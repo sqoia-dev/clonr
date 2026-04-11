@@ -196,3 +196,33 @@ type HealthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version,omitempty"`
 }
+
+// ─── Log types ───────────────────────────────────────────────────────────────
+
+// LogEntry is a single structured log event shipped from a CLI client.
+type LogEntry struct {
+	ID        string                 `json:"id"`
+	NodeMAC   string                 `json:"node_mac"`
+	Hostname  string                 `json:"hostname,omitempty"`
+	Level     string                 `json:"level"`     // "debug", "info", "warn", "error"
+	Component string                 `json:"component"` // "hardware", "deploy", "chroot", "ipmi", "efiboot"
+	Message   string                 `json:"message"`
+	Fields    map[string]interface{} `json:"fields,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+}
+
+// LogFilter specifies query constraints for log retrieval.
+type LogFilter struct {
+	NodeMAC   string
+	Hostname  string
+	Level     string
+	Component string
+	Since     *time.Time
+	Limit     int
+}
+
+// ListLogsResponse wraps a log query result.
+type ListLogsResponse struct {
+	Logs  []LogEntry `json:"logs"`
+	Total int        `json:"total"`
+}

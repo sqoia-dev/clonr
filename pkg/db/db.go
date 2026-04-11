@@ -510,6 +510,140 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	return cfg, nil
 }
 
+// ─── Log operations ──────────────────────────────────────────────────────────
+
+// InsertLog persists a single LogEntry.
+func (db *DB) InsertLog(ctx context.Context, entry api.LogEntry) error {
+	fields, err := json.Marshal(entry.Fields)
+	if err != nil {
+		return fmt.Errorf("db: marshal log fields: %w", err)
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO node_logs (id, node_mac, hostname, level, component, message, fields, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, entry.ID, entry.NodeMAC, entry.Hostname, entry.Level, entry.Component,
+		entry.Message, string(fields), entry.Timestamp.Unix())
+	if err != nil {
+		return fmt.Errorf("db: insert log: %w", err)
+	}
+	return nil
+}
+
+// InsertLogBatch persists a slice of LogEntry records in a single transaction.
+func (db *DB) InsertLogBatch(ctx context.Context, entries []api.LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("db: begin log batch tx: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO node_logs (id, node_mac, hostname, level, component, message, fields, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		return fmt.Errorf("db: prepare log batch: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, entry := range entries {
+		fields, err := json.Marshal(entry.Fields)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("db: marshal log fields: %w", err)
+		}
+		if _, err := stmt.ExecContext(ctx, entry.ID, entry.NodeMAC, entry.Hostname,
+			entry.Level, entry.Component, entry.Message,
+			string(fields), entry.Timestamp.Unix()); err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("db: exec log batch insert: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("db: commit log batch: %w", err)
+	}
+	return nil
+}
+
+// QueryLogs returns log entries matching the given filter, newest first.
+func (db *DB) QueryLogs(ctx context.Context, f api.LogFilter) ([]api.LogEntry, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	query := `SELECT id, node_mac, hostname, level, component, message, fields, timestamp
+	          FROM node_logs WHERE 1=1`
+	args := []interface{}{}
+
+	if f.NodeMAC != "" {
+		query += " AND node_mac = ?"
+		args = append(args, f.NodeMAC)
+	}
+	if f.Hostname != "" {
+		query += " AND hostname = ?"
+		args = append(args, f.Hostname)
+	}
+	if f.Level != "" {
+		query += " AND level = ?"
+		args = append(args, f.Level)
+	}
+	if f.Component != "" {
+		query += " AND component = ?"
+		args = append(args, f.Component)
+	}
+	if f.Since != nil {
+		query += " AND timestamp >= ?"
+		args = append(args, f.Since.Unix())
+	}
+	query += " ORDER BY timestamp DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: query logs: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []api.LogEntry
+	for rows.Next() {
+		var (
+			entry      api.LogEntry
+			fieldsJSON string
+			tsUnix     int64
+		)
+		if err := rows.Scan(&entry.ID, &entry.NodeMAC, &entry.Hostname,
+			&entry.Level, &entry.Component, &entry.Message,
+			&fieldsJSON, &tsUnix); err != nil {
+			return nil, fmt.Errorf("db: scan log entry: %w", err)
+		}
+		entry.Timestamp = time.Unix(tsUnix, 0).UTC()
+		if fieldsJSON != "" && fieldsJSON != "{}" {
+			if err := json.Unmarshal([]byte(fieldsJSON), &entry.Fields); err != nil {
+				entry.Fields = nil // non-fatal, just drop corrupt fields
+			}
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: iterate logs: %w", err)
+	}
+	return entries, nil
+}
+
+// PurgeLogs deletes log entries older than olderThan and returns the count deleted.
+func (db *DB) PurgeLogs(ctx context.Context, olderThan time.Time) (int64, error) {
+	res, err := db.sql.ExecContext(ctx,
+		`DELETE FROM node_logs WHERE timestamp < ?`, olderThan.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("db: purge logs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // requireOneRow returns ErrNotFound if no rows were affected.
 func requireOneRow(res sql.Result, table, id string) error {
 	n, err := res.RowsAffected()
