@@ -183,3 +183,88 @@ func (h *NodesHandler) GetNodeByMAC(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, cfg)
 }
+
+// RegisterNode handles POST /api/v1/nodes/register.
+// Called by the clonr client on first PXE boot. Creates a NodeConfig stub if
+// the MAC is new, or updates the hardware_profile if the node already exists.
+// Returns the NodeConfig and an action directive ("deploy" or "wait").
+func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
+	var req api.RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	if len(req.HardwareProfile) == 0 {
+		writeValidationError(w, "hardware_profile is required")
+		return
+	}
+
+	// Extract primary MAC and hostname from the hardware profile.
+	primaryMAC, hostname := extractNodeIdentity(req.HardwareProfile)
+	if primaryMAC == "" {
+		writeValidationError(w, "hardware_profile must contain at least one NIC with a MAC address")
+		return
+	}
+
+	now := time.Now().UTC()
+	stub := api.NodeConfig{
+		ID:              uuid.New().String(),
+		Hostname:        hostname,
+		PrimaryMAC:      primaryMAC,
+		Interfaces:      []api.InterfaceConfig{},
+		SSHKeys:         []string{},
+		Groups:          []string{},
+		CustomVars:      map[string]string{},
+		HardwareProfile: req.HardwareProfile,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	nodeCfg, err := h.DB.UpsertNodeByMAC(r.Context(), stub)
+	if err != nil {
+		log.Error().Err(err).Str("mac", primaryMAC).Msg("register node: upsert failed")
+		writeError(w, err)
+		return
+	}
+
+	action := "wait"
+	if nodeCfg.BaseImageID != "" {
+		action = "deploy"
+	}
+
+	log.Info().Str("mac", primaryMAC).Str("hostname", nodeCfg.Hostname).
+		Str("action", action).Msg("node registered")
+
+	writeJSON(w, http.StatusOK, api.RegisterResponse{
+		NodeConfig: &nodeCfg,
+		Action:     action,
+	})
+}
+
+// extractNodeIdentity parses the hardware profile JSON to find the primary MAC
+// and hostname. Returns empty strings on any parse failure.
+func extractNodeIdentity(profile []byte) (mac, hostname string) {
+	var hw struct {
+		Hostname string `json:"Hostname"`
+		NICs     []struct {
+			Name  string `json:"Name"`
+			MAC   string `json:"MAC"`
+			State string `json:"State"`
+		} `json:"NICs"`
+	}
+	if err := json.Unmarshal(profile, &hw); err != nil {
+		return "", ""
+	}
+
+	hostname = hw.Hostname
+
+	// Pick first non-loopback NIC with a real MAC.
+	for _, nic := range hw.NICs {
+		if nic.Name == "lo" || nic.MAC == "" || nic.MAC == "00:00:00:00:00:00" {
+			continue
+		}
+		return nic.MAC, hostname
+	}
+	return "", hostname
+}
