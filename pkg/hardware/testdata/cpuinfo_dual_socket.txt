@@ -1,0 +1,28 @@
+processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 85
+model name	: Intel(R) Xeon(R) Gold 6154 CPU @ 3.00GHz
+stepping	: 4
+cpu MHz		: 3000.000
+physical id	: 0
+siblings	: 36
+core id		: 0
+cpu cores	: 18
+flags		: fpu vme sse sse2 avx avx512f
+bogomips	: 6000.00
+
+processor	: 1
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 85
+model name	: Intel(R) Xeon(R) Gold 6154 CPU @ 3.00GHz
+stepping	: 4
+cpu MHz		: 3000.000
+physical id	: 1
+siblings	: 36
+core id		: 0
+cpu cores	: 18
+flags		: fpu vme sse sse2 avx avx512f
+bogomips	: 6000.00
+
