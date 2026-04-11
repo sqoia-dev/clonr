@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,8 +42,10 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 
 	if cfg.KernelArgs != "" {
 		if err := applyKernelArgs(ctx, mountRoot, cfg.KernelArgs); err != nil {
-			// Non-fatal: kernel args failure doesn't prevent boot.
-			_ = err
+			// Non-fatal: the GRUB config file edit may have succeeded even if
+			// grub2-mkconfig failed in the chroot. Log prominently so operators
+			// know to verify the bootloader configuration manually.
+			log.Printf("WARNING: finalize: kernel args: %v", err)
 		}
 	}
 
@@ -364,12 +367,21 @@ func applyKernelArgs(ctx context.Context, mountRoot, kernelArgs string) error {
 	}
 
 	// Attempt to regenerate grub.cfg inside the chroot using chroot + grub2-mkconfig.
-	// This is best-effort — failure is non-fatal since the file edit itself is the important part.
+	// grub2-mkconfig may not be available in all chroot environments (e.g. minimal
+	// initramfs deployments or systemd-boot systems). The /etc/default/grub edit
+	// above is the durable change; grub2-mkconfig makes it take effect immediately.
+	// Failure here is non-fatal but MUST be surfaced — the node may not boot with
+	// the requested kernel arguments without manual intervention.
 	grubCfgPath := findGrubCfg(mountRoot)
 	if grubCfgPath != "" {
 		chrootArgs := []string{mountRoot, "grub2-mkconfig", "-o", grubCfgPath}
 		if out, err := exec.CommandContext(ctx, "chroot", chrootArgs...).CombinedOutput(); err != nil {
-			_ = fmt.Errorf("grub2-mkconfig: %w\noutput: %s", err, string(out))
+			return fmt.Errorf(
+				"WARNING: grub configuration update failed — node may not boot with the requested "+
+					"kernel arguments. Manual intervention may be required. "+
+					"grub2-mkconfig: %w\noutput: %s",
+				err, string(out),
+			)
 		}
 	}
 
