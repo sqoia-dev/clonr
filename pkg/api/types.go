@@ -28,8 +28,12 @@ const (
 // DiskLayout describes the partition schema expected on a target node.
 // It is part of BaseImage — never per-node.
 type DiskLayout struct {
-	Partitions []PartitionSpec `json:"partitions"`
-	Bootloader Bootloader      `json:"bootloader"`
+	Partitions   []PartitionSpec `json:"partitions"`
+	Bootloader   Bootloader      `json:"bootloader"`
+	// TargetDevice is an optional operator hint specifying the preferred kernel
+	// device name (e.g. "nvme0n1") to deploy to. When set, selectTargetDisk
+	// will prefer this device over automatic selection heuristics.
+	TargetDevice string          `json:"target_device,omitempty"`
 }
 
 // PartitionSpec describes a single partition within a DiskLayout.

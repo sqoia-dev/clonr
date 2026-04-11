@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
+	"strings"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
@@ -93,15 +95,91 @@ func totalLayoutBytes(layout api.DiskLayout) int64 {
 	return total
 }
 
-// selectTargetDisk picks the first disk from hw that is large enough for the
-// layout and matches the discovered disk types. Returns the /dev/ path.
-func selectTargetDisk(layout api.DiskLayout, hw hardware.SystemInfo) (string, error) {
-	needed := totalLayoutBytes(layout)
-	for _, disk := range hw.Disks {
-		if int64(disk.Size) >= needed {
-			return "/dev/" + disk.Name, nil
+// isBootDisk returns true if any partition on the disk is mounted at "/" or "/boot".
+// This identifies the currently running system disk, which must not be overwritten.
+func isBootDisk(disk hardware.Disk) bool {
+	for _, p := range disk.Partitions {
+		mp := strings.TrimSpace(p.MountPoint)
+		if mp == "/" || mp == "/boot" || mp == "/boot/efi" {
+			return true
 		}
 	}
-	return "", fmt.Errorf("%w: no disk >= %d bytes found (layout requires %d bytes)",
-		ErrPreflightFailed, needed, needed)
+	return false
+}
+
+// selectTargetDisk picks the best disk from hw for the given layout.
+//
+// Selection priority (highest to lowest):
+//  1. layout.TargetDevice hint — if set, use that device if it exists and is large enough.
+//  2. Exclude the active boot disk (any disk with "/" or "/boot" mounted).
+//  3. Prefer non-removable, non-USB disks.
+//  4. Among remaining candidates, pick the smallest disk that still fits
+//     (avoids accidentally wiping a large data disk).
+//
+// The selected disk and the reason for the choice are logged for operator audit.
+func selectTargetDisk(layout api.DiskLayout, hw hardware.SystemInfo) (string, error) {
+	needed := totalLayoutBytes(layout)
+
+	// 1. Honor an explicit target_device hint from the layout.
+	if layout.TargetDevice != "" {
+		for _, disk := range hw.Disks {
+			if disk.Name == layout.TargetDevice {
+				if int64(disk.Size) < needed {
+					return "", fmt.Errorf("%w: hinted disk %s (%d bytes) is smaller than layout requires (%d bytes)",
+						ErrPreflightFailed, disk.Name, disk.Size, needed)
+				}
+				devPath := "/dev/" + disk.Name
+				log.Printf("deploy: selected disk %s (reason: target_device hint in layout)", devPath)
+				return devPath, nil
+			}
+		}
+		return "", fmt.Errorf("%w: hinted target_device %q not found in discovered disks",
+			ErrPreflightFailed, layout.TargetDevice)
+	}
+
+	// Collect candidates: disks that are large enough and not the boot disk.
+	type candidate struct {
+		disk   hardware.Disk
+		reason string
+	}
+	var preferred []candidate // non-removable, non-USB
+	var fallback []candidate  // removable or USB (lower preference)
+
+	for _, disk := range hw.Disks {
+		if int64(disk.Size) < needed {
+			continue // too small
+		}
+		if isBootDisk(disk) {
+			log.Printf("deploy: skipping disk %s (boot disk — has / or /boot mounted)", disk.Name)
+			continue
+		}
+		transport := strings.ToLower(disk.Transport)
+		if transport == "usb" {
+			fallback = append(fallback, candidate{disk, "usb/removable"})
+		} else {
+			preferred = append(preferred, candidate{disk, "non-removable, non-USB"})
+		}
+	}
+
+	pool := preferred
+	if len(pool) == 0 {
+		pool = fallback
+	}
+	if len(pool) == 0 {
+		return "", fmt.Errorf("%w: no disk >= %d bytes found that is not the active boot disk",
+			ErrPreflightFailed, needed)
+	}
+
+	// 4. Pick the smallest disk that fits among the pool.
+	best := pool[0]
+	for _, c := range pool[1:] {
+		if c.disk.Size < best.disk.Size {
+			best = c
+		}
+	}
+
+	devPath := "/dev/" + best.disk.Name
+	log.Printf("deploy: selected disk %s (%d bytes, reason: smallest fitting %s disk)",
+		devPath, best.disk.Size, best.reason)
+	return devPath, nil
 }
