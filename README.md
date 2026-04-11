@@ -2,6 +2,8 @@
 
 clonr is a self-hosted node cloning and image management system for HPC clusters. It separates deployable OS images (base images) from per-node identity (hostname, network config, SSH keys), so a single image can be deployed to hundreds of nodes without modification.
 
+The system includes: an image factory (pull cloud images, import from ISO, capture from running nodes), chroot customization sessions, a built-in PXE/DHCP/TFTP server, IPMI/BMC management, InfiniBand device discovery, centralized logging with live streaming, and an embedded web UI.
+
 The system has two binaries: `clonr-serverd` (the management server) and `clonr` (the CLI, which runs both on operator workstations and on target nodes during deployment).
 
 ---
@@ -21,41 +23,28 @@ docker run -d \
 # Or build and run directly:
 make server
 CLONR_AUTH_TOKEN=mytoken ./bin/clonr-serverd
+
+# With built-in PXE server enabled:
+CLONR_AUTH_TOKEN=mytoken ./bin/clonr-serverd --pxe
 ```
 
-### 2. Register a node configuration
+### 2. Pull an image
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/images \
-  -H "Authorization: Bearer mytoken" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "rocky9-hpc-base",
-    "version": "1.0.0",
-    "os": "Rocky Linux 9",
-    "arch": "x86_64",
-    "format": "filesystem",
-    "disk_layout": {
-      "partitions": [
-        {"label": "esp",  "size_bytes": 536870912,  "filesystem": "vfat", "mountpoint": "/boot/efi", "flags": ["esp"]},
-        {"label": "boot", "size_bytes": 1073741824,  "filesystem": "xfs",  "mountpoint": "/boot"},
-        {"label": "root", "size_bytes": 0,           "filesystem": "xfs",  "mountpoint": "/"}
-      ],
-      "bootloader": {"type": "grub2", "target": "x86_64-efi"}
-    }
-  }'
-```
-
-### 3. Pull an image from a URL
-
-```bash
-clonr --server http://localhost:8080 --token mytoken \
-  image pull \
+clonr image pull \
   --url https://your-image-server.example.com/rocky9-base.tar.gz \
   --name rocky9-hpc-base \
   --version 1.0.0 \
   --os "Rocky Linux 9" \
   --format filesystem
+```
+
+### 3. Customize the image
+
+```bash
+# Drop into an interactive chroot shell for package installs, config changes, etc.
+clonr shell <image-id>
+# Inside chroot: dnf install -y slurm munge, configure sshd, etc.
 ```
 
 ### 4. Register node-specific config
@@ -68,7 +57,7 @@ curl -X POST http://localhost:8080/api/v1/nodes \
     "hostname": "compute-001",
     "fqdn": "compute-001.cluster.example.com",
     "primary_mac": "aa:bb:cc:dd:ee:01",
-    "base_image_id": "<image-id-from-step-3>",
+    "base_image_id": "<image-id>",
     "interfaces": [
       {
         "mac_address": "aa:bb:cc:dd:ee:01",
@@ -95,7 +84,49 @@ clonr deploy \
   --fix-efi
 ```
 
-`deploy` auto-discovers the node's MAC address, fetches the matching node config from the server, runs preflight checks, downloads and writes the image, applies hostname/network/SSH config, and optionally repairs EFI boot entries.
+`deploy` auto-discovers the node's MAC address, fetches the matching node config from the server, runs preflight checks, downloads and writes the image, applies hostname/network/SSH config, streams logs back to the server in real-time, and optionally repairs EFI boot entries.
+
+---
+
+## Full Workflow Example
+
+```bash
+# 1. Start server with built-in PXE
+clonr-serverd --pxe
+
+# 2. Pull a Rocky 9 cloud image
+clonr image pull \
+  --url https://dl.rockylinux.org/.../Rocky-9-GenericCloud.latest.x86_64.qcow2 \
+  --name rocky9-base \
+  --version 1.0
+
+# 3. Customize it via chroot
+clonr shell <image-id>
+# Inside: dnf install -y slurm munge, configure /etc/ssh/sshd_config, etc.
+
+# 4. Register node configs
+curl -X POST http://localhost:8080/api/v1/nodes \
+  -H "Authorization: Bearer mytoken" \
+  -d '{"hostname":"compute-001","primary_mac":"aa:bb:cc:dd:ee:01","base_image_id":"<id>",...}'
+
+# 5. PXE boot nodes via IPMI (sets next boot to PXE + power cycles)
+clonr ipmi pxe --host 10.0.0.101 --user admin --pass admin
+
+# 6. Watch deployment logs in real time
+clonr logs --follow --hostname compute-001
+```
+
+---
+
+## Web UI
+
+The server embeds a web UI accessible at `http://server:8080/`. Dark theme. No build step required — static assets are compiled into the binary via Go embed.
+
+Pages:
+- **Dashboard** — cluster summary: node count, image count, recent activity
+- **Images** — browse and inspect base images, monitor pull/build status
+- **Nodes** — view and manage node configurations
+- **Logs** — searchable log viewer with live SSE streaming; filter by node, level, or component
 
 ---
 
@@ -136,7 +167,7 @@ clonr image details a1b2c3d4-...
 
 ### `clonr image pull`
 
-Instruct the server to pull an image blob from a URL. Returns immediately with the image in `building` status.
+Instruct the server to pull an image blob from a URL. Supports qcow2, raw, and tar.gz formats. Returns immediately with the image in `building` status.
 
 ```
 clonr image pull \
@@ -150,13 +181,37 @@ clonr image pull \
 
 | Flag | Required | Description |
 |---|---|---|
-| `--url` | yes | Source URL for the image blob |
+| `--url` | yes | Source URL for the image blob (qcow2, raw, tar.gz) |
 | `--name` | yes | Image name |
 | `--version` | no | Version string (default: 1.0.0) |
 | `--os` | no | OS name |
 | `--arch` | no | Target architecture (default: x86_64) |
 | `--format` | no | `filesystem` or `block` (default: filesystem) |
 | `--notes` | no | Free-text notes |
+
+---
+
+### `clonr image import-iso <path>`
+
+Import an OS image directly from a Rocky Linux or RHEL ISO. The server mounts the ISO, extracts the root filesystem, and registers it as a new base image.
+
+```
+clonr image import-iso /path/to/Rocky-9.3-x86_64-dvd.iso \
+  --name rocky9-from-iso \
+  --version 1.0.0
+```
+
+---
+
+### `clonr shell <image-id>`
+
+Open an interactive chroot shell into a base image for customization. Mounts `/proc`, `/sys`, and `/dev` inside the chroot, then drops you into a bash session. Changes are committed back to the image on exit.
+
+```
+clonr shell a1b2c3d4-...
+```
+
+Use this to install packages, configure services, or run any setup that needs to happen before deployment.
 
 ---
 
@@ -194,13 +249,13 @@ Discover local hardware and print as JSON. No server connection required.
 clonr hardware
 ```
 
-Output includes: hostname, CPUs, memory, disks (lsblk), NICs, DMI/firmware info.
+Output includes: hostname, CPUs, memory, disks (lsblk), NICs, DMI/firmware info, and InfiniBand devices (HCAs, port state, GUIDs, link speed).
 
 ---
 
 ### `clonr deploy`
 
-Full deployment flow: discover hardware, fetch node config, preflight, write image, apply config.
+Full deployment flow: discover hardware, fetch node config, preflight, write image, apply config, stream logs to server.
 
 ```
 clonr deploy --image <id> [--disk /dev/nvme0n1] [--fix-efi]
@@ -208,10 +263,52 @@ clonr deploy --image <id> [--disk /dev/nvme0n1] [--fix-efi]
 
 | Flag | Description |
 |---|---|
-| `--image` | Image ID to deploy (required) |
+| `--image` | Image ID to deploy (required without `--auto`) |
 | `--disk` | Target block device (auto-detected from disk layout if omitted) |
 | `--mount-root` | Temporary mount point directory (auto-created if omitted) |
 | `--fix-efi` | Repair EFI NVRAM boot entries after deployment |
+| `--auto` | Auto mode: register with server, wait for image assignment, then deploy (for PXE-booted nodes) |
+
+#### `--auto` mode
+
+When booted from a PXE initramfs, pass `--auto` to have the node self-register and wait for an admin to assign a base image before proceeding:
+
+```bash
+clonr deploy --auto
+```
+
+The node discovers its hardware, registers with the server, and polls until an image is assigned. Intended for fully unattended PXE deployments.
+
+---
+
+### `clonr logs`
+
+Query historical deployment logs from the server or tail the live stream.
+
+```
+clonr logs [flags]
+```
+
+| Flag | Description |
+|---|---|
+| `--mac` | Filter by node MAC address |
+| `--hostname` | Filter by hostname |
+| `--level` | Filter by log level (`debug`, `info`, `warn`, `error`) |
+| `--component` | Filter by component (`hardware`, `deploy`, `chroot`, `ipmi`, `efiboot`) |
+| `--since` | Show logs since a duration ago (`1h`, `30m`) or RFC3339 timestamp |
+| `--limit` | Max number of log entries to return (default: 100) |
+| `--follow` | Tail the live log stream via SSE |
+
+Examples:
+
+```bash
+clonr logs --mac aa:bb:cc:dd:ee:ff          # history for a specific node
+clonr logs --follow                          # live tail all nodes
+clonr logs --follow --mac aa:bb:cc:dd:ee:ff --level error
+clonr logs --component deploy --since 1h    # last hour of deploy logs
+```
+
+All logs are also visible in the web UI log viewer.
 
 ---
 
@@ -232,6 +329,173 @@ clonr fix-efiboot --disk /dev/nvme0n1 --esp 1 --label "Rocky Linux"
 
 ---
 
+## IPMI / BMC Management
+
+clonr includes built-in IPMI management via `ipmitool`. All `clonr ipmi` subcommands can target the local BMC (no flags needed) or a remote BMC via `--host`, `--user`, `--pass`.
+
+### `clonr ipmi status`
+
+Show local BMC network configuration and user list.
+
+```
+clonr ipmi status
+```
+
+Prints channel, IP address, netmask, gateway, IP source, and BMC users with access levels.
+
+---
+
+### `clonr ipmi power`
+
+Control node power via IPMI.
+
+```
+clonr ipmi power [on|off|cycle|reset|status] --host <bmc-ip> --user <user> --pass <pass>
+```
+
+| Action | Description |
+|---|---|
+| `on` | Power the node on |
+| `off` | Power the node off |
+| `cycle` | Power cycle (off then on) |
+| `reset` | Hard reset |
+| `status` | Print current power state |
+
+| Flag | Description |
+|---|---|
+| `--host` | BMC IP address (required for remote nodes) |
+| `--user` | BMC username |
+| `--pass` | BMC password |
+
+---
+
+### `clonr ipmi configure`
+
+Configure the local BMC with a static IP address.
+
+```
+clonr ipmi configure --ip 10.0.0.200 --netmask 255.255.255.0 --gateway 10.0.0.1
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--ip` | yes | Static IP address for the BMC |
+| `--netmask` | yes | Subnet mask |
+| `--gateway` | yes | Default gateway |
+
+---
+
+### `clonr ipmi pxe`
+
+Set next boot to PXE and power cycle the target node. Use this to remotely kick off a deployment without physically touching the node.
+
+```
+clonr ipmi pxe --host 10.0.0.101 --user admin --pass admin
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--host` | yes | BMC IP address |
+| `--user` | no | BMC username |
+| `--pass` | no | BMC password |
+
+---
+
+### `clonr ipmi sensors`
+
+Display IPMI sensor readings (temperatures, voltages, fan speeds).
+
+```
+clonr ipmi sensors [--host <bmc-ip> --user <user> --pass <pass>]
+```
+
+Reads from local BMC when no `--host` is provided.
+
+---
+
+## Image Factory
+
+The image factory handles the full image lifecycle: pulling from URLs, importing from ISOs, interactive chroot customization, and capturing images from running nodes.
+
+| Command | Description |
+|---|---|
+| `clonr image pull --url ...` | Pull cloud images (qcow2, raw, tar.gz) from any URL |
+| `clonr image import-iso <path>` | Import from a Rocky Linux or RHEL ISO |
+| `clonr shell <image-id>` | Interactive chroot shell for customization |
+| Image capture | Capture a configured running node back into a base image |
+
+Images are stored in `CLONR_IMAGE_DIR` and tracked in the SQLite database. The factory runs image scrubbing on captured images to remove node-specific artifacts (machine IDs, SSH host keys, etc.) before registration.
+
+---
+
+## PXE Boot
+
+clonr includes a built-in PXE server (DHCP + TFTP + iPXE chainloading). Enable it with the `--pxe` flag or `CLONR_PXE_ENABLED=true`.
+
+```bash
+./bin/clonr-serverd --pxe
+```
+
+How it works:
+1. The built-in DHCP server responds only to PXE clients (no conflict with your existing DHCP server).
+2. TFTP serves `ipxe.efi` / `undionly.kpxe` and the iPXE chainload script.
+3. PXE-booted nodes load a minimal initramfs containing `clonr`.
+4. Nodes run `clonr deploy --auto`, self-register with the server, and wait for image assignment.
+
+Build the initramfs for PXE nodes:
+
+```bash
+./scripts/build-initramfs.sh
+```
+
+### PXE Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLONR_PXE_ENABLED` | `false` | Enable built-in PXE server |
+| `CLONR_PXE_INTERFACE` | auto-detect | Network interface for the DHCP/TFTP server |
+| `CLONR_PXE_RANGE` | `10.99.0.100-10.99.0.200` | DHCP IP pool for PXE clients |
+| `CLONR_PXE_SERVER_IP` | auto-detect | Server IP advertised to PXE clients |
+| `CLONR_BOOT_DIR` | `/var/lib/clonr/boot` | Kernel and initramfs location |
+| `CLONR_TFTP_DIR` | `/var/lib/clonr/tftpboot` | TFTP root directory (iPXE binaries) |
+
+---
+
+## Centralized Logging
+
+During deployment, the `clonr` CLI streams structured logs to the server in real-time over HTTP. All phases — hardware discovery, image write, chroot finalization, EFI repair — emit logs with component and level metadata.
+
+Logs are stored in the SQLite database and queryable via CLI or web UI.
+
+```bash
+# Query historical logs
+clonr logs
+
+# Live tail (SSE stream)
+clonr logs --follow
+
+# Filter
+clonr logs --mac aa:bb:cc:dd:ee:ff
+clonr logs --hostname compute-001
+clonr logs --level error
+clonr logs --component deploy --since 1h
+clonr logs --follow --hostname compute-001 --level warn
+```
+
+The web UI log viewer supports the same filters with live SSE streaming.
+
+---
+
+## InfiniBand Discovery
+
+`clonr hardware` discovers InfiniBand HCAs, Intel OPA adapters, and RoCE interfaces via `/sys/class/infiniband/`. Output includes: device name, firmware version, node GUID, sys image GUID, ports with state, physical state, link layer, and link speed.
+
+Supported devices: Mellanox ConnectX series (mlx5), Intel OPA (hfi1), RoCE interfaces.
+
+NodeConfig supports IPoIB interface configuration, which is applied automatically during deployment finalization.
+
+---
+
 ## Server Configuration
 
 `clonr-serverd` is configured via environment variables:
@@ -243,6 +507,12 @@ clonr fix-efiboot --disk /dev/nvme0n1 --esp 1 --label "Rocky Linux"
 | `CLONR_DB_PATH` | `/var/lib/clonr/clonr.db` | SQLite database path |
 | `CLONR_AUTH_TOKEN` | _(empty = auth disabled)_ | Bearer token for API auth |
 | `CLONR_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
+| `CLONR_PXE_ENABLED` | `false` | Enable built-in PXE server |
+| `CLONR_PXE_INTERFACE` | auto-detect | Network interface for PXE/DHCP/TFTP |
+| `CLONR_PXE_RANGE` | `10.99.0.100-10.99.0.200` | DHCP IP pool for PXE clients |
+| `CLONR_PXE_SERVER_IP` | auto-detect | Server IP advertised to PXE clients |
+| `CLONR_BOOT_DIR` | `/var/lib/clonr/boot` | Kernel + initramfs location |
+| `CLONR_TFTP_DIR` | `/var/lib/clonr/tftpboot` | TFTP root directory |
 
 ---
 
@@ -287,6 +557,8 @@ Key decisions:
 - **chi router** — Composes cleanly with standard `net/http` middleware.
 - **No auth system at v1** — Single pre-shared API token. HPC clusters are typically air-gapped and operator-administered.
 - **Deployment engines** — Two backends: `FilesystemDeployer` (tar archive extraction with sgdisk + mkfs) and `BlockDeployer` (raw block image streamed directly to disk via dd, no temp file required).
+- **Embedded web UI** — Static assets compiled into the server binary via Go embed. No separate build step or asset server needed.
+- **Centralized log broker** — In-process log broker fans out SSE streams to connected CLI and web UI clients. Logs persisted to SQLite for historical queries.
 
 ### Package Layout
 
@@ -296,9 +568,12 @@ pkg/
   client/     HTTP client for CLI → server
   config/     ServerConfig and ClientConfig (env + flag resolution)
   deploy/     Deployment engines: rsync, block, efiboot, finalize
-  hardware/   Hardware discovery: CPU, memory, disks, NICs, DMI
+  hardware/   Hardware discovery: CPU, memory, disks, NICs, DMI, InfiniBand
   server/     HTTP server + handlers + middleware
+  server/ui/  Embedded web UI (Go embed, dark theme, no build step)
   db/         SQLite database layer + migrations
   chroot/     Chroot session lifecycle (mount/unmount proc/sys/dev)
-  image/      Image store interface
+  image/      Image factory (pull, import ISO, capture, shell sessions, scrubbing)
+  ipmi/       IPMI/BMC management via ipmitool
+  pxe/        Built-in DHCP/TFTP/PXE server with iPXE chainloading
 ```
