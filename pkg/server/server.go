@@ -4,6 +4,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -11,7 +13,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/image"
 	"github.com/sqoia-dev/clonr/pkg/server/handlers"
+	"github.com/sqoia-dev/clonr/pkg/server/ui"
 )
 
 // Server wraps the HTTP server and all its dependencies.
@@ -19,16 +23,19 @@ type Server struct {
 	cfg    config.ServerConfig
 	db     *db.DB
 	broker *LogBroker
+	shells *image.ShellManager
 	router chi.Router
 	http   *http.Server
 }
 
 // New creates a Server wired with the given config and database.
 func New(cfg config.ServerConfig, database *db.DB) *Server {
+	shells := image.NewShellManager(database, cfg.ImageDir, log.Logger)
 	s := &Server{
 		cfg:    cfg,
 		db:     database,
 		broker: NewLogBroker(),
+		shells: shells,
 	}
 	s.router = s.buildRouter()
 	s.http = &http.Server{
@@ -50,16 +57,49 @@ func (s *Server) buildRouter() chi.Router {
 	if s.cfg.AuthToken == "" {
 		log.Warn().Msg("CLONR_AUTH_TOKEN not set — auth is disabled (dev mode only)")
 	}
-	r.Use(bearerAuth(s.cfg.AuthToken))
+	// bearerAuth is applied only to the /api/v1 subrouter below,
+	// so that the embedded web UI at / and /ui/* is always accessible.
+
+	// Derive public server URL from listen addr for boot script generation.
+	serverURL := "http://" + s.cfg.PXE.ServerIP + s.cfg.ListenAddr
+	if s.cfg.PXE.ServerIP == "" {
+		// Fallback: use localhost when PXE is not configured.
+		serverURL = "http://localhost" + s.cfg.ListenAddr
+	}
 
 	// Handler instances.
 	health := &handlers.HealthHandler{Version: "dev"}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir}
 	nodes := &handlers.NodesHandler{DB: s.db}
-	factory := &handlers.FactoryHandler{DB: s.db, ImageDir: s.cfg.ImageDir}
+	imgFactory := &image.Factory{
+		Store:    s.db,
+		ImageDir: s.cfg.ImageDir,
+		Logger:   log.Logger,
+	}
+	factory := &handlers.FactoryHandler{
+		DB:       s.db,
+		ImageDir: s.cfg.ImageDir,
+		Factory:  imgFactory,
+		Shells:   s.shells,
+	}
 	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
+	boot := &handlers.BootHandler{
+		BootDir:   s.cfg.PXE.BootDir,
+		TFTPDir:   s.cfg.PXE.TFTPDir,
+		ServerURL: serverURL,
+	}
+
+	// Embedded web UI — served without bearer auth.
+	// The UI JavaScript talks to /api/v1 which enforces auth when a token is set.
+	staticFS, _ := fs.Sub(ui.StaticFiles, "static")
+	fileServer := http.FileServer(http.FS(staticFS))
+	r.Handle("/ui/*", http.StripPrefix("/ui", fileServer))
+	r.Get("/", serveIndex(staticFS))
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Bearer auth is applied here so UI assets remain accessible.
+		r.Use(bearerAuth(s.cfg.AuthToken))
+
 		// Health
 		r.Get("/health", health.ServeHTTP)
 
@@ -76,14 +116,32 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Factory
 		r.Post("/factory/pull", factory.Pull)
+		r.Post("/factory/import", factory.Import)
+		r.Post("/factory/import-path", factory.ImportPath)
+		r.Post("/factory/capture", factory.Capture)
 
-		// Nodes — by-mac must be registered before /{id} to avoid chi match ambiguity.
+		// Shell sessions
+		r.Post("/images/{id}/shell-session", factory.OpenShellSession)
+		r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
+		r.Post("/images/{id}/shell-session/{sid}/exec", factory.ExecInSession)
+
+		// Nodes — by-mac and register must be before /{id} to avoid chi match ambiguity.
 		r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)
+		r.Post("/nodes/register", nodes.RegisterNode)
 		r.Get("/nodes", nodes.ListNodes)
 		r.Post("/nodes", nodes.CreateNode)
 		r.Get("/nodes/{id}", nodes.GetNode)
 		r.Put("/nodes/{id}", nodes.UpdateNode)
 		r.Delete("/nodes/{id}", nodes.DeleteNode)
+
+		// Boot assets — served without auth so PXE-booted nodes can fetch them.
+		r.Group(func(r chi.Router) {
+			r.Get("/boot/ipxe", boot.ServeIPXEScript)
+			r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
+			r.Get("/boot/initramfs.img", boot.ServeInitramfs)
+			r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
+			r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
+		})
 
 		// Logs — stream must be registered before plain /logs to avoid ambiguity.
 		r.Get("/logs/stream", logs.StreamLogs)
@@ -92,6 +150,25 @@ func (s *Server) buildRouter() chi.Router {
 	})
 
 	return r
+}
+
+// serveIndex serves index.html from the embedded static FS.
+func serveIndex(staticFS fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open("index.html")
+		if err != nil {
+			http.Error(w, "UI not found", http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			http.Error(w, "UI not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		http.ServeContent(w, r, "index.html", stat.ModTime(), f.(io.ReadSeeker))
+	}
 }
 
 // Handler returns the underlying http.Handler for use in tests.
@@ -106,6 +183,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		shutdownCtx := context.Background()
 		if err := s.http.Shutdown(shutdownCtx); err != nil {
 			log.Error().Err(err).Msg("graceful shutdown error")
+		}
+		if err := s.shells.CloseAll(); err != nil {
+			log.Error().Err(err).Msg("shell session cleanup error")
 		}
 	}()
 

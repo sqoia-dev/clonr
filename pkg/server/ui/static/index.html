@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="clonr-token" content="">
+    <title>clonr</title>
+    <link rel="stylesheet" href="/ui/css/style.css">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%231a1a2e'/><text x='4' y='24' font-size='22' font-family='monospace' fill='%2300d4ff'>c</text></svg>">
+</head>
+<body>
+<div id="app">
+    <header>
+        <div class="logo">clonr<span>-serverd</span></div>
+        <nav>
+            <a href="#/" id="nav-dash">Dashboard</a>
+            <a href="#/images" id="nav-images">Images</a>
+            <a href="#/nodes" id="nav-nodes">Nodes</a>
+            <a href="#/logs" id="nav-logs">Logs</a>
+        </nav>
+        <div class="header-status">
+            <span class="dot" id="health-dot"></span>
+            <span id="health-label">checking…</span>
+        </div>
+    </header>
+    <main id="main-content">
+        <div class="loading"><div class="spinner"></div>Loading…</div>
+    </main>
+</div>
+
+<script src="/ui/js/api.js"></script>
+<script src="/ui/js/logs.js"></script>
+<script src="/ui/js/app.js"></script>
+</body>
+</html>
