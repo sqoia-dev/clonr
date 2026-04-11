@@ -282,16 +282,21 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal custom_vars: %w", err)
 	}
+	hwProfile, err := json.Marshal(cfg.HardwareProfile)
+	if err != nil {
+		return fmt.Errorf("db: marshal hardware_profile: %w", err)
+	}
 
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			 groups, custom_vars, base_image_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
-		string(groups), string(customVars), cfg.BaseImageID,
+		string(groups), string(customVars), nullableString(cfg.BaseImageID),
+		string(hwProfile),
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 	)
 	if err != nil {
@@ -300,11 +305,76 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	return nil
 }
 
+// UpsertNodeByMAC creates a new NodeConfig for the given MAC, or updates the
+// hardware_profile and hostname of the existing record if one already exists.
+// Returns the resulting NodeConfig (created or updated).
+func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.NodeConfig, error) {
+	hwProfile, err := json.Marshal(cfg.HardwareProfile)
+	if err != nil {
+		return api.NodeConfig{}, fmt.Errorf("db: marshal hardware_profile: %w", err)
+	}
+
+	// Check whether a record for this MAC already exists.
+	_, err = db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
+	if err == nil {
+		// Exists — update hardware_profile and hostname only.
+		_, err = db.sql.ExecContext(ctx, `
+			UPDATE node_configs
+			SET hardware_profile = ?, hostname = ?, updated_at = ?
+			WHERE primary_mac = ?
+		`, string(hwProfile), cfg.Hostname, time.Now().Unix(), cfg.PrimaryMAC)
+		if err != nil {
+			return api.NodeConfig{}, fmt.Errorf("db: upsert node (update): %w", err)
+		}
+		return db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
+	}
+
+	if err != api.ErrNotFound {
+		return api.NodeConfig{}, fmt.Errorf("db: upsert node (lookup): %w", err)
+	}
+
+	// New node — insert a stub with no image assigned.
+	interfaces, _ := json.Marshal(cfg.Interfaces)
+	sshKeys, _ := json.Marshal(cfg.SSHKeys)
+	groups, _ := json.Marshal(cfg.Groups)
+	customVars, _ := json.Marshal(cfg.CustomVars)
+
+	now := time.Now().UTC()
+	cfg.CreatedAt = now
+	cfg.UpdatedAt = now
+
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO node_configs
+			(id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+			 groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+	`,
+		cfg.ID, cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
+		string(interfaces), string(sshKeys), cfg.KernelArgs,
+		string(groups), string(customVars),
+		string(hwProfile),
+		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
+	)
+	if err != nil {
+		return api.NodeConfig{}, fmt.Errorf("db: upsert node (insert): %w", err)
+	}
+	return cfg, nil
+}
+
+// nullableString returns nil when s is empty, otherwise the string value.
+// Used for nullable TEXT columns like base_image_id.
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-		       groups, custom_vars, base_image_id, created_at, updated_at
+		       groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at
 		FROM node_configs WHERE id = ?
 	`, id)
 	return scanNodeConfig(row)
@@ -314,7 +384,7 @@ func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, err
 func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfig, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-		       groups, custom_vars, base_image_id, created_at, updated_at
+		       groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at
 		FROM node_configs WHERE primary_mac = ?
 	`, mac)
 	return scanNodeConfig(row)
@@ -328,13 +398,13 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 	if baseImageID != "" {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			       groups, custom_vars, base_image_id, created_at, updated_at
+			       groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at
 			FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC
 		`, baseImageID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			       groups, custom_vars, base_image_id, created_at, updated_at
+			       groups, custom_vars, base_image_id, hardware_profile, created_at, updated_at
 			FROM node_configs ORDER BY hostname ASC
 		`)
 	}
@@ -372,16 +442,22 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal custom_vars: %w", err)
 	}
+	hwProfile, err := json.Marshal(cfg.HardwareProfile)
+	if err != nil {
+		return fmt.Errorf("db: marshal hardware_profile: %w", err)
+	}
 
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
-		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?, updated_at = ?
+		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
+		    hardware_profile = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
-		string(groups), string(customVars), cfg.BaseImageID,
+		string(groups), string(customVars), nullableString(cfg.BaseImageID),
+		string(hwProfile),
 		time.Now().Unix(), cfg.ID,
 	)
 	if err != nil {
@@ -456,19 +532,22 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
-		cfg            api.NodeConfig
-		interfacesJSON string
-		sshKeysJSON    string
-		groupsJSON     string
-		customVarsJSON string
-		createdAtUnix  int64
-		updatedAtUnix  int64
+		cfg             api.NodeConfig
+		interfacesJSON  string
+		sshKeysJSON     string
+		groupsJSON      string
+		customVarsJSON  string
+		baseImageID     sql.NullString
+		hwProfileJSON   string
+		createdAtUnix   int64
+		updatedAtUnix   int64
 	)
 
 	err := s.Scan(
 		&cfg.ID, &cfg.Hostname, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
-		&groupsJSON, &customVarsJSON, &cfg.BaseImageID,
+		&groupsJSON, &customVarsJSON, &baseImageID,
+		&hwProfileJSON,
 		&createdAtUnix, &updatedAtUnix,
 	)
 	if err == sql.ErrNoRows {
@@ -476,6 +555,10 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	}
 	if err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: scan node config: %w", err)
+	}
+
+	if baseImageID.Valid {
+		cfg.BaseImageID = baseImageID.String
 	}
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
@@ -492,6 +575,12 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	}
 	if err := json.Unmarshal([]byte(customVarsJSON), &cfg.CustomVars); err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: unmarshal custom_vars: %w", err)
+	}
+	if hwProfileJSON != "" {
+		if err := json.Unmarshal([]byte(hwProfileJSON), &cfg.HardwareProfile); err != nil {
+			// Non-fatal: log but don't abort.
+			cfg.HardwareProfile = nil
+		}
 	}
 
 	if cfg.Interfaces == nil {

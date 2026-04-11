@@ -97,56 +97,58 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/", serveIndex(staticFS))
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Bearer auth is applied here so UI assets remain accessible.
-		r.Use(bearerAuth(s.cfg.AuthToken))
-
-		// Health
-		r.Get("/health", health.ServeHTTP)
-
-		// Images
-		r.Get("/images", images.ListImages)
-		r.Post("/images", images.CreateImage)
-		r.Get("/images/{id}", images.GetImage)
-		r.Delete("/images/{id}", images.ArchiveImage)
-		r.Get("/images/{id}/status", images.GetImageStatus)
-		r.Get("/images/{id}/disklayout", images.GetDiskLayout)
-		r.Put("/images/{id}/disklayout", images.PutDiskLayout)
-		r.Post("/images/{id}/blob", images.UploadBlob)
-		r.Get("/images/{id}/blob", images.DownloadBlob)
-
-		// Factory
-		r.Post("/factory/pull", factory.Pull)
-		r.Post("/factory/import", factory.Import)
-		r.Post("/factory/import-path", factory.ImportPath)
-		r.Post("/factory/capture", factory.Capture)
-
-		// Shell sessions
-		r.Post("/images/{id}/shell-session", factory.OpenShellSession)
-		r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
-		r.Post("/images/{id}/shell-session/{sid}/exec", factory.ExecInSession)
-
-		// Nodes — by-mac and register must be before /{id} to avoid chi match ambiguity.
-		r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)
+		// Public endpoints — no auth required.
+		// PXE-booted nodes fetch boot files and register themselves before any
+		// admin has configured credentials on them.
+		r.Get("/boot/ipxe", boot.ServeIPXEScript)
+		r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
+		r.Get("/boot/initramfs.img", boot.ServeInitramfs)
+		r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
+		r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
 		r.Post("/nodes/register", nodes.RegisterNode)
-		r.Get("/nodes", nodes.ListNodes)
-		r.Post("/nodes", nodes.CreateNode)
-		r.Get("/nodes/{id}", nodes.GetNode)
-		r.Put("/nodes/{id}", nodes.UpdateNode)
-		r.Delete("/nodes/{id}", nodes.DeleteNode)
+		r.Post("/logs", logs.IngestLogs) // nodes ship logs without tokens
 
-		// Boot assets — served without auth so PXE-booted nodes can fetch them.
+		// Authenticated endpoints.
 		r.Group(func(r chi.Router) {
-			r.Get("/boot/ipxe", boot.ServeIPXEScript)
-			r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
-			r.Get("/boot/initramfs.img", boot.ServeInitramfs)
-			r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
-			r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
-		})
+			r.Use(bearerAuth(s.cfg.AuthToken))
 
-		// Logs — stream must be registered before plain /logs to avoid ambiguity.
-		r.Get("/logs/stream", logs.StreamLogs)
-		r.Get("/logs", logs.QueryLogs)
-		r.Post("/logs", logs.IngestLogs)
+			// Health
+			r.Get("/health", health.ServeHTTP)
+
+			// Images
+			r.Get("/images", images.ListImages)
+			r.Post("/images", images.CreateImage)
+			r.Get("/images/{id}", images.GetImage)
+			r.Delete("/images/{id}", images.ArchiveImage)
+			r.Get("/images/{id}/status", images.GetImageStatus)
+			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
+			r.Put("/images/{id}/disklayout", images.PutDiskLayout)
+			r.Post("/images/{id}/blob", images.UploadBlob)
+			r.Get("/images/{id}/blob", images.DownloadBlob)
+
+			// Factory
+			r.Post("/factory/pull", factory.Pull)
+			r.Post("/factory/import", factory.Import)
+			r.Post("/factory/import-path", factory.ImportPath)
+			r.Post("/factory/capture", factory.Capture)
+
+			// Shell sessions
+			r.Post("/images/{id}/shell-session", factory.OpenShellSession)
+			r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
+			r.Post("/images/{id}/shell-session/{sid}/exec", factory.ExecInSession)
+
+			// Nodes — by-mac must be before /{id} to avoid chi match ambiguity.
+			r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)
+			r.Get("/nodes", nodes.ListNodes)
+			r.Post("/nodes", nodes.CreateNode)
+			r.Get("/nodes/{id}", nodes.GetNode)
+			r.Put("/nodes/{id}", nodes.UpdateNode)
+			r.Delete("/nodes/{id}", nodes.DeleteNode)
+
+			// Logs — stream must be registered before plain /logs.
+			r.Get("/logs/stream", logs.StreamLogs)
+			r.Get("/logs", logs.QueryLogs)
+		})
 	})
 
 	return r
