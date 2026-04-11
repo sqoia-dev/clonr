@@ -21,6 +21,15 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/ipmi"
 )
 
+// ANSI colour codes used by the log viewer.
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorGray   = "\033[90m"
+)
+
 var version = "dev"
 
 // Persistent flag values applied to every subcommand.
@@ -90,6 +99,7 @@ func init() {
 	rootCmd.AddCommand(identifyCmd)
 	rootCmd.AddCommand(newDeployCmd())
 	rootCmd.AddCommand(newFixEFIBootCmd())
+	rootCmd.AddCommand(newLogsCmd())
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.
@@ -375,8 +385,20 @@ func newDeployCmd() *cobra.Command {
 			ctx := context.Background()
 			c := clientFromFlags()
 
+			// ── Remote logging setup ─────────────────────────────────────────
+			// Discover a best-effort MAC for the log writer before hardware
+			// discovery runs fully. We'll update nodeMAC after hardware is done.
+			remoteWriter := client.NewRemoteLogWriter(c, "unknown", "", client.WithComponent("deploy"))
+			defer remoteWriter.Close()
+
+			// Tee all zerolog output: local console + remote server.
+			multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr}, remoteWriter)
+			deployLog := zerolog.New(multi).With().Timestamp().Logger()
+			// ─────────────────────────────────────────────────────────────────
+
 			// Step 1: Discover hardware.
 			fmt.Fprintln(os.Stderr, "[1/6] Discovering hardware...")
+			deployLog.Info().Str("component", "hardware").Msg("starting hardware discovery")
 			hw, err := hardware.Discover()
 			if err != nil {
 				return fmt.Errorf("hardware discovery: %w", err)
@@ -389,22 +411,34 @@ func newDeployCmd() *cobra.Command {
 				return fmt.Errorf("no usable NIC found — cannot look up node config")
 			}
 
+			// Now that we have the MAC, update the remote writer identity.
+			remoteWriter.SetNodeMAC(primaryMAC)
+			deployLog.Info().Str("component", "deploy").Str("mac", primaryMAC).Msg("fetching node config")
+
 			nodeCfg, err := c.GetNodeConfigByMAC(ctx, primaryMAC)
 			if err != nil {
+				deployLog.Error().Str("component", "deploy").Err(err).Msg("failed to fetch node config")
 				return fmt.Errorf("get node config (MAC %s): %w", primaryMAC, err)
 			}
+			remoteWriter.SetHostname(nodeCfg.Hostname)
 			fmt.Fprintf(os.Stderr, "    Node: %s (%s)\n", nodeCfg.Hostname, nodeCfg.ID)
+			deployLog.Info().Str("component", "deploy").Str("hostname", nodeCfg.Hostname).Msg("node config loaded")
 
 			// Step 3: Get image details.
 			fmt.Fprintln(os.Stderr, "[3/6] Fetching image details...")
+			deployLog.Info().Str("component", "deploy").Str("image_id", flagImage).Msg("fetching image details")
 			img, err := c.GetImage(ctx, flagImage)
 			if err != nil {
+				deployLog.Error().Str("component", "deploy").Err(err).Msg("failed to fetch image")
 				return fmt.Errorf("get image %s: %w", flagImage, err)
 			}
 			if img.Status != api.ImageStatusReady {
 				return fmt.Errorf("image %s is not ready (status: %s)", img.ID, img.Status)
 			}
 			fmt.Fprintf(os.Stderr, "    Image: %s %s (%s)\n", img.Name, img.Version, img.Format)
+			deployLog.Info().Str("component", "deploy").
+				Str("image", img.Name).Str("version", img.Version).Str("format", string(img.Format)).
+				Msg("image ready")
 
 			// Resolve server URL for blob download.
 			cfg := config.LoadClientConfig()
@@ -426,6 +460,7 @@ func newDeployCmd() *cobra.Command {
 
 			// Step 4: Preflight.
 			fmt.Fprintln(os.Stderr, "[4/6] Running preflight checks...")
+			deployLog.Info().Str("component", "deploy").Msg("running preflight checks")
 			var deployer deploy.Deployer
 			switch img.Format {
 			case api.ImageFormatBlock:
@@ -435,11 +470,14 @@ func newDeployCmd() *cobra.Command {
 			}
 
 			if err := deployer.Preflight(ctx, img.DiskLayout, *hw); err != nil {
+				deployLog.Error().Str("component", "deploy").Err(err).Msg("preflight failed")
 				return fmt.Errorf("preflight: %w", err)
 			}
+			deployLog.Info().Str("component", "deploy").Msg("preflight passed")
 
 			// Step 5: Deploy.
 			fmt.Fprintln(os.Stderr, "[5/6] Deploying image...")
+			deployLog.Info().Str("component", "deploy").Msg("starting image write")
 			opts := deploy.DeployOpts{
 				ImageURL:   blobURL,
 				AuthToken:  cfg.AuthToken,
@@ -461,33 +499,39 @@ func newDeployCmd() *cobra.Command {
 
 			if err := deployer.Deploy(ctx, opts, progressFn); err != nil {
 				fmt.Fprintln(os.Stderr) // newline after progress
+				deployLog.Error().Str("component", "deploy").Err(err).Msg("image write failed")
 				return fmt.Errorf("deploy: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "\n    Done in %s\n", time.Since(start).Round(time.Second))
+			elapsed := time.Since(start).Round(time.Second)
+			fmt.Fprintf(os.Stderr, "\n    Done in %s\n", elapsed)
+			deployLog.Info().Str("component", "deploy").Str("duration", elapsed.String()).Msg("image write complete")
 
 			// Step 6: Finalize.
 			fmt.Fprintln(os.Stderr, "[6/6] Applying node configuration...")
+			deployLog.Info().Str("component", "chroot").Msg("applying node configuration")
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
+				deployLog.Error().Str("component", "chroot").Err(err).Msg("finalize failed")
 				return fmt.Errorf("finalize: %w", err)
 			}
 			fmt.Fprintln(os.Stderr, "    Hostname, network, and SSH keys applied.")
+			deployLog.Info().Str("component", "chroot").Msg("node configuration applied")
 
 			// Step 7: EFI boot repair (optional).
 			if flagFixEFI {
 				fmt.Fprintln(os.Stderr, "[+] Repairing EFI boot entries...")
+				deployLog.Info().Str("component", "efiboot").Msg("repairing EFI boot entries")
 				disk := flagDisk
 				if disk == "" {
 					disk = "/dev/sda"
 				}
 				label := img.Name
-				if nodeCfg.Hostname != "" {
-					label = img.Name
-				}
 				if err := deploy.FixEFIBoot(ctx, disk, 1, label, `\EFI\rocky\grubx64.efi`); err != nil {
 					// Non-fatal — log the error but don't fail the deployment.
 					fmt.Fprintf(os.Stderr, "    Warning: EFI boot repair failed: %v\n", err)
+					deployLog.Warn().Str("component", "efiboot").Err(err).Msg("EFI boot repair failed (non-fatal)")
 				} else {
 					fmt.Fprintln(os.Stderr, "    EFI boot entry set.")
+					deployLog.Info().Str("component", "efiboot").Msg("EFI boot entry set")
 				}
 			}
 
@@ -763,6 +807,148 @@ func newIPMISensorsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flagUser, "user", "", "BMC username")
 	cmd.Flags().StringVar(&flagPass, "pass", "", "BMC password")
 	return cmd
+}
+
+// ─── logs ────────────────────────────────────────────────────────────────────
+
+// newLogsCmd creates the "clonr logs" command and its subcommands.
+func newLogsCmd() *cobra.Command {
+	var (
+		flagMAC       string
+		flagHostname  string
+		flagLevel     string
+		flagComponent string
+		flagSince     string
+		flagLimit     int
+		flagFollow    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "View deployment logs from the server",
+		Long: `logs queries or tails the centralized deployment log stream.
+
+Examples:
+  clonr logs --mac aa:bb:cc:dd:ee:ff        # history for a specific node
+  clonr logs --follow                        # live tail all nodes
+  clonr logs --follow --mac aa:bb:cc:dd:ee:ff --level error
+  clonr logs --component deploy --since 1h  # last hour of deploy phase logs`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			c := clientFromFlags()
+
+			filter := api.LogFilter{
+				NodeMAC:   flagMAC,
+				Hostname:  flagHostname,
+				Level:     flagLevel,
+				Component: flagComponent,
+				Limit:     flagLimit,
+			}
+
+			// Parse --since as a duration ("1h", "30m") or RFC3339 timestamp.
+			if flagSince != "" {
+				if d, err := time.ParseDuration(flagSince); err == nil {
+					t := time.Now().UTC().Add(-d)
+					filter.Since = &t
+				} else if t, err := time.Parse(time.RFC3339, flagSince); err == nil {
+					filter.Since = &t
+				} else {
+					return fmt.Errorf("--since: expected a duration (e.g. 1h, 30m) or RFC3339 timestamp")
+				}
+			}
+
+			if flagFollow {
+				return tailLogs(ctx, c, filter)
+			}
+			return queryLogs(ctx, c, filter)
+		},
+	}
+
+	cmd.Flags().StringVar(&flagMAC, "mac", "", "Filter by node MAC address")
+	cmd.Flags().StringVar(&flagHostname, "hostname", "", "Filter by hostname")
+	cmd.Flags().StringVar(&flagLevel, "level", "", "Filter by log level (debug, info, warn, error)")
+	cmd.Flags().StringVar(&flagComponent, "component", "", "Filter by component (hardware, deploy, chroot, ipmi, efiboot)")
+	cmd.Flags().StringVar(&flagSince, "since", "", "Show logs since a duration ago (e.g. 1h, 30m) or RFC3339 timestamp")
+	cmd.Flags().IntVar(&flagLimit, "limit", 100, "Max number of log entries to return")
+	cmd.Flags().BoolVar(&flagFollow, "follow", false, "Tail the live log stream (SSE)")
+
+	return cmd
+}
+
+// queryLogs fetches and prints historical logs.
+func queryLogs(ctx context.Context, c *client.Client, filter api.LogFilter) error {
+	entries, err := c.QueryLogs(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("query logs: %w", err)
+	}
+	if len(entries) == 0 {
+		fmt.Println("No log entries found.")
+		return nil
+	}
+	// Entries come back newest-first; reverse for chronological output.
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+	for _, e := range entries {
+		printLogEntry(e)
+	}
+	return nil
+}
+
+// tailLogs opens an SSE stream and prints entries as they arrive.
+func tailLogs(ctx context.Context, c *client.Client, filter api.LogFilter) error {
+	ch, cancel, err := c.StreamLogs(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("stream logs: %w", err)
+	}
+	defer cancel()
+
+	fmt.Fprintln(os.Stderr, "Streaming live logs (Ctrl-C to stop)...")
+	for entry := range ch {
+		printLogEntry(entry)
+	}
+	return nil
+}
+
+// printLogEntry writes a formatted log line to stdout.
+func printLogEntry(e api.LogEntry) {
+	ts := e.Timestamp.Local().Format("2006-01-02 15:04:05")
+
+	levelStr := levelColored(e.Level)
+	node := e.Hostname
+	if node == "" {
+		node = e.NodeMAC
+	}
+
+	fmt.Printf("%s  %s  [%s] %s%s%s  %s\n",
+		colorGray+ts+colorReset,
+		levelStr,
+		e.Component,
+		colorGray+node+colorReset,
+		sep(node),
+		colorReset,
+		e.Message,
+	)
+}
+
+func sep(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "  "
+}
+
+func levelColored(level string) string {
+	switch strings.ToLower(level) {
+	case "error":
+		return colorRed + "ERR" + colorReset
+	case "warn":
+		return colorYellow + "WRN" + colorReset
+	case "debug":
+		return colorGray + "DBG" + colorReset
+	default:
+		return colorCyan + "INF" + colorReset
+	}
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
