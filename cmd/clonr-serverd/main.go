@@ -9,13 +9,28 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
 
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/pxe"
 	"github.com/sqoia-dev/clonr/pkg/server"
 )
 
 var version = "dev"
+
+var rootCmd = &cobra.Command{
+	Use:   "clonr-serverd",
+	Short: "clonr provisioning server",
+	RunE:  runServer,
+}
+
+var flagPXE bool
+
+func init() {
+	rootCmd.Flags().BoolVar(&flagPXE, "pxe", false,
+		"Enable built-in DHCP/TFTP PXE server (also set via CLONR_PXE_ENABLED=true)")
+}
 
 func main() {
 	// Bootstrap a console logger early so startup failures are readable.
@@ -24,7 +39,18 @@ func main() {
 		Str("service", "clonr-serverd").
 		Logger()
 
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func runServer(cmd *cobra.Command, args []string) error {
 	cfg := config.LoadServerConfig()
+
+	// --pxe flag overrides env var.
+	if flagPXE {
+		cfg.PXE.Enabled = true
+	}
 
 	// Set log level from config.
 	level, err := zerolog.ParseLevel(cfg.LogLevel)
@@ -37,31 +63,46 @@ func main() {
 
 	// Ensure image directory exists.
 	if err := os.MkdirAll(cfg.ImageDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create image dir %s: %v\n", cfg.ImageDir, err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create image dir %s: %w", cfg.ImageDir, err)
 	}
 
 	// Open database (applies migrations on first run).
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open database %s: %v\n", cfg.DBPath, err)
-		os.Exit(1)
+		return fmt.Errorf("failed to open database %s: %w", cfg.DBPath, err)
 	}
 	defer database.Close()
 
 	log.Info().Str("db", cfg.DBPath).Msg("database ready")
 
-	// Wire up the server.
-	srv := server.New(cfg, database)
-
 	// Graceful shutdown on SIGINT / SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start PXE server if enabled.
+	if cfg.PXE.Enabled {
+		pxeSrv, err := pxe.New(cfg.PXE)
+		if err != nil {
+			return fmt.Errorf("failed to init PXE server: %w", err)
+		}
+		go func() {
+			if err := pxeSrv.Start(ctx); err != nil {
+				log.Error().Err(err).Msg("PXE server error")
+			}
+		}()
+		log.Info().
+			Str("interface", cfg.PXE.Interface).
+			Str("range", cfg.PXE.IPRange).
+			Msg("PXE server enabled")
+	}
+
+	// Wire up and start the HTTP server.
+	srv := server.New(cfg, database)
+
 	if err := srv.ListenAndServe(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("server error: %w", err)
 	}
 
 	log.Info().Msg("shutdown complete")
+	return nil
 }
