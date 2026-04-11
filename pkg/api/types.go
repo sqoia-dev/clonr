@@ -2,7 +2,10 @@
 // All JSON field names here are authoritative — the REST API contract.
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ImageStatus represents the lifecycle state of a BaseImage.
 type ImageStatus string
@@ -101,20 +104,23 @@ type IBInterfaceConfig struct {
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
-	ID          string              `json:"id"`
-	Hostname    string              `json:"hostname"`
-	FQDN        string              `json:"fqdn"`
-	PrimaryMAC  string              `json:"primary_mac"`
-	Interfaces  []InterfaceConfig   `json:"interfaces"`
-	SSHKeys     []string            `json:"ssh_keys"`
-	KernelArgs  string              `json:"kernel_args"`
-	Groups      []string            `json:"groups"`
-	CustomVars  map[string]string   `json:"custom_vars"`
-	BaseImageID string              `json:"base_image_id"`
-	BMC         *BMCNodeConfig      `json:"bmc,omitempty"`
-	IBConfig    []IBInterfaceConfig `json:"ib_config,omitempty"`
-	CreatedAt   time.Time           `json:"created_at"`
-	UpdatedAt   time.Time           `json:"updated_at"`
+	ID              string              `json:"id"`
+	Hostname        string              `json:"hostname"`
+	FQDN            string              `json:"fqdn"`
+	PrimaryMAC      string              `json:"primary_mac"`
+	Interfaces      []InterfaceConfig   `json:"interfaces"`
+	SSHKeys         []string            `json:"ssh_keys"`
+	KernelArgs      string              `json:"kernel_args"`
+	Groups          []string            `json:"groups"`
+	CustomVars      map[string]string   `json:"custom_vars"`
+	BaseImageID     string              `json:"base_image_id,omitempty"`
+	BMC             *BMCNodeConfig      `json:"bmc,omitempty"`
+	IBConfig        []IBInterfaceConfig `json:"ib_config,omitempty"`
+	// HardwareProfile is the raw hardware discovery JSON from the node.
+	// Populated on auto-registration; nil when node was created manually.
+	HardwareProfile json.RawMessage     `json:"hardware_profile,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
 }
 
 // --- Request types ---
@@ -225,4 +231,62 @@ type LogFilter struct {
 type ListLogsResponse struct {
 	Logs  []LogEntry `json:"logs"`
 	Total int        `json:"total"`
+}
+
+// ─── PXE / auto-registration types ───────────────────────────────────────────
+
+// RegisterRequest is the body for POST /api/v1/nodes/register.
+// Sent by the clonr client on first PXE boot to register itself with the server.
+type RegisterRequest struct {
+	// HardwareProfile is the raw JSON from hardware.Discover().
+	HardwareProfile json.RawMessage `json:"hardware_profile"`
+}
+
+// RegisterResponse is the response body for POST /api/v1/nodes/register.
+type RegisterResponse struct {
+	NodeConfig *NodeConfig `json:"node_config"`
+	// Action tells the client what to do next:
+	//   "deploy"  — an image has been assigned; proceed with deployment.
+	//   "wait"    — no image assigned yet; poll GET /api/v1/nodes/by-mac/:mac every 30s.
+	//   "capture" — admin wants to capture this node's image (future).
+	Action string `json:"action"`
+}
+
+// ─── Factory request types ────────────────────────────────────────────────────
+
+// ImportISORequest is the JSON metadata posted alongside a multipart ISO upload.
+type ImportISORequest struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// CaptureRequest is the body for POST /api/v1/factory/capture.
+type CaptureRequest struct {
+	Source  string   `json:"source"`   // rsync source: "user@host:/" or local path
+	Name    string   `json:"name"`
+	Version string   `json:"version"`
+	OS      string   `json:"os"`
+	Arch    string   `json:"arch"`
+	Tags    []string `json:"tags"`
+	Notes   string   `json:"notes"`
+}
+
+// ─── Shell session types ──────────────────────────────────────────────────────
+
+// ShellSessionResponse is returned when a session is opened.
+type ShellSessionResponse struct {
+	SessionID string `json:"session_id"`
+	ImageID   string `json:"image_id"`
+	RootDir   string `json:"root_dir"`
+}
+
+// ExecRequest is the body for POST /api/v1/images/:id/shell-session/:sid/exec.
+type ExecRequest struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+// ExecResponse is returned by the exec endpoint.
+type ExecResponse struct {
+	Output string `json:"output"`
 }
