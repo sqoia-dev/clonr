@@ -288,16 +288,39 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	log.Printf("deploy: running partprobe on %s", disk)
 	_ = runCmd(ctx, "partprobe", disk)
 	_ = runCmd(ctx, "udevadm", "settle")
+	// In minimal initramfs environments without udevd, partition uevent
+	// notifications are not processed, so /dev/sdaN nodes don't appear
+	// after partprobe. Run 'mdev -s' (busybox) to scan sysfs and create
+	// device nodes, then fall back to manually creating them if needed.
+	log.Printf("deploy: triggering device node creation for new partitions")
+	_ = exec.CommandContext(ctx, "mdev", "-s").Run()
+	// Also trigger re-read via blockdev for kernels that support it.
+	_ = exec.CommandContext(ctx, "blockdev", "--rereadpt", disk).Run()
 	// Give the kernel time to create partition device nodes in /dev.
-	// In initramfs environments with devtmpfs, the nodes appear asynchronously
-	// after partprobe. Without this wait, subsequent mkfs/mount calls fail with
-	// "No such file or directory" even though the partitions exist in the table.
 	if err := waitForPartitions(ctx, disk, len(d.layout.Partitions), 15); err != nil {
-		log.Printf("deploy: WARNING: partition devices not all visible after wait: %v", err)
+		log.Printf("deploy: waitForPartitions timed out — attempting manual device node creation")
+		ensurePartitionNodes(disk, len(d.layout.Partitions))
 	}
 	log.Printf("deploy: partition table re-read complete")
 
 	return nil
+}
+
+// ensurePartitionNodes uses partx to explicitly add partition device nodes to /dev.
+// partx is the util-linux tool that tells the kernel about partitions found in
+// a partition table — it's more reliable than partprobe in initramfs environments
+// and explicitly creates /dev/sdaN nodes via BLKPG ioctl.
+func ensurePartitionNodes(disk string, count int) {
+	log.Printf("deploy: running partx to force partition node creation on %s", disk)
+	// partx --add adds partition nodes to /dev.
+	cmd := exec.Command("partx", "--add", disk)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("deploy: partx --add %s: %v\noutput: %s", disk, err, string(out))
+	} else {
+		log.Printf("deploy: partx --add succeeded on %s", disk)
+	}
+	// Also try kpartx as a fallback (device-mapper based, commonly available).
+	_ = exec.Command("kpartx", "-a", disk).Run()
 }
 
 // waitForPartitions waits until all expected partition device nodes appear in /dev.

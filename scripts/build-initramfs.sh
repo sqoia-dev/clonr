@@ -351,6 +351,7 @@ ${transitive}"
         mkfs.ext4       # ext4 filesystem creation (e2fsprogs)
         mkfs.vfat       # FAT32 for EFI System Partition (dosfstools)
         partprobe       # kernel partition re-read after sgdisk (parted package)
+        partx           # force /dev partition node creation via BLKPG ioctl (util-linux)
         wipefs          # wipe existing filesystem signatures before re-partitioning
         blockdev        # sector count / disk size queries (util-linux)
         mkswap          # swap partition setup (util-linux)
