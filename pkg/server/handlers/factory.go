@@ -193,30 +193,40 @@ func (h *FactoryHandler) ImportPath(w http.ResponseWriter, r *http.Request) {
 }
 
 // Capture handles POST /api/v1/factory/capture
-// Accepts a CaptureRequest and rsyncs from the given source into a new image.
+// Accepts a CaptureRequest, SSHes to the source host, and streams the filesystem
+// into a new BaseImage via rsync. Returns 202 immediately; the capture runs async.
+// Poll GET /api/v1/images/:id for status transitions: building → ready | error.
 func (h *FactoryHandler) Capture(w http.ResponseWriter, r *http.Request) {
 	var req api.CaptureRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeValidationError(w, "invalid JSON body")
 		return
 	}
-	if req.Source == "" {
-		writeValidationError(w, "source is required")
+	if req.SourceHost == "" {
+		writeValidationError(w, "source_host is required")
 		return
 	}
 	if req.Name == "" {
 		writeValidationError(w, "name is required")
 		return
 	}
+	if req.Version == "" {
+		req.Version = "1.0.0"
+	}
 
 	captureReq := image.CaptureRequest{
-		Source:  req.Source,
-		Name:    req.Name,
-		Version: req.Version,
-		OS:      req.OS,
-		Arch:    req.Arch,
-		Tags:    req.Tags,
-		Notes:   req.Notes,
+		SourceHost:   req.SourceHost,
+		SSHUser:      req.SSHUser,
+		SSHPassword:  req.SSHPassword,
+		SSHKeyPath:   req.SSHKeyPath,
+		SSHPort:      req.SSHPort,
+		Name:         req.Name,
+		Version:      req.Version,
+		OS:           req.OS,
+		Arch:         req.Arch,
+		Tags:         req.Tags,
+		Notes:        req.Notes,
+		ExcludePaths: req.ExcludePaths,
 	}
 
 	img, err := h.Factory.CaptureNode(r.Context(), captureReq)
