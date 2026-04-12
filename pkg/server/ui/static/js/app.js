@@ -2778,8 +2778,8 @@ const Pages = {
         container.innerHTML = `<div class="loading"><div class="spinner"></div>Loading…</div>`;
         try {
             const [effectiveResp, recResp] = await Promise.allSettled([
-                API.request('GET', `/api/v1/nodes/${nodeId}/effective-layout`),
-                API.request('GET', `/api/v1/nodes/${nodeId}/layout-recommendation`),
+                API.request('GET', `/nodes/${nodeId}/effective-layout`),
+                API.request('GET', `/nodes/${nodeId}/layout-recommendation`),
             ]);
             const effective = effectiveResp.status === 'fulfilled' ? effectiveResp.value : null;
             const rec = recResp.status === 'fulfilled' ? recResp.value : null;
@@ -2797,7 +2797,7 @@ const Pages = {
         if (container.dataset.loaded === nodeId) return;
         container.innerHTML = `<div class="loading"><div class="spinner"></div>Loading mounts…</div>`;
         try {
-            const resp = await API.request('GET', `/api/v1/nodes/${nodeId}/effective-mounts`);
+            const resp = await API.request('GET', `/nodes/${nodeId}/effective-mounts`);
             container.innerHTML = Pages._renderEffectiveMountsTab(resp);
             container.dataset.loaded = nodeId;
         } catch (e) {
@@ -2954,7 +2954,7 @@ const Pages = {
         const layout = JSON.parse(layoutJSON);
         if (!confirm('Apply the recommended disk layout as a node-level override? This will override the image/group default for this node only.')) return;
         try {
-            await API.request('PUT', `/api/v1/nodes/${nodeId}/layout-override`, { layout });
+            await API.request('PUT', `/nodes/${nodeId}/layout-override`, { layout });
             Pages._onDiskLayoutTabOpen(nodeId);
         } catch (e) {
             alert(`Failed to apply layout: ${e.message}`);
@@ -2964,7 +2964,7 @@ const Pages = {
     async _clearLayoutOverride(nodeId) {
         if (!confirm('Clear the node-level disk layout override? The group or image default will be used instead.')) return;
         try {
-            await API.request('PUT', `/api/v1/nodes/${nodeId}/layout-override`, { clear_layout_override: true });
+            await API.request('PUT', `/nodes/${nodeId}/layout-override`, { clear_layout_override: true });
             Pages._onDiskLayoutTabOpen(nodeId);
         } catch (e) {
             alert(`Failed to clear override: ${e.message}`);
@@ -3118,7 +3118,7 @@ const Pages = {
         const resultEl = document.getElementById('layout-editor-result');
         if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
         try {
-            await API.request('PUT', `/api/v1/nodes/${nodeId}/layout-override`, { layout: modal._layoutState });
+            await API.request('PUT', `/nodes/${nodeId}/layout-override`, { layout: modal._layoutState });
             modal.remove();
             Pages._onDiskLayoutTabOpen(nodeId);
         } catch (e) {
