@@ -129,27 +129,72 @@ type IBInterfaceConfig struct {
 	MTU        int      `json:"mtu,omitempty"`      // typically 65520 for connected mode
 }
 
+// PowerProviderConfig holds the type and backend-specific fields for a node's
+// power management provider. The "type" field selects the backend ("ipmi",
+// "proxmox", …); "fields" carries backend-specific key/value pairs.
+//
+// Security: Fields may contain credentials. Always call Sanitize() before
+// returning this struct in an API response.
+type PowerProviderConfig struct {
+	Type   string            `json:"type"`
+	Fields map[string]string `json:"fields"`
+}
+
+// sensitiveFields lists the key names whose values are redacted by Sanitize.
+var sensitiveFields = []string{
+	"password", "token_secret", "secret", "api_key", "api_secret",
+}
+
+// Sanitize returns a copy of c with credential fields replaced by "****".
+// Always call this before including a PowerProviderConfig in an API response.
+func (c *PowerProviderConfig) Sanitize() *PowerProviderConfig {
+	if c == nil {
+		return nil
+	}
+	out := &PowerProviderConfig{
+		Type:   c.Type,
+		Fields: make(map[string]string, len(c.Fields)),
+	}
+	for k, v := range c.Fields {
+		out.Fields[k] = v
+	}
+	for _, name := range sensitiveFields {
+		if _, ok := out.Fields[name]; ok {
+			out.Fields[name] = "****"
+		}
+	}
+	return out
+}
+
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
-	ID              string              `json:"id"`
-	Hostname        string              `json:"hostname"`
-	HostnameAuto    bool                `json:"hostname_auto"`
-	FQDN            string              `json:"fqdn"`
-	PrimaryMAC      string              `json:"primary_mac"`
-	Interfaces      []InterfaceConfig   `json:"interfaces"`
-	SSHKeys         []string            `json:"ssh_keys"`
-	KernelArgs      string              `json:"kernel_args"`
-	Groups          []string            `json:"groups"`
-	CustomVars      map[string]string   `json:"custom_vars"`
-	BaseImageID     string              `json:"base_image_id,omitempty"`
-	BMC             *BMCNodeConfig      `json:"bmc,omitempty"`
-	IBConfig        []IBInterfaceConfig `json:"ib_config,omitempty"`
+	ID              string               `json:"id"`
+	Hostname        string               `json:"hostname"`
+	HostnameAuto    bool                 `json:"hostname_auto"`
+	FQDN            string               `json:"fqdn"`
+	PrimaryMAC      string               `json:"primary_mac"`
+	Interfaces      []InterfaceConfig    `json:"interfaces"`
+	SSHKeys         []string             `json:"ssh_keys"`
+	KernelArgs      string               `json:"kernel_args"`
+	Groups          []string             `json:"groups"`
+	CustomVars      map[string]string    `json:"custom_vars"`
+	BaseImageID     string               `json:"base_image_id,omitempty"`
+	BMC             *BMCNodeConfig       `json:"bmc,omitempty"`
+	IBConfig        []IBInterfaceConfig  `json:"ib_config,omitempty"`
+	// PowerProvider selects the power management backend for this node.
+	// If nil, the server falls back to legacy BMC-based IPMI when BMC is set.
+	PowerProvider   *PowerProviderConfig `json:"power_provider,omitempty"`
+	// ReimagePending is set to true by the reimage orchestrator after it fires
+	// SetNextBoot(PXE) + PowerCycle. The register endpoint returns action=deploy
+	// unconditionally while this flag is set, forcing the deploy client to
+	// re-image the node. Cleared once deployment finalizes.
+	ReimagePending  bool                 `json:"reimage_pending,omitempty"`
 	// HardwareProfile is the raw hardware discovery JSON from the node.
 	// Populated on auto-registration; nil when node was created manually.
-	HardwareProfile json.RawMessage     `json:"hardware_profile,omitempty"`
-	CreatedAt       time.Time           `json:"created_at"`
-	UpdatedAt       time.Time           `json:"updated_at"`
+	HardwareProfile json.RawMessage      `json:"hardware_profile,omitempty"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
 }
 
 // --- Request types ---
@@ -195,15 +240,16 @@ type CreateNodeConfigRequest struct {
 
 // UpdateNodeConfigRequest is the body for PUT /api/v1/nodes/:id.
 type UpdateNodeConfigRequest struct {
-	Hostname    string            `json:"hostname"`
-	FQDN        string            `json:"fqdn"`
-	PrimaryMAC  string            `json:"primary_mac"`
-	Interfaces  []InterfaceConfig `json:"interfaces"`
-	SSHKeys     []string          `json:"ssh_keys"`
-	KernelArgs  string            `json:"kernel_args"`
-	Groups      []string          `json:"groups"`
-	CustomVars  map[string]string `json:"custom_vars"`
-	BaseImageID string            `json:"base_image_id"`
+	Hostname      string               `json:"hostname"`
+	FQDN          string               `json:"fqdn"`
+	PrimaryMAC    string               `json:"primary_mac"`
+	Interfaces    []InterfaceConfig    `json:"interfaces"`
+	SSHKeys       []string             `json:"ssh_keys"`
+	KernelArgs    string               `json:"kernel_args"`
+	Groups        []string             `json:"groups"`
+	CustomVars    map[string]string    `json:"custom_vars"`
+	BaseImageID   string               `json:"base_image_id"`
+	PowerProvider *PowerProviderConfig `json:"power_provider,omitempty"`
 }
 
 // --- Response types ---
@@ -332,4 +378,62 @@ type ExecRequest struct {
 // ExecResponse is returned by the exec endpoint.
 type ExecResponse struct {
 	Output string `json:"output"`
+}
+
+// ─── Reimage types ────────────────────────────────────────────────────────────
+
+// ReimageStatus enumerates valid states for a ReimageRequest.
+type ReimageStatus string
+
+const (
+	ReimageStatusPending    ReimageStatus = "pending"
+	ReimageStatusTriggered  ReimageStatus = "triggered"
+	ReimageStatusInProgress ReimageStatus = "in_progress"
+	ReimageStatusComplete   ReimageStatus = "complete"
+	ReimageStatusFailed     ReimageStatus = "failed"
+	ReimageStatusCanceled   ReimageStatus = "canceled"
+)
+
+// IsTerminal reports whether s is a terminal state (no further transitions).
+func (s ReimageStatus) IsTerminal() bool {
+	switch s {
+	case ReimageStatusComplete, ReimageStatusFailed, ReimageStatusCanceled:
+		return true
+	}
+	return false
+}
+
+// ReimageRequest is the server-side record for a reimage lifecycle.
+type ReimageRequest struct {
+	ID           string        `json:"id"`
+	NodeID       string        `json:"node_id"`
+	ImageID      string        `json:"image_id"`
+	Status       ReimageStatus `json:"status"`
+	ScheduledAt  *time.Time    `json:"scheduled_at,omitempty"`
+	TriggeredAt  *time.Time    `json:"triggered_at,omitempty"`
+	StartedAt    *time.Time    `json:"started_at,omitempty"`
+	CompletedAt  *time.Time    `json:"completed_at,omitempty"`
+	ErrorMessage string        `json:"error_message,omitempty"`
+	RequestedBy  string        `json:"requested_by"`
+	DryRun       bool          `json:"dry_run,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+}
+
+// CreateReimageRequest is the body for POST /api/v1/nodes/:id/reimage.
+type CreateReimageRequest struct {
+	// ImageID is the base image to deploy. If empty the node's currently
+	// assigned base_image_id is used.
+	ImageID     string     `json:"image_id,omitempty"`
+	// ScheduledAt, when non-nil, defers the reimage. nil = immediate.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
+	// DryRun sets next boot to PXE and power-cycles but does not wipe the disk.
+	DryRun      bool       `json:"dry_run,omitempty"`
+	// Force skips the image-ready and active-reimage pre-checks.
+	Force       bool       `json:"force,omitempty"`
+}
+
+// ListReimagesResponse wraps the reimage history list.
+type ListReimagesResponse struct {
+	Requests []ReimageRequest `json:"requests"`
+	Total    int              `json:"total"`
 }

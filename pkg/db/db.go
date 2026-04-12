@@ -322,18 +322,22 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ib_config: %w", err)
 	}
+	powerProvider, err := marshalNullableJSON(cfg.PowerProvider, "{}")
+	if err != nil {
+		return fmt.Errorf("db: marshal power_provider: %w", err)
+	}
 
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 power_provider, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
-		string(hwProfile), bmcConfig, ibConfig,
+		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 	)
 	if err != nil {
@@ -391,8 +395,8 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', ?, ?)
+			 power_provider, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -420,7 +424,7 @@ func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, err
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       created_at, updated_at
+		       power_provider, reimage_pending, created_at, updated_at
 		FROM node_configs WHERE id = ?
 	`, id)
 	return scanNodeConfig(row)
@@ -431,7 +435,7 @@ func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfi
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       created_at, updated_at
+		       power_provider, reimage_pending, created_at, updated_at
 		FROM node_configs WHERE primary_mac = ?
 	`, mac)
 	return scanNodeConfig(row)
@@ -446,14 +450,14 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       created_at, updated_at
+			       power_provider, reimage_pending, created_at, updated_at
 			FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC
 		`, baseImageID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       created_at, updated_at
+			       power_provider, reimage_pending, created_at, updated_at
 			FROM node_configs ORDER BY hostname ASC
 		`)
 	}
@@ -503,18 +507,22 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ib_config: %w", err)
 	}
+	powerProvider, err := marshalNullableJSON(cfg.PowerProvider, "{}")
+	if err != nil {
+		return fmt.Errorf("db: marshal power_provider: %w", err)
+	}
 
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
-		    hardware_profile = ?, bmc_config = ?, ib_config = ?, updated_at = ?
+		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
-		string(hwProfile), bmcConfig, ibConfig,
+		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		time.Now().Unix(), cfg.ID,
 	)
 	if err != nil {
@@ -530,6 +538,202 @@ func (db *DB) DeleteNodeConfig(ctx context.Context, id string) error {
 		return fmt.Errorf("db: delete node config: %w", err)
 	}
 	return requireOneRow(res, "node_configs", id)
+}
+
+// SetReimagePending sets or clears the reimage_pending flag for a node.
+// Set to true before power-cycling for a reimage; clear to false after finalize.
+func (db *DB) SetReimagePending(ctx context.Context, nodeID string, pending bool) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET reimage_pending = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(pending), time.Now().Unix(), nodeID,
+	)
+	if err != nil {
+		return fmt.Errorf("db: set reimage_pending: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
+// ─── ReimageRequest operations ───────────────────────────────────────────────
+
+// CreateReimageRequest inserts a new reimage request with status "pending".
+func (db *DB) CreateReimageRequest(ctx context.Context, req api.ReimageRequest) error {
+	var scheduledAtVal interface{}
+	if req.ScheduledAt != nil {
+		scheduledAtVal = req.ScheduledAt.Unix()
+	}
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO reimage_requests
+			(id, node_id, image_id, status, scheduled_at, error_message,
+			 requested_by, dry_run, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		req.ID, req.NodeID, req.ImageID, string(req.Status),
+		scheduledAtVal, req.ErrorMessage,
+		req.RequestedBy, boolToInt(req.DryRun), req.CreatedAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("db: create reimage request: %w", err)
+	}
+	return nil
+}
+
+// GetReimageRequest retrieves a single ReimageRequest by ID.
+func (db *DB) GetReimageRequest(ctx context.Context, id string) (api.ReimageRequest, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		FROM reimage_requests WHERE id = ?
+	`, id)
+	return scanReimageRequest(row)
+}
+
+// ListReimageRequests returns all ReimageRequests for a node, newest first.
+// If nodeID is empty, returns all requests.
+func (db *DB) ListReimageRequests(ctx context.Context, nodeID string) ([]api.ReimageRequest, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if nodeID != "" {
+		rows, err = db.sql.QueryContext(ctx, `
+			SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
+			       started_at, completed_at, error_message, requested_by, dry_run, created_at
+			FROM reimage_requests WHERE node_id = ? ORDER BY created_at DESC
+		`, nodeID)
+	} else {
+		rows, err = db.sql.QueryContext(ctx, `
+			SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
+			       started_at, completed_at, error_message, requested_by, dry_run, created_at
+			FROM reimage_requests ORDER BY created_at DESC
+		`)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db: list reimage requests: %w", err)
+	}
+	defer rows.Close()
+	return collectReimageRows(rows)
+}
+
+// ListPendingScheduledRequests returns all requests with status "pending" and a
+// scheduled_at time at or before `before`. Used by the scheduler goroutine.
+func (db *DB) ListPendingScheduledRequests(ctx context.Context, before time.Time) ([]api.ReimageRequest, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		FROM reimage_requests
+		WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+		ORDER BY scheduled_at ASC
+	`, before.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("db: list pending scheduled requests: %w", err)
+	}
+	defer rows.Close()
+	return collectReimageRows(rows)
+}
+
+// UpdateReimageRequestStatus updates the status and error_message of a request.
+// It also sets the appropriate timestamp column based on the new status.
+func (db *DB) UpdateReimageRequestStatus(ctx context.Context, id string, status api.ReimageStatus, errMsg string) error {
+	now := time.Now().Unix()
+	var q string
+	switch status {
+	case api.ReimageStatusTriggered:
+		q = `UPDATE reimage_requests SET status = ?, error_message = ?, triggered_at = ? WHERE id = ?`
+	case api.ReimageStatusInProgress:
+		q = `UPDATE reimage_requests SET status = ?, error_message = ?, started_at = ? WHERE id = ?`
+	case api.ReimageStatusComplete, api.ReimageStatusFailed, api.ReimageStatusCanceled:
+		q = `UPDATE reimage_requests SET status = ?, error_message = ?, completed_at = ? WHERE id = ?`
+	default:
+		q = `UPDATE reimage_requests SET status = ?, error_message = ?, triggered_at = ? WHERE id = ?`
+	}
+	res, err := db.sql.ExecContext(ctx, q, string(status), errMsg, now, id)
+	if err != nil {
+		return fmt.Errorf("db: update reimage status: %w", err)
+	}
+	return requireOneRow(res, "reimage_requests", id)
+}
+
+// GetActiveReimageForNode returns the first non-terminal reimage request for
+// nodeID, or (nil, nil) if none exists.
+func (db *DB) GetActiveReimageForNode(ctx context.Context, nodeID string) (*api.ReimageRequest, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		FROM reimage_requests
+		WHERE node_id = ?
+		  AND status NOT IN ('complete', 'failed', 'canceled')
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, nodeID)
+	req, err := scanReimageRequest(row)
+	if err == api.ErrNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+// ─── ReimageRequest scan helpers ─────────────────────────────────────────────
+
+func scanReimageRequest(s scanner) (api.ReimageRequest, error) {
+	var (
+		req            api.ReimageRequest
+		status         string
+		scheduledAt    sql.NullInt64
+		triggeredAt    sql.NullInt64
+		startedAt      sql.NullInt64
+		completedAt    sql.NullInt64
+		dryRunInt      int
+		createdAtUnix  int64
+	)
+	err := s.Scan(
+		&req.ID, &req.NodeID, &req.ImageID, &status,
+		&scheduledAt, &triggeredAt, &startedAt, &completedAt,
+		&req.ErrorMessage, &req.RequestedBy, &dryRunInt, &createdAtUnix,
+	)
+	if err == sql.ErrNoRows {
+		return api.ReimageRequest{}, api.ErrNotFound
+	}
+	if err != nil {
+		return api.ReimageRequest{}, fmt.Errorf("db: scan reimage request: %w", err)
+	}
+	req.Status = api.ReimageStatus(status)
+	req.DryRun = dryRunInt != 0
+	req.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+	if scheduledAt.Valid {
+		t := time.Unix(scheduledAt.Int64, 0).UTC()
+		req.ScheduledAt = &t
+	}
+	if triggeredAt.Valid {
+		t := time.Unix(triggeredAt.Int64, 0).UTC()
+		req.TriggeredAt = &t
+	}
+	if startedAt.Valid {
+		t := time.Unix(startedAt.Int64, 0).UTC()
+		req.StartedAt = &t
+	}
+	if completedAt.Valid {
+		t := time.Unix(completedAt.Int64, 0).UTC()
+		req.CompletedAt = &t
+	}
+	return req, nil
+}
+
+func collectReimageRows(rows *sql.Rows) ([]api.ReimageRequest, error) {
+	var reqs []api.ReimageRequest
+	for rows.Next() {
+		req, err := scanReimageRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		reqs = append(reqs, req)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: iterate reimage requests: %w", err)
+	}
+	return reqs, nil
 }
 
 // ─── Internal scan helpers ───────────────────────────────────────────────────
@@ -589,18 +793,20 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
-		cfg            api.NodeConfig
-		hostnameAuto   int
-		interfacesJSON string
-		sshKeysJSON    string
-		groupsJSON     string
-		customVarsJSON string
-		baseImageID    sql.NullString
-		hwProfileJSON  string
-		bmcConfigJSON  string
-		ibConfigJSON   string
-		createdAtUnix  int64
-		updatedAtUnix  int64
+		cfg               api.NodeConfig
+		hostnameAuto      int
+		interfacesJSON    string
+		sshKeysJSON       string
+		groupsJSON        string
+		customVarsJSON    string
+		baseImageID       sql.NullString
+		hwProfileJSON     string
+		bmcConfigJSON     string
+		ibConfigJSON      string
+		powerProviderJSON string
+		reimagePending    int
+		createdAtUnix     int64
+		updatedAtUnix     int64
 	)
 
 	err := s.Scan(
@@ -608,6 +814,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
 		&groupsJSON, &customVarsJSON, &baseImageID,
 		&hwProfileJSON, &bmcConfigJSON, &ibConfigJSON,
+		&powerProviderJSON, &reimagePending,
 		&createdAtUnix, &updatedAtUnix,
 	)
 	if err == sql.ErrNoRows {
@@ -618,6 +825,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	}
 
 	cfg.HostnameAuto = hostnameAuto != 0
+	cfg.ReimagePending = reimagePending != 0
 
 	if baseImageID.Valid {
 		cfg.BaseImageID = baseImageID.String
@@ -653,6 +861,12 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	if ibConfigJSON != "" && ibConfigJSON != "[]" {
 		if err := json.Unmarshal([]byte(ibConfigJSON), &cfg.IBConfig); err != nil {
 			cfg.IBConfig = nil
+		}
+	}
+	if powerProviderJSON != "" && powerProviderJSON != "{}" {
+		var pp api.PowerProviderConfig
+		if err := json.Unmarshal([]byte(powerProviderJSON), &pp); err == nil && pp.Type != "" {
+			cfg.PowerProvider = &pp
 		}
 	}
 
