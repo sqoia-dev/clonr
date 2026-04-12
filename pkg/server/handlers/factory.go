@@ -13,6 +13,7 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
 	"github.com/sqoia-dev/clonr/pkg/image"
+	"github.com/sqoia-dev/clonr/pkg/image/isoinstaller"
 )
 
 // FactoryHandler handles image ingest operations and chroot shell sessions.
@@ -21,6 +22,33 @@ type FactoryHandler struct {
 	ImageDir string
 	Factory  *image.Factory
 	Shells   *image.ShellManager
+}
+
+// ListImageRoles handles GET /api/v1/image-roles.
+// Returns the static list of built-in HPC node role presets with UI-friendly
+// metadata: id, name, description, notes, and the unique package count across
+// all supported distros (so the UI can show "45 packages" without knowing the
+// target distro at browse-time).
+func (h *FactoryHandler) ListImageRoles(w http.ResponseWriter, _ *http.Request) {
+	roles := isoinstaller.HPCRoles
+	out := make([]api.ImageRoleResponse, 0, len(roles))
+	for _, role := range roles {
+		// Count unique packages across all distros for the UI preview line.
+		pkgSet := map[string]struct{}{}
+		for _, pkgs := range role.Packages {
+			for _, p := range pkgs {
+				pkgSet[p] = struct{}{}
+			}
+		}
+		out = append(out, api.ImageRoleResponse{
+			ID:           role.ID,
+			Name:         role.Name,
+			Description:  role.Description,
+			Notes:        role.Notes,
+			PackageCount: len(pkgSet),
+		})
+	}
+	writeJSON(w, http.StatusOK, api.ListImageRolesResponse{Roles: out, Total: len(out)})
 }
 
 // Pull handles POST /api/v1/factory/pull
@@ -186,6 +214,48 @@ func (h *FactoryHandler) ImportPath(w http.ResponseWriter, r *http.Request) {
 	img, err := h.Factory.ImportISO(r.Context(), absPath, body.Name, body.Version)
 	if err != nil {
 		log.Error().Err(err).Str("path", absPath).Msg("factory import-path")
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, img)
+}
+
+// BuildFromISO handles POST /api/v1/factory/build-from-iso
+//
+// Downloads an installer ISO from a URL, runs it in a temporary QEMU VM with
+// an auto-generated kickstart/autoinstall, extracts the installed filesystem,
+// and creates a ready BaseImage. Returns 202 immediately; the build runs async.
+// Requires qemu-system-x86_64, qemu-img, and genisoimage/xorriso on the server.
+func (h *FactoryHandler) BuildFromISO(w http.ResponseWriter, r *http.Request) {
+	var req api.BuildFromISORequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.URL == "" {
+		writeValidationError(w, "url is required")
+		return
+	}
+	if req.Name == "" {
+		writeValidationError(w, "name is required")
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(strings.Split(req.URL, "?")[0]), ".iso") {
+		writeValidationError(w, "url must point to an installer ISO (.iso extension)")
+		return
+	}
+	if req.DiskSizeGB < 0 || (req.DiskSizeGB > 0 && req.DiskSizeGB < 10) {
+		writeValidationError(w, "disk_size_gb must be >= 10 (or 0 for default of 20)")
+		return
+	}
+	if req.MemoryMB < 0 || (req.MemoryMB > 0 && req.MemoryMB < 512) {
+		writeValidationError(w, "memory_mb must be >= 512 (or 0 for default of 2048)")
+		return
+	}
+
+	img, err := h.Factory.BuildFromISO(r.Context(), req)
+	if err != nil {
+		log.Error().Err(err).Msg("factory build-from-iso")
 		writeError(w, err)
 		return
 	}

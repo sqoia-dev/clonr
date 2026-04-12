@@ -171,11 +171,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/blob", images.DownloadBlob)
 
 			// Factory
+			r.Get("/image-roles", factory.ListImageRoles)
 			r.Post("/factory/pull", factory.Pull)
 			r.Post("/factory/import", factory.Import)
 			r.Post("/factory/import-path", factory.ImportPath)
 			r.Post("/factory/import-iso", factory.ImportPath) // alias used by the web UI
 			r.Post("/factory/capture", factory.Capture)
+			r.Post("/factory/build-from-iso", factory.BuildFromISO)
 
 			// Shell sessions
 			r.Post("/images/{id}/shell-session", factory.OpenShellSession)

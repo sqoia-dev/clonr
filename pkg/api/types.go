@@ -122,6 +122,13 @@ type BaseImage struct {
 	SourceURL    string      `json:"source_url,omitempty"`
 	Notes        string      `json:"notes"`
 	ErrorMessage string      `json:"error_message,omitempty"`
+	// BuildMethod identifies how the image was created: "pull", "import", "capture", "iso".
+	// Used by the UI to decide which detail view to show (e.g. build progress panel).
+	BuildMethod  string      `json:"build_method,omitempty"`
+	// BuiltForRoles holds the HPC role IDs that were selected when the image was
+	// built via the Build from ISO flow. Used by the node-assignment UI to warn
+	// when a node's role tag doesn't match the image's built-for roles.
+	BuiltForRoles []string   `json:"built_for_roles,omitempty"`
 	CreatedAt    time.Time   `json:"created_at"`
 	FinalizedAt  *time.Time  `json:"finalized_at,omitempty"`
 }
@@ -657,6 +664,87 @@ type CaptureRequest struct {
 	Tags         []string `json:"tags"`
 	Notes        string   `json:"notes"`
 	ExcludePaths []string `json:"exclude_paths,omitempty"` // rsync --exclude patterns
+}
+
+// BuildFromISORequest is the body for POST /api/v1/factory/build-from-iso.
+// It instructs clonr to download an installer ISO, run it in a temporary QEMU
+// VM with an auto-generated kickstart/autoinstall config, and capture the
+// installed OS as a deployable BaseImage.
+//
+// The build runs asynchronously and can take 5-30 minutes. Poll
+// GET /api/v1/images/:id for status transitions: building → ready | error.
+type BuildFromISORequest struct {
+	// URL is the HTTP(S) URL of the installer ISO. Required.
+	// Example: "https://download.rockylinux.org/pub/rocky/10/isos/x86_64/Rocky-10.1-x86_64-dvd1.iso"
+	URL string `json:"url"`
+
+	// Name is the human-readable name for the resulting BaseImage. Required.
+	Name string `json:"name"`
+
+	// Version is the image version string, e.g. "10.1". Optional.
+	Version string `json:"version,omitempty"`
+
+	// OS is a short OS identifier, e.g. "rocky", "ubuntu". Optional — auto-detected
+	// from URL when empty.
+	OS string `json:"os,omitempty"`
+
+	// Arch is the CPU architecture, e.g. "x86_64". Optional.
+	Arch string `json:"arch,omitempty"`
+
+	// Distro explicitly specifies the distribution family when auto-detection
+	// is unreliable. Valid values: "rocky", "almalinux", "centos", "rhel",
+	// "ubuntu", "debian", "suse", "alpine". Optional — auto-detected from URL.
+	Distro string `json:"distro,omitempty"`
+
+	// DiskSizeGB is the size in GiB of the blank disk presented to the installer.
+	// Default: 20. Minimum: 10. The installed rootfs will be smaller.
+	DiskSizeGB int `json:"disk_size_gb,omitempty"`
+
+	// MemoryMB is the RAM in MiB allocated to the installer VM. Default: 2048.
+	MemoryMB int `json:"memory_mb,omitempty"`
+
+	// CPUs is the number of virtual CPUs for the installer VM. Default: 2.
+	CPUs int `json:"cpus,omitempty"`
+
+	// RoleIDs is the list of HPC node role preset IDs to include in the build.
+	// Each role ID corresponds to a Role returned by GET /api/v1/image-roles.
+	// The role package lists are merged and written into the kickstart %packages
+	// stanza. Ignored when CustomKickstart is non-empty.
+	RoleIDs []string `json:"role_ids,omitempty"`
+
+	// InstallUpdates, when true, appends a %post section that runs the distro's
+	// package manager update command (dnf update -y / apt-get upgrade -y).
+	// Adds 5-10 minutes to the build but produces a fully patched image.
+	InstallUpdates bool `json:"install_updates,omitempty"`
+
+	// CustomKickstart, when non-empty, overrides the auto-generated
+	// kickstart/autoinstall config with admin-supplied content.
+	// Only respected for RHEL-family distros (Rocky, Alma, CentOS, RHEL).
+	// For other distros, this field is silently ignored.
+	CustomKickstart string `json:"custom_kickstart,omitempty"`
+
+	// Tags is an optional list of string tags attached to the resulting image.
+	Tags []string `json:"tags,omitempty"`
+
+	// Notes is a free-text description stored on the resulting image.
+	Notes string `json:"notes,omitempty"`
+}
+
+// ImageRoleResponse is the wire type for a single HPC role preset returned by
+// GET /api/v1/image-roles. It is the read-only, UI-facing projection of the
+// internal isoinstaller.Role type.
+type ImageRoleResponse struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	PackageCount int    `json:"package_count"` // unique packages across all supported distros
+	Notes        string `json:"notes,omitempty"`
+}
+
+// ListImageRolesResponse wraps the role list returned by GET /api/v1/image-roles.
+type ListImageRolesResponse struct {
+	Roles []ImageRoleResponse `json:"roles"`
+	Total int                 `json:"total"`
 }
 
 // ─── Shell session types ──────────────────────────────────────────────────────

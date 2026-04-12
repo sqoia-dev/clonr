@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/image/isoinstaller"
 )
 
 // CaptureRequest describes a live-node SSH+rsync capture operation.
@@ -157,6 +158,12 @@ func (f *Factory) pullAndExtract(ctx context.Context, imageID, url string) (root
 		err = extractTar(tmpFile.Name(), rootfsPath)
 	case ext == ".tar.zst" || ext == ".tzst":
 		err = extractTarZst(ctx, tmpFile.Name(), rootfsPath)
+	case ext == ".iso":
+		// Installer ISOs cannot be directly mounted as a deployable rootfs.
+		// Route to BuildFromISO which runs the installer in a temp QEMU VM.
+		// We pass a zero BuildFromISORequest so the method uses defaults; the
+		// distro is auto-detected from the URL.
+		return f.buildFromISOFile(ctx, imageID, url, tmpFile.Name(), imageRoot, api.BuildFromISORequest{})
 	default:
 		// Try treating unknown extensions as raw block images.
 		err = f.extractRaw(ctx, imageID, tmpFile.Name(), rootfsPath)
@@ -567,7 +574,11 @@ func (f *Factory) captureAsync(imageID string, req CaptureRequest, sshUser strin
 		}
 	}
 
-	rsyncArgs := []string{"-aAXvH", "--numeric-ids", "--one-file-system", "-e", sshOpts}
+	// --one-file-system was intentionally removed: it prevented rsync from
+	// crossing mount boundaries (e.g. /boot on a separate partition), which caused
+	// deployed images to have an empty /boot. We now traverse all mounts under /.
+	// Pseudo-filesystems (/proc, /sys, /dev) are excluded via defaultCaptureExcludes.
+	rsyncArgs := []string{"-aAXvH", "--numeric-ids", "-e", sshOpts}
 	rsyncArgs = append(rsyncArgs, excludeArgs...)
 	rsyncArgs = append(rsyncArgs, rsyncSrc, rootfs+"/")
 
@@ -943,5 +954,347 @@ func urlExt(rawURL string) string {
 		return ".tar.zst"
 	}
 	return filepath.Ext(base)
+}
+
+// ─── ISO installer pipeline ───────────────────────────────────────────────────
+
+// BuildFromISO downloads an installer ISO from a URL, runs it inside a
+// temporary QEMU VM with an auto-generated kickstart/autoinstall config,
+// extracts the installed root filesystem, and finalizes a BaseImage record.
+//
+// Returns immediately (202) with a "building" record; the install runs async.
+// Poll GET /api/v1/images/:id to track: building → ready | error.
+//
+// The build can take 5-30 minutes depending on the distro, disk size, and
+// whether KVM acceleration is available.
+func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest) (*api.BaseImage, error) {
+	id := uuid.New().String()
+
+	if req.Tags == nil {
+		req.Tags = []string{}
+	}
+	if req.DiskSizeGB == 0 {
+		req.DiskSizeGB = 20
+	}
+	if req.MemoryMB == 0 {
+		req.MemoryMB = 2048
+	}
+	if req.CPUs == 0 {
+		req.CPUs = 2
+	}
+
+	// Pre-flight: check required host binaries before creating the DB record.
+	missing := isoinstaller.CheckDependencies()
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("factory: ISO build requires missing host tools: %s — "+
+			"install them on the clonr-server host (e.g. dnf install qemu-kvm qemu-img genisoimage)",
+			strings.Join(missing, ", "))
+	}
+
+	// Auto-detect distro from URL when not explicitly supplied.
+	distro := isoinstaller.Distro(req.Distro)
+	if distro == "" || distro == isoinstaller.DistroUnknown {
+		detected, _ := isoinstaller.DetectDistro(req.URL, "")
+		if detected != isoinstaller.DistroUnknown {
+			distro = detected
+		} else {
+			// We can still proceed — the kickstart fallback is RHEL-style which
+			// works for Rocky/Alma/CentOS. Flag this in notes so the admin knows.
+			distro = isoinstaller.DistroUnknown
+		}
+	}
+
+	os_ := req.OS
+	if os_ == "" {
+		os_ = string(distro)
+	}
+
+	img := api.BaseImage{
+		ID:        id,
+		Name:      req.Name,
+		Version:   req.Version,
+		OS:        os_,
+		Arch:      req.Arch,
+		Status:    api.ImageStatusBuilding,
+		Format:    api.ImageFormatFilesystem,
+		Tags:      req.Tags,
+		Notes:     req.Notes,
+		SourceURL: req.URL,
+		CreatedAt: time.Now().UTC(),
+		// Disk layout is determined from what the installer actually creates.
+		// We set a bios-boot default here; it gets overwritten after extraction.
+		DiskLayout: api.DiskLayout{
+			Partitions: []api.PartitionSpec{
+				{Label: "biosboot", SizeBytes: 1 * 1024 * 1024, Filesystem: "", MountPoint: "", Flags: []string{"bios_grub"}},
+				{Label: "boot", SizeBytes: 1 * 1024 * 1024 * 1024, Filesystem: "xfs", MountPoint: "/boot"},
+				{Label: "root", SizeBytes: 0, Filesystem: "xfs", MountPoint: "/"},
+			},
+			Bootloader: api.Bootloader{Type: "grub2", Target: "i386-pc"},
+		},
+	}
+
+	f.Logger.Info().
+		Str("image_id", id).
+		Str("url", req.URL).
+		Str("distro", string(distro)).
+		Strs("role_ids", req.RoleIDs).
+		Bool("install_updates", req.InstallUpdates).
+		Bool("kvm_available", isoinstaller.HasKVM()).
+		Msg("factory: ISO build started")
+
+	if err := f.Store.CreateBaseImage(ctx, img); err != nil {
+		return nil, fmt.Errorf("factory: create image record: %w", err)
+	}
+
+	go f.buildISOAsync(id, req, distro)
+
+	return &img, nil
+}
+
+func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, distro isoinstaller.Distro) {
+	ctx := context.Background()
+
+	// ── Download ISO ──────────────────────────────────────────────────────
+	f.Logger.Info().Str("image_id", imageID).Str("url", req.URL).Msg("factory: downloading installer ISO")
+
+	tmpISO, err := os.CreateTemp("", "clonr-iso-*.iso")
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: create temp iso file")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+	tmpISO.Close()
+	defer os.Remove(tmpISO.Name())
+
+	// Re-open for writing.
+	isoFile, err := os.OpenFile(tmpISO.Name(), os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: open temp iso file")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+	if err := downloadURL(ctx, req.URL, isoFile); err != nil {
+		isoFile.Close()
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: download ISO failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError,
+			fmt.Sprintf("download ISO: %v", err))
+		return
+	}
+	isoFile.Close()
+
+	// If distro was unknown at request time, try detecting from the file now.
+	if distro == isoinstaller.DistroUnknown {
+		if detected, _ := isoinstaller.DetectDistro(req.URL, tmpISO.Name()); detected != isoinstaller.DistroUnknown {
+			distro = detected
+			f.Logger.Info().Str("image_id", imageID).Str("distro", string(distro)).
+				Msg("factory: distro detected from ISO volume label")
+		}
+	}
+
+	// ── Create work directory ─────────────────────────────────────────────
+	workDir, err := os.MkdirTemp("", "clonr-iso-build-*")
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: create work dir")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+	defer os.RemoveAll(workDir)
+
+	// ── Run installer VM ─────────────────────────────────────────────────
+	f.Logger.Info().
+		Str("image_id", imageID).
+		Str("distro", string(distro)).
+		Int("disk_gb", req.DiskSizeGB).
+		Int("memory_mb", req.MemoryMB).
+		Int("cpus", req.CPUs).
+		Msg("factory: launching installer VM")
+
+	// Extend the install timeout when OS updates are requested.
+	installTimeout := 30 * time.Minute
+	if req.InstallUpdates {
+		installTimeout = 60 * time.Minute
+	}
+
+	buildOpts := isoinstaller.BuildOptions{
+		ISOPath:         tmpISO.Name(),
+		Distro:          distro,
+		DiskSizeGB:      req.DiskSizeGB,
+		MemoryMB:        req.MemoryMB,
+		CPUs:            req.CPUs,
+		Timeout:         installTimeout,
+		WorkDir:         workDir,
+		Logger:          f.Logger,
+		CustomKickstart: req.CustomKickstart,
+		RoleIDs:         req.RoleIDs,
+		InstallUpdates:  req.InstallUpdates,
+	}
+
+	result, err := isoinstaller.Build(ctx, buildOpts)
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: installer VM failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError,
+			fmt.Sprintf("installer VM: %v", err))
+		return
+	}
+
+	f.Logger.Info().
+		Str("image_id", imageID).
+		Dur("elapsed", result.ElapsedTime.Round(time.Second)).
+		Str("disk", result.RawDiskPath).
+		Msg("factory: installer VM complete — extracting rootfs")
+
+	// ── Extract rootfs from installed disk ────────────────────────────────
+	imageRoot := filepath.Join(f.ImageDir, imageID)
+	rootfsPath := filepath.Join(imageRoot, "rootfs")
+	if err := os.MkdirAll(rootfsPath, 0o755); err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: create rootfs dir")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	extractOpts := isoinstaller.ExtractOptions{
+		RawDiskPath:   result.RawDiskPath,
+		RootfsDestDir: rootfsPath,
+	}
+	if err := isoinstaller.ExtractRootfs(extractOpts); err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: rootfs extraction failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError,
+			fmt.Sprintf("extract rootfs: %v", err))
+		return
+	}
+
+	// ── Detect disk layout from extracted rootfs ──────────────────────────
+	diskLayout := f.detectDiskLayout(rootfsPath)
+	if err := f.Store.UpdateDiskLayout(ctx, imageID, diskLayout); err != nil {
+		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: update disk layout (non-fatal)")
+	}
+
+	// ── Scrub identity ────────────────────────────────────────────────────
+	f.Logger.Info().Str("image_id", imageID).Msg("factory: scrubbing node identity")
+	if err := ScrubNodeIdentity(rootfsPath); err != nil {
+		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
+	}
+
+	// ── Checksum ──────────────────────────────────────────────────────────
+	f.Logger.Info().Str("image_id", imageID).Msg("factory: computing rootfs checksum")
+	size, checksum, err := checksumDir(rootfsPath)
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: checksum failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	if err := f.Store.SetBlobPath(ctx, imageID, rootfsPath); err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	f.Logger.Info().
+		Str("image_id", imageID).
+		Int64("size_bytes", size).
+		Str("checksum", checksum).
+		Str("distro", string(distro)).
+		Dur("install_time", result.ElapsedTime.Round(time.Second)).
+		Msg("factory: ISO build complete — image is ready")
+}
+
+// buildFromISOFile is called from pullAndExtract when PullImage downloads an
+// .iso URL. It hands off to the full installer pipeline using the already-
+// downloaded temp file, avoiding a second download.
+//
+// Returns the rootfs path, size, and checksum just like the other extract paths.
+func (f *Factory) buildFromISOFile(
+	ctx context.Context,
+	imageID string,
+	isoURL string,
+	tmpISOPath string,
+	imageRoot string,
+	req api.BuildFromISORequest,
+) (rootfsPath string, sizeBytes int64, checksum string, err error) {
+	rootfsPath = filepath.Join(imageRoot, "rootfs")
+	if err = os.MkdirAll(rootfsPath, 0o755); err != nil {
+		return "", 0, "", fmt.Errorf("create rootfs dir: %w", err)
+	}
+
+	// Detect distro from URL (ISO is already downloaded but we have the URL).
+	distro := isoinstaller.Distro(req.Distro)
+	if distro == "" || distro == isoinstaller.DistroUnknown {
+		distro, _ = isoinstaller.DetectDistro(isoURL, tmpISOPath)
+	}
+
+	// Set defaults.
+	diskSizeGB := req.DiskSizeGB
+	if diskSizeGB == 0 {
+		diskSizeGB = 20
+	}
+	memoryMB := req.MemoryMB
+	if memoryMB == 0 {
+		memoryMB = 2048
+	}
+	cpus := req.CPUs
+	if cpus == 0 {
+		cpus = 2
+	}
+
+	workDir, err := os.MkdirTemp("", "clonr-iso-build-*")
+	if err != nil {
+		return "", 0, "", fmt.Errorf("create work dir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	fileInstallTimeout := 30 * time.Minute
+	if req.InstallUpdates {
+		fileInstallTimeout = 60 * time.Minute
+	}
+
+	buildOpts := isoinstaller.BuildOptions{
+		ISOPath:         tmpISOPath,
+		Distro:          distro,
+		DiskSizeGB:      diskSizeGB,
+		MemoryMB:        memoryMB,
+		CPUs:            cpus,
+		Timeout:         fileInstallTimeout,
+		WorkDir:         workDir,
+		Logger:          f.Logger,
+		CustomKickstart: req.CustomKickstart,
+		RoleIDs:         req.RoleIDs,
+		InstallUpdates:  req.InstallUpdates,
+	}
+
+	result, err := isoinstaller.Build(ctx, buildOpts)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("installer VM: %w", err)
+	}
+
+	extractOpts := isoinstaller.ExtractOptions{
+		RawDiskPath:   result.RawDiskPath,
+		RootfsDestDir: rootfsPath,
+	}
+	if err := isoinstaller.ExtractRootfs(extractOpts); err != nil {
+		return "", 0, "", fmt.Errorf("extract rootfs: %w", err)
+	}
+
+	diskLayout := f.detectDiskLayout(rootfsPath)
+	if dbErr := f.Store.UpdateDiskLayout(ctx, imageID, diskLayout); dbErr != nil {
+		f.Logger.Warn().Err(dbErr).Str("image_id", imageID).Msg("factory: update disk layout (non-fatal)")
+	}
+
+	if err := ScrubNodeIdentity(rootfsPath); err != nil {
+		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
+	}
+
+	sizeBytes, checksum, err = checksumDir(rootfsPath)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("checksum rootfs: %w", err)
+	}
+
+	return rootfsPath, sizeBytes, checksum, nil
 }
 
