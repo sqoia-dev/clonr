@@ -877,29 +877,98 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).
 		Msg("reporting deploy-complete to server")
 
-	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
-	completeErr := c.ReportDeployComplete(completeCtx, nodeCfg.ID)
-	completeCancel()
+	// Use a background context so the HTTP call is not cancelled if the parent
+	// deploy ctx is near its deadline, but still bound by per-attempt timeouts
+	// inside ReportDeployCompleteWithRetry.
+	completeBaseCtx := context.Background()
+	completeErr := c.ReportDeployCompleteWithRetry(completeBaseCtx, nodeCfg.ID, 3)
 
+	stateVerified := false
 	if completeErr != nil {
-		// Non-fatal: log but don't abort. The node image is correctly deployed
-		// on disk. The worst case is it PXE boots again on next restart and
-		// re-runs deploy --auto, which will call register, see the image is
-		// already assigned, and re-deploy (idempotent). The admin can also
-		// manually set the node state via the API.
-		deployLog.Warn().Err(completeErr).
+		deployLog.Error().Err(completeErr).
 			Str("hostname", nodeCfg.Hostname).
-			Msg("deploy-complete report failed (non-fatal) -- node may PXE boot again on next restart")
-		reporter.EndPhase(completeErr.Error())
+			Str("node_id", nodeCfg.ID).
+			Msg("deploy-complete HTTP call failed after 3 attempts — starting state verification loop")
 	} else {
 		deployLog.Info().Str("hostname", nodeCfg.Hostname).
-			Msg("server notified: node is deployed, next PXE boot will exit to disk")
+			Msg("deploy-complete reported to server — verifying node state")
+	}
+
+	// Verify the server actually recorded the state transition, regardless of
+	// whether the HTTP call returned an error. Up to 5 attempts with 2s backoff.
+	const maxVerifyAttempts = 5
+	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
+		verifyCtx, verifyCancel := context.WithTimeout(completeBaseCtx, 10*time.Second)
+		updated, err := c.GetNode(verifyCtx, nodeCfg.ID)
+		verifyCancel()
+
+		if err != nil {
+			deployLog.Warn().Err(err).
+				Int("attempt", attempt).Int("max", maxVerifyAttempts).
+				Msg("state verification: GetNode failed")
+		} else if updated.State() == api.NodeStateDeployed && updated.LastDeploySucceededAt != nil {
+			deployLog.Info().
+				Str("hostname", nodeCfg.Hostname).
+				Str("state", string(updated.State())).
+				Time("last_deploy_succeeded_at", *updated.LastDeploySucceededAt).
+				Msg("state verified: node is deployed, next PXE boot will exit to disk")
+			stateVerified = true
+			break
+		} else {
+			deployLog.Warn().
+				Str("state", string(updated.State())).
+				Int("attempt", attempt).Int("max", maxVerifyAttempts).
+				Msg("state verification: node not yet in deployed state, retrying")
+
+			// If the HTTP POST succeeded but the state isn't updated yet, retry
+			// the POST as well — the server may have had a transient DB error.
+			if completeErr == nil && attempt < maxVerifyAttempts {
+				retryCtx, retryCancel := context.WithTimeout(completeBaseCtx, 15*time.Second)
+				if retryErr := c.ReportDeployCompleteWithRetry(retryCtx, nodeCfg.ID, 1); retryErr != nil {
+					deployLog.Warn().Err(retryErr).
+						Int("attempt", attempt).Msg("state verification: re-POST deploy-complete failed")
+				}
+				retryCancel()
+			}
+		}
+
+		if attempt < maxVerifyAttempts {
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	if !stateVerified {
+		deployLog.Error().
+			Str("hostname", nodeCfg.Hostname).
+			Str("node_id", nodeCfg.ID).
+			Str("mac", nodeCfg.PrimaryMAC).
+			Msg("CRITICAL: deploy-complete state verification failed after all retries — " +
+				"node is deployed on disk but server state was NOT updated. " +
+				"Writing /tmp/clonr-deploy-success flag so init can re-send on next boot.")
+
+		// Write a flag file so the init script can detect this on next boot,
+		// re-send the deploy-complete report before entering the wait loop,
+		// and avoid triggering another full re-deploy.
+		flagErr := os.WriteFile("/tmp/clonr-deploy-success", []byte(nodeCfg.ID+"\n"), 0o644)
+		if flagErr != nil {
+			deployLog.Error().Err(flagErr).Msg("failed to write /tmp/clonr-deploy-success flag file")
+		} else {
+			deployLog.Warn().Msg("wrote /tmp/clonr-deploy-success — init script will retry deploy-complete on next boot")
+		}
+
+		reporter.EndPhase("state verification failed — rebooting anyway, flag written")
+	} else {
 		reporter.EndPhase("")
 	}
 	// ───────────────────────────────────────────────────────────────────────
 
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Str("duration",
 		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete — rebooting")
+
+	// Flush remote logs before the init script calls reboot. This ensures the
+	// "deployment complete" log lines reach the server before the kernel kills
+	// the network stack.
+	remoteWriter.FlushSync()
 
 	fmt.Printf("\n[auto] Deployment complete.\n")
 	fmt.Printf("  Node:     %s\n", nodeCfg.Hostname)

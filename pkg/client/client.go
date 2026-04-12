@@ -208,6 +208,34 @@ func (c *Client) ReportDeployComplete(ctx context.Context, nodeID string) error 
 	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
 }
 
+// ReportDeployCompleteWithRetry calls POST /api/v1/nodes/:id/deploy-complete
+// with a short per-attempt timeout (15s) and up to maxAttempts retries with
+// exponential backoff. Each attempt is logged so transient failures are visible
+// in the remote log stream.
+//
+// Returns nil on the first successful attempt. Returns the last error if all
+// attempts fail.
+func (c *Client) ReportDeployCompleteWithRetry(ctx context.Context, nodeID string, maxAttempts int) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := c.post(attemptCtx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		backoff := time.Duration(attempt) * 2 * time.Second
+		// Check parent context before sleeping — don't delay an already-cancelled flow.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("deploy-complete retry cancelled after %d/%d attempts (last: %w)", attempt, maxAttempts, lastErr)
+		case <-time.After(backoff):
+		}
+	}
+	return fmt.Errorf("deploy-complete failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
 // ReportDeployFailed calls POST /api/v1/nodes/:id/deploy-failed.
 // Called by the clonr CLI after a deployment failure. The server sets
 // last_deploy_failed_at, transitioning the node to NodeStateFailed.

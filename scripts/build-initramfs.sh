@@ -805,6 +805,38 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CLONR_SERVER="\${CLONR_SERVER:-http://10.99.0.1:8080}"
 log "PATH: \$PATH"
 log "lsblk location: \$(which lsblk 2>&1 || echo NOT_FOUND)"
+
+# ── Step 8a: check for deferred deploy-complete flag ─────────────────────────
+# If the previous boot's clonr wrote /tmp/clonr-deploy-success, the node was
+# fully deployed on disk but the server state was not updated (transient network
+# or server error). Re-send the deploy-complete report now, before running
+# deploy --auto, so the server transitions to NodeStateDeployed and the PXE
+# boot handler returns "exit" rather than triggering another deploy loop.
+if [ -f /tmp/clonr-deploy-success ]; then
+    NODE_ID=\$(cat /tmp/clonr-deploy-success | tr -d '[:space:]')
+    log "found /tmp/clonr-deploy-success (node_id=\${NODE_ID}) — re-sending deploy-complete before entering deploy loop"
+    RETRY=0
+    REPORTED=0
+    while [ \$RETRY -lt 5 ]; do
+        HTTP_STATUS=\$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            "\${CLONR_SERVER}/api/v1/nodes/\${NODE_ID}/deploy-complete" 2>/dev/null)
+        log "deploy-complete retry \${RETRY}: HTTP \${HTTP_STATUS}"
+        if [ "\${HTTP_STATUS}" = "200" ] || [ "\${HTTP_STATUS}" = "204" ] || [ "\${HTTP_STATUS}" = "201" ]; then
+            log "deploy-complete re-send succeeded — removing flag file"
+            rm -f /tmp/clonr-deploy-success
+            REPORTED=1
+            break
+        fi
+        RETRY=\$((RETRY + 1))
+        sleep 2
+    done
+    if [ \$REPORTED -eq 0 ]; then
+        log "WARNING: deploy-complete re-send failed after 5 attempts — proceeding with deploy --auto"
+        log "(server may still transition the node; clonr register will handle it)"
+    fi
+fi
+
 log "running: /usr/bin/clonr deploy --auto --server \${CLONR_SERVER}"
 
 /usr/bin/clonr deploy --auto --server "\${CLONR_SERVER}" 2>&1 >> "\$LOG"
