@@ -69,6 +69,7 @@ func init() {
 		newImageDetailsCmd(),
 		newImagePullCmd(),
 		newImageImportISOCmd(),
+		newImageCaptureCmd(),
 	)
 	rootCmd.AddCommand(imageCmd)
 
@@ -1347,5 +1348,101 @@ clonr-serverd (rootfs is accessed directly via local filesystem path).`,
 			return nil
 		},
 	}
+	return cmd
+}
+
+// ─── image capture ───────────────────────────────────────────────────────────
+
+// newImageCaptureCmd creates "clonr image capture".
+// It instructs clonr-serverd to SSH into the target host and rsync its
+// filesystem into a new BaseImage. The server must have network access
+// to the source host, and either a private key or password must be provided.
+// SSH host key verification is disabled (StrictHostKeyChecking=no) — only
+// use this on trusted golden nodes on a management network.
+func newImageCaptureCmd() *cobra.Command {
+	var (
+		flagFrom        string
+		flagSSHKey      string
+		flagSSHPassword string
+		flagSSHPort     int
+		flagName        string
+		flagVersion     string
+		flagOS          string
+		flagArch        string
+		flagExclude     []string
+		flagNotes       string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "capture",
+		Short: "Capture a live server as a base image via SSH rsync",
+		Long: `capture instructs clonr-serverd to SSH into the source host and stream
+its filesystem into a new BaseImage via rsync. The server must be able to reach
+the source host over the network.
+
+SSH host key verification is disabled by default (StrictHostKeyChecking=no).
+Only use this against trusted golden nodes on a management network.
+
+If --ssh-key is omitted, the server's default SSH key (~/.ssh/id_rsa or the
+key configured by the server's user environment) is used. Provide --ssh-password
+only when key-based auth is unavailable; sshpass must be installed on the server.
+
+The capture runs asynchronously. Poll with: clonr image details <id>
+
+Examples:
+  clonr image capture --from root@192.168.1.10 --name rocky9-golden --version 1.0.0
+  clonr image capture --from 10.0.0.5 --ssh-key /etc/clonr/keys/golden --name hpc-compute`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagFrom == "" {
+				return fmt.Errorf("--from is required (e.g. root@192.168.1.10)")
+			}
+			if flagName == "" {
+				return fmt.Errorf("--name is required")
+			}
+
+			ctx := context.Background()
+			c := clientFromFlags()
+
+			req := api.CaptureRequest{
+				SourceHost:   flagFrom,
+				SSHKeyPath:   flagSSHKey,
+				SSHPassword:  flagSSHPassword,
+				SSHPort:      flagSSHPort,
+				Name:         flagName,
+				Version:      flagVersion,
+				OS:           flagOS,
+				Arch:         flagArch,
+				ExcludePaths: flagExclude,
+				Notes:        flagNotes,
+				Tags:         []string{},
+			}
+
+			fmt.Fprintf(os.Stderr, "Requesting capture of %s from %s...\n", flagName, flagFrom)
+			img, err := c.CaptureImage(ctx, req)
+			if err != nil {
+				return fmt.Errorf("capture: %w", err)
+			}
+
+			fmt.Printf("Capture initiated:\n")
+			fmt.Printf("  ID:     %s\n", img.ID)
+			fmt.Printf("  Name:   %s\n", img.Name)
+			fmt.Printf("  Status: %s\n", img.Status)
+			fmt.Printf("\nThe server is now rsyncing from %s — this may take several minutes.\n", flagFrom)
+			fmt.Printf("Poll status with: clonr image details %s\n", img.ID)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&flagFrom, "from", "", "Source host in user@host or host form (required)")
+	cmd.Flags().StringVar(&flagSSHKey, "ssh-key", "", "Server-local path to SSH private key (uses server default key if omitted)")
+	cmd.Flags().StringVar(&flagSSHPassword, "ssh-password", "", "SSH password (requires sshpass on server host; prefer key auth)")
+	cmd.Flags().IntVar(&flagSSHPort, "ssh-port", 22, "SSH port on the source host")
+	cmd.Flags().StringVar(&flagName, "name", "", "Image name (required)")
+	cmd.Flags().StringVar(&flagVersion, "version", "1.0.0", "Image version")
+	cmd.Flags().StringVar(&flagOS, "os", "", "OS name, e.g. 'Rocky Linux 9'")
+	cmd.Flags().StringVar(&flagArch, "arch", "x86_64", "Target architecture")
+	cmd.Flags().StringSliceVar(&flagExclude, "exclude", nil, "Additional rsync --exclude paths (repeatable)")
+	cmd.Flags().StringVar(&flagNotes, "notes", "", "Free-text notes")
+
 	return cmd
 }

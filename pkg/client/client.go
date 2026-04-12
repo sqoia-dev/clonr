@@ -131,7 +131,16 @@ func (c *Client) ImportISOPath(ctx context.Context, path, name, version string) 
 }
 
 // CaptureNode instructs the server to capture a node's filesystem into a new image.
+// Deprecated: use CaptureImage — kept for API compatibility.
 func (c *Client) CaptureNode(ctx context.Context, req api.CaptureRequest) (*api.BaseImage, error) {
+	return c.CaptureImage(ctx, req)
+}
+
+// CaptureImage instructs clonr-serverd to SSH into the source host and stream its
+// filesystem into a new BaseImage via rsync. Returns immediately with status "building".
+// The server must be able to reach source_host; progress is visible via the image status
+// and server logs. Poll with GetImage(ctx, img.ID) until status is "ready" or "error".
+func (c *Client) CaptureImage(ctx context.Context, req api.CaptureRequest) (*api.BaseImage, error) {
 	var img api.BaseImage
 	if err := c.post(ctx, "/api/v1/factory/capture", req, &img); err != nil {
 		return nil, err

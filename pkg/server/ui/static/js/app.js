@@ -579,6 +579,12 @@ const Pages = {
                     </div>
                     <div class="flex gap-8">
                         <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
+                        <button class="btn btn-secondary" onclick="Pages.showCaptureModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                            Capture from Host
+                        </button>
                         <button class="btn btn-primary" onclick="Pages.showPullModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
@@ -892,6 +898,166 @@ const Pages = {
             Pages.images();
         } catch (e) {
             alert(`Archive failed: ${e.message}`);
+        }
+    },
+
+    // ── Capture from Host ──────────────────────────────────────────────────
+
+    showCaptureModal(prefillHost = '', prefillName = '') {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'capture-modal';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:560px">
+                <div class="modal-header">
+                    <span class="modal-title">Capture from Host</span>
+                    <button class="modal-close" onclick="document.getElementById('capture-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info" style="margin-bottom:16px;font-size:12px">
+                        The server will SSH to the source host and rsync its filesystem into a new image.
+                        SSH host key verification is disabled — only use this on trusted golden nodes.
+                    </div>
+                    <form id="capture-form" onsubmit="Pages.submitCapture(event)">
+                        <div class="form-group" style="margin-bottom:14px">
+                            <label>Source Host * <span style="font-size:11px;color:var(--text-secondary)">(user@host or host)</span></label>
+                            <input type="text" name="source_host" placeholder="root@192.168.1.10" value="${escHtml(prefillHost)}" required>
+                        </div>
+                        <div class="form-grid" style="margin-bottom:14px">
+                            <div class="form-group">
+                                <label>Name *</label>
+                                <input type="text" name="name" placeholder="rocky9-golden" value="${escHtml(prefillName)}" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Version</label>
+                                <input type="text" name="version" placeholder="1.0.0" value="1.0.0">
+                            </div>
+                            <div class="form-group">
+                                <label>OS</label>
+                                <input type="text" name="os" placeholder="Rocky Linux 9">
+                            </div>
+                            <div class="form-group">
+                                <label>Arch</label>
+                                <input type="text" name="arch" placeholder="x86_64" value="x86_64">
+                            </div>
+                            <div class="form-group">
+                                <label>SSH Port</label>
+                                <input type="number" name="ssh_port" value="22" min="1" max="65535">
+                            </div>
+                        </div>
+                        <div style="margin-bottom:14px">
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block">SSH Authentication</label>
+                            <div class="tab-bar" style="margin-bottom:10px">
+                                <div class="tab active" id="ssh-tab-key" onclick="Pages._switchCaptureAuth('key')">Private Key (server path)</div>
+                                <div class="tab" id="ssh-tab-pwd" onclick="Pages._switchCaptureAuth('pwd')">Password</div>
+                            </div>
+                            <div id="ssh-auth-key">
+                                <div class="form-group">
+                                    <label>Key Path <span style="font-size:11px;color:var(--text-secondary)">(absolute path on the server)</span></label>
+                                    <input type="text" name="ssh_key_path" placeholder="/etc/clonr/keys/golden_key">
+                                </div>
+                            </div>
+                            <div id="ssh-auth-pwd" style="display:none">
+                                <div class="form-group">
+                                    <label>Password <span style="font-size:11px;color:var(--text-secondary)">(requires sshpass on server)</span></label>
+                                    <input type="password" name="ssh_password" autocomplete="off">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px">
+                            <label>Extra Exclude Paths <span style="font-size:11px;color:var(--text-secondary)">(one per line, beyond defaults)</span></label>
+                            <textarea name="exclude_paths" rows="3" placeholder="/opt/scratch&#10;/data/volatile"></textarea>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px">
+                            <label>Notes</label>
+                            <input type="text" name="notes" placeholder="Optional description">
+                        </div>
+                        <div id="capture-progress" style="display:none;margin-top:12px">
+                            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">Submitting capture request…</div>
+                            <div class="progress-bar-wrap" style="width:100%">
+                                <div class="progress-bar-fill" style="width:60%;animation:indeterminate 1.5s ease infinite"></div>
+                            </div>
+                        </div>
+                        <div id="capture-result"></div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('capture-modal').remove()">Cancel</button>
+                            <button type="submit" class="btn btn-primary" id="capture-btn">Start Capture</button>
+                        </div>
+                    </form>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        const firstInput = overlay.querySelector('input[name="source_host"]');
+        if (firstInput && !prefillHost) firstInput.focus();
+    },
+
+    _switchCaptureAuth(tab) {
+        const keyDiv = document.getElementById('ssh-auth-key');
+        const pwdDiv = document.getElementById('ssh-auth-pwd');
+        const keyTab = document.getElementById('ssh-tab-key');
+        const pwdTab = document.getElementById('ssh-tab-pwd');
+        if (tab === 'key') {
+            if (keyDiv) keyDiv.style.display = '';
+            if (pwdDiv) pwdDiv.style.display = 'none';
+            if (keyTab) keyTab.classList.add('active');
+            if (pwdTab) pwdTab.classList.remove('active');
+        } else {
+            if (keyDiv) keyDiv.style.display = 'none';
+            if (pwdDiv) pwdDiv.style.display = '';
+            if (keyTab) keyTab.classList.remove('active');
+            if (pwdTab) pwdTab.classList.add('active');
+        }
+    },
+
+    async submitCapture(e) {
+        e.preventDefault();
+        const form = e.target;
+        const btn  = document.getElementById('capture-btn');
+        const res  = document.getElementById('capture-result');
+        const prog = document.getElementById('capture-progress');
+        const data = new FormData(form);
+
+        btn.disabled = true;
+        btn.textContent = 'Submitting…';
+        if (prog) prog.style.display = 'block';
+        res.innerHTML = '';
+
+        const excludeRaw = (data.get('exclude_paths') || '').split('\n').map(s => s.trim()).filter(Boolean);
+
+        try {
+            const body = {
+                source_host:  data.get('source_host'),
+                ssh_user:     '',  // embedded in source_host if user@host form
+                ssh_key_path: data.get('ssh_key_path') || '',
+                ssh_password: data.get('ssh_password') || '',
+                ssh_port:     parseInt(data.get('ssh_port') || '22', 10),
+                name:         data.get('name'),
+                version:      data.get('version') || '1.0.0',
+                os:           data.get('os') || '',
+                arch:         data.get('arch') || 'x86_64',
+                exclude_paths: excludeRaw,
+                notes:        data.get('notes') || '',
+                tags:         [],
+            };
+            const img = await API.factory.capture(body);
+            if (prog) prog.style.display = 'none';
+            res.innerHTML = alertBox(
+                `Capture started: ${img.name} (${img.id.substring(0, 8)}) — status: ${img.status}. ` +
+                `The server is rsyncing from ${body.source_host} — this may take several minutes.`,
+                'success'
+            );
+            App.setAutoRefresh(() => Pages.images(), 5000);
+            setTimeout(() => {
+                const modal = document.getElementById('capture-modal');
+                if (modal) modal.remove();
+                Pages.images();
+            }, 2500);
+        } catch (ex) {
+            if (prog) prog.style.display = 'none';
+            res.innerHTML = alertBox(`Capture failed: ${ex.message}`);
+            btn.disabled = false;
+            btn.textContent = 'Start Capture';
         }
     },
 
@@ -1300,6 +1466,18 @@ const Pages = {
                         ${nodeBadge(node)}
                     </div>
                     <div class="flex gap-8">
+                        ${(() => {
+                            // Show "Capture this node" when the node has a reachable IP configured.
+                            const iface = (node.interfaces || []).find(i => i.ip_address);
+                            if (!iface) return '';
+                            const ip = iface.ip_address.split('/')[0]; // strip CIDR suffix
+                            const prefillHost = 'root@' + ip;
+                            const prefillName = (node.hostname && node.hostname !== '(none)')
+                                ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture'
+                                : '';
+                            return '<button class="btn btn-secondary" onclick="Pages.showCaptureModal(' +
+                                JSON.stringify(prefillHost) + ',' + JSON.stringify(prefillName) + ')">Capture this node</button>';
+                        })()}
                         <button class="btn btn-secondary" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(node))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
                         <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}')">Delete</button>
                     </div>

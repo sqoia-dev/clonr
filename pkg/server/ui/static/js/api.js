@@ -95,6 +95,7 @@ const API = {
     factory: {
         pull(body)            { return API.post('/factory/pull', body); },
         importISO(body)       { return API.post('/factory/import-iso', body); },
+        capture(body)         { return API.post('/factory/capture', body); },
 
         // uploadISO — browser file upload with real progress.
         // file     : File object from <input type="file"> or drag-and-drop.
