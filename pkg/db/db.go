@@ -327,18 +327,28 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		return fmt.Errorf("db: marshal power_provider: %w", err)
 	}
 
+	diskLayoutOverride, err := marshalDiskLayoutOverride(cfg.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal disk_layout_override: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(cfg.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal extra_mounts: %w", err)
+	}
+
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
+		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
@@ -395,8 +405,8 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?)
+			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]')
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -419,27 +429,24 @@ func nullableString(s string) interface{} {
 	return s
 }
 
+// nodeConfigCols is the canonical SELECT column list for node_configs.
+// Update this constant whenever columns are added or removed.
+const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+	       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
+	       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
+	       created_at, updated_at, group_id, disk_layout_override, extra_mounts`
+
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
-	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
-		       created_at, updated_at
-		FROM node_configs WHERE id = ?
-	`, id)
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+nodeConfigCols+` FROM node_configs WHERE id = ?`, id)
 	return scanNodeConfig(row)
 }
 
 // GetNodeConfigByMAC retrieves the NodeConfig whose primary_mac matches mac.
 func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfig, error) {
-	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
-		       created_at, updated_at
-		FROM node_configs WHERE primary_mac = ?
-	`, mac)
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+nodeConfigCols+` FROM node_configs WHERE primary_mac = ?`, mac)
 	return scanNodeConfig(row)
 }
 
@@ -449,21 +456,12 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 	var err error
 
 	if baseImageID != "" {
-		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
-			       created_at, updated_at
-			FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC
-		`, baseImageID)
+		rows, err = db.sql.QueryContext(ctx,
+			`SELECT `+nodeConfigCols+` FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC`,
+			baseImageID)
 	} else {
-		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
-			       created_at, updated_at
-			FROM node_configs ORDER BY hostname ASC
-		`)
+		rows, err = db.sql.QueryContext(ctx,
+			`SELECT `+nodeConfigCols+` FROM node_configs ORDER BY hostname ASC`)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("db: list node configs: %w", err)
@@ -516,17 +514,28 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		return fmt.Errorf("db: marshal power_provider: %w", err)
 	}
 
+	diskLayoutOverride, err := marshalDiskLayoutOverride(cfg.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal disk_layout_override: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(cfg.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal extra_mounts: %w", err)
+	}
+
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
-		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?, updated_at = ?
+		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?,
+		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
+		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
 		time.Now().Unix(), cfg.ID,
 	)
 	if err != nil {
@@ -845,6 +854,9 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		lastDeployFailedAtVal    sql.NullInt64
 		createdAtUnix            int64
 		updatedAtUnix            int64
+		groupID                  sql.NullString
+		diskLayoutOverrideJSON   string
+		extraMountsJSON          string
 	)
 
 	err := s.Scan(
@@ -855,6 +867,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&powerProviderJSON, &reimagePending,
 		&lastDeploySucceededAtVal, &lastDeployFailedAtVal,
 		&createdAtUnix, &updatedAtUnix,
+		&groupID, &diskLayoutOverrideJSON, &extraMountsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
@@ -868,6 +881,18 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 
 	if baseImageID.Valid {
 		cfg.BaseImageID = baseImageID.String
+	}
+	if groupID.Valid {
+		cfg.GroupID = groupID.String
+	}
+	if diskLayoutOverrideJSON != "" && diskLayoutOverrideJSON != "{}" {
+		var layout api.DiskLayout
+		if err := json.Unmarshal([]byte(diskLayoutOverrideJSON), &layout); err == nil {
+			// Only treat as a real override if it has at least one partition defined.
+			if len(layout.Partitions) > 0 {
+				cfg.DiskLayoutOverride = &layout
+			}
+		}
 	}
 
 	if lastDeploySucceededAtVal.Valid {
@@ -918,6 +943,12 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		}
 	}
 
+	if extraMountsJSON != "" && extraMountsJSON != "[]" {
+		if err := json.Unmarshal([]byte(extraMountsJSON), &cfg.ExtraMounts); err != nil {
+			cfg.ExtraMounts = nil // non-fatal: treat corrupt entry as empty
+		}
+	}
+
 	if cfg.Interfaces == nil {
 		cfg.Interfaces = []api.InterfaceConfig{}
 	}
@@ -939,6 +970,19 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 func marshalNullableJSON(v interface{}, defaultVal string) (string, error) {
 	if v == nil {
 		return defaultVal, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// marshalJSONSlice marshals a slice to a JSON array string.
+// A nil or empty slice marshals as "[]".
+func marshalJSONSlice(v interface{}) (string, error) {
+	if v == nil {
+		return "[]", nil
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -1079,6 +1123,185 @@ func (db *DB) PurgeLogs(ctx context.Context, olderThan time.Time) (int64, error)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// ─── NodeGroup operations ────────────────────────────────────────────────────
+
+// CreateNodeGroup inserts a new NodeGroup.
+func (db *DB) CreateNodeGroup(ctx context.Context, g api.NodeGroup) error {
+	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group disk_layout: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(g.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group extra_mounts: %w", err)
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO node_groups (id, name, description, disk_layout, extra_mounts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, g.ID, g.Name, g.Description, diskLayout, extraMounts, g.CreatedAt.Unix(), g.UpdatedAt.Unix())
+	if err != nil {
+		return fmt.Errorf("db: create node group: %w", err)
+	}
+	return nil
+}
+
+// GetNodeGroup retrieves a NodeGroup by ID.
+func (db *DB) GetNodeGroup(ctx context.Context, id string) (api.NodeGroup, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, name, description, disk_layout, extra_mounts, created_at, updated_at
+		FROM node_groups WHERE id = ?
+	`, id)
+	return scanNodeGroup(row)
+}
+
+// GetNodeGroupByName retrieves a NodeGroup by name.
+func (db *DB) GetNodeGroupByName(ctx context.Context, name string) (api.NodeGroup, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, name, description, disk_layout, extra_mounts, created_at, updated_at
+		FROM node_groups WHERE name = ?
+	`, name)
+	return scanNodeGroup(row)
+}
+
+// ListNodeGroups returns all NodeGroups, ordered by name.
+func (db *DB) ListNodeGroups(ctx context.Context) ([]api.NodeGroup, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, name, description, disk_layout, extra_mounts, created_at, updated_at
+		FROM node_groups ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list node groups: %w", err)
+	}
+	defer rows.Close()
+
+	var groups []api.NodeGroup
+	for rows.Next() {
+		g, err := scanNodeGroup(rows)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+// UpdateNodeGroup replaces the mutable fields of a NodeGroup.
+func (db *DB) UpdateNodeGroup(ctx context.Context, g api.NodeGroup) error {
+	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group disk_layout: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(g.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group extra_mounts: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_groups
+		SET name = ?, description = ?, disk_layout = ?, extra_mounts = ?, updated_at = ?
+		WHERE id = ?
+	`, g.Name, g.Description, diskLayout, extraMounts, time.Now().Unix(), g.ID)
+	if err != nil {
+		return fmt.Errorf("db: update node group: %w", err)
+	}
+	return requireOneRow(res, "node_groups", g.ID)
+}
+
+// DeleteNodeGroup removes a NodeGroup. Nodes in the group have their group_id
+// cleared first to avoid orphaned references.
+func (db *DB) DeleteNodeGroup(ctx context.Context, id string) error {
+	// Clear group membership on any nodes in this group.
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET group_id = NULL, updated_at = ? WHERE group_id = ?`,
+		time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("db: clear node group memberships before delete: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM node_groups WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("db: delete node group: %w", err)
+	}
+	return requireOneRow(res, "node_groups", id)
+}
+
+// AssignNodeToGroup sets or clears the group_id for a node. Pass empty groupID to remove.
+func (db *DB) AssignNodeToGroup(ctx context.Context, nodeID, groupID string) error {
+	var gid interface{}
+	if groupID != "" {
+		gid = groupID
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
+		gid, time.Now().Unix(), nodeID)
+	if err != nil {
+		return fmt.Errorf("db: assign node to group: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
+// SetNodeLayoutOverride sets or clears the disk_layout_override for a node.
+// Pass nil to clear the override (node will use group or image layout).
+func (db *DB) SetNodeLayoutOverride(ctx context.Context, nodeID string, layout *api.DiskLayout) error {
+	override, err := marshalDiskLayoutOverride(layout)
+	if err != nil {
+		return fmt.Errorf("db: marshal node layout override: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET disk_layout_override = ?, updated_at = ? WHERE id = ?`,
+		override, time.Now().Unix(), nodeID)
+	if err != nil {
+		return fmt.Errorf("db: set node layout override: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
+// scanNodeGroup scans a single NodeGroup row.
+func scanNodeGroup(s scanner) (api.NodeGroup, error) {
+	var (
+		g               api.NodeGroup
+		diskLayoutJSON  string
+		extraMountsJSON string
+		createdAtUnix   int64
+		updatedAtUnix   int64
+	)
+	err := s.Scan(&g.ID, &g.Name, &g.Description, &diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix)
+	if err == sql.ErrNoRows {
+		return api.NodeGroup{}, api.ErrNotFound
+	}
+	if err != nil {
+		return api.NodeGroup{}, fmt.Errorf("db: scan node group: %w", err)
+	}
+	g.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+	g.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
+
+	if diskLayoutJSON != "" && diskLayoutJSON != "{}" {
+		var layout api.DiskLayout
+		if err := json.Unmarshal([]byte(diskLayoutJSON), &layout); err == nil {
+			if len(layout.Partitions) > 0 {
+				g.DiskLayoutOverride = &layout
+			}
+		}
+	}
+	if extraMountsJSON != "" && extraMountsJSON != "[]" {
+		if err := json.Unmarshal([]byte(extraMountsJSON), &g.ExtraMounts); err != nil {
+			g.ExtraMounts = nil // non-fatal
+		}
+	}
+	return g, nil
+}
+
+// marshalDiskLayoutOverride serialises a *DiskLayout to JSON for storage.
+// nil (no override) is stored as '{}' to distinguish from a real empty layout.
+func marshalDiskLayoutOverride(layout *api.DiskLayout) (string, error) {
+	if layout == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(layout)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // boolToInt converts a bool to SQLite's INTEGER representation (0 or 1).

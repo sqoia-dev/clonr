@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,6 +25,34 @@ const (
 	ImageFormatFilesystem ImageFormat = "filesystem" // tar archive of a root filesystem
 	ImageFormatBlock      ImageFormat = "block"      // raw block device image (partclone/dd)
 )
+
+// FstabEntry describes a single mount to add to /etc/fstab during finalization.
+// Entries are stored on NodeConfig and NodeGroup; the effective list is the
+// group entries merged with node entries (node overrides group by mount point).
+type FstabEntry struct {
+	Source     string `json:"source"`              // e.g. "nfs-server:/export/home"
+	MountPoint string `json:"mount_point"`         // e.g. "/home/shared"
+	FSType     string `json:"fs_type"`             // "nfs", "nfs4", "cifs", "lustre", …
+	Options    string `json:"options"`             // "defaults,_netdev,vers=4"
+	Dump       int    `json:"dump"`                // usually 0
+	Pass       int    `json:"pass"`                // usually 0 for network mounts
+	AutoMkdir  bool   `json:"auto_mkdir"`          // create mount point if missing
+	Comment    string `json:"comment,omitempty"`   // human-readable note
+}
+
+// NodeGroup is a named set of nodes that share a disk layout override and other
+// configuration. Nodes may optionally belong to a group; when they do, the
+// group's DiskLayoutOverride takes precedence over the image default but is
+// overridden by a node-level DiskLayoutOverride.
+type NodeGroup struct {
+	ID                 string       `json:"id"`
+	Name               string       `json:"name"`
+	Description        string       `json:"description"`
+	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"` // nil = use image default
+	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
+	CreatedAt          time.Time    `json:"created_at"`
+	UpdatedAt          time.Time    `json:"updated_at"`
+}
 
 // DiskLayout describes the partition schema expected on a target node.
 // It is part of BaseImage — never per-node.
@@ -216,6 +245,18 @@ type NodeConfig struct {
 	// PowerProvider selects the power management backend for this node.
 	// If nil, the server falls back to legacy BMC-based IPMI when BMC is set.
 	PowerProvider   *PowerProviderConfig `json:"power_provider,omitempty"`
+	// GroupID optionally links this node to a NodeGroup. When set, the group's
+	// DiskLayoutOverride is consulted during layout resolution if the node has
+	// no node-level override.
+	GroupID         string               `json:"group_id,omitempty"`
+	// DiskLayoutOverride, when non-nil, completely replaces the image's disk
+	// layout for this specific node. Takes highest priority in resolution.
+	DiskLayoutOverride *DiskLayout       `json:"disk_layout_override,omitempty"`
+	// ExtraMounts holds additional /etc/fstab entries written during finalization.
+	// The effective list is group mounts merged with node mounts; use
+	// EffectiveExtraMounts to resolve. Stored as node-level on NodeConfig only
+	// after server-side merging for the deploy path.
+	ExtraMounts        []FstabEntry      `json:"extra_mounts,omitempty"`
 	// ReimagePending is set to true by the reimage orchestrator after it fires
 	// PowerCycle. The PXE boot handler returns the full clonr initramfs boot
 	// script while this flag is set, causing the node to deploy fresh.
@@ -261,6 +302,105 @@ func (n *NodeConfig) State() NodeState {
 	return NodeStateRegistered
 }
 
+// EffectiveLayout resolves the disk layout that will be used when deploying
+// this node, following the three-level priority hierarchy:
+//
+//  1. Node-level override (highest) — DiskLayoutOverride on this NodeConfig.
+//  2. Group-level override — DiskLayoutOverride on the NodeGroup, if any.
+//  3. Image default (lowest) — DiskLayout on the BaseImage.
+//
+// Pass group=nil when the node is not in a group or the group has no override.
+func (n *NodeConfig) EffectiveLayout(img *BaseImage, group *NodeGroup) DiskLayout {
+	if n.DiskLayoutOverride != nil {
+		return *n.DiskLayoutOverride
+	}
+	if group != nil && group.DiskLayoutOverride != nil {
+		return *group.DiskLayoutOverride
+	}
+	if img != nil {
+		return img.DiskLayout
+	}
+	return DiskLayout{}
+}
+
+// EffectiveLayoutSource returns a human-readable label describing which level
+// of the hierarchy provided the effective layout: "node", "group", or "image".
+func (n *NodeConfig) EffectiveLayoutSource(img *BaseImage, group *NodeGroup) string {
+	if n.DiskLayoutOverride != nil {
+		return "node"
+	}
+	if group != nil && group.DiskLayoutOverride != nil {
+		return "group"
+	}
+	return "image"
+}
+
+// EffectiveExtraMounts returns the merged fstab entries for this node.
+// Group entries form the base; node entries override by mount point or append.
+// Pass group=nil when the node is not in a group.
+func (n *NodeConfig) EffectiveExtraMounts(group *NodeGroup) []FstabEntry {
+	result := []FstabEntry{}
+	seen := map[string]int{}
+
+	if group != nil {
+		for _, m := range group.ExtraMounts {
+			seen[m.MountPoint] = len(result)
+			result = append(result, m)
+		}
+	}
+	for _, m := range n.ExtraMounts {
+		if idx, exists := seen[m.MountPoint]; exists {
+			result[idx] = m // node overrides group for this mount point
+		} else {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+// allowedFSTypes is the whitelist of supported filesystem types for FstabEntry.
+var allowedFSTypes = map[string]bool{
+	"nfs": true, "nfs4": true, "cifs": true, "smbfs": true,
+	"beegfs": true, "lustre": true, "xfs": true, "ext4": true,
+	"ext3": true, "vfat": true, "tmpfs": true, "bind": true,
+	"9p": true, "gpfs": true,
+}
+
+// forbiddenMountPoints lists paths that must never be used as extra mount points.
+var forbiddenMountPoints = map[string]bool{
+	"/": true, "/boot": true, "/proc": true, "/sys": true, "/dev": true, "/run": true,
+}
+
+// networkFSTypes lists filesystem types that require network access at mount
+// time and should carry the _netdev option so systemd waits for the network.
+var networkFSTypes = map[string]bool{
+	"nfs": true, "nfs4": true, "cifs": true, "smbfs": true,
+	"beegfs": true, "lustre": true, "gpfs": true, "9p": true,
+}
+
+// ValidateFstabEntry checks that e is safe to write into /etc/fstab.
+// Returns a non-nil error describing the first problem found.
+func ValidateFstabEntry(e FstabEntry) error {
+	if e.Source == "" {
+		return fmt.Errorf("fstab entry source must not be empty")
+	}
+	if e.MountPoint == "" || e.MountPoint[0] != '/' {
+		return fmt.Errorf("fstab entry mount_point %q must be an absolute path", e.MountPoint)
+	}
+	if forbiddenMountPoints[e.MountPoint] {
+		return fmt.Errorf("fstab entry mount_point %q is a reserved system path and cannot be overridden", e.MountPoint)
+	}
+	if !allowedFSTypes[e.FSType] {
+		return fmt.Errorf("fstab entry fs_type %q is not in the allowed list", e.FSType)
+	}
+	return nil
+}
+
+// IsNetworkFS reports whether fsType requires network connectivity at mount time.
+func IsNetworkFS(fsType string) bool {
+	return networkFSTypes[fsType]
+}
+
 // --- Request types ---
 
 // CreateImageRequest is the body for POST /api/v1/images.
@@ -304,16 +444,106 @@ type CreateNodeConfigRequest struct {
 
 // UpdateNodeConfigRequest is the body for PUT /api/v1/nodes/:id.
 type UpdateNodeConfigRequest struct {
-	Hostname      string               `json:"hostname"`
-	FQDN          string               `json:"fqdn"`
-	PrimaryMAC    string               `json:"primary_mac"`
-	Interfaces    []InterfaceConfig    `json:"interfaces"`
-	SSHKeys       []string             `json:"ssh_keys"`
-	KernelArgs    string               `json:"kernel_args"`
-	Groups        []string             `json:"groups"`
-	CustomVars    map[string]string    `json:"custom_vars"`
-	BaseImageID   string               `json:"base_image_id"`
-	PowerProvider *PowerProviderConfig `json:"power_provider,omitempty"`
+	Hostname           string               `json:"hostname"`
+	FQDN               string               `json:"fqdn"`
+	PrimaryMAC         string               `json:"primary_mac"`
+	Interfaces         []InterfaceConfig    `json:"interfaces"`
+	SSHKeys            []string             `json:"ssh_keys"`
+	KernelArgs         string               `json:"kernel_args"`
+	Groups             []string             `json:"groups"`
+	CustomVars         map[string]string    `json:"custom_vars"`
+	BaseImageID        string               `json:"base_image_id"`
+	PowerProvider      *PowerProviderConfig `json:"power_provider,omitempty"`
+	GroupID            string               `json:"group_id,omitempty"`
+	// DiskLayoutOverride, when non-nil, replaces the image/group disk layout for
+	// this node. Send null or omit to clear a previously set override.
+	DiskLayoutOverride *DiskLayout          `json:"disk_layout_override,omitempty"`
+	// ClearLayoutOverride, when true, explicitly removes any node-level override.
+	// Use this instead of sending an empty DiskLayoutOverride, which is ambiguous.
+	ClearLayoutOverride bool                `json:"clear_layout_override,omitempty"`
+	// ExtraMounts replaces the node-level extra fstab entries. Send an empty
+	// slice to clear all node-level mounts (group mounts are unaffected).
+	ExtraMounts         []FstabEntry        `json:"extra_mounts,omitempty"`
+}
+
+// ─── Node group request types ─────────────────────────────────────────────────
+
+// CreateNodeGroupRequest is the body for POST /api/v1/node-groups.
+type CreateNodeGroupRequest struct {
+	Name               string       `json:"name"`
+	Description        string       `json:"description"`
+	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"`
+	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
+}
+
+// UpdateNodeGroupRequest is the body for PUT /api/v1/node-groups/:id.
+type UpdateNodeGroupRequest struct {
+	Name               string       `json:"name"`
+	Description        string       `json:"description"`
+	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"`
+	ClearLayoutOverride bool        `json:"clear_layout_override,omitempty"`
+	// ExtraMounts replaces the group-level extra fstab entries.
+	ExtraMounts         []FstabEntry `json:"extra_mounts,omitempty"`
+}
+
+// AssignGroupRequest is the body for PUT /api/v1/nodes/:id/group.
+type AssignGroupRequest struct {
+	// GroupID is the group to assign. Empty string removes the node from its
+	// current group (equivalent to DELETE).
+	GroupID string `json:"group_id"`
+}
+
+// ─── Node group response types ────────────────────────────────────────────────
+
+// ListNodeGroupsResponse wraps the node groups list.
+type ListNodeGroupsResponse struct {
+	Groups []NodeGroup `json:"groups"`
+	Total  int         `json:"total"`
+}
+
+// ─── Layout recommendation types ─────────────────────────────────────────────
+
+// LayoutRecommendation is the response from GET /api/v1/nodes/:id/layout-recommendation.
+// It contains a suggested DiskLayout derived from hardware discovery and the
+// reasoning behind each decision so admins can evaluate it before applying.
+type LayoutRecommendation struct {
+	Layout    DiskLayout `json:"layout"`
+	Reasoning string     `json:"reasoning"`
+	Warnings  []string   `json:"warnings,omitempty"`
+}
+
+// LayoutValidationRequest is the body for POST /api/v1/nodes/:id/layout/validate.
+type LayoutValidationRequest struct {
+	Layout DiskLayout `json:"layout"`
+}
+
+// LayoutValidationResponse is returned by the validation endpoint.
+type LayoutValidationResponse struct {
+	Valid    bool     `json:"valid"`
+	Errors   []string `json:"errors,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// EffectiveLayoutResponse is returned by GET /api/v1/nodes/:id/effective-layout.
+type EffectiveLayoutResponse struct {
+	Layout DiskLayout `json:"layout"`
+	Source string     `json:"source"` // "node", "group", or "image"
+	GroupID string    `json:"group_id,omitempty"`
+	ImageID string    `json:"image_id,omitempty"`
+}
+
+// EffectiveMountsResponse is returned by GET /api/v1/nodes/:id/effective-mounts.
+// It shows the merge result along with where each entry originates.
+type EffectiveMountEntry struct {
+	FstabEntry
+	Source  string `json:"source"`             // "node" or "group"
+	GroupID string `json:"group_id,omitempty"` // set when source == "group"
+}
+
+type EffectiveMountsResponse struct {
+	Mounts  []EffectiveMountEntry `json:"mounts"`
+	NodeID  string                `json:"node_id"`
+	GroupID string                `json:"group_id,omitempty"`
 }
 
 // --- Response types ---
