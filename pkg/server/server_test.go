@@ -170,22 +170,24 @@ func TestImages_NotFound(t *testing.T) {
 	}
 }
 
-func TestImages_Archive(t *testing.T) {
+func TestImages_Delete(t *testing.T) {
 	_, ts := newTestServer(t)
 
-	createReq := api.CreateImageRequest{Name: "to-archive", Format: api.ImageFormatBlock}
+	createReq := api.CreateImageRequest{Name: "to-delete", Format: api.ImageFormatBlock}
 	var created api.BaseImage
 	doJSON(t, ts, http.MethodPost, "/api/v1/images", createReq, &created)
 
 	resp := doJSON(t, ts, http.MethodDelete, "/api/v1/images/"+created.ID, nil, nil)
 	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("archive status: got %d want 204", resp.StatusCode)
+		t.Errorf("delete status: got %d want 204", resp.StatusCode)
 	}
 
-	var got api.BaseImage
-	doJSON(t, ts, http.MethodGet, "/api/v1/images/"+created.ID, nil, &got)
-	if got.Status != api.ImageStatusArchived {
-		t.Errorf("status after archive: got %s want archived", got.Status)
+	// Image should be gone — GET must return 404.
+	getResp, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/images/"+created.ID, nil)
+	getResp.Header.Set("Authorization", authHeader())
+	httpResp, _ := http.DefaultClient.Do(getResp)
+	if httpResp.StatusCode != http.StatusNotFound {
+		t.Errorf("get after delete: got %d want 404", httpResp.StatusCode)
 	}
 }
 

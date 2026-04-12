@@ -1675,12 +1675,13 @@ const Pages = {
                 hwChips = `<div class="hw-chips">${chips.map(c => `<span class="hw-chip">${escHtml(c)}</span>`).join('')}</div>`;
             }
         } catch (_) {}
+        const hostnameHtml = (n.hostname && n.hostname !== '(none)')
+            ? `${escHtml(n.hostname)}${n.hostname_auto ? ' <span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>' : ''}`
+            : `<span class="text-dim" style="font-style:italic">Unassigned</span>`;
         return `<tr data-key="${escHtml(n.id)}">
             <td>
                 <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
-                    ${(n.hostname && n.hostname !== '(none)')
-                        ? escHtml(n.hostname)
-                        : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
+                    ${hostnameHtml}
                 </a>
                 <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
             </td>
@@ -1782,8 +1783,22 @@ const Pages = {
                     <form id="node-form" onsubmit="Pages.submitNode(event, ${isEdit ? `'${node.id}'` : 'null'})">
                         <div class="form-grid">
                             <div class="form-group">
-                                <label>Hostname *</label>
-                                <input type="text" name="hostname" value="${isEdit ? escHtml(node.hostname) : ''}" required>
+                                <label>Hostname *
+                                    ${isEdit && node.hostname_auto
+                                        ? ' <span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>'
+                                        : ''}
+                                </label>
+                                <div style="display:flex;gap:6px;align-items:center">
+                                    <input type="text" name="hostname" id="node-hostname-input"
+                                        value="${isEdit ? escHtml(node.hostname) : ''}"
+                                        placeholder="${isEdit && node.hostname_auto ? escHtml(node.hostname) + ' (auto-generated)' : ''}"
+                                        style="flex:1" required>
+                                    ${isEdit && node.hostname_auto
+                                        ? `<button type="button" class="btn btn-secondary btn-sm"
+                                               onclick="Pages._regenerateHostname('${escHtml(node.primary_mac)}')"
+                                               title="Pick a new auto-generated hostname">Regenerate</button>`
+                                        : ''}
+                                </div>
                             </div>
                             <div class="form-group">
                                 <label>FQDN</label>
@@ -1878,6 +1893,17 @@ const Pages = {
         }
     },
 
+    // _regenerateHostname picks a new random 4-hex suffix and fills the hostname field.
+    // Called by the Regenerate button in the node edit modal.
+    _regenerateHostname(mac) {
+        const input = document.getElementById('node-hostname-input');
+        if (!input) return;
+        // Generate a random 4-character hex suffix (not MAC-derived, so it's clearly new).
+        const suffix = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
+        input.value = 'clonr-' + suffix;
+        input.focus();
+    },
+
     // ── Node Detail ────────────────────────────────────────────────────────
 
     async nodeDetail(id) {
@@ -1916,10 +1942,11 @@ const Pages = {
                             Back
                         </button>
                         <div>
-                            <div class="page-title">
+                            <div class="page-title" style="display:flex;align-items:center;gap:8px">
                                 ${(node.hostname && node.hostname !== '(none)')
                                     ? escHtml(node.hostname)
                                     : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
+                                ${node.hostname_auto ? `<span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>` : ''}
                             </div>
                             <div class="page-subtitle text-mono">${escHtml(node.primary_mac)}</div>
                         </div>
@@ -1958,7 +1985,9 @@ const Pages = {
                             <div class="kv-grid">
                                 <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value">${escHtml(node.id)}</div></div>
                                 <div class="kv-item"><div class="kv-key">Hostname</div><div class="kv-value">
-                                    ${(node.hostname && node.hostname !== '(none)') ? escHtml(node.hostname) : '<span class="text-dim" style="font-style:italic">Unassigned</span>'}
+                                    ${(node.hostname && node.hostname !== '(none)')
+                                        ? escHtml(node.hostname) + (node.hostname_auto ? ' <span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>' : '')
+                                        : '<span class="text-dim" style="font-style:italic">Unassigned</span>'}
                                 </div></div>
                                 <div class="kv-item"><div class="kv-key">FQDN</div><div class="kv-value">${escHtml(node.fqdn || '—')}</div></div>
                                 <div class="kv-item"><div class="kv-key">Primary MAC</div><div class="kv-value">${escHtml(node.primary_mac)}</div></div>
