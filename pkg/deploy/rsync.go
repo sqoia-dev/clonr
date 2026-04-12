@@ -288,9 +288,44 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	log.Printf("deploy: running partprobe on %s", disk)
 	_ = runCmd(ctx, "partprobe", disk)
 	_ = runCmd(ctx, "udevadm", "settle")
+	// Give the kernel time to create partition device nodes in /dev.
+	// In initramfs environments with devtmpfs, the nodes appear asynchronously
+	// after partprobe. Without this wait, subsequent mkfs/mount calls fail with
+	// "No such file or directory" even though the partitions exist in the table.
+	if err := waitForPartitions(ctx, disk, len(d.layout.Partitions), 15); err != nil {
+		log.Printf("deploy: WARNING: partition devices not all visible after wait: %v", err)
+	}
 	log.Printf("deploy: partition table re-read complete")
 
 	return nil
+}
+
+// waitForPartitions waits until all expected partition device nodes appear in /dev.
+// This is necessary in initramfs environments where devtmpfs creates nodes
+// asynchronously after partprobe signals the kernel.
+func waitForPartitions(ctx context.Context, disk string, count int, maxWaitSec int) error {
+	start := time.Now()
+	for i := 0; i < maxWaitSec; i++ {
+		allPresent := true
+		for num := 1; num <= count; num++ {
+			dev := partitionDevice(disk, num)
+			if _, err := os.Stat(dev); os.IsNotExist(err) {
+				allPresent = false
+				log.Printf("deploy: waiting for %s to appear... (%ds elapsed)", dev, i)
+				break
+			}
+		}
+		if allPresent {
+			log.Printf("deploy: all %d partition device nodes present after %s", count, time.Since(start).Round(time.Millisecond))
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	return fmt.Errorf("partition devices not ready after %ds", maxWaitSec)
 }
 
 // partitionDevice returns the partition device path for a given disk and number.
