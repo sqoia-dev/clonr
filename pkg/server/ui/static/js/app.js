@@ -192,6 +192,17 @@ function emptyState(title, sub = '', cta = '') {
     </div>`;
 }
 
+// Returns HTML for a hostname cell: italic "Unassigned" + MAC below when hostname is
+// absent, empty, null, or the literal server placeholder "(none)".
+function fmtHostname(hostname, mac) {
+    const isUnset = !hostname || hostname === '(none)';
+    const macHtml = mac ? `<div class="text-dim text-sm text-mono">${escHtml(mac)}</div>` : '';
+    if (isUnset) {
+        return `<span class="text-muted" style="font-style:italic">Unassigned</span>${macHtml}`;
+    }
+    return `<span style="font-weight:600">${escHtml(hostname)}</span>${macHtml}`;
+}
+
 // ─── Deployment phase helpers ──────────────────────────────────────────────
 
 function deployPhase(entry) {
@@ -317,7 +328,7 @@ const Pages = {
                             </svg>
                         </div>
                         <div class="stat-label">Active Deployments</div>
-                        <div class="stat-value">${deployProgress.filter(d => d.phase !== 'complete' && d.phase !== 'error').length}</div>
+                        <div class="stat-value">${deployProgress.filter(d => !d.stale && d.phase !== 'complete' && d.phase !== 'error').length}</div>
                         <div class="stat-sub">${deployProgress.filter(d => d.phase === 'complete').length} completed recently</div>
                     </div>
                     <div class="stat-card">
@@ -332,8 +343,8 @@ const Pages = {
                     </div>
                 </div>
 
-                ${deployProgress.length > 0 ? cardWrap('Active Deployments',
-                    this._deployProgressTable(deployProgress)) : ''}
+                ${cardWrap('Active Deployments',
+                    this._deployProgressTable(deployProgress))}
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
                     ${cardWrap('Recent Images',
@@ -362,9 +373,17 @@ const Pages = {
                     const ind = document.getElementById('dash-follow-ind');
                     if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
                 });
-                stream.onDisconnect(() => {
+                stream.onDisconnect((permanent) => {
                     const ind = document.getElementById('dash-follow-ind');
-                    if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
+                    if (permanent) {
+                        if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>unavailable'; }
+                        const viewer = document.getElementById('dash-log-viewer');
+                        if (viewer && !viewer.children.length) {
+                            viewer.innerHTML = '<div class="empty-state" style="padding:30px"><div class="empty-state-text">Live log stream unavailable</div></div>';
+                        }
+                    } else {
+                        if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
+                    }
                 });
                 stream.connect();
                 App._logStream = stream;
@@ -378,6 +397,8 @@ const Pages = {
     },
 
     _buildDeployProgress(logs) {
+        const STALE_MS = 30 * 60 * 1000; // 30 minutes
+        const now = Date.now();
         const nodeMap = new Map();
         for (const entry of logs) {
             const key = entry.node_mac || entry.hostname || 'unknown';
@@ -404,23 +425,29 @@ const Pages = {
         }
         return Array.from(nodeMap.values())
             .filter(s => s.phase !== 'waiting' || s.hasError)
-            .map(s => ({ ...s, phase: s.hasError && s.phase !== 'complete' ? 'error' : s.phase }))
+            .map(s => {
+                const age = now - new Date(s.lastTs).getTime();
+                return {
+                    ...s,
+                    phase: s.hasError && s.phase !== 'complete' ? 'error' : s.phase,
+                    stale: age > STALE_MS,
+                };
+            })
             .sort((a, b) => new Date(b.lastTs) - new Date(a.lastTs))
             .slice(0, 20);
     },
 
     _deployProgressTable(nodes) {
-        if (!nodes.length) return emptyState('No active deployments');
+        const active = nodes.filter(n => !n.stale);
+        if (!active.length) return emptyState('No active deployments');
         return `<div class="table-wrap"><table>
             <thead><tr>
                 <th>Node</th><th>Phase</th><th>Progress</th><th>Last Activity</th>
             </tr></thead>
             <tbody>
-            ${nodes.map(n => {
+            ${active.map(n => {
                 const pct = phaseProgress(n.phase);
-                const displayName = n.hostname
-                    ? `<span style="font-weight:600">${escHtml(n.hostname)}</span><div class="text-dim text-sm text-mono">${escHtml(n.mac)}</div>`
-                    : `<span class="text-dim" style="font-style:italic">Unassigned</span><div class="text-dim text-sm text-mono">${escHtml(n.mac)}</div>`;
+                const displayName = fmtHostname(n.hostname, n.mac);
                 const barClass = n.phase === 'complete' ? 'complete' : n.phase === 'error' ? 'error' : '';
                 return `<tr>
                     <td>${displayName}</td>
@@ -468,7 +495,11 @@ const Pages = {
                 </div>`;
             } else {
                 const n = item.data;
-                const displayName = n.hostname || n.primary_mac;
+                const hasHostname = n.hostname && n.hostname !== '(none)';
+                const displayName = hasHostname ? n.hostname : n.primary_mac;
+                const displayHtml = hasHostname
+                    ? escHtml(n.hostname)
+                    : `<span class="text-muted" style="font-style:italic">Unassigned</span>`;
                 return `<div class="timeline-item">
                     <div class="timeline-icon timeline-icon-green">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -477,7 +508,7 @@ const Pages = {
                         </svg>
                     </div>
                     <div class="timeline-body">
-                        <div class="timeline-title">Node <a href="#/nodes/${n.id}" class="text-accent">${escHtml(displayName)}</a> registered ${nodeBadge(n)}</div>
+                        <div class="timeline-title">Node <a href="#/nodes/${n.id}" class="text-accent">${displayHtml}</a> registered ${nodeBadge(n)}</div>
                         <div class="timeline-ts">${fmtRelative(item.ts)}</div>
                     </div>
                 </div>`;
@@ -520,7 +551,7 @@ const Pages = {
             ${nodes.map(n => `
                 <tr class="clickable" onclick="Router.navigate('/nodes/${n.id}')">
                     <td>
-                        ${n.hostname
+                        ${(n.hostname && n.hostname !== '(none)')
                             ? `<span style="font-weight:500">${escHtml(n.hostname)}</span>`
                             : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
                         <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
@@ -1062,7 +1093,7 @@ const Pages = {
                                 return `<tr>
                                     <td>
                                         <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
-                                            ${n.hostname
+                                            ${(n.hostname && n.hostname !== '(none)')
                                                 ? escHtml(n.hostname)
                                                 : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
                                         </a>
@@ -1260,7 +1291,7 @@ const Pages = {
                         </button>
                         <div>
                             <div class="page-title">
-                                ${node.hostname
+                                ${(node.hostname && node.hostname !== '(none)')
                                     ? escHtml(node.hostname)
                                     : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
                             </div>
@@ -1289,7 +1320,7 @@ const Pages = {
                             <div class="kv-grid">
                                 <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value">${escHtml(node.id)}</div></div>
                                 <div class="kv-item"><div class="kv-key">Hostname</div><div class="kv-value">
-                                    ${node.hostname ? escHtml(node.hostname) : '<span class="text-dim">Not assigned</span>'}
+                                    ${(node.hostname && node.hostname !== '(none)') ? escHtml(node.hostname) : '<span class="text-dim" style="font-style:italic">Unassigned</span>'}
                                 </div></div>
                                 <div class="kv-item"><div class="kv-key">FQDN</div><div class="kv-value">${escHtml(node.fqdn || '—')}</div></div>
                                 <div class="kv-item"><div class="kv-key">Primary MAC</div><div class="kv-value">${escHtml(node.primary_mac)}</div></div>
@@ -1436,8 +1467,13 @@ const Pages = {
             App._nodeLogStream.onConnect(() => {
                 if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
             });
-            App._nodeLogStream.onDisconnect(() => {
-                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
+            App._nodeLogStream.onDisconnect((permanent) => {
+                if (ind) {
+                    ind.className = 'follow-indicator';
+                    ind.innerHTML = permanent
+                        ? '<span class="follow-dot"></span>unavailable'
+                        : '<span class="follow-dot"></span>Reconnecting…';
+                }
             });
             App._nodeLogStream.connect();
         } else {

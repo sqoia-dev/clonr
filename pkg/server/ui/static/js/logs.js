@@ -9,6 +9,8 @@ class LogStream {
         this._userScrolled = false;
         this._onConnect = null;
         this._onDisconnect = null;
+        this._retryCount = 0;
+        this._maxRetries = 5;
 
         // Detect manual scroll-up to pause auto-scroll.
         this.container.addEventListener('scroll', () => {
@@ -25,7 +27,11 @@ class LogStream {
 
     connect() {
         this.disconnect();
+        this._retryCount = 0;
+        this._attemptConnect();
+    }
 
+    _attemptConnect() {
         const url = new URL('/api/v1/logs/stream', window.location.origin);
         const tok = document.querySelector('meta[name="clonr-token"]');
         if (tok && tok.content) url.searchParams.set('token', tok.content);
@@ -40,19 +46,31 @@ class LogStream {
         this.source = new EventSource(url.toString());
 
         this.source.onopen = () => {
+            this._retryCount = 0;
             if (this._onConnect) this._onConnect();
         };
 
         this.source.onerror = () => {
-            if (this._onDisconnect) this._onDisconnect();
-            // Auto-reconnect after 3 seconds on error.
             if (this.source) {
                 this.source.close();
                 this.source = null;
-                setTimeout(() => {
-                    if (this._shouldReconnect) this.connect();
-                }, 3000);
             }
+            if (!this._shouldReconnect) return;
+
+            this._retryCount++;
+            if (this._retryCount > this._maxRetries) {
+                // Stop retrying; notify caller so the UI can show a stable disconnected state.
+                this._shouldReconnect = false;
+                if (this._onDisconnect) this._onDisconnect(true /* permanent */);
+                return;
+            }
+
+            if (this._onDisconnect) this._onDisconnect(false);
+            // Exponential backoff: 3s, 6s, 12s, 24s, 48s.
+            const delay = 3000 * Math.pow(2, this._retryCount - 1);
+            setTimeout(() => {
+                if (this._shouldReconnect) this._attemptConnect();
+            }, delay);
         };
 
         this.source.onmessage = (evt) => {
