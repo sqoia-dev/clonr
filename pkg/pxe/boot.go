@@ -13,7 +13,7 @@ const bootScriptTemplate = `#!ipxe
 set server-url {{.ServerURL}}
 kernel ${server-url}/api/v1/boot/vmlinuz
 initrd ${server-url}/api/v1/boot/initramfs.img
-imgargs vmlinuz clonr.server=${server-url} clonr.mac=${mac} console=tty0
+imgargs vmlinuz clonr.server=${server-url} clonr.mac=${mac} console=ttyS0,115200n8 console=tty0
 boot
 `
 
