@@ -197,6 +197,11 @@ func (c *Client) Health(ctx context.Context) (*api.HealthResponse, error) {
 	return &h, nil
 }
 
+// SendDeployProgress ships a single DeployProgress update to POST /api/v1/deploy/progress.
+func (c *Client) SendDeployProgress(ctx context.Context, prog api.DeployProgress) error {
+	return c.post(ctx, "/api/v1/deploy/progress", prog, nil)
+}
+
 // SendLogs ships a batch of log entries to POST /api/v1/logs.
 func (c *Client) SendLogs(ctx context.Context, entries []api.LogEntry) error {
 	return c.post(ctx, "/api/v1/logs", entries, nil)
