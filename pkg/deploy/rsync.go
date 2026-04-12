@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"bufio"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -565,13 +567,20 @@ func (d *FilesystemDeployer) attemptDownloadAndExtract(ctx context.Context, opts
 // concurrently via a pipe so we never buffer the full blob to disk. This uses
 // constant memory regardless of image size.
 //
+// Compression detection is done in Go by peeking at the first two magic bytes
+// of the stream. If gzip magic (0x1f 0x8b) is detected, the stream is
+// transparently decompressed using Go's compress/gzip before being passed to
+// tar. This avoids any dependency on the tar binary's gzip support or the
+// presence of gzip/zcat in the initramfs PATH. Uncompressed tar streams are
+// passed directly to tar -xf -.
+//
 // When needsVerify is true, the hasher result is checked after tar exits — if
 // checksum mismatches, an error is returned (but extraction has already run, so
 // the data on disk may be corrupt; the caller's retry loop will re-run from scratch).
 func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, totalBytes int64, opts DeployOpts, needsVerify bool, progress ProgressFunc) error {
 	log.Printf("deploy: starting stream-extract into %s", opts.MountRoot)
 
-	// Set up the reader chain: body → [hasher tee] → progress → tar stdin.
+	// Set up the reader chain: body → [hasher tee] → progress → decompressor? → tar stdin.
 	var hasher hash.Hash
 	var reader io.Reader = body
 
@@ -582,14 +591,32 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 
 	pr := &progressReader{r: reader, total: totalBytes, fn: progress, phase: "downloading+extracting"}
 
-	// Use 'tar -xf -' which relies on GNU tar 1.29+ transparent decompression: when
-	// reading from stdin, GNU tar detects compression format from the stream's magic
-	// bytes (gzip=1f8b, xz=fd37, zstd=28b5) rather than the filename extension.
-	// Do NOT use '-a' (--auto-compress) — that flag uses the archive filename suffix
-	// to select the compressor, which always fails when reading from stdin ('-')
-	// because there is no filename to inspect.
+	// Peek at the first two bytes to detect gzip compression (magic: 0x1f 0x8b).
+	// We use a bufio.Reader to allow peeking without consuming the stream.
+	peeked := bufio.NewReaderSize(pr, 512)
+	magic, peekErr := peeked.Peek(2)
+	isGzip := peekErr == nil && len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b
+
+	// tarSrc is what we feed to tar. For gzip archives, we interpose a gzip.Reader
+	// so that tar always receives raw (uncompressed) tar data and needs no -z flag.
+	var tarSrc io.Reader = peeked
+
+	if isGzip {
+		log.Printf("deploy: detected gzip compression (magic %02x%02x) — decompressing in-process", magic[0], magic[1])
+		gz, err := gzip.NewReader(peeked)
+		if err != nil {
+			return fmt.Errorf("gzip.NewReader: %w", err)
+		}
+		defer gz.Close()
+		tarSrc = gz
+	} else {
+		log.Printf("deploy: no gzip magic detected — treating stream as uncompressed tar")
+	}
+
+	// tar -xf - expects raw (possibly uncompressed) tar data on stdin.
+	// We explicitly do NOT pass -z because we already decompressed above.
 	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", opts.MountRoot)
-	tarCmd.Stdin = pr
+	tarCmd.Stdin = tarSrc
 
 	tarOut, err := tarCmd.CombinedOutput()
 	if err != nil {
