@@ -94,13 +94,16 @@ const API = {
         update(id, body)      { return API.put(`/nodes/${id}`, body); },
         del(id)               { return API.del(`/nodes/${id}`); },
         power: {
-            status(id)        { return API.get(`/nodes/${id}/power`); },
-            on(id)            { return API.post(`/nodes/${id}/power/on`); },
-            off(id)           { return API.post(`/nodes/${id}/power/off`); },
-            cycle(id)         { return API.post(`/nodes/${id}/power/cycle`); },
-            reset(id)         { return API.post(`/nodes/${id}/power/reset`); },
-            pxeBoot(id)       { return API.post(`/nodes/${id}/power/pxe`); },
-            diskBoot(id)      { return API.post(`/nodes/${id}/power/disk`); },
+            status(id)              { return API.get(`/nodes/${id}/power`); },
+            on(id)                  { return API.post(`/nodes/${id}/power/on`); },
+            off(id)                 { return API.post(`/nodes/${id}/power/off`); },
+            cycle(id)               { return API.post(`/nodes/${id}/power/cycle`); },
+            reset(id)               { return API.post(`/nodes/${id}/power/reset`); },
+            pxeBoot(id)             { return API.post(`/nodes/${id}/power/pxe`); },
+            diskBoot(id)            { return API.post(`/nodes/${id}/power/disk`); },
+            // flipToDisk calls the provider-abstracted boot-flip endpoint.
+            // When cycle=true the server also power-cycles the node after flipping.
+            flipToDisk(id, cycle)   { return API.post(`/nodes/${id}/power/flip-to-disk${cycle ? '?cycle=true' : ''}`); },
         },
         sensors(id)           { return API.get(`/nodes/${id}/sensors`); },
     },

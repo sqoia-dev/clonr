@@ -1829,6 +1829,64 @@ const Pages = {
                                 <textarea name="ssh_keys" rows="3" placeholder="ssh-ed25519 AAAA…">${isEdit ? escHtml((node.ssh_keys || []).join('\n')) : ''}</textarea>
                             </div>
                         </div>
+
+                        <!-- Power Provider section -->
+                        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+                            <div style="font-weight:600;font-size:13px;margin-bottom:12px;color:var(--text-secondary)">Power Provider</div>
+                            <div class="form-grid">
+                                <div class="form-group" style="grid-column:1/-1">
+                                    <label>Provider Type</label>
+                                    <select name="power_provider_type" id="pp-type-select"
+                                        onchange="Pages._onPowerProviderTypeChange(this.value)"
+                                        value="${isEdit && node.power_provider ? escHtml(node.power_provider.type || '') : ''}">
+                                        <option value="">None — no power management</option>
+                                        <option value="ipmi" ${isEdit && node.power_provider && node.power_provider.type === 'ipmi' ? 'selected' : ''}>IPMI (uses BMC config)</option>
+                                        <option value="proxmox" ${isEdit && node.power_provider && node.power_provider.type === 'proxmox' ? 'selected' : ''}>Proxmox VE</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <!-- Proxmox fields — shown/hidden by JS -->
+                            <div id="pp-proxmox-fields" style="display:${isEdit && node.power_provider && node.power_provider.type === 'proxmox' ? '' : 'none'}">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label>API URL</label>
+                                        <input type="text" name="pp_api_url"
+                                            value="${isEdit && node.power_provider && node.power_provider.fields ? escHtml(node.power_provider.fields.api_url || '') : ''}"
+                                            placeholder="https://proxmox.example.com:8006">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Node Name</label>
+                                        <input type="text" name="pp_node"
+                                            value="${isEdit && node.power_provider && node.power_provider.fields ? escHtml(node.power_provider.fields.node || '') : ''}"
+                                            placeholder="pve">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>VM ID</label>
+                                        <input type="text" name="pp_vmid"
+                                            value="${isEdit && node.power_provider && node.power_provider.fields ? escHtml(node.power_provider.fields.vmid || '') : ''}"
+                                            placeholder="202">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Username</label>
+                                        <input type="text" name="pp_username"
+                                            value="${isEdit && node.power_provider && node.power_provider.fields ? escHtml(node.power_provider.fields.username || '') : ''}"
+                                            placeholder="root@pam">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Password</label>
+                                        <input type="password" name="pp_password"
+                                            placeholder="${isEdit && node.power_provider && node.power_provider.fields && node.power_provider.fields.password === '****' ? '(saved — leave blank to keep)' : 'Enter password'}">
+                                    </div>
+                                    <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:22px">
+                                        <input type="checkbox" name="pp_insecure" id="pp-insecure"
+                                            ${isEdit && node.power_provider && node.power_provider.fields && node.power_provider.fields.insecure === 'true' ? 'checked' : ''}>
+                                        <label for="pp-insecure" style="margin:0;font-weight:400">Skip TLS verification (self-signed certs)</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- End Power Provider section -->
+
                         <div id="node-form-result"></div>
                         <div class="form-actions">
                             <button type="button" class="btn btn-secondary" onclick="document.getElementById('node-modal').remove()">Cancel</button>
@@ -1840,6 +1898,13 @@ const Pages = {
 
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    // _onPowerProviderTypeChange shows/hides the Proxmox fields when the provider
+    // type dropdown changes. Called by the onchange handler in the node edit modal.
+    _onPowerProviderTypeChange(type) {
+        const proxmoxFields = document.getElementById('pp-proxmox-fields');
+        if (proxmoxFields) proxmoxFields.style.display = (type === 'proxmox') ? '' : 'none';
     },
 
     async submitNode(e, nodeId) {
@@ -1856,16 +1921,36 @@ const Pages = {
         const groups  = data.get('groups').split(',').map(g => g.trim()).filter(Boolean);
         const sshKeys = data.get('ssh_keys').split('\n').map(k => k.trim()).filter(Boolean);
 
+        // Build power_provider from form fields.
+        const ppType = data.get('power_provider_type') || '';
+        let powerProvider = null;
+        if (ppType === 'proxmox') {
+            const fields = {
+                api_url:  data.get('pp_api_url') || '',
+                node:     data.get('pp_node') || '',
+                vmid:     data.get('pp_vmid') || '',
+                username: data.get('pp_username') || '',
+                insecure: document.getElementById('pp-insecure') && document.getElementById('pp-insecure').checked ? 'true' : 'false',
+            };
+            // Only include password if the user typed something; blank means keep existing.
+            const pw = data.get('pp_password');
+            if (pw) fields.password = pw;
+            powerProvider = { type: 'proxmox', fields };
+        } else if (ppType === 'ipmi') {
+            powerProvider = { type: 'ipmi', fields: {} };
+        }
+
         const body = {
-            hostname:      data.get('hostname'),
-            fqdn:          data.get('fqdn'),
-            primary_mac:   data.get('primary_mac'),
-            base_image_id: data.get('base_image_id'),
+            hostname:       data.get('hostname'),
+            fqdn:           data.get('fqdn'),
+            primary_mac:    data.get('primary_mac'),
+            base_image_id:  data.get('base_image_id'),
             groups,
-            ssh_keys:    sshKeys,
-            kernel_args: data.get('kernel_args'),
-            interfaces:  [],
-            custom_vars: {},
+            ssh_keys:       sshKeys,
+            kernel_args:    data.get('kernel_args'),
+            interfaces:     [],
+            custom_vars:    {},
+            power_provider: powerProvider,
         };
 
         try {
@@ -1973,7 +2058,7 @@ const Pages = {
                 <div class="tab-bar">
                     <div class="tab active" onclick="Pages._switchTab(this, 'tab-overview')">Overview</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-hardware')">Hardware</div>
-                    <div class="tab" onclick="Pages._switchTab(this, 'tab-bmc');Pages._onBMCTabOpen('${node.id}', ${!!node.bmc})">Power / IPMI</div>
+                    <div class="tab" onclick="Pages._switchTab(this, 'tab-bmc');Pages._onBMCTabOpen('${node.id}', ${!!(node.bmc || node.power_provider)})">Power / IPMI</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-config')">Configuration</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-logs')">Logs</div>
                 </div>
@@ -2027,8 +2112,42 @@ const Pages = {
                     ${hw ? this._hardwareProfile(hw) : `<div class="card"><div class="card-body">${emptyState('No hardware profile', 'Hardware is discovered when a node registers via PXE boot.')}</div></div>`}
                 </div>
 
-                <!-- Power / IPMI tab — always rendered; content depends on BMC config -->
+                <!-- Power / IPMI tab — always rendered; content depends on provider config -->
                 <div id="tab-bmc" class="tab-panel">
+                    ${node.power_provider && node.power_provider.type ? `
+                    ${cardWrap('Power Provider', `
+                        <div class="card-body">
+                            <div class="kv-grid" style="margin-bottom:12px">
+                                <div class="kv-item">
+                                    <div class="kv-key">Type</div>
+                                    <div class="kv-value">
+                                        <span class="badge badge-neutral">${escHtml(node.power_provider.type)}</span>
+                                    </div>
+                                </div>
+                                ${node.power_provider.type === 'proxmox' && node.power_provider.fields ? `
+                                <div class="kv-item"><div class="kv-key">API URL</div><div class="kv-value text-mono">${escHtml(node.power_provider.fields.api_url || '—')}</div></div>
+                                <div class="kv-item"><div class="kv-key">PVE Node</div><div class="kv-value text-mono">${escHtml(node.power_provider.fields.node || '—')}</div></div>
+                                <div class="kv-item"><div class="kv-key">VM ID</div><div class="kv-value text-mono">${escHtml(node.power_provider.fields.vmid || '—')}</div></div>
+                                <div class="kv-item"><div class="kv-key">Username</div><div class="kv-value text-mono">${escHtml(node.power_provider.fields.username || '—')}</div></div>
+                                <div class="kv-item"><div class="kv-key">Skip TLS</div><div class="kv-value">${node.power_provider.fields.insecure === 'true' ? 'Yes' : 'No'}</div></div>
+                                ` : ''}
+                            </div>
+                            <div class="flex gap-8">
+                                <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                    Flip Next Boot → Disk
+                                </button>
+                                <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                    Flip → Disk + Reboot
+                                </button>
+                                <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(node))}, ${JSON.stringify(JSON.stringify([]))})'>Edit Provider</button>
+                            </div>
+                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info"></div>
+                        </div>`,
+                        ''
+                    )}` : ''}
+
                     ${node.bmc && node.bmc.ip_address ? `
                     ${cardWrap('Power Status',
                         `<div class="card-body">
@@ -2087,11 +2206,11 @@ const Pages = {
                         `<div id="sensor-table-wrap"><div class="loading"><div class="spinner"></div>Loading sensors…</div></div>`,
                         `<button class="btn btn-secondary btn-sm" onclick="Pages._refreshSensors('${node.id}')">Refresh</button>`
                     )}`
-                    : `<div class="card"><div class="card-body">${emptyState(
-                        'BMC not configured',
-                        'Add BMC credentials to this node to enable remote power management.',
-                        `<button class="btn btn-primary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(node))}, ${JSON.stringify(JSON.stringify([]))})'>Configure BMC</button>`
-                    )}</div></div>`}
+                    : (!node.power_provider || !node.power_provider.type ? `<div class="card"><div class="card-body">${emptyState(
+                        'No power management configured',
+                        'Configure a power provider (Proxmox VE or IPMI/BMC) to enable remote power controls and auto boot-flip after deployment.',
+                        `<button class="btn btn-primary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(node))}, ${JSON.stringify(JSON.stringify([]))})'>Configure Power</button>`
+                    )}</div></div>` : '')}
                 </div>
 
                 <!-- Configuration tab -->
@@ -2141,9 +2260,9 @@ const Pages = {
                 });
             });
 
-            // Kick off initial power status fetch if BMC is configured.
+            // Kick off initial power status fetch if any power management is configured.
             // This runs immediately so status is ready when the user opens the tab.
-            if (node.bmc && node.bmc.ip_address) {
+            if ((node.bmc && node.bmc.ip_address) || (node.power_provider && node.power_provider.type)) {
                 Pages._refreshPowerStatus(node.id);
             }
 
@@ -2211,6 +2330,21 @@ const Pages = {
     },
 
     // ── Power management ──────────────────────────────────────────────────────
+
+    // _doFlipToDisk calls POST /nodes/:id/power/flip-to-disk via the provider.
+    // When cycle=true the server also power-cycles the node after flipping.
+    async _doFlipToDisk(nodeId, cycle) {
+        const feedback = document.getElementById('power-action-feedback');
+        const label = cycle ? 'Flip to Disk + Reboot' : 'Flip to Disk';
+        if (feedback) { feedback.textContent = `${label}…`; feedback.style.display = ''; feedback.className = 'alert alert-info'; }
+        try {
+            await API.nodes.power.flipToDisk(nodeId, !!cycle);
+            if (feedback) { feedback.textContent = `${label} command sent.`; feedback.className = 'alert alert-info'; }
+            if (!cycle) setTimeout(() => Pages._refreshPowerStatus(nodeId), 2000);
+        } catch (e) {
+            if (feedback) { feedback.textContent = `Error: ${e.message}`; feedback.className = 'alert alert-error'; }
+        }
+    },
 
     // _onBMCTabOpen is called when the user clicks the Power / IPMI tab.
     // Starts a 20-second auto-refresh for power status and a 30-second refresh

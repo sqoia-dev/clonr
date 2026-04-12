@@ -304,18 +304,25 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 	// The reimage orchestrator set this flag after firing SetNextBoot(PXE) +
 	// PowerCycle — the node is here because it was told to come back for a
 	// fresh image.
+	var dryRun bool
 	if nodeCfg.ReimagePending {
 		action = "deploy"
+		// Look up the active reimage request to surface dry_run to the client.
+		if activeReq, err := h.DB.GetActiveReimageForNode(r.Context(), nodeCfg.ID); err == nil && activeReq != nil {
+			dryRun = activeReq.DryRun
+		}
 	}
 
 	log.Info().Str("mac", primaryMAC).Str("hostname", nodeCfg.Hostname).
 		Bool("hostname_auto", nodeCfg.HostnameAuto).
 		Bool("reimage_pending", nodeCfg.ReimagePending).
+		Bool("dry_run", dryRun).
 		Str("action", action).Msg("node registered")
 
 	writeJSON(w, http.StatusOK, api.RegisterResponse{
 		NodeConfig: &nodeCfg,
 		Action:     action,
+		DryRun:     dryRun,
 	})
 }
 
