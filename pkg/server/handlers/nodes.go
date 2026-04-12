@@ -43,6 +43,21 @@ type NodesHandler struct {
 	DB *db.DB
 }
 
+// sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider redacted.
+// Call this on every outbound NodeConfig so credentials never leak in responses.
+func sanitizeNodeConfig(cfg api.NodeConfig) api.NodeConfig {
+	cfg.PowerProvider = cfg.PowerProvider.Sanitize()
+	return cfg
+}
+
+// sanitizeNodeConfigs applies sanitizeNodeConfig to a slice in place.
+func sanitizeNodeConfigs(cfgs []api.NodeConfig) []api.NodeConfig {
+	for i := range cfgs {
+		cfgs[i] = sanitizeNodeConfig(cfgs[i])
+	}
+	return cfgs
+}
+
 // ListNodes handles GET /api/v1/nodes
 func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	baseImageID := r.URL.Query().Get("base_image_id")
@@ -55,6 +70,7 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	if nodes == nil {
 		nodes = []api.NodeConfig{}
 	}
+	nodes = sanitizeNodeConfigs(nodes)
 	writeJSON(w, http.StatusOK, api.ListNodesResponse{Nodes: nodes, Total: len(nodes)})
 }
 
@@ -124,7 +140,7 @@ func (h *NodesHandler) GetNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, sanitizeNodeConfig(cfg))
 }
 
 // UpdateNode handles PUT /api/v1/nodes/:id
@@ -154,19 +170,20 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := api.NodeConfig{
-		ID:           id,
-		Hostname:     req.Hostname,
-		HostnameAuto: false, // admin explicitly set the hostname → mark as non-auto
-		FQDN:         req.FQDN,
-		PrimaryMAC:   req.PrimaryMAC,
-		Interfaces:   req.Interfaces,
-		SSHKeys:      req.SSHKeys,
-		KernelArgs:   req.KernelArgs,
-		Groups:       req.Groups,
-		CustomVars:   req.CustomVars,
-		BaseImageID:  req.BaseImageID,
-		CreatedAt:    existing.CreatedAt,
-		UpdatedAt:    time.Now().UTC(),
+		ID:            id,
+		Hostname:      req.Hostname,
+		HostnameAuto:  false, // admin explicitly set the hostname → mark as non-auto
+		FQDN:          req.FQDN,
+		PrimaryMAC:    req.PrimaryMAC,
+		Interfaces:    req.Interfaces,
+		SSHKeys:       req.SSHKeys,
+		KernelArgs:    req.KernelArgs,
+		Groups:        req.Groups,
+		CustomVars:    req.CustomVars,
+		BaseImageID:   req.BaseImageID,
+		PowerProvider: req.PowerProvider,
+		CreatedAt:     existing.CreatedAt,
+		UpdatedAt:     time.Now().UTC(),
 	}
 	if cfg.Interfaces == nil {
 		cfg.Interfaces = []api.InterfaceConfig{}
@@ -208,7 +225,7 @@ func (h *NodesHandler) GetNodeByMAC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, sanitizeNodeConfig(cfg))
 }
 
 // RegisterNode handles POST /api/v1/nodes/register.
@@ -283,9 +300,17 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 	if nodeCfg.BaseImageID != "" {
 		action = "deploy"
 	}
+	// A pending reimage overrides the normal wait/deploy logic: always deploy.
+	// The reimage orchestrator set this flag after firing SetNextBoot(PXE) +
+	// PowerCycle — the node is here because it was told to come back for a
+	// fresh image.
+	if nodeCfg.ReimagePending {
+		action = "deploy"
+	}
 
 	log.Info().Str("mac", primaryMAC).Str("hostname", nodeCfg.Hostname).
 		Bool("hostname_auto", nodeCfg.HostnameAuto).
+		Bool("reimage_pending", nodeCfg.ReimagePending).
 		Str("action", action).Msg("node registered")
 
 	writeJSON(w, http.StatusOK, api.RegisterResponse{

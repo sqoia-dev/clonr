@@ -16,32 +16,47 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
 	"github.com/sqoia-dev/clonr/pkg/image"
+	"github.com/sqoia-dev/clonr/pkg/power"
+	ipmipower "github.com/sqoia-dev/clonr/pkg/power/ipmi"
+	proxmoxpower "github.com/sqoia-dev/clonr/pkg/power/proxmox"
+	"github.com/sqoia-dev/clonr/pkg/reimage"
 	"github.com/sqoia-dev/clonr/pkg/server/handlers"
 	"github.com/sqoia-dev/clonr/pkg/server/ui"
 )
 
 // Server wraps the HTTP server and all its dependencies.
 type Server struct {
-	cfg          config.ServerConfig
-	db           *db.DB
-	broker       *LogBroker
-	progress     *ProgressStore
-	shells       *image.ShellManager
-	powerCache   *PowerCache
-	router       chi.Router
-	http         *http.Server
+	cfg                config.ServerConfig
+	db                 *db.DB
+	broker             *LogBroker
+	progress           *ProgressStore
+	shells             *image.ShellManager
+	powerCache         *PowerCache
+	powerRegistry      *power.Registry
+	reimageOrchestrator *reimage.Orchestrator
+	router             chi.Router
+	http               *http.Server
 }
 
 // New creates a Server wired with the given config and database.
 func New(cfg config.ServerConfig, database *db.DB) *Server {
+	// Build the power provider registry and register all supported backends.
+	registry := power.NewRegistry()
+	ipmipower.Register(registry)
+	proxmoxpower.Register(registry)
+
+	reimageOrch := reimage.New(database, registry, log.Logger)
+
 	shells := image.NewShellManager(database, cfg.ImageDir, log.Logger)
 	s := &Server{
-		cfg:        cfg,
-		db:         database,
-		broker:     NewLogBroker(),
-		progress:   NewProgressStore(),
-		shells:     shells,
-		powerCache: NewPowerCache(15 * time.Second),
+		cfg:                 cfg,
+		db:                  database,
+		broker:              NewLogBroker(),
+		progress:            NewProgressStore(),
+		shells:              shells,
+		powerCache:          NewPowerCache(15 * time.Second),
+		powerRegistry:       registry,
+		reimageOrchestrator: reimageOrch,
 	}
 	s.router = s.buildRouter()
 	s.http = &http.Server{
@@ -49,6 +64,12 @@ func New(cfg config.ServerConfig, database *db.DB) *Server {
 		Handler: s.router,
 	}
 	return s
+}
+
+// StartBackgroundWorkers starts long-running background goroutines.
+// Call this after New() and before ListenAndServe().
+func (s *Server) StartBackgroundWorkers(ctx context.Context) {
+	go s.reimageOrchestrator.Scheduler(ctx)
 }
 
 // buildRouter constructs the chi router and registers all routes.
@@ -99,7 +120,9 @@ func (s *Server) buildRouter() chi.Router {
 	}
 	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
 	progress := &handlers.ProgressHandler{Store: s.progress}
-	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache}
+	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
+	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}
+	reimageH := &handlers.ReimageHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	boot := &handlers.BootHandler{
 		BootDir:   s.cfg.PXE.BootDir,
 		TFTPDir:   s.cfg.PXE.TFTPDir,
@@ -177,7 +200,15 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/nodes/{id}/power/reset", ipmiH.PowerReset)
 			r.Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
 			r.Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
+			r.Post("/nodes/{id}/power/flip-to-disk", powerH.FlipToDisk)
 			r.Get("/nodes/{id}/sensors", ipmiH.GetSensors)
+
+			// Reimage — queue, track and retry node reimages via the power provider.
+			r.Post("/nodes/{id}/reimage", reimageH.Create)
+			r.Get("/nodes/{id}/reimage", reimageH.ListForNode)
+			r.Get("/reimage/{id}", reimageH.Get)
+			r.Delete("/reimage/{id}", reimageH.Cancel)
+			r.Post("/reimage/{id}/retry", reimageH.Retry)
 
 			// Logs — stream must be registered before plain /logs.
 			r.Get("/logs/stream", logs.StreamLogs)
