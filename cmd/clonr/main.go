@@ -425,6 +425,8 @@ PXE-booted nodes running from initramfs.`,
 			// Tee all zerolog output: local console + remote server.
 			multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr}, remoteWriter)
 			deployLog := zerolog.New(multi).With().Timestamp().Logger()
+			// Wire the deploy package so subprocess output goes through the same logger.
+			deploy.SetLogger(deployLog)
 			// ─────────────────────────────────────────────────────────────────
 
 			// Step 1: Discover hardware.
@@ -632,6 +634,8 @@ func runAutoDeployMode() error {
 	defer remoteWriter.Close()
 	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr}, remoteWriter)
 	deployLog := zerolog.New(multi).With().Timestamp().Logger()
+	// Wire the deploy package so subprocess output goes through the same logger.
+	deploy.SetLogger(deployLog)
 
 	deployLog.Info().Str("mac", primaryMAC).Str("hostname", hw.Hostname).
 		Msg("hardware discovered, registering with server")
@@ -657,7 +661,7 @@ func runAutoDeployMode() error {
 	switch regResp.Action {
 	case "deploy":
 		fmt.Fprintln(os.Stderr, "[auto] Image assigned — proceeding with deployment")
-		return runAutoDeployImage(ctx, c, *regResp.NodeConfig, deployLog)
+		return runAutoDeployImage(ctx, c, *regResp.NodeConfig, deployLog, remoteWriter)
 
 	case "wait":
 		fmt.Fprintln(os.Stderr, "[auto] Waiting for admin to assign an image (polling every 30s)...")
@@ -677,7 +681,7 @@ func runAutoDeployMode() error {
 			if nodeCfg.BaseImageID != "" {
 				deployLog.Info().Str("image_id", nodeCfg.BaseImageID).Msg("image assigned, starting deployment")
 				fmt.Fprintln(os.Stderr, "[auto] Image assigned — proceeding with deployment")
-				return runAutoDeployImage(ctx, c, *nodeCfg, deployLog)
+				return runAutoDeployImage(ctx, c, *nodeCfg, deployLog, remoteWriter)
 			}
 			deployLog.Debug().Msg("no image assigned yet, still waiting")
 		}
@@ -707,10 +711,11 @@ func sleepCtx(ctx context.Context, d time.Duration) <-chan struct{} {
 
 // runAutoDeployImage performs the full deployment given a NodeConfig with an assigned image.
 // The node config must have BaseImageID set.
-func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeConfig, deployLog zerolog.Logger) (retErr error) {
+func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeConfig, deployLog zerolog.Logger, remoteWriter *client.RemoteLogWriter) (retErr error) {
 	// Panic recovery: if any deployment sub-call panics (e.g. nil pointer in a
-	// hardware probe or partition library), catch it here, log the stack trace,
-	// and return it as an error rather than crashing PID 1 in the initramfs.
+	// hardware probe or partition library), catch it here, flush buffered logs so
+	// the last messages before the panic reach the server, then return as an error
+	// rather than crashing PID 1 in the initramfs.
 	defer func() {
 		if r := recover(); r != nil {
 			deployLog.Error().
@@ -718,6 +723,8 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 				Stack().
 				Msg("deploy panicked — caught by recovery wrapper")
 			retErr = fmt.Errorf("deploy panicked: %v", r)
+			// Flush immediately so crash logs reach the server before we exit.
+			remoteWriter.FlushSync()
 		}
 	}()
 

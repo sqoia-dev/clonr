@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -66,16 +65,17 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 	}
 
 	// ── Rollback setup ────────────────────────────────────────────────────────
+	log := logger()
 	var rollbackPath string
 	if !opts.NoRollback {
 		backup, empty, err := backupPartitionTable(disk)
 		if err != nil {
-			log.Printf("deploy/block: WARNING: could not back up partition table on %s: %v — proceeding without rollback", disk, err)
+			log.Warn().Str("disk", disk).Err(err).Msg("could not back up partition table — proceeding without rollback")
 		} else if empty {
-			log.Printf("deploy/block: disk %s has no existing partition table — no rollback possible if deployment fails", disk)
+			log.Info().Str("disk", disk).Msg("disk has no existing partition table — no rollback possible if deployment fails")
 		} else {
 			rollbackPath = backup
-			log.Printf("deploy/block: partition table backup saved to %s (will restore on failure)", rollbackPath)
+			log.Info().Str("backup", rollbackPath).Msg("partition table backup saved (will restore on failure)")
 		}
 	}
 
@@ -83,11 +83,11 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 		if rollbackPath == "" {
 			return
 		}
-		log.Printf("deploy/block: ROLLBACK triggered (%s) — restoring partition table on %s", reason, disk)
+		log.Warn().Str("reason", reason).Str("disk", disk).Msg("ROLLBACK triggered — restoring partition table")
 		if err := restorePartitionTable(disk, rollbackPath); err != nil {
-			log.Printf("deploy/block: ROLLBACK FAILED: %v — disk %s may be in an inconsistent state; re-run deployment to recover", err, disk)
+			log.Error().Err(err).Str("disk", disk).Msg("ROLLBACK FAILED — disk may be in inconsistent state; re-run deployment to recover")
 		} else {
-			log.Printf("deploy/block: rollback complete — partition table on %s restored to pre-deployment state", disk)
+			log.Info().Str("disk", disk).Msg("rollback complete — partition table restored to pre-deployment state")
 			rollbackPath = ""
 		}
 	}
@@ -100,8 +100,8 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
 		if attempt > 1 {
 			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
-			log.Printf("deploy/block: network error downloading image blob — retrying in %s (attempt %d/%d)",
-				backoff, attempt, maxDownloadAttempts)
+			log.Warn().Dur("backoff", backoff).Int("attempt", attempt).Int("max", maxDownloadAttempts).
+				Msg("network error downloading image blob — retrying")
 			if progress != nil {
 				progress(0, 0, fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxDownloadAttempts))
 			}
@@ -121,7 +121,7 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 			doRollback("context cancelled during download")
 			return ctx.Err()
 		}
-		log.Printf("deploy/block: download attempt %d/%d failed: %v", attempt, maxDownloadAttempts, writeErr)
+		log.Warn().Int("attempt", attempt).Int("max", maxDownloadAttempts).Err(writeErr).Msg("block write attempt failed")
 	}
 
 	if writeErr != nil {
@@ -132,12 +132,12 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 	// Deployment succeeded — remove the rollback backup.
 	if rollbackPath != "" {
 		os.Remove(rollbackPath)
-		log.Printf("deploy/block: deployment succeeded — partition table backup removed")
+		log.Info().Msg("deployment succeeded — partition table backup removed")
 	}
 
 	// Re-read the partition table after writing.
-	_ = exec.CommandContext(ctx, "partprobe", disk).Run()
-	_ = exec.CommandContext(ctx, "udevadm", "settle").Run()
+	_ = runAndLog(ctx, "partprobe", exec.CommandContext(ctx, "partprobe", disk))
+	_ = runCmd(ctx, "udevadm", "settle")
 
 	return nil
 }
@@ -170,7 +170,7 @@ func (d *BlockDeployer) attemptBlockWrite(ctx context.Context, disk string, opts
 	}
 
 	if opts.SkipVerify && opts.ExpectedChecksum != "" {
-		log.Printf("deploy/block: WARNING: checksum verification skipped (--skip-verify set)")
+		logger().Warn().Msg("checksum verification skipped (--skip-verify set)")
 	}
 	return d.streamBlockWrite(ctx, resp.Body, totalBytes, disk, progress)
 }
@@ -201,7 +201,7 @@ func (d *BlockDeployer) downloadVerifyAndWrite(ctx context.Context, body io.Read
 			"expected=%s — the image may be corrupt or the server checksum is stale; "+
 			"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
 	}
-	log.Printf("deploy/block: image checksum verified: sha256=%s", gotChecksum)
+	logger().Info().Str("sha256", gotChecksum).Msg("image checksum verified")
 
 	// Seek to start for writing.
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {

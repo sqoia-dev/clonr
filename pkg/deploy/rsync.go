@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -70,6 +69,12 @@ func humanReadableBytes(b int64) string {
 }
 
 // Deploy partitions the disk, creates filesystems, mounts them, and extracts the tarball.
+// Blob download is started concurrently with partition/format/mount to overlap I/O:
+//  1. Start HTTP connection + open blob download in a goroutine (establishes TCP + TLS).
+//  2. In parallel: partition, format filesystems, mount (CPU/disk ops, typically 2-5s).
+//  3. Once mounts are ready, begin extracting from the already-open download pipe.
+//
+// This hides nearly all of the network round-trip latency behind local disk ops.
 func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
 	if d.targetDisk == "" {
 		return fmt.Errorf("deploy: Preflight must be called before Deploy")
@@ -80,7 +85,41 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		disk = d.targetDisk
 	}
 
-	log.Printf("deploy: target disk: %s", disk)
+	logger().Info().Str("disk", disk).Msg("deploy: target disk selected")
+
+	// ── Start blob download in background — overlaps with partition/format/mount ─
+	// We open the HTTP connection now so the TCP handshake + TLS + server seek
+	// happen while we are busy with local disk operations. The body is buffered
+	// via an os.Pipe (64KB kernel buffer) so the server can push data ahead of us.
+	type blobResult struct {
+		resp       *http.Response
+		totalBytes int64
+		err        error
+	}
+	blobCh := make(chan blobResult, 1)
+
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
+		if err != nil {
+			blobCh <- blobResult{err: fmt.Errorf("build download request: %w", err)}
+			return
+		}
+		if opts.AuthToken != "" {
+			req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
+		}
+		logger().Info().Str("url", opts.ImageURL).Msg("prefetching image blob (concurrent with partitioning)")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			blobCh <- blobResult{err: fmt.Errorf("network error fetching blob: %w", err)}
+			return
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			blobCh <- blobResult{err: fmt.Errorf("HTTP %d fetching blob from %s", resp.StatusCode, opts.ImageURL)}
+			return
+		}
+		blobCh <- blobResult{resp: resp, totalBytes: resp.ContentLength}
+	}()
 
 	// ── Rollback setup ────────────────────────────────────────────────────────
 	var rollbackPath string
@@ -88,12 +127,12 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		backup, empty, err := backupPartitionTable(disk)
 		if err != nil {
 			// Non-fatal: log and continue. We still proceed, just without rollback.
-			log.Printf("deploy: WARNING: could not back up partition table on %s: %v — proceeding without rollback", disk, err)
+			logger().Warn().Str("disk", disk).Err(err).Msg("could not back up partition table — proceeding without rollback")
 		} else if empty {
-			log.Printf("deploy: disk %s has no existing partition table — no rollback possible if deployment fails", disk)
+			logger().Info().Str("disk", disk).Msg("disk has no existing partition table — no rollback possible if deployment fails")
 		} else {
 			rollbackPath = backup
-			log.Printf("deploy: partition table backup saved to %s (will restore on failure)", rollbackPath)
+			logger().Info().Str("backup", rollbackPath).Msg("partition table backup saved (will restore on failure)")
 		}
 	}
 
@@ -102,24 +141,24 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		if rollbackPath == "" {
 			return
 		}
-		log.Printf("deploy: ROLLBACK triggered (%s) — restoring partition table on %s", reason, disk)
+		logger().Warn().Str("reason", reason).Str("disk", disk).Msg("ROLLBACK triggered — restoring partition table")
 		if err := restorePartitionTable(disk, rollbackPath); err != nil {
-			log.Printf("deploy: ROLLBACK FAILED: %v — disk %s may be in an inconsistent state; re-run deployment to recover", err, disk)
+			logger().Error().Err(err).Str("disk", disk).Msg("ROLLBACK FAILED — disk may be in inconsistent state; re-run deployment to recover")
 		} else {
-			log.Printf("deploy: rollback complete — partition table on %s restored to pre-deployment state", disk)
+			logger().Info().Str("disk", disk).Msg("rollback complete — partition table restored to pre-deployment state")
 			rollbackPath = "" // already removed by restorePartitionTable
 		}
 	}
 
 	// Emit progress: partitioning phase.
-	log.Printf("deploy: partitioning disk %s (%d partitions)", disk, len(d.layout.Partitions))
+	logger().Info().Str("disk", disk).Int("partitions", len(d.layout.Partitions)).Msg("partitioning disk")
 	if progress != nil {
 		progress(0, 0, "partitioning")
 	}
 
 	// Create RAID arrays before partitioning, if any are specified.
 	if len(d.layout.RAIDArrays) > 0 {
-		log.Printf("deploy: creating %d RAID arrays", len(d.layout.RAIDArrays))
+		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays")
 		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
 			doRollback("RAID array creation failed")
 			return fmt.Errorf("deploy: create raid arrays: %w", err)
@@ -128,22 +167,14 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 
 	// Partition the disk.
 	if err := d.partitionDisk(ctx, disk); err != nil {
-		log.Printf("deploy: ERROR: partitioning failed on %s: %v", disk, err)
+		logger().Error().Str("disk", disk).Err(err).Msg("partitioning failed")
 		doRollback("partitioning failed")
 		return err // partitionDisk already produces an actionable error
 	}
-	log.Printf("deploy: partitioning complete on %s", disk)
-
-	for i, p := range d.layout.Partitions {
-		sizeStr := "fill"
-		if p.SizeBytes > 0 {
-			sizeStr = fmt.Sprintf("%s", humanReadableBytes(p.SizeBytes))
-		}
-		log.Printf("deploy: partition %d: %s fs=%s size=%s", i+1, p.MountPoint, p.Filesystem, sizeStr)
-	}
+	logger().Info().Str("disk", disk).Msg("partitioning complete")
 
 	// Emit progress: formatting phase.
-	log.Printf("deploy: formatting partitions on %s", disk)
+	logger().Info().Str("disk", disk).Msg("formatting partitions")
 	if progress != nil {
 		progress(0, 0, "formatting")
 	}
@@ -151,41 +182,57 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// Create filesystems.
 	partDevs, err := d.createFilesystems(ctx, disk)
 	if err != nil {
-		log.Printf("deploy: ERROR: filesystem creation failed on %s: %v", disk, err)
+		logger().Error().Str("disk", disk).Err(err).Msg("filesystem creation failed")
 		doRollback("filesystem creation failed")
 		return fmt.Errorf("deploy: create filesystems: %w", err)
 	}
-	log.Printf("deploy: filesystems created: %s", strings.Join(partDevs, ", "))
+	logger().Info().Str("devices", strings.Join(partDevs, ", ")).Msg("filesystems created")
 
 	// Mount partitions.
-	log.Printf("deploy: mounting partitions at %s", opts.MountRoot)
+	logger().Info().Str("mount_root", opts.MountRoot).Msg("mounting partitions")
 	if err := d.mountPartitions(ctx, partDevs, opts.MountRoot); err != nil {
-		log.Printf("deploy: ERROR: mount failed: %v", err)
+		logger().Error().Err(err).Msg("partition mount failed")
 		doRollback("partition mount failed")
 		return fmt.Errorf("deploy: mount partitions: %w", err)
 	}
-	log.Printf("deploy: partitions mounted")
+	logger().Info().Str("mount_root", opts.MountRoot).Msg("partitions mounted")
 	// Always attempt unmount on exit.
 	defer d.unmountAll(opts.MountRoot)
 
-	// Emit progress: downloading/extracting phase.
-	log.Printf("deploy: downloading image blob from server")
+	// ── Wait for the pre-fetched blob connection, then extract ────────────────
 	if progress != nil {
 		progress(0, 0, "downloading")
 	}
 
-	// Download, verify checksum, and stream-extract.
-	if err := d.downloadVerifyAndExtract(ctx, opts, progress); err != nil {
-		log.Printf("deploy: ERROR: image download/extract failed: %v", err)
+	blob := <-blobCh
+	if blob.err != nil {
+		logger().Error().Err(blob.err).Msg("blob prefetch failed")
+		doRollback("blob prefetch failed")
+		return fmt.Errorf("deploy: blob prefetch: %w", blob.err)
+	}
+	defer blob.resp.Body.Close()
+	if blob.totalBytes > 0 {
+		logger().Info().Str("size", humanReadableBytes(blob.totalBytes)).Msg("image blob connection ready — extracting")
+	} else {
+		logger().Info().Msg("image blob connection ready — extracting (unknown size)")
+	}
+
+	needsVerify := !opts.SkipVerify && opts.ExpectedChecksum != ""
+	if opts.SkipVerify && opts.ExpectedChecksum != "" {
+		logger().Warn().Msg("checksum verification skipped for image download (--skip-verify set)")
+	}
+
+	if err := d.streamExtract(ctx, blob.resp.Body, blob.totalBytes, opts, needsVerify, progress); err != nil {
+		logger().Error().Err(err).Msg("image download/extract failed")
 		doRollback("image download/extract failed")
 		return fmt.Errorf("deploy: extract: %w", err)
 	}
-	log.Printf("deploy: extraction complete")
+	logger().Info().Msg("extraction complete")
 
 	// Deployment succeeded — remove the rollback backup.
 	if rollbackPath != "" {
 		os.Remove(rollbackPath)
-		log.Printf("deploy: deployment succeeded — partition table backup removed")
+		logger().Info().Msg("deployment succeeded — partition table backup removed")
 	}
 
 	return nil
@@ -222,7 +269,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		if err := GenerateMdadmConf(ctx, mountRoot); err != nil {
 			// Non-fatal: log and continue. The node may still boot if the kernel
 			// auto-assembles the RAID arrays via superblock scanning.
-			log.Printf("deploy: generate mdadm.conf (non-fatal): %v", err)
+			logger().Warn().Err(err).Msg("generate mdadm.conf failed (non-fatal)")
 		}
 	}
 
@@ -232,17 +279,18 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 // partitionDisk wipes and repartitions the disk according to the layout.
 // Uses sgdisk for GPT layouts (standard for EFI systems).
 func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) error {
-	log.Printf("deploy: wiping existing partition table on %s", disk)
+	log := logger()
+	log.Info().Str("disk", disk).Msg("wiping existing partition table")
 	// Wipe existing partition table.
 	if err := runCmd(ctx, "sgdisk", "--zap-all", disk); err != nil {
-		log.Printf("deploy: sgdisk --zap-all failed (%v), trying wipefs", err)
+		log.Warn().Str("disk", disk).Err(err).Msg("sgdisk --zap-all failed, trying wipefs")
 		// Fall back to wipefs if sgdisk is unavailable.
 		if err2 := runCmd(ctx, "wipefs", "-a", disk); err2 != nil {
 			return fmt.Errorf("wipe disk %s: sgdisk failed (%v) and wipefs also failed (%v) — "+
 				"check if the disk has an active RAID superblock (wipefs -a %s)", disk, err, err2, disk)
 		}
 	}
-	log.Printf("deploy: disk %s wiped", disk)
+	log.Info().Str("disk", disk).Msg("disk wiped")
 
 	// Build sgdisk partition arguments.
 	args := []string{}
@@ -270,41 +318,45 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 				args = append(args, fmt.Sprintf("--typecode=%d:ef02", num))
 			}
 		}
+
+		// Log each partition as it's being defined (granular progress, Problem 3).
+		sizeStr := "fill"
+		if p.SizeBytes > 0 {
+			sizeStr = humanReadableBytes(p.SizeBytes)
+		}
+		log.Info().Int("partition", num).Str("mountpoint", p.MountPoint).
+			Str("filesystem", p.Filesystem).Str("size", sizeStr).
+			Str("flags", strings.Join(p.Flags, ",")).
+			Msg("defining partition")
 	}
 	args = append(args, disk)
 
-	log.Printf("deploy: running sgdisk to create %d partitions on %s", len(d.layout.Partitions), disk)
-	cmd := exec.CommandContext(ctx, "sgdisk", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		exitCode := -1
-		if cmd.ProcessState != nil {
-			exitCode = cmd.ProcessState.ExitCode()
-		}
-		return fmt.Errorf("failed to create partitions on %s: sgdisk exited with code %d — "+
-			"check if the disk has an existing RAID superblock (wipefs -a %s)\noutput: %s",
-			disk, exitCode, disk, string(out))
+	log.Info().Int("count", len(d.layout.Partitions)).Str("disk", disk).Msg("running sgdisk to create partitions")
+	if err := runAndLog(ctx, "sgdisk", exec.CommandContext(ctx, "sgdisk", args...)); err != nil {
+		return fmt.Errorf("failed to create partitions on %s — "+
+			"check if the disk has an existing RAID superblock (wipefs -a %s): %w",
+			disk, disk, err)
 	}
-	log.Printf("deploy: sgdisk partition creation succeeded on %s", disk)
+	log.Info().Str("disk", disk).Msg("sgdisk partition creation succeeded")
 
 	// Allow kernel to re-read the new partition table.
-	log.Printf("deploy: running partprobe on %s", disk)
+	log.Info().Str("disk", disk).Msg("running partprobe to re-read partition table")
 	_ = runCmd(ctx, "partprobe", disk)
 	_ = runCmd(ctx, "udevadm", "settle")
 	// In minimal initramfs environments without udevd, partition uevent
 	// notifications are not processed, so /dev/sdaN nodes don't appear
 	// after partprobe. Run 'mdev -s' (busybox) to scan sysfs and create
 	// device nodes, then fall back to manually creating them if needed.
-	log.Printf("deploy: triggering device node creation for new partitions")
+	log.Info().Msg("triggering device node creation for new partitions")
 	_ = exec.CommandContext(ctx, "mdev", "-s").Run()
 	// Also trigger re-read via blockdev for kernels that support it.
 	_ = exec.CommandContext(ctx, "blockdev", "--rereadpt", disk).Run()
 	// Give the kernel time to create partition device nodes in /dev.
 	if err := waitForPartitions(ctx, disk, len(d.layout.Partitions), 15); err != nil {
-		log.Printf("deploy: waitForPartitions timed out — attempting manual device node creation")
+		log.Warn().Err(err).Msg("waitForPartitions timed out — attempting manual device node creation")
 		ensurePartitionNodes(disk, len(d.layout.Partitions))
 	}
-	log.Printf("deploy: partition table re-read complete")
+	log.Info().Str("disk", disk).Msg("partition table re-read complete")
 
 	return nil
 }
@@ -320,19 +372,20 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 //  3. mknod        — last resort: directly create block device nodes using
 //     major/minor numbers read from /sys/class/block/<name>/dev.
 func ensurePartitionNodes(disk string, count int) {
-	log.Printf("deploy: running partx to force partition node creation on %s", disk)
+	log := logger()
+	log.Info().Str("disk", disk).Msg("running partx to force partition node creation")
 	cmd := exec.Command("partx", "--add", disk)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("deploy: partx --add %s: %v\noutput: %s", disk, err, string(out))
+		log.Warn().Str("disk", disk).Err(err).Str("output", string(out)).Msg("partx --add failed")
 	} else {
-		log.Printf("deploy: partx --add succeeded on %s", disk)
+		log.Info().Str("disk", disk).Msg("partx --add succeeded")
 	}
 
 	// Re-run mdev -s to pick up any new sysfs entries for the partitions.
 	if out, err := exec.Command("mdev", "-s").CombinedOutput(); err != nil {
-		log.Printf("deploy: mdev -s after partx: %v (output: %s)", err, string(out))
+		log.Warn().Err(err).Str("output", string(out)).Msg("mdev -s after partx failed")
 	} else {
-		log.Printf("deploy: mdev -s ran after partx")
+		log.Info().Msg("mdev -s ran after partx")
 	}
 
 	// Last resort: create nodes directly from sysfs major:minor data.
@@ -348,27 +401,27 @@ func ensurePartitionNodes(disk string, count int) {
 		sysDevPath := fmt.Sprintf("/sys/class/block/%s/dev", partName)
 		devData, readErr := os.ReadFile(sysDevPath)
 		if readErr != nil {
-			log.Printf("deploy: mknod fallback: cannot read %s: %v", sysDevPath, readErr)
+			log.Warn().Str("sysfs_path", sysDevPath).Err(readErr).Msg("mknod fallback: cannot read major:minor")
 			continue
 		}
 		// devData is "MAJOR:MINOR\n"
 		var major, minor uint32
 		if _, err := fmt.Sscanf(strings.TrimSpace(string(devData)), "%d:%d", &major, &minor); err != nil {
-			log.Printf("deploy: mknod fallback: cannot parse major:minor from %q: %v", string(devData), err)
+			log.Warn().Str("data", string(devData)).Err(err).Msg("mknod fallback: cannot parse major:minor")
 			continue
 		}
 		// syscall.Mknod creates a block device node (S_IFBLK = 0x6000).
 		devNum := major*256 + minor
 		if err := syscall.Mknod(devPath, syscall.S_IFBLK|0o600, int(devNum)); err != nil {
-			log.Printf("deploy: mknod %s (%d:%d): %v", devPath, major, minor, err)
+			log.Warn().Str("dev", devPath).Uint32("major", major).Uint32("minor", minor).Err(err).Msg("mknod failed")
 		} else {
-			log.Printf("deploy: mknod created %s (%d:%d)", devPath, major, minor)
+			log.Info().Str("dev", devPath).Uint32("major", major).Uint32("minor", minor).Msg("mknod created device node")
 		}
 	}
 
 	// Log final /dev state for diagnostics.
 	if out, err := exec.Command("ls", "-la", filepath.Dir(disk)).CombinedOutput(); err == nil {
-		log.Printf("deploy: /dev after ensurePartitionNodes:\n%s", string(out))
+		log.Info().Str("output", string(out)).Msg("/dev state after ensurePartitionNodes")
 	}
 }
 
@@ -376,6 +429,7 @@ func ensurePartitionNodes(disk string, count int) {
 // This is necessary in initramfs environments where devtmpfs creates nodes
 // asynchronously after partprobe signals the kernel.
 func waitForPartitions(ctx context.Context, disk string, count int, maxWaitSec int) error {
+	log := logger()
 	start := time.Now()
 	for i := 0; i < maxWaitSec; i++ {
 		allPresent := true
@@ -383,12 +437,13 @@ func waitForPartitions(ctx context.Context, disk string, count int, maxWaitSec i
 			dev := partitionDevice(disk, num)
 			if _, err := os.Stat(dev); os.IsNotExist(err) {
 				allPresent = false
-				log.Printf("deploy: waiting for %s to appear... (%ds elapsed)", dev, i)
+				log.Info().Str("dev", dev).Int("elapsed_sec", i).Msg("waiting for partition device node to appear")
 				break
 			}
 		}
 		if allPresent {
-			log.Printf("deploy: all %d partition device nodes present after %s", count, time.Since(start).Round(time.Millisecond))
+			log.Info().Int("count", count).Str("elapsed", time.Since(start).Round(time.Millisecond).String()).
+				Msg("all partition device nodes present")
 			return nil
 		}
 		select {
@@ -412,6 +467,7 @@ func partitionDevice(disk string, num int) string {
 // createFilesystems creates the appropriate filesystem on each partition.
 // Returns a slice of resolved partition device paths in layout order.
 func (d *FilesystemDeployer) createFilesystems(ctx context.Context, disk string) ([]string, error) {
+	log := logger()
 	devs := make([]string, len(d.layout.Partitions))
 	for i, p := range d.layout.Partitions {
 		dev := partitionDevice(disk, i+1)
@@ -435,18 +491,27 @@ func (d *FilesystemDeployer) createFilesystems(ctx context.Context, disk string)
 		case "", "biosboot", "bios_grub":
 			// No filesystem — raw partition for BIOS boot (GPT BIOS boot partition)
 			// or an explicitly unformatted partition. sgdisk already set the type GUID.
-			log.Printf("deploy: partition %d: skipping mkfs for %q (BIOS boot / raw)", i+1, p.Filesystem)
+			log.Info().Int("partition", i+1).Str("filesystem", p.Filesystem).
+				Msg("skipping mkfs for BIOS boot / raw partition")
 			continue
 		default:
 			return nil, fmt.Errorf("unsupported filesystem %q for partition %d", p.Filesystem, i+1)
 		}
 
-		log.Printf("deploy: formatting %s as %s", dev, p.Filesystem)
-		if err := runCmd(ctx, mkfsBin, mkfsArgs...); err != nil {
-			log.Printf("deploy: ERROR: mkfs failed on %s (%s): %v", dev, p.Filesystem, err)
+		// Log size if known (granular progress, Problem 3).
+		sizeStr := "fill"
+		if p.SizeBytes > 0 {
+			sizeStr = humanReadableBytes(p.SizeBytes)
+		}
+		log.Info().Int("partition", i+1).Str("device", dev).Str("filesystem", p.Filesystem).
+			Str("size", sizeStr).Msg("formatting partition")
+
+		if err := runAndLog(ctx, mkfsBin, exec.CommandContext(ctx, mkfsBin, mkfsArgs...)); err != nil {
+			log.Error().Str("device", dev).Str("filesystem", p.Filesystem).Err(err).Msg("mkfs failed")
 			return nil, fmt.Errorf("mkfs partition %d (%s): %w", i+1, p.Filesystem, err)
 		}
-		log.Printf("deploy: filesystem %s created on %s", p.Filesystem, dev)
+		log.Info().Int("partition", i+1).Str("device", dev).Str("filesystem", p.Filesystem).
+			Str("size", sizeStr).Msg("filesystem created")
 	}
 	return devs, nil
 }
@@ -494,12 +559,13 @@ const maxDownloadAttempts = 3
 // its sha256 checksum if opts.ExpectedChecksum is set, then extracts it into
 // opts.MountRoot. Retries up to maxDownloadAttempts with exponential backoff.
 func (d *FilesystemDeployer) downloadVerifyAndExtract(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
+	log := logger()
 	var lastErr error
 	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
 		if attempt > 1 {
 			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
-			log.Printf("deploy: network error downloading image blob — retrying in %s (attempt %d/%d)",
-				backoff, attempt, maxDownloadAttempts)
+			log.Warn().Dur("backoff", backoff).Int("attempt", attempt).Int("max", maxDownloadAttempts).
+				Msg("network error downloading image blob — retrying")
 			if progress != nil {
 				progress(0, 0, fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxDownloadAttempts))
 			}
@@ -520,7 +586,7 @@ func (d *FilesystemDeployer) downloadVerifyAndExtract(ctx context.Context, opts 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		log.Printf("deploy: download attempt %d/%d failed: %v", attempt, maxDownloadAttempts, err)
+		log.Warn().Int("attempt", attempt).Int("max", maxDownloadAttempts).Err(err).Msg("download attempt failed")
 	}
 	return fmt.Errorf("image download failed after %d attempts: %w", maxDownloadAttempts, lastErr)
 }
@@ -539,7 +605,8 @@ func (d *FilesystemDeployer) attemptDownloadAndExtract(ctx context.Context, opts
 		req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
 	}
 
-	log.Printf("deploy: downloading image blob from %s", opts.ImageURL)
+	log := logger()
+	log.Info().Str("url", opts.ImageURL).Msg("downloading image blob")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("network error downloading image blob: %w", err)
@@ -552,12 +619,12 @@ func (d *FilesystemDeployer) attemptDownloadAndExtract(ctx context.Context, opts
 
 	totalBytes := resp.ContentLength
 	if totalBytes > 0 {
-		log.Printf("deploy: image size: %s", humanReadableBytes(totalBytes))
+		log.Info().Str("size", humanReadableBytes(totalBytes)).Msg("image blob size")
 	}
 
 	needsVerify := !opts.SkipVerify && opts.ExpectedChecksum != ""
 	if opts.SkipVerify && opts.ExpectedChecksum != "" {
-		log.Printf("deploy: WARNING: checksum verification skipped for image download (--skip-verify set)")
+		log.Warn().Msg("checksum verification skipped for image download (--skip-verify set)")
 	}
 
 	return d.streamExtract(ctx, resp.Body, totalBytes, opts, needsVerify, progress)
@@ -567,18 +634,18 @@ func (d *FilesystemDeployer) attemptDownloadAndExtract(ctx context.Context, opts
 // concurrently via a pipe so we never buffer the full blob to disk. This uses
 // constant memory regardless of image size.
 //
-// Compression detection is done in Go by peeking at the first two magic bytes
-// of the stream. If gzip magic (0x1f 0x8b) is detected, the stream is
-// transparently decompressed using Go's compress/gzip before being passed to
-// tar. This avoids any dependency on the tar binary's gzip support or the
-// presence of gzip/zcat in the initramfs PATH. Uncompressed tar streams are
-// passed directly to tar -xf -.
+// Compression detection is done by peeking at the first 4 magic bytes:
+//   - gzip: 0x1f 0x8b → decompressed via pigz (parallel, all cores) if available,
+//     otherwise via Go's compress/gzip.
+//   - zstd: 0x28 0xb5 0x2f 0xfd → decompressed via external "zstd -dc" pipe.
+//   - plain tar: no magic match → passed directly to tar.
 //
 // When needsVerify is true, the hasher result is checked after tar exits — if
 // checksum mismatches, an error is returned (but extraction has already run, so
 // the data on disk may be corrupt; the caller's retry loop will re-run from scratch).
 func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, totalBytes int64, opts DeployOpts, needsVerify bool, progress ProgressFunc) error {
-	log.Printf("deploy: starting stream-extract into %s", opts.MountRoot)
+	log := logger()
+	log.Info().Str("mount_root", opts.MountRoot).Msg("starting stream-extract")
 
 	// Set up the reader chain: body → [hasher tee] → progress → decompressor? → tar stdin.
 	var hasher hash.Hash
@@ -591,43 +658,81 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 
 	pr := &progressReader{r: reader, total: totalBytes, fn: progress, phase: "downloading+extracting"}
 
-	// Peek at the first two bytes to detect gzip compression (magic: 0x1f 0x8b).
-	// We use a bufio.Reader to allow peeking without consuming the stream.
+	// Peek at the first 4 bytes to detect compression format.
 	peeked := bufio.NewReaderSize(pr, 512)
-	magic, peekErr := peeked.Peek(2)
-	isGzip := peekErr == nil && len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b
+	magic, peekErr := peeked.Peek(4)
 
-	// tarSrc is what we feed to tar. For gzip archives, we interpose a gzip.Reader
-	// so that tar always receives raw (uncompressed) tar data and needs no -z flag.
+	isGzip := peekErr == nil && len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b
+	isZstd := peekErr == nil && len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd
+
 	var tarSrc io.Reader = peeked
+	var decompCmd *exec.Cmd
 
-	if isGzip {
-		log.Printf("deploy: detected gzip compression (magic %02x%02x) — decompressing in-process", magic[0], magic[1])
-		gz, err := gzip.NewReader(peeked)
-		if err != nil {
-			return fmt.Errorf("gzip.NewReader: %w", err)
+	switch {
+	case isZstd:
+		// zstd: pipe through external "zstd -dc". 3-5x faster decompression than gzip.
+		log.Info().Msgf("detected zstd compression (magic %02x%02x%02x%02x) — decompressing via zstd -dc", magic[0], magic[1], magic[2], magic[3])
+		zstdPath, zstdErr := exec.LookPath("zstd")
+		if zstdErr != nil {
+			return fmt.Errorf("zstd binary not found in PATH — cannot decompress .tar.zst image")
 		}
-		defer gz.Close()
-		tarSrc = gz
-	} else {
-		log.Printf("deploy: no gzip magic detected — treating stream as uncompressed tar")
+		decompCmd = exec.CommandContext(ctx, zstdPath, "-dc", "--no-progress")
+		pr2, pw2 := io.Pipe()
+		decompCmd.Stdin = peeked
+		decompCmd.Stdout = pw2
+		if err := decompCmd.Start(); err != nil {
+			return fmt.Errorf("zstd start: %w", err)
+		}
+		// Close pw2 when zstd exits (success or error) so tar sees EOF.
+		go func() {
+			_ = decompCmd.Wait()
+			pw2.Close()
+		}()
+		tarSrc = pr2
+
+	case isGzip:
+		// gzip: prefer pigz (parallel gzip, uses all CPU cores) over in-process gzip.
+		log.Info().Msgf("detected gzip compression (magic %02x%02x)", magic[0], magic[1])
+		if pigzPath, pigzErr := exec.LookPath("pigz"); pigzErr == nil {
+			log.Info().Str("pigz", pigzPath).Msg("decompressing via pigz (parallel gzip)")
+			decompCmd = exec.CommandContext(ctx, pigzPath, "-dc")
+			pr2, pw2 := io.Pipe()
+			decompCmd.Stdin = peeked
+			decompCmd.Stdout = pw2
+			if err := decompCmd.Start(); err != nil {
+				return fmt.Errorf("pigz start: %w", err)
+			}
+			go func() {
+				_ = decompCmd.Wait()
+				pw2.Close()
+			}()
+			tarSrc = pr2
+		} else {
+			// Fallback: Go's in-process gzip reader.
+			log.Info().Msg("pigz not found — decompressing via Go gzip (single-core)")
+			gz, err := gzip.NewReader(peeked)
+			if err != nil {
+				return fmt.Errorf("gzip.NewReader: %w", err)
+			}
+			defer gz.Close()
+			tarSrc = gz
+		}
+
+	default:
+		log.Info().Msg("no compression magic detected — treating stream as uncompressed tar")
 	}
 
-	// tar -xf - expects raw (possibly uncompressed) tar data on stdin.
-	// We explicitly do NOT pass -z because we already decompressed above.
-	tarCmd := exec.CommandContext(ctx, "tar", "-xf", "-", "-C", opts.MountRoot)
+	// tar -xvf - streams each extracted filename to stdout, which runAndLog pipes
+	// through the logger at Info level. This gives per-file visibility during
+	// extraction without any extra logic.
+	tarCmd := exec.CommandContext(ctx, "tar", "-xvf", "-", "-C", opts.MountRoot)
 	tarCmd.Stdin = tarSrc
 
-	tarOut, err := tarCmd.CombinedOutput()
-	if err != nil {
-		exitCode := -1
-		if tarCmd.ProcessState != nil {
-			exitCode = tarCmd.ProcessState.ExitCode()
-		}
-		return fmt.Errorf("tar extract failed (exit %d): %w\noutput: %s", exitCode, err, string(tarOut))
+	if err := runAndLog(ctx, "tar", tarCmd); err != nil {
+		return fmt.Errorf("tar extract failed: %w", err)
 	}
 
-	log.Printf("deploy: stream-extract complete, %s read", humanReadableBytes(pr.written))
+	log.Info().Str("read", humanReadableBytes(pr.written)).Msg("stream-extract complete")
 
 	// Post-extraction checksum verification. If this fails the data is on disk
 	// but potentially corrupt — the caller's retry loop will restart the download.
@@ -638,7 +743,7 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 				"expected=%s — the image may be corrupt or the server checksum is stale; "+
 				"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
 		}
-		log.Printf("deploy: image checksum verified: sha256=%s", gotChecksum)
+		log.Info().Str("sha256", gotChecksum).Msg("image checksum verified")
 	}
 
 	if progress != nil {

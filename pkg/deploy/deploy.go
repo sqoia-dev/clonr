@@ -4,17 +4,109 @@
 package deploy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
+	"github.com/rs/zerolog"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
 )
+
+// pkgLogger is the package-level zerolog logger used by deploy helpers.
+// It defaults to a no-op logger. Call SetLogger from main.go after building deployLog.
+var (
+	pkgLogMu sync.RWMutex
+	pkgLog   = zerolog.Nop()
+)
+
+// SetLogger sets the zerolog logger used by the deploy package for subprocess
+// output streaming and phase progress messages. Call this once before running
+// any deployment, passing the same logger used for the deploy command.
+func SetLogger(l zerolog.Logger) {
+	pkgLogMu.Lock()
+	pkgLog = l
+	pkgLogMu.Unlock()
+}
+
+// logger returns a pointer to a snapshot of the current package logger.
+// A pointer is returned so callers can use zerolog's pointer-receiver methods
+// (Info, Warn, Error, etc.) directly on the returned value without needing
+// to assign to a local variable first.
+func logger() *zerolog.Logger {
+	pkgLogMu.RLock()
+	l := pkgLog
+	pkgLogMu.RUnlock()
+	return &l
+}
+
+// runAndLog executes cmd and streams each line of stdout and stderr to the
+// package logger at Info level with the command name and stream as fields.
+// Returns an error if the process exits non-zero (error message includes the
+// last few lines of combined output for context).
+func runAndLog(ctx context.Context, name string, cmd *exec.Cmd) error {
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("deploy: %s: stdout pipe: %w", name, err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("deploy: %s: stderr pipe: %w", name, err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("deploy: %s: start: %w", name, err)
+	}
+
+	log := logger()
+
+	// Stream stdout and stderr in parallel, collecting the last 20 lines for
+	// error context in case the process exits non-zero.
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		tailBuf []string
+	)
+
+	scanStream := func(r io.Reader, stream string) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			log.Info().Str("cmd", name).Str("stream", stream).Msg(line)
+			mu.Lock()
+			tailBuf = append(tailBuf, stream+": "+line)
+			if len(tailBuf) > 20 {
+				tailBuf = tailBuf[len(tailBuf)-20:]
+			}
+			mu.Unlock()
+		}
+	}
+
+	wg.Add(2)
+	go scanStream(stdoutPipe, "stdout")
+	go scanStream(stderrPipe, "stderr")
+	wg.Wait()
+
+	if err := cmd.Wait(); err != nil {
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		return fmt.Errorf("deploy: %s exited with code %d\nlast output:\n%s",
+			name, exitCode, strings.Join(tailBuf, "\n"))
+	}
+	return nil
+}
 
 // ErrNotImplemented is returned by engine stubs pending full implementation.
 var ErrNotImplemented = errors.New("not implemented")
@@ -66,15 +158,11 @@ type Deployer interface {
 	Finalize(ctx context.Context, cfg api.NodeConfig, mountRoot string) error
 }
 
-// runCmd executes a command and returns a combined error message if it fails.
-// The command's combined output is included in the error for debuggability.
+// runCmd executes a command and streams its output through the package logger.
+// Returns an error (including tail of output) if the process exits non-zero.
 func runCmd(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("deploy: %s %v: %w\noutput: %s", name, args, err, string(out))
-	}
-	return nil
+	return runAndLog(ctx, name, cmd)
 }
 
 // diskSizeBytes returns the size of a block device in bytes by reading
@@ -192,7 +280,7 @@ func selectTargetDisk(layout api.DiskLayout, hw hardware.SystemInfo) (string, er
 						ErrPreflightFailed, disk.Name, disk.Size, needed)
 				}
 				devPath := "/dev/" + disk.Name
-				log.Printf("deploy: selected disk %s (reason: target_device hint in layout)", devPath)
+				logger().Info().Str("disk", devPath).Msg("selected disk (reason: target_device hint in layout)")
 				return devPath, nil
 			}
 		}
@@ -213,7 +301,7 @@ func selectTargetDisk(layout api.DiskLayout, hw hardware.SystemInfo) (string, er
 			continue // too small
 		}
 		if isBootDisk(disk) {
-			log.Printf("deploy: skipping disk %s (boot disk — has / or /boot mounted)", disk.Name)
+			logger().Info().Str("disk", disk.Name).Msg("skipping disk (boot disk — has / or /boot mounted)")
 			continue
 		}
 		transport := strings.ToLower(disk.Transport)
@@ -242,7 +330,7 @@ func selectTargetDisk(layout api.DiskLayout, hw hardware.SystemInfo) (string, er
 	}
 
 	devPath := "/dev/" + best.disk.Name
-	log.Printf("deploy: selected disk %s (%d bytes, reason: smallest fitting %s disk)",
-		devPath, best.disk.Size, best.reason)
+	logger().Info().Str("disk", devPath).Int64("size_bytes", int64(best.disk.Size)).
+		Str("reason", "smallest fitting "+best.reason+" disk").Msg("selected target disk")
 	return devPath, nil
 }

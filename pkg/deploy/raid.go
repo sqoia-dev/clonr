@@ -3,7 +3,6 @@ package deploy
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,10 +73,12 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 
 	args = append(args, members...)
 
-	log.Printf("deploy/raid: creating %s (%s) on %v", devPath, spec.Level, members)
-	if err := runCmd(ctx, "mdadm", args...); err != nil {
+	log := logger()
+	log.Info().Str("device", devPath).Str("level", spec.Level).Strs("members", members).Msg("creating RAID array")
+	if err := runAndLog(ctx, "mdadm", exec.CommandContext(ctx, "mdadm", args...)); err != nil {
 		return fmt.Errorf("mdadm create: %w", err)
 	}
+	log.Info().Str("device", devPath).Str("level", spec.Level).Msg("RAID array created")
 
 	// Wait for udev to settle so the new md device is visible.
 	_ = runCmd(ctx, "udevadm", "settle")
@@ -102,9 +103,9 @@ func DestroyRAIDArrays(ctx context.Context, devices []string) error {
 
 	for _, mdName := range arraysToStop {
 		mdDev := "/dev/" + mdName
-		log.Printf("deploy/raid: stopping %s", mdDev)
+		logger().Info().Str("device", mdDev).Msg("stopping RAID array")
 		if err := runCmd(ctx, "mdadm", "--stop", mdDev); err != nil {
-			log.Printf("deploy/raid: stop %s (non-fatal): %v", mdDev, err)
+			logger().Warn().Str("device", mdDev).Err(err).Msg("mdadm --stop failed (non-fatal)")
 		}
 		// Wipe the superblocks on all members.
 		members := findMembersForArray(string(raw), mdName)
@@ -133,7 +134,7 @@ func GenerateMdadmConf(ctx context.Context, mountRoot string) error {
 		// Non-fatal: if there are no active arrays or mdadm isn't available,
 		// we skip conf generation. The node can still boot without it if the
 		// kernel finds the superblocks.
-		log.Printf("deploy/raid: mdadm --detail --scan failed (non-fatal): %v", err)
+		logger().Warn().Err(err).Msg("mdadm --detail --scan failed (non-fatal) — skipping mdadm.conf generation")
 		return nil
 	}
 
@@ -141,12 +142,12 @@ func GenerateMdadmConf(ctx context.Context, mountRoot string) error {
 	if err := os.WriteFile(confPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("deploy/raid: write mdadm.conf: %w", err)
 	}
-	log.Printf("deploy/raid: wrote %s", confPath)
+	logger().Info().Str("path", confPath).Msg("wrote mdadm.conf")
 
 	// Regenerate initramfs so it includes the RAID configuration.
 	// Try dracut first (RHEL/Rocky), then update-initramfs (Debian/Ubuntu).
 	if err := runInitramfs(ctx, mountRoot); err != nil {
-		log.Printf("deploy/raid: initramfs update failed (non-fatal): %v", err)
+		logger().Warn().Err(err).Msg("initramfs update failed (non-fatal)")
 	}
 
 	return nil
@@ -154,17 +155,19 @@ func GenerateMdadmConf(ctx context.Context, mountRoot string) error {
 
 // runInitramfs attempts to regenerate the initramfs inside the chroot.
 func runInitramfs(ctx context.Context, mountRoot string) error {
+	log := logger()
 	// Try dracut first.
+	log.Info().Str("mount_root", mountRoot).Msg("regenerating initramfs with dracut")
 	dracut := exec.CommandContext(ctx, "chroot", mountRoot, "dracut", "--force", "--regenerate-all")
-	if out, err := dracut.CombinedOutput(); err == nil {
-		log.Printf("deploy/raid: dracut: %s", string(out))
+	if err := runAndLog(ctx, "dracut", dracut); err == nil {
 		return nil
 	}
 
 	// Fall back to update-initramfs.
+	log.Info().Str("mount_root", mountRoot).Msg("dracut not available, trying update-initramfs")
 	ui := exec.CommandContext(ctx, "chroot", mountRoot, "update-initramfs", "-u", "-k", "all")
-	if out, err := ui.CombinedOutput(); err != nil {
-		return fmt.Errorf("update-initramfs: %w\noutput: %s", err, string(out))
+	if err := runAndLog(ctx, "update-initramfs", ui); err != nil {
+		return fmt.Errorf("update-initramfs: %w", err)
 	}
 	return nil
 }
