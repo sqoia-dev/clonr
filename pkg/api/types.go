@@ -166,6 +166,37 @@ func (c *PowerProviderConfig) Sanitize() *PowerProviderConfig {
 	return out
 }
 
+// NodeState enumerates the lifecycle states of a NodeConfig.
+// The state is derived from existing fields via NodeConfig.State() rather than
+// stored as a separate column, so it cannot drift from the underlying data.
+type NodeState string
+
+const (
+	// NodeStateRegistered: node has PXE-booted and self-registered but no image
+	// has been assigned yet. The node is idle, waiting for admin action.
+	NodeStateRegistered NodeState = "registered"
+
+	// NodeStateConfigured: a base image has been assigned but the node has not
+	// yet run a successful deployment. Next PXE boot will trigger a deploy.
+	NodeStateConfigured NodeState = "configured"
+
+	// NodeStateDeploying: reserved for future use when a deploy is actively
+	// in-flight and the server can observe it via progress callbacks.
+	NodeStateDeploying NodeState = "deploying"
+
+	// NodeStateDeployed: the most recent deploy succeeded and reimage_pending is
+	// false. The PXE handler returns "exit" so the node boots from local disk.
+	NodeStateDeployed NodeState = "deployed"
+
+	// NodeStateReimagePending: admin has requested a reimage. The next PXE boot
+	// will trigger a fresh deploy regardless of prior deployment state.
+	NodeStateReimagePending NodeState = "reimage_pending"
+
+	// NodeStateFailed: the most recent deploy failed and no successful deploy has
+	// occurred since. Needs admin attention.
+	NodeStateFailed NodeState = "failed"
+)
+
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
@@ -186,15 +217,48 @@ type NodeConfig struct {
 	// If nil, the server falls back to legacy BMC-based IPMI when BMC is set.
 	PowerProvider   *PowerProviderConfig `json:"power_provider,omitempty"`
 	// ReimagePending is set to true by the reimage orchestrator after it fires
-	// SetNextBoot(PXE) + PowerCycle. The register endpoint returns action=deploy
-	// unconditionally while this flag is set, forcing the deploy client to
-	// re-image the node. Cleared once deployment finalizes.
+	// PowerCycle. The PXE boot handler returns the full clonr initramfs boot
+	// script while this flag is set, causing the node to deploy fresh.
+	// Cleared by the deploy-complete callback once deployment finalizes.
 	ReimagePending  bool                 `json:"reimage_pending,omitempty"`
+	// LastDeploySucceededAt is the Unix timestamp of the most recent successful
+	// deployment finalize. Used by State() to determine NodeStateDeployed.
+	LastDeploySucceededAt *time.Time `json:"last_deploy_succeeded_at,omitempty"`
+	// LastDeployFailedAt is the Unix timestamp of the most recent failed deploy.
+	// Used by State() to determine NodeStateFailed.
+	LastDeployFailedAt *time.Time `json:"last_deploy_failed_at,omitempty"`
 	// HardwareProfile is the raw hardware discovery JSON from the node.
 	// Populated on auto-registration; nil when node was created manually.
 	HardwareProfile json.RawMessage      `json:"hardware_profile,omitempty"`
 	CreatedAt       time.Time            `json:"created_at"`
 	UpdatedAt       time.Time            `json:"updated_at"`
+}
+
+// State derives the current lifecycle state of this node from its stored fields.
+// This is the canonical way to determine what the PXE boot handler should return.
+//
+// Priority order (highest to lowest):
+//  1. ReimagePending — always overrides everything else.
+//  2. LastDeployFailedAt after LastDeploySucceededAt — node is in error.
+//  3. LastDeploySucceededAt set — node is deployed and healthy.
+//  4. BaseImageID set — node is configured but never deployed.
+//  5. Otherwise — node is registered but has no image.
+func (n *NodeConfig) State() NodeState {
+	if n.ReimagePending {
+		return NodeStateReimagePending
+	}
+	if n.LastDeployFailedAt != nil {
+		if n.LastDeploySucceededAt == nil || n.LastDeployFailedAt.After(*n.LastDeploySucceededAt) {
+			return NodeStateFailed
+		}
+	}
+	if n.LastDeploySucceededAt != nil {
+		return NodeStateDeployed
+	}
+	if n.BaseImageID != "" {
+		return NodeStateConfigured
+	}
+	return NodeStateRegistered
 }
 
 // --- Request types ---

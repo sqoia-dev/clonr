@@ -424,7 +424,8 @@ func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, err
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       power_provider, reimage_pending, created_at, updated_at
+		       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
+		       created_at, updated_at
 		FROM node_configs WHERE id = ?
 	`, id)
 	return scanNodeConfig(row)
@@ -435,7 +436,8 @@ func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfi
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-		       power_provider, reimage_pending, created_at, updated_at
+		       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
+		       created_at, updated_at
 		FROM node_configs WHERE primary_mac = ?
 	`, mac)
 	return scanNodeConfig(row)
@@ -450,14 +452,16 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       power_provider, reimage_pending, created_at, updated_at
+			       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
+			       created_at, updated_at
 			FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC
 		`, baseImageID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			       power_provider, reimage_pending, created_at, updated_at
+			       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
+			       created_at, updated_at
 			FROM node_configs ORDER BY hostname ASC
 		`)
 	}
@@ -549,6 +553,38 @@ func (db *DB) SetReimagePending(ctx context.Context, nodeID string, pending bool
 	)
 	if err != nil {
 		return fmt.Errorf("db: set reimage_pending: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
+// RecordDeploySucceeded marks a node's last deployment as successful.
+// Sets last_deploy_succeeded_at = now() and clears reimage_pending.
+// Called by the deploy-complete HTTP callback from the node after finalize.
+func (db *DB) RecordDeploySucceeded(ctx context.Context, nodeID string) error {
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_configs
+		SET last_deploy_succeeded_at = ?, reimage_pending = 0, updated_at = ?
+		WHERE id = ?
+	`, now, now, nodeID)
+	if err != nil {
+		return fmt.Errorf("db: record deploy succeeded: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
+// RecordDeployFailed marks a node's last deployment as failed.
+// Sets last_deploy_failed_at = now(). Does not clear reimage_pending —
+// the admin must decide whether to retry or cancel.
+func (db *DB) RecordDeployFailed(ctx context.Context, nodeID string) error {
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_configs
+		SET last_deploy_failed_at = ?, updated_at = ?
+		WHERE id = ?
+	`, now, now, nodeID)
+	if err != nil {
+		return fmt.Errorf("db: record deploy failed: %w", err)
 	}
 	return requireOneRow(res, "node_configs", nodeID)
 }
@@ -793,20 +829,22 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
-		cfg               api.NodeConfig
-		hostnameAuto      int
-		interfacesJSON    string
-		sshKeysJSON       string
-		groupsJSON        string
-		customVarsJSON    string
-		baseImageID       sql.NullString
-		hwProfileJSON     string
-		bmcConfigJSON     string
-		ibConfigJSON      string
-		powerProviderJSON string
-		reimagePending    int
-		createdAtUnix     int64
-		updatedAtUnix     int64
+		cfg                      api.NodeConfig
+		hostnameAuto             int
+		interfacesJSON           string
+		sshKeysJSON              string
+		groupsJSON               string
+		customVarsJSON           string
+		baseImageID              sql.NullString
+		hwProfileJSON            string
+		bmcConfigJSON            string
+		ibConfigJSON             string
+		powerProviderJSON        string
+		reimagePending           int
+		lastDeploySucceededAtVal sql.NullInt64
+		lastDeployFailedAtVal    sql.NullInt64
+		createdAtUnix            int64
+		updatedAtUnix            int64
 	)
 
 	err := s.Scan(
@@ -815,6 +853,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&groupsJSON, &customVarsJSON, &baseImageID,
 		&hwProfileJSON, &bmcConfigJSON, &ibConfigJSON,
 		&powerProviderJSON, &reimagePending,
+		&lastDeploySucceededAtVal, &lastDeployFailedAtVal,
 		&createdAtUnix, &updatedAtUnix,
 	)
 	if err == sql.ErrNoRows {
@@ -829,6 +868,15 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 
 	if baseImageID.Valid {
 		cfg.BaseImageID = baseImageID.String
+	}
+
+	if lastDeploySucceededAtVal.Valid {
+		t := time.Unix(lastDeploySucceededAtVal.Int64, 0).UTC()
+		cfg.LastDeploySucceededAt = &t
+	}
+	if lastDeployFailedAtVal.Valid {
+		t := time.Unix(lastDeployFailedAtVal.Int64, 0).UTC()
+		cfg.LastDeployFailedAt = &t
 	}
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
