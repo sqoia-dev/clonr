@@ -151,6 +151,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/images/{id}/shell-session", factory.OpenShellSession)
 			r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
 			r.Post("/images/{id}/shell-session/{sid}/exec", factory.ExecInSession)
+			r.Get("/images/{id}/shell-session/{sid}/ws", factory.ShellWS)
+
+			// Active deploy detection (for shell modal warning)
+			r.Get("/images/{id}/active-deploys", factory.ActiveDeploys)
 
 			// Nodes — by-mac must be before /{id} to avoid chi match ambiguity.
 			r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)

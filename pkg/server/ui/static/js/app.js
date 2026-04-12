@@ -1091,7 +1091,7 @@ const Pages = {
                     </div>
                     <div class="flex gap-8">
                         ${img.status === 'ready'
-                            ? `<button class="btn btn-secondary" onclick="Pages.showShellHint('${escHtml(img.id)}')">Shell Access</button>`
+                            ? `<button class="btn btn-secondary" onclick="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
                             : ''}
                         ${img.status !== 'archived'
                             ? `<button class="btn btn-danger btn-sm" onclick="Pages.archiveImage('${img.id}', '${escHtml(img.name)}')">Archive</button>`
@@ -1181,18 +1181,196 @@ const Pages = {
     },
 
     showShellHint(id) {
-        const area = document.getElementById('shell-hint-area');
-        if (!area) return;
-        const cmd = `clonr shell ${id}`;
-        area.innerHTML = cardWrap('Shell Access', `
-            <div class="card-body">
-                <p class="text-dim text-sm mb-12">Run this command on the clonr server to open an interactive shell inside the image:</p>
-                <div class="copy-wrap">
-                    <pre class="json-block" style="flex:1;margin:0;user-select:all">${escHtml(cmd)}</pre>
-                    <button class="copy-btn" onclick="Pages._copyText('${escHtml(cmd)}', this)">Copy</button>
+        // Legacy fallback — replaced by openShellTerminal.
+        this.openShellTerminal(id);
+    },
+
+    // ── Browser Shell Terminal ─────────────────────────────────────────────
+
+    _shellTerm: null,          // active xterm.js Terminal instance
+    _shellWs: null,            // active WebSocket
+    _shellSessionId: null,     // active session ID for cleanup
+    _shellImageId: null,       // active image ID for cleanup
+
+    async openShellTerminal(imageId) {
+        // Create session on server first.
+        let sess;
+        try {
+            sess = await API.images.openShellSession(imageId);
+        } catch (e) {
+            alert(`Failed to open shell session: ${e.message}`);
+            return;
+        }
+
+        this._shellSessionId = sess.session_id;
+        this._shellImageId = imageId;
+
+        // Check for active deploys (for the warning banner).
+        let activeCount = 0;
+        try {
+            const ad = await API.images.activeDeploys(imageId);
+            activeCount = ad.active_count || 0;
+        } catch (_) {}
+
+        // Build modal HTML.
+        const warnHtml = activeCount > 0
+            ? `<div class="shell-modal-warn">
+                &#9888; This image is currently being deployed to ${activeCount} node${activeCount !== 1 ? 's' : ''}.
+                Shell access is safe (read-only race) but changes won\'t affect in-progress deployments.
+               </div>`
+            : '';
+
+        const overlay = document.createElement('div');
+        overlay.className = 'shell-modal-overlay';
+        overlay.id = 'shell-modal-overlay';
+        overlay.innerHTML = `
+            <div class="shell-modal">
+                <div class="shell-modal-header">
+                    <div style="display:flex;align-items:center;gap:12px">
+                        <div class="shell-modal-dots">
+                            <div class="shell-modal-dot red"></div>
+                            <div class="shell-modal-dot yellow"></div>
+                            <div class="shell-modal-dot green"></div>
+                        </div>
+                        <span class="shell-modal-title">shell &mdash; ${escHtml(imageId)}</span>
+                    </div>
+                    <button class="shell-modal-close" onclick="Pages.closeShellTerminal()" title="Close terminal">&times;</button>
                 </div>
-            </div>`);
-        area.scrollIntoView({ behavior: 'smooth' });
+                ${warnHtml}
+                <div class="shell-modal-body">
+                    <div id="shell-terminal-container"></div>
+                </div>
+                <div class="shell-status-bar">
+                    <span class="shell-status-indicator connecting" id="shell-status-dot"></span>
+                    <span id="shell-status-text">Connecting…</span>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        // Close on overlay click (outside the modal box).
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) Pages.closeShellTerminal();
+        });
+
+        // Close on Escape.
+        this._shellEscHandler = (e) => { if (e.key === 'Escape') Pages.closeShellTerminal(); };
+        document.addEventListener('keydown', this._shellEscHandler);
+
+        // Initialise xterm.js.
+        const term = new Terminal({
+            cursorBlink: true,
+            theme: {
+                background: '#0d1117',
+                foreground: '#c9d1d9',
+                cursor:     '#58a6ff',
+                selectionBackground: 'rgba(88,166,255,0.3)',
+            },
+            fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, monospace',
+            fontSize: 13,
+            lineHeight: 1.4,
+            scrollback: 3000,
+        });
+
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('shell-terminal-container'));
+        fitAddon.fit();
+        this._shellTerm = term;
+
+        // Resize observer — fit terminal to container size.
+        const ro = new ResizeObserver(() => {
+            try { fitAddon.fit(); } catch (_) {}
+            if (this._shellWs && this._shellWs.readyState === WebSocket.OPEN && term.cols && term.rows) {
+                this._shellWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            }
+        });
+        ro.observe(document.getElementById('shell-terminal-container'));
+        this._shellRo = ro;
+
+        // Open WebSocket.
+        const wsUrl = API.images.shellWsUrl(imageId, sess.session_id);
+        const ws = new WebSocket(wsUrl);
+        this._shellWs = ws;
+
+        ws.onopen = () => {
+            this._setShellStatus('connected', 'Connected');
+            // Send initial resize.
+            if (term.cols && term.rows) {
+                ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            }
+            term.focus();
+        };
+
+        ws.onmessage = (evt) => {
+            try {
+                const msg = JSON.parse(evt.data);
+                if (msg.type === 'data') term.write(msg.data);
+            } catch (_) {
+                // Raw string fallback (shouldn't happen with our server).
+                term.write(evt.data);
+            }
+        };
+
+        ws.onerror = () => {
+            this._setShellStatus('disconnected', 'Connection error');
+            term.writeln('\r\n\x1b[31m[clonr] WebSocket error\x1b[0m');
+        };
+
+        ws.onclose = () => {
+            this._setShellStatus('disconnected', 'Disconnected');
+            term.writeln('\r\n\x1b[90m[clonr] Session closed\x1b[0m');
+        };
+
+        // Pipe keystrokes to WebSocket.
+        term.onData((data) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'data', data }));
+            }
+        });
+    },
+
+    closeShellTerminal() {
+        // Kill WebSocket.
+        if (this._shellWs) {
+            this._shellWs.onclose = null; // suppress the "Disconnected" write
+            this._shellWs.close();
+            this._shellWs = null;
+        }
+        // Dispose terminal.
+        if (this._shellTerm) {
+            this._shellTerm.dispose();
+            this._shellTerm = null;
+        }
+        // Stop resize observer.
+        if (this._shellRo) {
+            this._shellRo.disconnect();
+            this._shellRo = null;
+        }
+        // Remove Escape listener.
+        if (this._shellEscHandler) {
+            document.removeEventListener('keydown', this._shellEscHandler);
+            this._shellEscHandler = null;
+        }
+        // Remove modal.
+        const overlay = document.getElementById('shell-modal-overlay');
+        if (overlay) overlay.remove();
+
+        // Close server-side session.
+        if (this._shellImageId && this._shellSessionId) {
+            const imgId = this._shellImageId;
+            const sid   = this._shellSessionId;
+            this._shellImageId = null;
+            this._shellSessionId = null;
+            API.images.closeShellSession(imgId, sid).catch(() => {});
+        }
+    },
+
+    _setShellStatus(state, text) {
+        const dot  = document.getElementById('shell-status-dot');
+        const span = document.getElementById('shell-status-text');
+        if (dot)  { dot.className = `shell-status-indicator ${state}`; }
+        if (span) { span.textContent = text; }
     },
 
     _copyText(text, btn) {

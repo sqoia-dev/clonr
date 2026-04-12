@@ -1,0 +1,208 @@
+package handlers
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"time"
+
+	"github.com/creack/pty"
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clonr/pkg/api"
+)
+
+// wsUpgrader allows all origins for the embedded UI (same-origin in prod,
+// localhost in dev). In a future release this should be locked to the server's
+// own origin.
+var wsUpgrader = websocket.Upgrader{
+	HandshakeTimeout: 10 * time.Second,
+	CheckOrigin:      func(r *http.Request) bool { return true },
+	ReadBufferSize:   4096,
+	WriteBufferSize:  4096,
+}
+
+// wsMsg is the JSON envelope used by the browser xterm WebSocket protocol.
+// Types:
+//
+//	"data"   — terminal I/O bytes (base64 encoded for reliable JSON transport)
+//	"resize" — terminal resize, carries Cols and Rows
+//	"ping"   — keepalive from client (server ignores)
+type wsMsg struct {
+	Type string `json:"type"`
+	Data string `json:"data,omitempty"` // raw bytes as string (browser sends UTF-8)
+	Cols uint16 `json:"cols,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
+}
+
+// ShellWSHandler handles GET /api/v1/images/:id/shell-session/:sid/ws
+//
+// Upgrades the HTTP connection to WebSocket, forks /bin/bash inside the
+// image's chroot with a PTY attached, then bidirectionally pipes:
+//
+//	client keystrokes → PTY stdin
+//	PTY stdout        → client
+//
+// The session identified by :sid must already exist (created via
+// POST /api/v1/images/:id/shell-session). On WebSocket close, the bash
+// process is killed and the PTY is released.
+func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
+	imageID := chi.URLParam(r, "id")
+	sessionID := chi.URLParam(r, "sid")
+
+	// Resolve the session — must already exist.
+	sessions := h.Shells.ListSessions()
+	var rootDir string
+	for _, s := range sessions {
+		if s.ID == sessionID && s.ImageID == imageID {
+			rootDir = s.RootDir
+			break
+		}
+	}
+	if rootDir == "" {
+		http.Error(w, "shell session not found or expired", http.StatusNotFound)
+		return
+	}
+
+	// Upgrade to WebSocket. Auth token may be supplied via query param for
+	// browsers that cannot set custom headers during WebSocket handshake.
+	// (The bearer auth middleware already checked the Authorization header;
+	// if we are here the auth layer already approved the request.)
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade already wrote the HTTP error response.
+		log.Warn().Err(err).Str("session_id", sessionID).Msg("shell ws: upgrade failed")
+		return
+	}
+	defer conn.Close()
+
+	log.Info().Str("session_id", sessionID).Str("image_id", imageID).Str("rootdir", rootDir).
+		Msg("shell ws: terminal session started")
+
+	// Fork bash inside the chroot with a PTY.
+	shell := "/bin/bash"
+	if _, statErr := os.Stat(rootDir + shell); statErr != nil {
+		shell = "/bin/sh"
+	}
+
+	cmd := exec.Command("chroot", rootDir, shell, "--login")
+	cmd.Env = []string{
+		"TERM=xterm-256color",
+		"HOME=/root",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"SHELL=" + shell,
+	}
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		writeWSError(conn, fmt.Sprintf("failed to start shell: %v", err))
+		log.Error().Err(err).Str("session_id", sessionID).Msg("shell ws: pty start failed")
+		return
+	}
+	defer func() {
+		ptmx.Close()
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		log.Info().Str("session_id", sessionID).Msg("shell ws: terminal session ended")
+	}()
+
+	// PTY → WebSocket: stream shell output to browser.
+	ptyClosed := make(chan struct{})
+	go func() {
+		defer close(ptyClosed)
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := ptmx.Read(buf)
+			if n > 0 {
+				msg := wsMsg{Type: "data", Data: string(buf[:n])}
+				if writeErr := conn.WriteJSON(msg); writeErr != nil {
+					return
+				}
+			}
+			if readErr != nil {
+				// PTY closed — shell exited.
+				return
+			}
+		}
+	}()
+
+	// WebSocket → PTY: relay client keystrokes and resize events.
+	for {
+		var msg wsMsg
+		if err := conn.ReadJSON(&msg); err != nil {
+			// Client disconnected.
+			break
+		}
+
+		switch msg.Type {
+		case "data":
+			if _, writeErr := io.WriteString(ptmx, msg.Data); writeErr != nil {
+				log.Debug().Err(writeErr).Str("session_id", sessionID).Msg("shell ws: pty write error")
+				return
+			}
+		case "resize":
+			if msg.Cols > 0 && msg.Rows > 0 {
+				_ = pty.Setsize(ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows})
+			}
+		}
+
+		// If the PTY closed while we were reading, stop.
+		select {
+		case <-ptyClosed:
+			writeWSError(conn, "shell exited")
+			return
+		default:
+		}
+	}
+}
+
+// writeWSError sends an error message to the WebSocket client as terminal output.
+func writeWSError(conn *websocket.Conn, msg string) {
+	_ = conn.WriteJSON(wsMsg{Type: "data", Data: "\r\n\033[31m[clonr] " + msg + "\033[0m\r\n"})
+}
+
+// ActiveDeploys handles GET /api/v1/images/:id/active-deploys
+// Scans recent deploy log entries (last 30 minutes, component=deploy) for any
+// that reference this image ID. Returns a count and isActive flag so the
+// browser shell modal can show a warning when opening a shell on a live image.
+func (h *FactoryHandler) ActiveDeploys(w http.ResponseWriter, r *http.Request) {
+	imageID := chi.URLParam(r, "id")
+
+	since := time.Now().Add(-30 * time.Minute)
+	entries, err := h.DB.QueryLogs(r.Context(), api.LogFilter{
+		Component: "deploy",
+		Since:     &since,
+		Limit:     500,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Count entries that mention this image ID in any field.
+	activeCount := 0
+	for _, e := range entries {
+		// Check if any log field contains the image ID.
+		found := false
+		for _, v := range e.Fields {
+			if s, ok := v.(string); ok && s == imageID {
+				found = true
+				break
+			}
+		}
+		if found {
+			activeCount++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"image_id":     imageID,
+		"active_count": activeCount,
+		"is_active":    activeCount > 0,
+	})
+}

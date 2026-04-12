@@ -67,10 +67,19 @@ const API = {
 
     // Convenience methods.
     images: {
-        list(status = '')     { return API.get('/images', status ? { status } : {}); },
-        get(id)               { return API.get(`/images/${id}`); },
-        archive(id)           { return API.del(`/images/${id}`); },
-        diskLayout(id)        { return API.get(`/images/${id}/disklayout`); },
+        list(status = '')           { return API.get('/images', status ? { status } : {}); },
+        get(id)                     { return API.get(`/images/${id}`); },
+        archive(id)                 { return API.del(`/images/${id}`); },
+        diskLayout(id)              { return API.get(`/images/${id}/disklayout`); },
+        activeDeploys(id)           { return API.get(`/images/${id}/active-deploys`); },
+        openShellSession(id)        { return API.post(`/images/${id}/shell-session`, {}); },
+        closeShellSession(id, sid)  { return API.del(`/images/${id}/shell-session/${sid}`); },
+        shellWsUrl(id, sid) {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const tok = API._token();
+            const base = `${proto}//${location.host}/api/v1/images/${id}/shell-session/${sid}/ws`;
+            return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
+        },
     },
     nodes: {
         list()                { return API.get('/nodes'); },

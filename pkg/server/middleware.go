@@ -21,9 +21,18 @@ func bearerAuth(token string) func(http.Handler) http.Handler {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Accept token from Authorization header (REST) or ?token= query param
+			// (WebSocket — browsers cannot set headers during WS handshake).
+			var provided string
 			auth := r.Header.Get("Authorization")
 			parts := strings.SplitN(auth, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") || parts[1] != token {
+			if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+				provided = parts[1]
+			} else if q := r.URL.Query().Get("token"); q != "" {
+				provided = q
+			}
+
+			if provided != token {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_ = json.NewEncoder(w).Encode(api.ErrorResponse{
