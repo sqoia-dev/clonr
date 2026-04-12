@@ -192,6 +192,12 @@ func (s *Server) buildRouter() chi.Router {
 			r.Put("/nodes/{id}", nodes.UpdateNode)
 			r.Delete("/nodes/{id}", nodes.DeleteNode)
 
+			// Deploy lifecycle callbacks — called by the node after finalize.
+			// These are the mechanism by which the PXE server learns whether a
+			// node should boot from disk or run another deploy on next PXE boot.
+			r.Post("/nodes/{id}/deploy-complete", nodes.DeployComplete)
+			r.Post("/nodes/{id}/deploy-failed", nodes.DeployFailed)
+
 			// IPMI / power management — subpaths of /nodes/{id} must be
 			// registered in the same chi group so the auth middleware applies.
 			r.Get("/nodes/{id}/power", ipmiH.GetPowerStatus)

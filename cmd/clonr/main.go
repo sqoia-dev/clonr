@@ -21,6 +21,8 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/deploy"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
 	"github.com/sqoia-dev/clonr/pkg/ipmi"
+	"github.com/sqoia-dev/clonr/pkg/power"
+	poweripm "github.com/sqoia-dev/clonr/pkg/power/ipmi"
 )
 
 // ANSI colour codes used by the log viewer.
@@ -95,6 +97,7 @@ func init() {
 		newIPMIConfigureCmd(),
 		newIPMIPXECmd(),
 		newIPMISensorsCmd(),
+		newIPMITestBootFlipDirectCmd(),
 	)
 	rootCmd.AddCommand(ipmiCmd)
 
@@ -1149,6 +1152,80 @@ func newIPMISensorsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flagHost, "host", "", "BMC IP address (local BMC if omitted)")
 	cmd.Flags().StringVar(&flagUser, "user", "", "BMC username")
 	cmd.Flags().StringVar(&flagPass, "pass", "", "BMC password")
+	return cmd
+}
+
+// newIPMITestBootFlipDirectCmd tests the boot-flip code path directly against a
+// real BMC using raw credentials (bypasses the server API). Use this to verify
+// ipmitool connectivity and boot-order control before configuring a node in the UI.
+func newIPMITestBootFlipDirectCmd() *cobra.Command {
+	var flagHost, flagUser, flagPass string
+	var flagDevice string
+	var flagCycle bool
+
+	cmd := &cobra.Command{
+		Use:   "test-boot-flip",
+		Short: "Test IPMI boot-device flip directly against a BMC",
+		Long: `test-boot-flip creates an IPMI provider from raw credentials and calls
+SetNextBoot to the given device (pxe or disk), then optionally power-cycles.
+Use this to verify BMC connectivity before registering a node.
+
+Example:
+  clonr ipmi test-boot-flip --host 10.0.0.5 --user admin --pass secret --device pxe --cycle`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagHost == "" {
+				return fmt.Errorf("--host is required")
+			}
+
+			reg := power.NewRegistry()
+			poweripm.Register(reg)
+
+			prov, err := reg.Create(power.ProviderConfig{
+				Type: "ipmi",
+				Fields: map[string]string{
+					"host":     flagHost,
+					"username": flagUser,
+					"password": flagPass,
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("create ipmi provider: %w", err)
+			}
+
+			var dev power.BootDevice
+			switch flagDevice {
+			case "pxe":
+				dev = power.BootPXE
+			case "disk":
+				dev = power.BootDisk
+			default:
+				return fmt.Errorf("--device must be 'pxe' or 'disk', got %q", flagDevice)
+			}
+
+			ctx := context.Background()
+
+			fmt.Fprintf(os.Stderr, "Setting next boot to %s on %s via %s...\n", dev, flagHost, prov.Name())
+			if err := prov.SetNextBoot(ctx, dev); err != nil {
+				return fmt.Errorf("SetNextBoot: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Next boot set to %s.\n", dev)
+
+			if flagCycle {
+				fmt.Fprintf(os.Stderr, "Power cycling %s...\n", flagHost)
+				if err := prov.PowerCycle(ctx); err != nil {
+					return fmt.Errorf("PowerCycle: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "Power cycle sent.\n")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&flagHost, "host", "", "BMC IP address (required)")
+	cmd.Flags().StringVar(&flagUser, "user", "", "BMC username")
+	cmd.Flags().StringVar(&flagPass, "pass", "", "BMC password")
+	cmd.Flags().StringVar(&flagDevice, "device", "pxe", "Boot device: pxe or disk")
+	cmd.Flags().BoolVar(&flagCycle, "cycle", false, "Power cycle after setting next boot")
 	return cmd
 }
 

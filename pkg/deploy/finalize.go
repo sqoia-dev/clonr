@@ -441,6 +441,92 @@ func findGrubCfg(mountRoot string) string {
 	return ""
 }
 
+// installKernelInChroot installs the kernel and GRUB2 bootloader packages inside
+// the deployed chroot using dnf. This is needed when the image was captured
+// without /boot contents (e.g. --one-file-system capture with a separate /boot
+// partition on the source). After this function returns, /boot/grub2/grub.cfg
+// and at least one vmlinuz + initramfs pair will exist in the chroot.
+//
+// The function mounts /proc, /sys, and /dev into the chroot before running dnf
+// because dnf's scriptlets require these virtual filesystems.
+func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) error {
+	log := logger()
+
+	// Bind-mount virtual filesystems required by dnf/rpm scriptlets.
+	type bindMount struct{ src, dst string }
+	binds := []bindMount{
+		{"/proc", filepath.Join(mountRoot, "proc")},
+		{"/sys", filepath.Join(mountRoot, "sys")},
+		{"/dev", filepath.Join(mountRoot, "dev")},
+		{"/dev/pts", filepath.Join(mountRoot, "dev", "pts")},
+	}
+	for _, b := range binds {
+		if err := os.MkdirAll(b.dst, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", b.dst, err)
+		}
+		if out, err := exec.CommandContext(ctx, "mount", "--bind", b.src, b.dst).CombinedOutput(); err != nil {
+			return fmt.Errorf("bind-mount %s → %s: %w\n%s", b.src, b.dst, err, string(out))
+		}
+	}
+	defer func() {
+		// Unmount in reverse order.
+		for i := len(binds) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", binds[i].dst).Run()
+		}
+	}()
+
+	// Copy the host's /etc/resolv.conf into the chroot so dnf can reach the network.
+	resolvSrc := "/etc/resolv.conf"
+	resolvDst := filepath.Join(mountRoot, "etc", "resolv.conf")
+	if data, err := os.ReadFile(resolvSrc); err == nil {
+		_ = os.WriteFile(resolvDst, data, 0o644)
+	}
+
+	// Install kernel and grub2-pc. --setopt=install_weak_deps=False speeds this up.
+	// Use --releasever=9 explicitly so dnf doesn't try to auto-detect from the chroot
+	// (the chroot may not have os-release populated correctly during first deploy).
+	packages := []string{"kernel", "grub2-pc", "grub2-tools"}
+	dnfArgs := append([]string{
+		"--installroot=" + mountRoot,
+		"--releasever=9",
+		"--setopt=install_weak_deps=False",
+		"-y",
+		"install",
+	}, packages...)
+
+	log.Info().Strs("packages", packages).Msg("finalize/boot: installing kernel + grub2 via dnf --installroot")
+	dnfCmd := exec.CommandContext(ctx, "dnf", dnfArgs...)
+	if err := runAndLog(ctx, "dnf-kernel-install", dnfCmd); err != nil {
+		// Try the chroot variant as fallback (some minimal environments only have
+		// dnf inside the deployed image, not on the deployment host).
+		log.Warn().Err(err).Msg("finalize/boot: dnf --installroot failed, trying chroot dnf")
+		chrootDnfArgs := []string{mountRoot, "dnf", "-y", "--setopt=install_weak_deps=False", "install"}
+		chrootDnfArgs = append(chrootDnfArgs, packages...)
+		if err2 := runAndLog(ctx, "chroot-dnf-kernel-install", exec.CommandContext(ctx, "chroot", chrootDnfArgs...)); err2 != nil {
+			return fmt.Errorf("dnf --installroot: %w; chroot dnf: %v", err, err2)
+		}
+	}
+
+	// Install GRUB to the target disk MBR now that the grub2-pc package is present.
+	// grub2-install needs access to /boot (already mounted) and /dev.
+	bootDir := filepath.Join(mountRoot, "boot")
+	grubInstallArgs := []string{"--target=i386-pc", "--boot-directory=" + bootDir, "--recheck", targetDisk}
+	log.Info().Str("disk", targetDisk).Msg("finalize/boot: re-running grub2-install after kernel install")
+	if err := runAndLog(ctx, "grub2-install", exec.CommandContext(ctx, "grub2-install", grubInstallArgs...)); err != nil {
+		log.Warn().Err(err).Msg("finalize/boot: grub2-install after kernel install failed (non-fatal)")
+	}
+
+	// Generate grub.cfg inside the chroot.
+	grubCfgInChroot := "/boot/grub2/grub.cfg"
+	log.Info().Str("grub_cfg", grubCfgInChroot).Msg("finalize/boot: generating grub.cfg via chroot grub2-mkconfig")
+	mkcfgCmd := exec.CommandContext(ctx, "chroot", mountRoot, "grub2-mkconfig", "-o", grubCfgInChroot)
+	if err := runAndLog(ctx, "grub2-mkconfig", mkcfgCmd); err != nil {
+		return fmt.Errorf("finalize/boot: grub2-mkconfig after kernel install: %w", err)
+	}
+	log.Info().Msg("finalize/boot: kernel + grub2 installed and configured")
+	return nil
+}
+
 // applyBootConfig performs the post-install steps required to produce a bootable
 // deployed filesystem. It must be called after grub2-install has written the
 // bootloader to the MBR/bios-boot partition and after the full tar extraction is
@@ -466,13 +552,20 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// inside a chroot with the standard virtual filesystems mounted.
 	grubCfgPath := findGrubCfg(mountRoot)
 	if grubCfgPath == "" {
-		// /boot was either not yet populated or is not mounted. This is a hard
-		// prerequisite: if the image was captured without /boot (--exclude=/boot),
-		// grub2-mkconfig will silently produce an empty config. Bail early with a
-		// clear error so the operator knows to re-capture with /boot included.
-		log.Error().Str("mountRoot", mountRoot).
-			Msg("finalize/boot: grub.cfg not found under mountRoot — /boot may be empty or not mounted; re-capture image without --exclude=/boot")
-		return fmt.Errorf("finalize/boot: grub.cfg not found under %s — /boot must be present in the image; re-capture without --exclude=/boot", mountRoot)
+		// /boot is empty — the image was captured without /boot contents (common
+		// when the source system has /boot on a separate partition and the capture
+		// used --one-file-system). Install the kernel and grub2 packages inside the
+		// chroot so that grub2-mkconfig has something to build a menu from.
+		log.Warn().Str("mountRoot", mountRoot).
+			Msg("finalize/boot: grub.cfg not found — /boot is empty; installing kernel + grub2 via dnf in chroot")
+		if err := installKernelInChroot(ctx, mountRoot, targetDisk); err != nil {
+			return fmt.Errorf("finalize/boot: kernel install: %w", err)
+		}
+		// Re-check after install.
+		grubCfgPath = findGrubCfg(mountRoot)
+		if grubCfgPath == "" {
+			return fmt.Errorf("finalize/boot: grub.cfg still not found after kernel install — dnf may have failed silently")
+		}
 	}
 
 	log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: regenerating GRUB config via grub2-mkconfig")

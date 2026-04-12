@@ -326,6 +326,52 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DeployComplete handles POST /api/v1/nodes/:id/deploy-complete.
+// Called by the clonr CLI after a successful deployment finalize.
+// Sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
+// node to NodeStateDeployed. Subsequent PXE boots will return "exit" (disk boot).
+func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	// Confirm node exists before updating.
+	if _, err := h.DB.GetNodeConfig(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if err := h.DB.RecordDeploySucceeded(r.Context(), id); err != nil {
+		log.Error().Err(err).Str("node_id", id).Msg("deploy-complete: record succeeded")
+		writeError(w, err)
+		return
+	}
+
+	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeployFailed handles POST /api/v1/nodes/:id/deploy-failed.
+// Called by the clonr CLI after a deployment failure.
+// Sets last_deploy_failed_at, transitioning the node to NodeStateFailed.
+// Does not clear reimage_pending -- admin decides whether to retry or cancel.
+func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	// Confirm node exists before updating.
+	if _, err := h.DB.GetNodeConfig(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if err := h.DB.RecordDeployFailed(r.Context(), id); err != nil {
+		log.Error().Err(err).Str("node_id", id).Msg("deploy-failed: record failed")
+		writeError(w, err)
+		return
+	}
+
+	log.Warn().Str("node_id", id).Msg("deploy-failed: node marked failed")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // extractNodeIdentity parses the hardware profile JSON to find the primary MAC
 // and hostname. Returns empty strings on any parse failure.
 func extractNodeIdentity(profile []byte) (mac, hostname string) {

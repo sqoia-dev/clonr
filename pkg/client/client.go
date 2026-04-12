@@ -200,6 +200,21 @@ func (c *Client) FlipToDisk(ctx context.Context, nodeID string, cycle bool) erro
 	return c.post(ctx, path, nil, nil)
 }
 
+// ReportDeployComplete calls POST /api/v1/nodes/:id/deploy-complete.
+// Called by the clonr CLI after a successful deployment finalize. The server
+// sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
+// node to NodeStateDeployed so subsequent PXE boots return "exit" (disk boot).
+func (c *Client) ReportDeployComplete(ctx context.Context, nodeID string) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
+}
+
+// ReportDeployFailed calls POST /api/v1/nodes/:id/deploy-failed.
+// Called by the clonr CLI after a deployment failure. The server sets
+// last_deploy_failed_at, transitioning the node to NodeStateFailed.
+func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-failed", nil, nil)
+}
+
 // Health checks the server's health endpoint.
 func (c *Client) Health(ctx context.Context) (*api.HealthResponse, error) {
 	var h api.HealthResponse
