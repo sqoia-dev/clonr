@@ -18,6 +18,9 @@ import (
 type ImagesHandler struct {
 	DB       *db.DB
 	ImageDir string
+	// Progress is used by DeleteImage to check for active deploys.
+	// It is optional — when nil, the active-deploy guard is skipped.
+	Progress ProgressStoreIface
 }
 
 // ListImages handles GET /api/v1/images
@@ -89,13 +92,119 @@ func (h *ImagesHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, img)
 }
 
-// ArchiveImage handles DELETE /api/v1/images/:id
+// ArchiveImage handles DELETE /api/v1/images/:id (legacy — kept for back-compat).
 func (h *ImagesHandler) ArchiveImage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.DB.ArchiveBaseImage(r.Context(), id); err != nil {
 		writeError(w, err)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeleteImage handles DELETE /api/v1/images/:id (real delete).
+//
+// Query params:
+//
+//	?force=true — unassign all nodes using the image and delete anyway.
+//
+// Rejection rules (in order):
+//  1. Image not found → 404.
+//  2. Active deployment in progress (any phase != "complete"/"error") → 409.
+//  3. Nodes referencing the image (without force) → 409 with node list.
+//
+// On success:
+//   - Removes the blob directory from disk.
+//   - Deletes the DB record.
+//   - Returns 204 No Content.
+func (h *ImagesHandler) DeleteImage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	force := r.URL.Query().Get("force") == "true"
+	ctx := r.Context()
+
+	// Confirm the image exists.
+	img, err := h.DB.GetBaseImage(ctx, id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Guard: reject if the image is currently being deployed (even with force).
+	// We check the progress store for any non-terminal deploy phases.
+	if h.Progress != nil {
+		for _, p := range h.Progress.List() {
+			phase := p.Phase
+			if phase == "complete" || phase == "error" || phase == "" {
+				continue
+			}
+			// Determine which image is being deployed by checking the log fields.
+			// The progress entry only has node_mac; we fetch the node's assigned image.
+			node, lookupErr := h.DB.GetNodeConfigByMAC(ctx, p.NodeMAC)
+			if lookupErr != nil {
+				continue
+			}
+			if node.BaseImageID == id {
+				writeJSON(w, http.StatusConflict, api.ErrorResponse{
+					Error: "image is currently being deployed to one or more nodes — wait for the deployment to complete or fail before deleting",
+					Code:  "image_deploying",
+				})
+				return
+			}
+		}
+	}
+
+	// Guard: reject if nodes reference this image (unless force).
+	nodes, err := h.DB.ListNodesByBaseImageID(ctx, id)
+	if err != nil {
+		log.Error().Err(err).Str("image_id", id).Msg("delete image: list nodes")
+		writeError(w, err)
+		return
+	}
+	if len(nodes) > 0 && !force {
+		writeJSON(w, http.StatusConflict, api.ImageInUseResponse{
+			Error: "image is assigned to one or more nodes; use ?force=true to unassign and delete",
+			Code:  "image_in_use",
+			Nodes: nodes,
+		})
+		return
+	}
+
+	// Force path: unassign all nodes first.
+	if len(nodes) > 0 && force {
+		if err := h.DB.ClearBaseImageOnNodes(ctx, id); err != nil {
+			log.Error().Err(err).Str("image_id", id).Msg("delete image: clear nodes")
+			writeError(w, err)
+			return
+		}
+		log.Warn().Str("image_id", id).Int("node_count", len(nodes)).
+			Msg("delete image: force-unassigned nodes")
+	}
+
+	// Remove blob directory from disk (best-effort — don't fail if missing).
+	blobDir := filepath.Join(h.ImageDir, id)
+	if rmErr := os.RemoveAll(blobDir); rmErr != nil && !os.IsNotExist(rmErr) {
+		log.Error().Err(rmErr).Str("path", blobDir).Msg("delete image: remove blob dir")
+		// Non-fatal: continue to remove the DB record so the image isn't
+		// permanently undeletable due to a missing directory.
+	}
+	// Also remove legacy flat blob file (uploaded via /blob endpoint).
+	legacyBlob := filepath.Join(h.ImageDir, id+".blob")
+	_ = os.Remove(legacyBlob)
+
+	// Delete the DB record.
+	if err := h.DB.DeleteBaseImage(ctx, id); err != nil {
+		log.Error().Err(err).Str("image_id", id).Msg("delete image: db delete")
+		writeError(w, err)
+		return
+	}
+
+	log.Warn().
+		Str("image_id", id).
+		Str("image_name", img.Name).
+		Bool("force", force).
+		Int("nodes_unassigned", len(nodes)).
+		Msg("image deleted")
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -84,7 +84,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Handler instances.
 	health := &handlers.HealthHandler{Version: "dev"}
-	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir}
+	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
 	nodes := &handlers.NodesHandler{DB: s.db}
 	imgFactory := &image.Factory{
 		Store:    s.db,
@@ -137,7 +137,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images", images.ListImages)
 			r.Post("/images", images.CreateImage)
 			r.Get("/images/{id}", images.GetImage)
-			r.Delete("/images/{id}", images.ArchiveImage)
+			r.Delete("/images/{id}", images.DeleteImage)
 			r.Get("/images/{id}/status", images.GetImageStatus)
 			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
 			r.Put("/images/{id}/disklayout", images.PutDiskLayout)

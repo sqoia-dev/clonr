@@ -134,6 +134,7 @@ type IBInterfaceConfig struct {
 type NodeConfig struct {
 	ID              string              `json:"id"`
 	Hostname        string              `json:"hostname"`
+	HostnameAuto    bool                `json:"hostname_auto"`
 	FQDN            string              `json:"fqdn"`
 	PrimaryMAC      string              `json:"primary_mac"`
 	Interfaces      []InterfaceConfig   `json:"interfaces"`
@@ -229,6 +230,14 @@ type ListNodesResponse struct {
 type HealthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version,omitempty"`
+}
+
+// ImageInUseResponse is returned with 409 Conflict when a DELETE /api/v1/images/:id
+// is rejected because nodes have the image assigned.
+type ImageInUseResponse struct {
+	Error string       `json:"error"`
+	Code  string       `json:"code"`
+	Nodes []NodeConfig `json:"nodes"`
 }
 
 // ─── Log types ───────────────────────────────────────────────────────────────

@@ -70,6 +70,12 @@ const API = {
         list(status = '')           { return API.get('/images', status ? { status } : {}); },
         get(id)                     { return API.get(`/images/${id}`); },
         archive(id)                 { return API.del(`/images/${id}`); },
+        // delete sends a real DELETE that removes blobs + DB record.
+        // opts.force=true unassigns nodes and deletes anyway.
+        delete(id, opts = {})       {
+            const path = opts.force ? `/images/${id}?force=true` : `/images/${id}`;
+            return API.del(path);
+        },
         diskLayout(id)              { return API.get(`/images/${id}/disklayout`); },
         activeDeploys(id)           { return API.get(`/images/${id}/active-deploys`); },
         openShellSession(id)        { return API.post(`/images/${id}/shell-session`, {}); },

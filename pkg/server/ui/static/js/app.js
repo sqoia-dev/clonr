@@ -55,6 +55,20 @@ const App = {
     _logStream: null,
     _mainEl: null,
 
+    // Simple short-lived data cache to avoid redundant fetches across refresh cycles.
+    // Structure: { key: { data, expiresAt } }
+    _cache: {},
+
+    _cacheGet(key) {
+        const entry = this._cache[key];
+        if (!entry || Date.now() > entry.expiresAt) return null;
+        return entry.data;
+    },
+
+    _cacheSet(key, data, ttlMs = 2000) {
+        this._cache[key] = { data, expiresAt: Date.now() + ttlMs };
+    },
+
     init() {
         this._mainEl = document.getElementById('main-content');
         this._initRoutes();
@@ -246,6 +260,10 @@ const Pages = {
 
     // ── Dashboard ──────────────────────────────────────────────────────────
 
+    // _dashDeployMap persists the deployment map across refresh cycles so the
+    // ProgressStream SSE updates are not lost when dashboardRefresh() runs.
+    _dashDeployMap: null,
+
     async dashboard() {
         App.render(loading('Loading dashboard…'));
 
@@ -259,14 +277,20 @@ const Pages = {
             const images = imagesResp.images || [];
             const nodes  = nodesResp.nodes   || [];
 
+            // Warm the cache so the first auto-refresh is instant.
+            App._cacheSet('images', images);
+            App._cacheSet('nodes', nodes);
+
             const ready    = images.filter(i => i.status === 'ready').length;
             const building = images.filter(i => i.status === 'building').length;
             const errored  = images.filter(i => i.status === 'error').length;
             const configured = nodes.filter(n => n.base_image_id).length;
 
-            // Build a MAC → progress map for live updates.
+            // Build a MAC → progress map for live updates. Stored on Pages so
+            // dashboardRefresh() can reuse and mutate it without losing SSE state.
             const deployMap = new Map();
             (progressEntries || []).forEach(p => deployMap.set(p.node_mac, p));
+            Pages._dashDeployMap = deployMap;
 
             const recentActivity = this._buildRecentActivity(images, nodes);
 
@@ -300,8 +324,8 @@ const Pages = {
                             </svg>
                         </div>
                         <div class="stat-label">Total Images</div>
-                        <div class="stat-value">${images.length}</div>
-                        <div class="stat-sub">
+                        <div class="stat-value" id="dash-images-count">${images.length}</div>
+                        <div class="stat-sub" id="dash-images-sub">
                             <span class="text-success">${ready} ready</span>
                             ${building > 0 ? ` · <span class="text-accent">${building} building</span>` : ''}
                             ${errored  > 0 ? ` · <span class="text-error">${errored} error</span>` : ''}
@@ -315,8 +339,8 @@ const Pages = {
                             </svg>
                         </div>
                         <div class="stat-label">Nodes</div>
-                        <div class="stat-value">${nodes.length}</div>
-                        <div class="stat-sub">${configured} configured · ${nodes.length - configured} unconfigured</div>
+                        <div class="stat-value" id="dash-nodes-count">${nodes.length}</div>
+                        <div class="stat-sub" id="dash-nodes-sub">${configured} configured · ${nodes.length - configured} unconfigured</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon stat-icon-amber">
@@ -345,10 +369,10 @@ const Pages = {
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
                     ${cardWrap('Recent Images',
-                        this._imagesTable(images.slice(0, 6)),
+                        `<div id="dash-recent-images-wrap">${this._imagesTable(images.slice(0, 6))}</div>`,
                         `<a href="#/images" class="btn btn-secondary btn-sm">View all</a>`)}
                     ${cardWrap('Recent Nodes',
-                        this._nodesTable(nodes.slice(0, 6)),
+                        `<div id="dash-recent-nodes-wrap">${this._nodesTable(nodes.slice(0, 6))}</div>`,
                         `<a href="#/nodes" class="btn btn-secondary btn-sm">View all</a>`)}
                 </div>
 
@@ -414,11 +438,142 @@ const Pages = {
             });
             App._progressStream.connect();
 
-            App.setAutoRefresh(() => Pages.dashboard());
+            // Incremental auto-refresh — updates data in-place, no DOM flicker.
+            App.setAutoRefresh(() => Pages.dashboardRefresh());
 
         } catch (e) {
             App.render(alertBox(`Failed to load dashboard: ${e.message}`));
         }
+    },
+
+    // dashboardRefresh — called by the auto-refresh timer every 30 seconds.
+    // Fetches fresh data and updates existing DOM elements in-place.
+    // Never replaces the outer layout, the log stream, or any other stateful widget.
+    async dashboardRefresh() {
+        // Guard: if the dashboard DOM is gone (navigated away), do nothing.
+        if (!document.getElementById('dash-images-count')) return;
+
+        try {
+            // Use cached data if still fresh (avoids thundering-herd on rapid refreshes).
+            let images = App._cacheGet('images');
+            let nodes  = App._cacheGet('nodes');
+
+            const fetches = [];
+            if (!images) fetches.push(API.images.list().then(r => { images = r.images || []; App._cacheSet('images', images); }));
+            if (!nodes)  fetches.push(API.nodes.list().then(r  => { nodes  = r.nodes   || []; App._cacheSet('nodes',  nodes);  }));
+            if (fetches.length) await Promise.all(fetches);
+
+            // ── Stat cards ────────────────────────────────────────────────
+            const ready      = images.filter(i => i.status === 'ready').length;
+            const building   = images.filter(i => i.status === 'building').length;
+            const errored    = images.filter(i => i.status === 'error').length;
+            const configured = nodes.filter(n => n.base_image_id).length;
+
+            const imagesCount = document.getElementById('dash-images-count');
+            const imagesSub   = document.getElementById('dash-images-sub');
+            const nodesCount  = document.getElementById('dash-nodes-count');
+            const nodesSub    = document.getElementById('dash-nodes-sub');
+
+            if (imagesCount) imagesCount.textContent = images.length;
+            if (imagesSub) {
+                let sub = `<span class="text-success">${ready} ready</span>`;
+                if (building > 0) sub += ` · <span class="text-accent">${building} building</span>`;
+                if (errored  > 0) sub += ` · <span class="text-error">${errored} error</span>`;
+                imagesSub.innerHTML = sub;
+            }
+            if (nodesCount) nodesCount.textContent = nodes.length;
+            if (nodesSub)   nodesSub.textContent   = `${configured} configured · ${nodes.length - configured} unconfigured`;
+
+            // ── Recent Images table (diff rows, no full replace) ──────────
+            const imagesWrap = document.getElementById('dash-recent-images-wrap');
+            if (imagesWrap) {
+                this._diffTable(imagesWrap, images.slice(0, 6), 'id', (img) => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'clickable';
+                    tr.dataset.key = img.id;
+                    tr.onclick = () => Router.navigate(`/images/${img.id}`);
+                    tr.innerHTML = `
+                        <td>
+                            <span style="font-weight:500">${escHtml(img.name)}</span>
+                            ${img.version ? `<span class="text-dim text-sm"> v${escHtml(img.version)}</span>` : ''}
+                        </td>
+                        <td>
+                            ${img.os   ? `<span class="badge badge-neutral badge-sm">${escHtml(img.os)}</span> ` : ''}
+                            ${img.arch ? `<span class="badge badge-neutral badge-sm">${escHtml(img.arch)}</span>` : ''}
+                            ${!img.os && !img.arch ? '<span class="text-dim">—</span>' : ''}
+                        </td>
+                        <td>${badge(img.status)}</td>
+                        <td class="text-dim text-mono text-sm">${fmtBytes(img.size_bytes)}</td>`;
+                    return tr;
+                }, (tr, img) => {
+                    // Update status badge and size in place — name/os/arch don't change.
+                    const cells = tr.querySelectorAll('td');
+                    if (cells[2]) cells[2].innerHTML = badge(img.status);
+                    if (cells[3]) cells[3].textContent = fmtBytes(img.size_bytes);
+                });
+            }
+
+            // ── Recent Nodes table (diff rows) ────────────────────────────
+            const nodesWrap = document.getElementById('dash-recent-nodes-wrap');
+            if (nodesWrap) {
+                this._diffTable(nodesWrap, nodes.slice(0, 6), 'id', (n) => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'clickable';
+                    tr.dataset.key = n.id;
+                    tr.onclick = () => Router.navigate(`/nodes/${n.id}`);
+                    tr.innerHTML = `
+                        <td>
+                            ${(n.hostname && n.hostname !== '(none)')
+                                ? `<span style="font-weight:500">${escHtml(n.hostname)}</span>`
+                                : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
+                            <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
+                        </td>
+                        <td>${nodeBadge(n)}</td>
+                        <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>`;
+                    return tr;
+                }, (tr, n) => {
+                    const cells = tr.querySelectorAll('td');
+                    if (cells[1]) cells[1].innerHTML = nodeBadge(n);
+                    if (cells[2]) cells[2].textContent = fmtRelative(n.updated_at);
+                });
+            }
+
+        } catch (_) {
+            // Silently swallow refresh errors — the user is still on a functional page.
+            // The next tick will retry automatically.
+        }
+    },
+
+    // _diffTable reconciles the rows inside a table container (which holds a
+    // .table-wrap > table > tbody) against a new data array.
+    // - keyField: the property name used as the row identity key (matches data-key)
+    // - createRow(item): returns a new <tr> element with data-key set
+    // - updateRow(tr, item): mutates an existing <tr> in-place with fresh values
+    _diffTable(container, newData, keyField, createRow, updateRow) {
+        const tbody = container.querySelector('tbody');
+        // If the table structure doesn't exist yet (e.g. was empty-state), rebuild fully.
+        if (!tbody) {
+            if (newData.length === 0) return; // leave empty-state as-is
+            // Can't diff without a tbody — let the next full navigation render handle it.
+            return;
+        }
+
+        const existing = new Map();
+        tbody.querySelectorAll('[data-key]').forEach(el => existing.set(el.dataset.key, el));
+
+        // Track insertion order so rows stay sorted consistently.
+        for (const item of newData) {
+            const key = String(item[keyField]);
+            if (existing.has(key)) {
+                updateRow(existing.get(key), item);
+                existing.delete(key);
+            } else {
+                tbody.appendChild(createRow(item));
+            }
+        }
+
+        // Remove rows that are no longer in the data set.
+        for (const [, el] of existing) el.remove();
     },
 
     // _deployProgressTable renders the active deployments table from a MAC → DeployProgress map.
@@ -525,7 +680,7 @@ const Pages = {
             </tr></thead>
             <tbody>
             ${images.map(img => `
-                <tr class="clickable" onclick="Router.navigate('/images/${img.id}')">
+                <tr class="clickable" data-key="${escHtml(img.id)}" onclick="Router.navigate('/images/${img.id}')">
                     <td>
                         <span style="font-weight:500">${escHtml(img.name)}</span>
                         ${img.version ? `<span class="text-dim text-sm"> v${escHtml(img.version)}</span>` : ''}
@@ -550,7 +705,7 @@ const Pages = {
             </tr></thead>
             <tbody>
             ${nodes.map(n => `
-                <tr class="clickable" onclick="Router.navigate('/nodes/${n.id}')">
+                <tr class="clickable" data-key="${escHtml(n.id)}" onclick="Router.navigate('/nodes/${n.id}')">
                     <td>
                         ${(n.hostname && n.hostname !== '(none)')
                             ? `<span style="font-weight:500">${escHtml(n.hostname)}</span>`
@@ -902,6 +1057,67 @@ const Pages = {
         }
     },
 
+    // showDeleteImageModal — opens a confirmation modal for real image deletion.
+    // When the image is in-use by nodes, shows them and offers a force-delete checkbox.
+    async showDeleteImageModal(id, name) {
+        // Pre-fetch to see if any nodes are using the image.
+        let nodes = [];
+        try {
+            const resp = await API.get(`/nodes`, { base_image_id: id });
+            nodes = (resp && resp.nodes) || [];
+        } catch (_) {}
+
+        const nodesHtml = nodes.length
+            ? `<div style="margin:12px 0 8px;padding:10px 12px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border)">
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">Nodes using this image:</div>
+                ${nodes.map(n => `<div style="font-size:13px;font-family:var(--font-mono);padding:2px 0">${escHtml(n.hostname || n.primary_mac)}</div>`).join('')}
+               </div>
+               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:4px 0 12px">
+                   <input type="checkbox" id="delete-image-force">
+                   <span style="font-size:13px">Force delete — unassign ${nodes.length} node${nodes.length !== 1 ? 's' : ''} and delete anyway</span>
+               </label>`
+            : `<p style="margin:8px 0 16px;color:var(--text-secondary);font-size:13px">This will permanently remove the image and all associated files. This action cannot be undone.</p>`;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'delete-image-modal';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:480px">
+                <div class="modal-header">
+                    <span class="modal-title">Delete Image</span>
+                    <button class="modal-close" onclick="document.getElementById('delete-image-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin:0 0 4px;font-weight:600">${escHtml(name)}</p>
+                    ${nodesHtml}
+                    <div id="delete-image-error" style="display:none" class="form-error"></div>
+                    <div class="form-actions" style="margin-top:0">
+                        <button class="btn btn-secondary" onclick="document.getElementById('delete-image-modal').remove()">Cancel</button>
+                        <button class="btn btn-danger" id="delete-image-confirm-btn" onclick="Pages._confirmDeleteImage('${id}')">Delete Permanently</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    async _confirmDeleteImage(id) {
+        const force = !!(document.getElementById('delete-image-force') || {}).checked;
+        const btn = document.getElementById('delete-image-confirm-btn');
+        const errEl = document.getElementById('delete-image-error');
+        if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+        if (errEl) errEl.style.display = 'none';
+        try {
+            await API.images.delete(id, { force });
+            const modal = document.getElementById('delete-image-modal');
+            if (modal) modal.remove();
+            Router.navigate('/images');
+        } catch (e) {
+            if (errEl) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+            if (btn) { btn.disabled = false; btn.textContent = 'Delete Permanently'; }
+        }
+    },
+
     // ── Capture from Host ──────────────────────────────────────────────────
 
     showCaptureModal(prefillHost = '', prefillName = '') {
@@ -1094,9 +1310,7 @@ const Pages = {
                         ${img.status === 'ready'
                             ? `<button class="btn btn-secondary" onclick="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
                             : ''}
-                        ${img.status !== 'archived'
-                            ? `<button class="btn btn-danger btn-sm" onclick="Pages.archiveImage('${img.id}', '${escHtml(img.name)}')">Archive</button>`
-                            : ''}
+                        <button class="btn btn-danger btn-sm" onclick="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>
                     </div>
                 </div>
 
@@ -1387,6 +1601,9 @@ const Pages = {
 
     // ── Nodes ──────────────────────────────────────────────────────────────
 
+    // _nodesImages caches the images list used for modal data across refresh cycles.
+    _nodesImages: null,
+
     async nodes() {
         App.render(loading('Loading nodes…'));
         try {
@@ -1396,13 +1613,19 @@ const Pages = {
             ]);
             const nodes  = nodesResp.nodes  || [];
             const images = imagesResp.images || [];
+
+            // Cache for incremental refresh.
+            App._cacheSet('nodes',  nodes);
+            App._cacheSet('images', images);
+            Pages._nodesImages = images;
+
             const imgMap = Object.fromEntries(images.map(i => [i.id, i]));
 
             App.render(`
                 <div class="page-header">
                     <div>
                         <div class="page-title">Nodes</div>
-                        <div class="page-subtitle">${nodes.length} node${nodes.length !== 1 ? 's' : ''} total</div>
+                        <div class="page-subtitle" id="nodes-subtitle">${nodes.length} node${nodes.length !== 1 ? 's' : ''} total</div>
                     </div>
                     <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -1418,62 +1641,120 @@ const Pages = {
                             <thead><tr>
                                 <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Groups</th><th>Updated</th><th>Actions</th>
                             </tr></thead>
-                            <tbody>
-                            ${nodes.map(n => {
-                                const img = imgMap[n.base_image_id];
-                                let hwChips = '';
-                                try {
-                                    const hw = n.hardware_profile
-                                        ? (typeof n.hardware_profile === 'string' ? JSON.parse(n.hardware_profile) : n.hardware_profile)
-                                        : null;
-                                    if (hw) {
-                                        const chips = [];
-                                        if (hw.CPUCount || hw.cpu_count) chips.push(`${hw.CPUCount || hw.cpu_count} CPU`);
-                                        if (hw.MemoryBytes || hw.memory_bytes) chips.push(fmtBytes(hw.MemoryBytes || hw.memory_bytes) + ' RAM');
-                                        if (hw.Disks && hw.Disks.length) chips.push(`${hw.Disks.length} disk${hw.Disks.length > 1 ? 's' : ''}`);
-                                        if (hw.NICs && hw.NICs.length) chips.push(`${hw.NICs.length} NIC${hw.NICs.length > 1 ? 's' : ''}`);
-                                        hwChips = `<div class="hw-chips">${chips.map(c => `<span class="hw-chip">${escHtml(c)}</span>`).join('')}</div>`;
-                                    }
-                                } catch (_) {}
-                                return `<tr>
-                                    <td>
-                                        <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
-                                            ${(n.hostname && n.hostname !== '(none)')
-                                                ? escHtml(n.hostname)
-                                                : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
-                                        </a>
-                                        <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
-                                    </td>
-                                    <td class="text-sm">
-                                        ${img
-                                            ? `<a href="#/images/${img.id}">${escHtml(img.name)}</a>`
-                                            : (n.base_image_id ? `<span class="text-dim text-mono">${n.base_image_id.substring(0, 8)}…</span>` : '<span class="text-dim">—</span>')}
-                                    </td>
-                                    <td>${nodeBadge(n)}</td>
-                                    <td>${hwChips || '<span class="text-dim text-sm">—</span>'}</td>
-                                    <td>
-                                        ${(n.groups || []).map(g => `<span class="badge badge-neutral badge-sm">${escHtml(g)}</span>`).join(' ') || '<span class="text-dim">—</span>'}
-                                    </td>
-                                    <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
-                                    <td>
-                                        <div class="flex gap-6">
-                                            <button class="btn btn-secondary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(n))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
-                                            <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
-                                        </div>
-                                    </td>
-                                </tr>`;
-                            }).join('')}
+                            <tbody id="nodes-tbody">
+                            ${nodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
                             </tbody>
                         </table></div>`
-                        : emptyState('No nodes', 'Add your first node using the button above',
-                            `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)
+                        : `<div id="nodes-empty">${emptyState('No nodes', 'Add your first node using the button above',
+                            `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`
                 )}
             `);
 
-            App.setAutoRefresh(() => Pages.nodes());
+            // Incremental auto-refresh — updates rows in-place without blowing away the DOM.
+            App.setAutoRefresh(() => Pages.nodesRefresh());
 
         } catch (e) {
             App.render(alertBox(`Failed to load nodes: ${e.message}`));
+        }
+    },
+
+    // _nodeRow renders a single <tr> string for the nodes table.
+    _nodeRow(n, imgMap, images) {
+        const img = imgMap[n.base_image_id];
+        let hwChips = '';
+        try {
+            const hw = n.hardware_profile
+                ? (typeof n.hardware_profile === 'string' ? JSON.parse(n.hardware_profile) : n.hardware_profile)
+                : null;
+            if (hw) {
+                const chips = [];
+                if (hw.CPUCount || hw.cpu_count) chips.push(`${hw.CPUCount || hw.cpu_count} CPU`);
+                if (hw.MemoryBytes || hw.memory_bytes) chips.push(fmtBytes(hw.MemoryBytes || hw.memory_bytes) + ' RAM');
+                if (hw.Disks && hw.Disks.length) chips.push(`${hw.Disks.length} disk${hw.Disks.length > 1 ? 's' : ''}`);
+                if (hw.NICs && hw.NICs.length) chips.push(`${hw.NICs.length} NIC${hw.NICs.length > 1 ? 's' : ''}`);
+                hwChips = `<div class="hw-chips">${chips.map(c => `<span class="hw-chip">${escHtml(c)}</span>`).join('')}</div>`;
+            }
+        } catch (_) {}
+        return `<tr data-key="${escHtml(n.id)}">
+            <td>
+                <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
+                    ${(n.hostname && n.hostname !== '(none)')
+                        ? escHtml(n.hostname)
+                        : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
+                </a>
+                <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
+            </td>
+            <td class="text-sm">
+                ${img
+                    ? `<a href="#/images/${img.id}">${escHtml(img.name)}</a>`
+                    : (n.base_image_id ? `<span class="text-dim text-mono">${n.base_image_id.substring(0, 8)}…</span>` : '<span class="text-dim">—</span>')}
+            </td>
+            <td>${nodeBadge(n)}</td>
+            <td>${hwChips || '<span class="text-dim text-sm">—</span>'}</td>
+            <td>
+                ${(n.groups || []).map(g => `<span class="badge badge-neutral badge-sm">${escHtml(g)}</span>`).join(' ') || '<span class="text-dim">—</span>'}
+            </td>
+            <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
+            <td>
+                <div class="flex gap-6">
+                    <button class="btn btn-secondary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(n))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
+                    <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
+                </div>
+            </td>
+        </tr>`;
+    },
+
+    // nodesRefresh — called by the auto-refresh timer. Updates the nodes table
+    // in-place without replacing the full page layout or showing a loading state.
+    async nodesRefresh() {
+        const tbody = document.getElementById('nodes-tbody');
+        if (!tbody) return; // navigated away, or table was empty on initial render
+
+        try {
+            let nodes  = App._cacheGet('nodes');
+            let images = App._cacheGet('images') || Pages._nodesImages || [];
+
+            const fetches = [];
+            if (!nodes)  fetches.push(API.nodes.list().then(r  => { nodes  = r.nodes   || []; App._cacheSet('nodes',  nodes);  }));
+            // Only re-fetch images if cache is cold — they change infrequently.
+            if (!App._cacheGet('images')) fetches.push(API.images.list().then(r => { images = r.images || []; App._cacheSet('images', images); Pages._nodesImages = images; }));
+            if (fetches.length) await Promise.all(fetches);
+
+            const imgMap = Object.fromEntries(images.map(i => [i.id, i]));
+
+            // Update subtitle.
+            const subtitle = document.getElementById('nodes-subtitle');
+            if (subtitle) subtitle.textContent = `${nodes.length} node${nodes.length !== 1 ? 's' : ''} total`;
+
+            // Diff the tbody rows.
+            const existing = new Map();
+            tbody.querySelectorAll('[data-key]').forEach(el => existing.set(el.dataset.key, el));
+
+            for (const n of nodes) {
+                const key = n.id;
+                if (existing.has(key)) {
+                    // Update only the columns that can change between refreshes.
+                    const tr   = existing.get(key);
+                    const cells = tr.querySelectorAll('td');
+                    if (cells[2]) cells[2].innerHTML = nodeBadge(n);
+                    if (cells[5]) cells[5].textContent = fmtRelative(n.updated_at);
+                    // Refresh action buttons with latest node JSON (hostname may have changed).
+                    if (cells[6]) cells[6].innerHTML = `<div class="flex gap-6">
+                        <button class="btn btn-secondary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(n))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
+                        <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
+                    </div>`;
+                    existing.delete(key);
+                } else {
+                    // New node appeared — insert a full row.
+                    tbody.insertAdjacentHTML('beforeend', Pages._nodeRow(n, imgMap, images));
+                }
+            }
+
+            // Remove rows for nodes that were deleted.
+            for (const [, el] of existing) el.remove();
+
+        } catch (_) {
+            // Silently ignore refresh errors — next tick will retry.
         }
     },
 

@@ -249,6 +249,34 @@ func (db *DB) ArchiveBaseImage(ctx context.Context, id string) error {
 	return requireOneRow(res, "base_images", id)
 }
 
+// DeleteBaseImage hard-deletes a BaseImage record. Returns ErrNotFound if the
+// image does not exist. Callers must ensure blobs are removed from disk first.
+func (db *DB) DeleteBaseImage(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM base_images WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("db: delete base image: %w", err)
+	}
+	return requireOneRow(res, "base_images", id)
+}
+
+// ListNodesByBaseImageID returns all NodeConfigs that reference the given image.
+func (db *DB) ListNodesByBaseImageID(ctx context.Context, imageID string) ([]api.NodeConfig, error) {
+	return db.ListNodeConfigs(ctx, imageID)
+}
+
+// ClearBaseImageOnNodes sets base_image_id = NULL for all nodes referencing the
+// given image ID. Used by force-delete to unassign nodes before deleting the image.
+func (db *DB) ClearBaseImageOnNodes(ctx context.Context, imageID string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET base_image_id = NULL, updated_at = ? WHERE base_image_id = ?`,
+		time.Now().Unix(), imageID,
+	)
+	if err != nil {
+		return fmt.Errorf("db: clear base_image_id on nodes: %w", err)
+	}
+	return nil
+}
+
 // UpdateDiskLayout replaces the disk_layout JSON for a BaseImage.
 func (db *DB) UpdateDiskLayout(ctx context.Context, id string, layout api.DiskLayout) error {
 	data, err := json.Marshal(layout)
@@ -297,12 +325,12 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
-			(id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		cfg.ID, cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
+		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig,
@@ -324,14 +352,21 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 	}
 
 	// Check whether a record for this MAC already exists.
-	_, err = db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
+	existing, err := db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
 	if err == nil {
-		// Exists — update hardware_profile and hostname only.
+		// Exists — update hardware_profile. Only overwrite hostname when the stored
+		// hostname was auto-generated; admin-set hostnames are preserved.
+		newHostname := existing.Hostname
+		newHostnameAuto := existing.HostnameAuto
+		if existing.HostnameAuto && cfg.Hostname != "" {
+			newHostname = cfg.Hostname
+			newHostnameAuto = cfg.HostnameAuto
+		}
 		_, err = db.sql.ExecContext(ctx, `
 			UPDATE node_configs
-			SET hardware_profile = ?, hostname = ?, updated_at = ?
+			SET hardware_profile = ?, hostname = ?, hostname_auto = ?, updated_at = ?
 			WHERE primary_mac = ?
-		`, string(hwProfile), cfg.Hostname, time.Now().Unix(), cfg.PrimaryMAC)
+		`, string(hwProfile), newHostname, boolToInt(newHostnameAuto), time.Now().Unix(), cfg.PrimaryMAC)
 		if err != nil {
 			return api.NodeConfig{}, fmt.Errorf("db: upsert node (update): %w", err)
 		}
@@ -354,12 +389,12 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
-			(id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', ?, ?)
 	`,
-		cfg.ID, cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
+		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars),
 		string(hwProfile),
@@ -383,7 +418,7 @@ func nullableString(s string) interface{} {
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 		       created_at, updated_at
 		FROM node_configs WHERE id = ?
@@ -394,7 +429,7 @@ func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, err
 // GetNodeConfigByMAC retrieves the NodeConfig whose primary_mac matches mac.
 func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfig, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+		SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 		       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 		       created_at, updated_at
 		FROM node_configs WHERE primary_mac = ?
@@ -409,14 +444,14 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 
 	if baseImageID != "" {
 		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			       created_at, updated_at
 			FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC
 		`, baseImageID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, hostname, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+			SELECT id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			       created_at, updated_at
 			FROM node_configs ORDER BY hostname ASC
@@ -471,12 +506,12 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
-		SET hostname = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
+		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
 		    hardware_profile = ?, bmc_config = ?, ib_config = ?, updated_at = ?
 		WHERE id = ?
 	`,
-		cfg.Hostname, cfg.FQDN, cfg.PrimaryMAC,
+		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig,
@@ -555,6 +590,7 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
 		cfg            api.NodeConfig
+		hostnameAuto   int
 		interfacesJSON string
 		sshKeysJSON    string
 		groupsJSON     string
@@ -568,7 +604,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	)
 
 	err := s.Scan(
-		&cfg.ID, &cfg.Hostname, &cfg.FQDN, &cfg.PrimaryMAC,
+		&cfg.ID, &cfg.Hostname, &hostnameAuto, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
 		&groupsJSON, &customVarsJSON, &baseImageID,
 		&hwProfileJSON, &bmcConfigJSON, &ibConfigJSON,
@@ -580,6 +616,8 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	if err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: scan node config: %w", err)
 	}
+
+	cfg.HostnameAuto = hostnameAuto != 0
 
 	if baseImageID.Valid {
 		cfg.BaseImageID = baseImageID.String
@@ -779,6 +817,14 @@ func (db *DB) PurgeLogs(ctx context.Context, olderThan time.Time) (int64, error)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// boolToInt converts a bool to SQLite's INTEGER representation (0 or 1).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // requireOneRow returns ErrNotFound if no rows were affected.
