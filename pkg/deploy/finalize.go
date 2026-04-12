@@ -500,9 +500,24 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 	// We always use "chroot <mountRoot> dnf" because the initramfs (deployment host)
 	// does not have dnf — it must be invoked from within the deployed image, which
 	// is a full Rocky Linux 9 system with /usr/bin/dnf present.
+	//
+	// IMPORTANT: disable all third-party repos (epel, epel-next, etc.) during
+	// this install. The initramfs environment has no external DNS resolution and
+	// any attempt to reach mirrors.fedoraproject.org or similar will time out and
+	// cause dnf to fail. Kernel and grub2 are in the base Rocky repos (baseos,
+	// appstream, extras) which are served by the local mirrorlist / fastest-mirror
+	// cache inside the chroot, but to be safe we explicitly enable only baseos and
+	// appstream and disable everything else.
 	packages := []string{"kernel", "grub2-pc", "grub2-tools"}
-	log.Info().Strs("packages", packages).Msg("finalize/boot: installing kernel + grub2 via chroot dnf")
-	chrootDnfArgs := append([]string{mountRoot, "dnf", "-y", "--setopt=install_weak_deps=False", "install"}, packages...)
+	log.Info().Strs("packages", packages).Msg("finalize/boot: installing kernel + grub2 via chroot dnf (baseos+appstream only)")
+	chrootDnfArgs := append([]string{
+		mountRoot, "dnf", "-y",
+		"--setopt=install_weak_deps=False",
+		"--disablerepo=*",
+		"--enablerepo=baseos",
+		"--enablerepo=appstream",
+		"install",
+	}, packages...)
 	if err := runAndLog(ctx, "chroot-dnf-kernel-install", exec.CommandContext(ctx, "chroot", chrootDnfArgs...)); err != nil {
 		return fmt.Errorf("chroot dnf install kernel+grub2: %w", err)
 	}
