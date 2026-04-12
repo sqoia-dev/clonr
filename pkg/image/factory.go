@@ -1021,6 +1021,10 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		Notes:     req.Notes,
 		SourceURL: req.URL,
 		CreatedAt: time.Now().UTC(),
+		// BuiltForRoles records which HPC role presets were selected at build time.
+		// The node-assignment UI uses this to warn when an admin assigns a gpu-compute
+		// image to a node tagged as plain "compute" (or vice versa).
+		BuiltForRoles: req.RoleIDs,
 		// Disk layout is determined from what the installer actually creates.
 		// We set a bios-boot default here; it gets overwritten after extraction.
 		DiskLayout: api.DiskLayout{
