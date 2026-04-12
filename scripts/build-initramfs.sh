@@ -363,6 +363,19 @@ ${transitive}"
         find_and_install_bin "$tool" "$WORKDIR/usr/sbin" || true
     done
 
+    # ── util-linux mount/umount → /usr/sbin ──────────────────────────────────────
+    # busybox umount does NOT support -R (recursive unmount). clonr's unmountAll()
+    # calls `umount -R <mountRoot>` which requires util-linux's umount. Without it,
+    # busybox silently ignores -R and returns exit 0, leaving XFS partitions mounted
+    # and causing all subsequent finalize operations to fail with EBUSY.
+    #
+    # busybox mount also does not support --make-rprivate (shared peer propagation
+    # severing). Fetch util-linux mount+umount and install them into /usr/sbin so
+    # they appear earlier in PATH than the busybox symlinks in /bin.
+    for mntool in mount umount; do
+        find_and_install_bin "$mntool" "$WORKDIR/usr/sbin" || true
+    done
+
     # ── GNU userland → /usr/bin ──────────────────────────────────────────────────
     # tar: busybox tar cannot reliably handle .tar.gz with large files or extended
     # headers. GNU tar at /usr/bin/tar overrides the busybox symlink at /bin/tar.
