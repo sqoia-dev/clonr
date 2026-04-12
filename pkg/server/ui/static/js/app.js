@@ -735,6 +735,12 @@ const Pages = {
                     </div>
                     <div class="flex gap-8">
                         <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
+                        <button class="btn btn-secondary" onclick="Pages.showBuildFromISOModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                <rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/>
+                            </svg>
+                            Build from ISO
+                        </button>
                         <button class="btn btn-secondary" onclick="Pages.showCaptureModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -854,6 +860,21 @@ const Pages = {
                                 <label>VM CPUs</label>
                                 <input type="number" name="cpus" value="2" min="1" max="16">
                             </div>
+                            <!-- Role presets (ISO mode only) -->
+                            <div style="grid-column:1/-1" id="pull-roles-group" style="display:none">
+                                <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">Node Roles <span style="font-weight:400;font-size:12px;color:var(--text-secondary)">(select all that apply)</span></div>
+                                <div id="pull-roles-list" style="display:grid;gap:6px;margin-bottom:10px">
+                                    <div style="font-size:12px;color:var(--text-secondary);font-style:italic">Loading roles…</div>
+                                </div>
+                                <div id="pull-roles-preview" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px"></div>
+                                <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px">
+                                    <input type="checkbox" name="install_updates" id="pull-install-updates" style="margin-top:2px;flex-shrink:0">
+                                    <span>
+                                        <strong>Install OS updates during build</strong><br>
+                                        <span style="font-size:12px;color:var(--text-secondary)">Adds ~5-10 min. The resulting image will not need immediate patching on deploy.</span>
+                                    </span>
+                                </label>
+                            </div>
                             <div class="form-group" style="grid-column:1/-1" id="pull-ks-group" style="display:none">
                                 <label>Custom Kickstart / Autoinstall</label>
                                 <textarea name="custom_kickstart" rows="3"
@@ -883,23 +904,57 @@ const Pages = {
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 
         // Detect ISO URL and toggle ISO-specific fields.
-        const urlInput = document.getElementById('pull-url');
-        const isoHint  = document.getElementById('pull-iso-hint');
-        const fmtGroup  = document.getElementById('pull-format-group');
-        const diskGroup = document.getElementById('pull-disk-group');
-        const memGroup  = document.getElementById('pull-mem-group');
-        const cpuGroup  = document.getElementById('pull-cpu-group');
-        const ksGroup   = document.getElementById('pull-ks-group');
-        const pullBtn   = document.getElementById('pull-btn');
+        const urlInput    = document.getElementById('pull-url');
+        const isoHint     = document.getElementById('pull-iso-hint');
+        const fmtGroup    = document.getElementById('pull-format-group');
+        const diskGroup   = document.getElementById('pull-disk-group');
+        const memGroup    = document.getElementById('pull-mem-group');
+        const cpuGroup    = document.getElementById('pull-cpu-group');
+        const rolesGroup  = document.getElementById('pull-roles-group');
+        const ksGroup     = document.getElementById('pull-ks-group');
+        const pullBtn     = document.getElementById('pull-btn');
+        let rolesLoaded   = false;
+
+        // _loadRoles fetches the role list from the server and renders the picker.
+        // Called once on first ISO URL detection; subsequent toggles reuse the DOM.
+        const _loadRoles = async () => {
+            if (rolesLoaded) return;
+            rolesLoaded = true;
+            const list    = document.getElementById('pull-roles-list');
+            const preview = document.getElementById('pull-roles-preview');
+            try {
+                const resp   = await API.imageRoles.list();
+                const roles  = resp.roles || [];
+                list.innerHTML = roles.map(r => `
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;
+                                  padding:6px 8px;border-radius:6px;
+                                  background:var(--bg-tertiary,#1e2a3a);font-size:13px"
+                           title="${escHtml(r.notes || '')}">
+                        <input type="checkbox" name="role_ids" value="${escHtml(r.id)}"
+                               style="margin-top:2px;flex-shrink:0"
+                               onchange="Pages._updateRolePreview()">
+                        <span>
+                            <strong>${escHtml(r.name)}</strong>
+                            <span style="color:var(--text-secondary);font-size:12px;display:block">${escHtml(r.description)}</span>
+                            ${r.notes ? `<span style="color:var(--text-secondary);font-size:11px;font-style:italic;display:block">${escHtml(r.notes)}</span>` : ''}
+                        </span>
+                    </label>`).join('');
+                Pages._updateRolePreview();
+            } catch (ex) {
+                list.innerHTML = `<div style="font-size:12px;color:var(--text-secondary)">Could not load role presets: ${escHtml(ex.message)}</div>`;
+            }
+        };
 
         const applyISOMode = (isISO) => {
-            isoHint.style.display  = isISO ? 'block' : 'none';
+            isoHint.style.display   = isISO ? 'block' : 'none';
             fmtGroup.style.display  = isISO ? 'none'  : '';
             diskGroup.style.display = isISO ? ''      : 'none';
             memGroup.style.display  = isISO ? ''      : 'none';
             cpuGroup.style.display  = isISO ? ''      : 'none';
+            if (rolesGroup) rolesGroup.style.display = isISO ? '' : 'none';
             if (ksGroup) ksGroup.style.display = isISO ? '' : 'none';
             pullBtn.textContent = isISO ? 'Build from ISO' : 'Pull Image';
+            if (isISO) _loadRoles();
         };
 
         urlInput.addEventListener('input', () => {
@@ -941,6 +996,23 @@ const Pages = {
             else if (lower.includes('opensuse') || lower.includes('suse')) osEl.value = 'suse';
             else if (lower.includes('alpine')) osEl.value = 'alpine';
         }
+    },
+
+    // _updateRolePreview updates the "Selected: ..." line below the role picker.
+    _updateRolePreview() {
+        const form    = document.getElementById('pull-form');
+        const preview = document.getElementById('pull-roles-preview');
+        if (!form || !preview) return;
+        const checked = [...form.querySelectorAll('input[name="role_ids"]:checked')];
+        if (checked.length === 0) {
+            preview.textContent = '';
+            return;
+        }
+        const names = checked.map(cb => {
+            const label = cb.closest('label');
+            return label ? (label.querySelector('strong') || {}).textContent || cb.value : cb.value;
+        });
+        preview.textContent = 'Selected: ' + names.join(', ');
     },
 
     showImportISOModal() {
@@ -1058,6 +1130,8 @@ const Pages = {
         try {
             let img;
             if (isISO) {
+                const roleIds = [...form.querySelectorAll('input[name="role_ids"]:checked')].map(cb => cb.value);
+                const updatesEl = form.querySelector('input[name="install_updates"]');
                 const body = {
                     url:              url,
                     name:             data.get('name'),
@@ -1067,6 +1141,8 @@ const Pages = {
                     disk_size_gb:     parseInt(data.get('disk_size_gb'), 10) || 0,
                     memory_mb:        parseInt(data.get('memory_mb'),    10) || 0,
                     cpus:             parseInt(data.get('cpus'),         10) || 0,
+                    role_ids:         roleIds.length > 0 ? roleIds : undefined,
+                    install_updates:  updatesEl ? updatesEl.checked : false,
                     custom_kickstart: data.get('custom_kickstart') || undefined,
                     notes:            data.get('notes')  || undefined,
                     tags:             [],
@@ -1428,7 +1504,7 @@ const Pages = {
                 </div>
 
                 ${img.error_message ? alertBox(`Error: ${img.error_message}`) : ''}
-                ${img.status === 'building' ? `<div class="alert alert-info" style="margin-bottom:16px">Build in progress — auto-refreshing every 5 seconds.</div>` : ''}
+                ${img.status === 'building' ? Pages._isoBuildInProgress(img) : ''}
 
                 ${cardWrap('Image Details', `
                     <div class="card-body">
@@ -1462,7 +1538,18 @@ const Pages = {
             `);
 
             if (img.status === 'building') {
-                App.setAutoRefresh(() => Pages.imageDetail(id), 5000);
+                App.setAutoRefresh(async () => {
+                    try {
+                        const fresh = await API.images.get(id);
+                        if (fresh.status !== 'building') {
+                            // Transition out of building — reload the full detail page.
+                            Pages.imageDetail(id);
+                        } else {
+                            // Still building: update elapsed time display in-place.
+                            Pages._updateIsoBuildProgress(fresh);
+                        }
+                    } catch (_) {}
+                }, 5000);
             }
         } catch (e) {
             App.render(alertBox(`Failed to load image: ${e.message}`));
@@ -1928,6 +2015,7 @@ const Pages = {
                                     ${imgOptions}
                                     ${!imgOptions ? `<option disabled>No ready images available</option>` : ''}
                                 </select>
+                                <div id="role-mismatch-warning" class="alert alert-warning" style="display:none;margin-top:8px;font-size:12px"></div>
                             </div>
                             <div class="form-group" style="grid-column:1/-1">
                                 <label>Groups (comma-separated)</label>
@@ -2056,6 +2144,15 @@ const Pages = {
 
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+        // Wire up role-mismatch warning when admin changes the base image selection.
+        const imageSelect = overlay.querySelector('select[name="base_image_id"]');
+        if (imageSelect && node) {
+            const checkMismatch = () => Pages._checkRoleMismatch(imageSelect.value, node, images);
+            imageSelect.addEventListener('change', checkMismatch);
+            // Run once on open so pre-selected images are validated immediately.
+            if (node.base_image_id) checkMismatch();
+        }
 
         // Attach live-validation listeners after DOM is ready.
         const tbody = document.getElementById('mounts-tbody');
@@ -3298,6 +3395,410 @@ const Pages = {
             Router.navigate('/nodes');
         } catch (e) {
             alert(`Delete failed: ${e.message}`);
+        }
+    },
+
+
+    // ── Build from ISO modal ─────────────────────────────────────────���─────
+
+    // _isoDetectDistro parses common ISO URL patterns and returns
+    // { distro, version, os, name } best-effort pre-fills.
+    _isoDetectDistro(url) {
+        const lower = url.toLowerCase();
+        const base  = lower.split('?')[0].split('/').pop();
+
+        // Version: grab first X.Y (or X.Y.Z) token from the filename.
+        const verMatch = base.match(/[\-_](\d+\.\d+(?:\.\d+)?)/);
+        const version  = verMatch ? verMatch[1] : '';
+
+        if (lower.includes('rockylinux.org') || base.startsWith('rocky-')) {
+            return { distro: 'rocky', os: 'Rocky Linux ' + (version || ''), version };
+        }
+        if (lower.includes('almalinux.org') || base.startsWith('almalinux-')) {
+            return { distro: 'almalinux', os: 'AlmaLinux ' + (version || ''), version };
+        }
+        if (lower.includes('centos.org') || base.startsWith('centos-')) {
+            return { distro: 'centos', os: 'CentOS ' + (version || ''), version };
+        }
+        if (lower.includes('ubuntu.com') || lower.includes('releases.ubuntu.com') || lower.includes('cdimage.ubuntu.com') || base.startsWith('ubuntu-')) {
+            return { distro: 'ubuntu', os: 'Ubuntu ' + (version || ''), version };
+        }
+        if (lower.includes('debian.org') || base.startsWith('debian-')) {
+            return { distro: 'debian', os: 'Debian ' + (version || ''), version };
+        }
+        if (lower.includes('opensuse.org') || lower.includes('suse.com') || base.startsWith('opensuse-') || base.startsWith('sle-')) {
+            return { distro: 'suse', os: 'SUSE / openSUSE', version };
+        }
+        if (lower.includes('alpinelinux.org') || base.startsWith('alpine-')) {
+            return { distro: 'alpine', os: 'Alpine Linux', version };
+        }
+        return { distro: '', os: '', version };
+    },
+
+    // _isoFormatHint returns a human-readable label for the auto-install format.
+    _isoFormatHint(distro) {
+        const fmts = {
+            rocky: 'kickstart install', almalinux: 'kickstart install',
+            centos: 'kickstart install', rhel: 'kickstart install',
+            ubuntu: 'cloud-init autoinstall', debian: 'preseed install',
+            suse: 'AutoYaST install', alpine: 'answers file',
+        };
+        return fmts[distro] || 'automated install';
+    },
+
+    // _countUniquePackages returns the number of unique packages across all
+    // provided role objects (which have a package_count field from the API).
+    // Since the server pre-computes per-role cross-distro unique counts, we
+    // cannot trivially deduplicate across roles client-side without knowing the
+    // actual package lists. We approximate by summing and noting the overlap.
+    // The "Preview" line is best-effort; exact count is computed server-side.
+    _countUniquePackages(selectedRoles) {
+        // Use the max single-role count plus 30% of remaining as an approximation.
+        if (!selectedRoles.length) return 0;
+        const counts = selectedRoles.map(r => r.package_count).sort((a, b) => b - a);
+        let total = counts[0];
+        for (let i = 1; i < counts.length; i++) {
+            total += Math.round(counts[i] * 0.6); // ~40% overlap heuristic
+        }
+        return total;
+    },
+
+    async showBuildFromISOModal() {
+        // Load roles in parallel with modal render.
+        let roles = [];
+        try {
+            const resp = await API.imageRoles.list();
+            roles = resp.roles || [];
+        } catch (e) {
+            console.warn('Failed to load image roles:', e.message);
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'build-iso-modal';
+
+        const rolesHtml = roles.length
+            ? roles.map(r => `
+                <label class="role-card" data-role-id="${escHtml(r.id)}">
+                    <div class="role-card-header">
+                        <input type="checkbox" name="role_ids" value="${escHtml(r.id)}" onchange="Pages._onRoleToggle()">
+                        <span class="role-card-name">${escHtml(r.name)}</span>
+                        <span class="role-card-count">${r.package_count} pkgs</span>
+                    </div>
+                    <div class="role-card-desc">${escHtml(r.description)}</div>
+                    ${r.notes ? `<div class="role-card-note">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="width:11px;height:11px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                        ${escHtml(r.notes)}
+                    </div>` : ''}
+                </label>`).join('')
+            : '<div style="color:var(--text-secondary);font-size:13px;padding:12px 0">No roles available — build will use minimal install.</div>';
+
+        // Store roles on overlay for access in event handlers.
+        overlay._roles = roles;
+
+        overlay.innerHTML = `
+            <div class="modal modal-wide">
+                <div class="modal-header">
+                    <span class="modal-title">Build Image from ISO</span>
+                    <button class="modal-close" onclick="document.getElementById('build-iso-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <form id="build-iso-form" onsubmit="Pages.submitBuildFromISO(event)">
+
+                        <div class="form-group" style="margin-bottom:6px">
+                            <label>ISO URL *</label>
+                            <input type="url" id="build-iso-url" name="url"
+                                placeholder="https://download.rockylinux.org/pub/rocky/10/isos/x86_64/Rocky-10.1-x86_64-dvd1.iso"
+                                oninput="Pages._onISOUrlChange(this.value)"
+                                required>
+                            <div id="build-iso-url-hint" class="form-hint" style="min-height:18px"></div>
+                        </div>
+
+                        <div class="form-grid" style="margin-bottom:16px">
+                            <div class="form-group">
+                                <label>Name *</label>
+                                <input type="text" name="name" id="build-iso-name" placeholder="rocky10-compute" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Version</label>
+                                <input type="text" name="version" id="build-iso-version" placeholder="10.1">
+                            </div>
+                            <div class="form-group">
+                                <label>OS</label>
+                                <input type="text" name="os" id="build-iso-os" placeholder="Rocky Linux 10">
+                            </div>
+                        </div>
+
+                        <div style="margin-bottom:16px">
+                            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Node roles</div>
+                            <div class="role-picker" id="build-iso-roles">
+                                ${rolesHtml}
+                            </div>
+                            <div id="build-iso-role-preview" class="form-hint" style="margin-top:8px;min-height:18px"></div>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+                                <input type="checkbox" name="install_updates" id="build-iso-updates">
+                                <span>Install OS updates during build</span>
+                            </label>
+                            <div class="form-hint">Adds ~5-10 min, produces a fully patched image</div>
+                        </div>
+
+                        <div style="margin-bottom:16px">
+                            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px">VM Resources</div>
+                            <div class="form-grid">
+                                <div class="form-group">
+                                    <label>Disk: <span id="build-iso-disk-val">20 GB</span></label>
+                                    <input type="range" name="disk_size_gb" id="build-iso-disk"
+                                        min="10" max="100" step="5" value="20"
+                                        oninput="document.getElementById('build-iso-disk-val').textContent=this.value+' GB'">
+                                </div>
+                                <div class="form-group">
+                                    <label>Memory: <span id="build-iso-mem-val">2 GB</span></label>
+                                    <input type="range" name="memory_gb" id="build-iso-mem"
+                                        min="1" max="8" step="1" value="2"
+                                        oninput="document.getElementById('build-iso-mem-val').textContent=this.value+' GB'">
+                                </div>
+                                <div class="form-group">
+                                    <label>CPUs: <span id="build-iso-cpu-val">2</span></label>
+                                    <input type="range" name="cpus" id="build-iso-cpu"
+                                        min="1" max="8" step="1" value="2"
+                                        oninput="document.getElementById('build-iso-cpu-val').textContent=this.value">
+                                </div>
+                            </div>
+                        </div>
+
+                        <details id="build-iso-advanced">
+                            <summary style="font-size:12px;font-weight:600;color:var(--text-secondary);cursor:pointer;user-select:none;margin-bottom:10px">
+                                Advanced: Custom Kickstart
+                            </summary>
+                            <div class="alert alert-warning" style="font-size:12px;margin-bottom:10px">
+                                Overrides role-based package list. Use only if you need full control.
+                            </div>
+                            <div class="form-group">
+                                <textarea name="custom_kickstart" id="build-iso-kickstart" rows="8"
+                                    placeholder="# Paste your kickstart/autoinstall/preseed here...&#10;# Leave blank to use the auto-generated config from roles."
+                                    style="font-family:var(--font-mono);font-size:12px"></textarea>
+                            </div>
+                        </details>
+
+                        <div id="build-iso-result" style="margin-top:12px"></div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('build-iso-modal').remove()">Cancel</button>
+                            <button type="submit" class="btn btn-primary" id="build-iso-btn">Build Image</button>
+                        </div>
+                    </form>
+                </div>
+            </div>`;
+
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        overlay.querySelector('#build-iso-url').focus();
+
+        // Initial role preview state.
+        Pages._onRoleToggle();
+    },
+
+    _onISOUrlChange(url) {
+        const hintEl  = document.getElementById('build-iso-url-hint');
+        const nameEl  = document.getElementById('build-iso-name');
+        const verEl   = document.getElementById('build-iso-version');
+        const osEl    = document.getElementById('build-iso-os');
+        if (!hintEl) return;
+
+        const det = Pages._isoDetectDistro(url);
+        if (det.distro) {
+            hintEl.textContent = 'Detected: ' + det.os + ' (' + Pages._isoFormatHint(det.distro) + ')';
+            hintEl.style.color = 'var(--success)';
+            if (nameEl && !nameEl.value && det.distro) {
+                // Auto-generate a slug name from distro + version.
+                const slug = (det.distro + (det.version ? det.version.replace(/\./g, '') : '')).toLowerCase();
+                nameEl.value = slug;
+            }
+            if (verEl && !verEl.value && det.version) {
+                verEl.value = det.version;
+            }
+            if (osEl && !osEl.value && det.os) {
+                osEl.value = det.os;
+            }
+        } else {
+            hintEl.textContent = url.toLowerCase().endsWith('.iso') ? 'ISO URL — distro could not be detected' : '';
+            hintEl.style.color = 'var(--text-secondary)';
+        }
+    },
+
+    _onRoleToggle() {
+        const modal   = document.getElementById('build-iso-modal');
+        const preview = document.getElementById('build-iso-role-preview');
+        const btn     = document.getElementById('build-iso-btn');
+        if (!preview || !modal) return;
+
+        const checked  = [...document.querySelectorAll('#build-iso-roles input[type=checkbox]:checked')];
+        const roleIds  = checked.map(cb => cb.value);
+        const roles    = (modal._roles || []).filter(r => roleIds.includes(r.id));
+        const hasKS    = !!(document.getElementById('build-iso-kickstart') || {}).value;
+
+        if (roles.length) {
+            const pkgEst = Pages._countUniquePackages(roles);
+            preview.textContent = 'Preview: ~' + pkgEst + ' unique packages will be installed';
+            preview.style.color = 'var(--accent)';
+        } else if (hasKS) {
+            preview.textContent = 'Using custom kickstart — role packages ignored';
+            preview.style.color = 'var(--text-secondary)';
+        } else {
+            preview.textContent = 'No roles selected — minimal base install only';
+            preview.style.color = 'var(--text-secondary)';
+        }
+
+        // Disable submit if no roles AND no custom kickstart.
+        if (btn) btn.disabled = (roles.length === 0 && !hasKS);
+    },
+
+    async submitBuildFromISO(e) {
+        e.preventDefault();
+        const form   = e.target;
+        const btn    = document.getElementById('build-iso-btn');
+        const result = document.getElementById('build-iso-result');
+        const data   = new FormData(form);
+
+        btn.disabled  = true;
+        btn.textContent = 'Submitting…';
+        result.innerHTML = '';
+
+        const roleIds = [...form.querySelectorAll('input[name="role_ids"]:checked')].map(cb => cb.value);
+
+        const body = {
+            url:              data.get('url'),
+            name:             data.get('name'),
+            version:          data.get('version') || '',
+            os:               data.get('os') || '',
+            disk_size_gb:     parseInt(data.get('disk_size_gb') || '20', 10),
+            memory_mb:        parseInt(data.get('memory_gb') || '2', 10) * 1024,
+            cpus:             parseInt(data.get('cpus') || '2', 10),
+            role_ids:         roleIds,
+            install_updates:  form.querySelector('input[name="install_updates"]').checked,
+            custom_kickstart: data.get('custom_kickstart') || '',
+        };
+
+        try {
+            const img = await API.factory.buildFromISO(body);
+            result.innerHTML = alertBox(
+                'Build started: ' + img.name + ' (' + img.id.substring(0, 8) + ') — status: ' + img.status +
+                '. This may take 10-30 minutes.',
+                'success'
+            );
+            App.setAutoRefresh(() => Pages.images(), 5000);
+            setTimeout(() => {
+                const modal = document.getElementById('build-iso-modal');
+                if (modal) modal.remove();
+                Router.navigate('/images/' + img.id);
+            }, 1800);
+        } catch (ex) {
+            result.innerHTML = alertBox('Build failed: ' + ex.message);
+            btn.disabled = false;
+            btn.textContent = 'Build Image';
+        }
+    },
+
+    // ── ISO build progress panel ───────────────────────────────────────────
+
+    // _isoBuildInProgress returns the HTML for the inline build progress panel
+    // shown on the image detail page when status=building and build_method=iso.
+    _isoBuildInProgress(img) {
+        const isISO = img.build_method === 'iso';
+        if (!isISO) {
+            return `<div class="alert alert-info" style="margin-bottom:16px">Build in progress — auto-refreshing every 5 seconds.</div>`;
+        }
+        return `
+            <div class="card iso-build-panel" style="margin-bottom:16px">
+                <div class="card-header">
+                    <span class="card-title">Building ${escHtml(img.name)} from ISO…</span>
+                    <span class="badge badge-building">building</span>
+                </div>
+                <div class="card-body">
+                    <div id="iso-build-phase" style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">
+                        Phase: <span style="font-weight:600;color:var(--text-primary)">Initializing</span>
+                    </div>
+                    <div class="progress-bar-wrap" style="margin-bottom:10px">
+                        <div class="progress-bar-fill" id="iso-build-bar" style="width:0%;animation:indeterminate 1.5s ease infinite"></div>
+                    </div>
+                    <div style="display:flex;gap:24px;font-size:12px;color:var(--text-secondary);margin-bottom:16px">
+                        <span>Elapsed: <span id="iso-build-elapsed" class="text-mono">—</span></span>
+                        <span>ETA: <span id="iso-build-eta" class="text-mono">—</span></span>
+                    </div>
+                    <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Serial console output</div>
+                    <div id="iso-serial-log" class="iso-serial-log log-viewer" style="height:220px"></div>
+                    <div style="margin-top:12px">
+                        <button class="btn btn-danger btn-sm" onclick="Pages._cancelIsoBuild('${escHtml(img.id)}')">Cancel Build</button>
+                    </div>
+                </div>
+            </div>`;
+    },
+
+    _updateIsoBuildProgress(img) {
+        // Called on each 5s refresh tick while status=building.
+        // Update elapsed time. Actual phase/log data comes from the SSE log stream
+        // which Richard wires up with component=iso-build logs.
+        const startTime = new Date(img.created_at).getTime();
+        const elapsed   = Math.floor((Date.now() - startTime) / 1000);
+        const elEl = document.getElementById('iso-build-elapsed');
+        if (elEl) elEl.textContent = fmtETA(elapsed);
+    },
+
+    async _cancelIsoBuild(imageId) {
+        if (!confirm('Cancel this build? The in-progress VM will be stopped and the image will remain in error state.')) return;
+        try {
+            await API.images.delete(imageId);
+            Router.navigate('/images');
+        } catch (e) {
+            alert('Cancel failed: ' + e.message);
+        }
+    },
+
+    // ── Role mismatch warning ───────────────────────────────────────────��──
+
+    // _checkRoleMismatch is called when the admin changes the image selection on the
+    // node edit modal. It reads the image's built_for_roles and compares against
+    // the node's groups to surface a warning when there is a mismatch.
+    _checkRoleMismatch(imageId, node, images) {
+        const warnEl = document.getElementById('role-mismatch-warning');
+        if (!warnEl) return;
+
+        if (!imageId) { warnEl.style.display = 'none'; return; }
+
+        const img = (images || []).find(i => i.id === imageId);
+        if (!img) { warnEl.style.display = 'none'; return; }
+
+        const builtFor = img.built_for_roles || [];
+        if (!builtFor.length) { warnEl.style.display = 'none'; return; }
+
+        // Compare the node's groups array against the image's built_for_roles.
+        // A mismatch is when the node has a group that looks like a role ID
+        // (compute, gpu-compute, storage, etc.) but it's not in the image's roles.
+        const roleKeywords = ['compute', 'gpu-compute', 'gpu', 'storage', 'head-node', 'management', 'minimal'];
+        const nodeRoles = (node.groups || []).filter(g => roleKeywords.some(k => g.toLowerCase().includes(k)));
+        const mismatched = nodeRoles.filter(g => !builtFor.some(r => g.toLowerCase().includes(r) || r.toLowerCase().includes(g)));
+
+        if (mismatched.length) {
+            const nodeRoleStr  = mismatched.join(', ');
+            const imageRoleStr = builtFor.join(', ');
+            warnEl.innerHTML = `
+                <div style="display:flex;gap:10px;align-items:flex-start">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="width:18px;height:18px;flex-shrink:0;margin-top:2px;color:var(--warning)">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <div>
+                        <div style="font-weight:600;margin-bottom:2px">Role mismatch</div>
+                        <div style="font-size:12px">This node has group <strong>${escHtml(nodeRoleStr)}</strong> but the image
+                        <strong>${escHtml(img.name)}</strong> was built for <strong>${escHtml(imageRoleStr)}</strong>.
+                        Required packages may not be present on the deployed node.</div>
+                    </div>
+                </div>`;
+            warnEl.style.display = '';
+        } else {
+            warnEl.style.display = 'none';
         }
     },
 
