@@ -295,6 +295,40 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		return err
 	}
 
+	// Install the GRUB bootloader if the layout includes a bios_grub partition.
+	// This writes stage1/stage1.5 to the bios_grub partition and the MBR so the
+	// deployed system can boot on BIOS/GPT systems without EFI.
+	hasBIOSGrub := false
+	for _, p := range d.layout.Partitions {
+		for _, flag := range p.Flags {
+			if flag == "bios_grub" || flag == "biosboot" {
+				hasBIOSGrub = true
+				break
+			}
+		}
+	}
+	if hasBIOSGrub {
+		log := logger()
+		bootDir := filepath.Join(mountRoot, "boot")
+		log.Info().Str("disk", d.targetDisk).Str("bootDir", bootDir).
+			Msg("finalize: installing GRUB bootloader (BIOS/GPT)")
+		grubArgs := []string{
+			"--target=i386-pc",
+			"--boot-directory=" + bootDir,
+			"--recheck",
+			d.targetDisk,
+		}
+		if err := runAndLog(ctx, "grub2-install", exec.CommandContext(ctx, "grub2-install", grubArgs...)); err != nil {
+			// Non-fatal: log prominently. The node may still boot if the image
+			// already had a working bootloader installed (e.g. a snapshot of a
+			// running system). Manual intervention: chroot in and run grub2-install.
+			log.Warn().Err(err).Str("disk", d.targetDisk).
+				Msg("WARNING: finalize: grub2-install failed (non-fatal) — node may not boot; run grub2-install manually")
+		} else {
+			log.Info().Str("disk", d.targetDisk).Msg("finalize: GRUB bootloader installed")
+		}
+	}
+
 	// If the layout includes RAID arrays, write mdadm.conf and update initramfs
 	// so the deployed system can reassemble its arrays on next boot.
 	if len(d.layout.RAIDArrays) > 0 {
