@@ -2256,6 +2256,7 @@ const Pages = {
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-hardware')">Hardware</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-bmc');Pages._onBMCTabOpen('${node.id}', ${!!(node.bmc || node.power_provider)})">Power / IPMI</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-disklayout');Pages._onDiskLayoutTabOpen('${node.id}')">Disk Layout</div>
+                    <div class="tab" onclick="Pages._switchTab(this, 'tab-mounts');Pages._onMountsTabOpen('${node.id}')">Mounts</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-config')">Configuration</div>
                     <div class="tab" onclick="Pages._switchTab(this, 'tab-logs')">Logs</div>
                 </div>
@@ -2417,6 +2418,13 @@ const Pages = {
                     </div>
                 </div>
 
+                <!-- Mounts tab -->
+                <div id="tab-mounts" class="tab-panel">
+                    <div id="mounts-content">
+                        <div class="loading"><div class="spinner"></div>Loading mounts…</div>
+                    </div>
+                </div>
+
                 <!-- Configuration tab -->
                 <div id="tab-config" class="tab-panel">
                     ${node.ssh_keys && node.ssh_keys.length ? cardWrap('SSH Public Keys', `
@@ -2569,6 +2577,72 @@ const Pages = {
         } catch (e) {
             container.innerHTML = alertBox(`Failed to load disk layout: ${e.message}`);
         }
+    },
+
+    // _onMountsTabOpen fetches the effective-mounts response and renders it.
+    async _onMountsTabOpen(nodeId) {
+        const container = document.getElementById('mounts-content');
+        if (!container) return;
+        // Don't reload if already populated.
+        if (container.dataset.loaded === nodeId) return;
+        container.innerHTML = `<div class="loading"><div class="spinner"></div>Loading mounts…</div>`;
+        try {
+            const resp = await API.request('GET', `/api/v1/nodes/${nodeId}/effective-mounts`);
+            container.innerHTML = Pages._renderEffectiveMountsTab(resp);
+            container.dataset.loaded = nodeId;
+        } catch (e) {
+            container.innerHTML = alertBox(`Failed to load effective mounts: ${e.message}`);
+        }
+    },
+
+    // _renderEffectiveMountsTab renders the merged fstab entry list for the Mounts tab.
+    _renderEffectiveMountsTab(resp) {
+        const mounts = (resp && resp.mounts) || [];
+
+        const sourceLabel = (m) => {
+            if (m.source === 'group') return `<span class="badge badge-neutral badge-sm" title="Inherited from group ${escHtml(m.group_id||'')}">group</span>`;
+            return `<span class="badge badge-info badge-sm">node</span>`;
+        };
+
+        const mountsTable = mounts.length === 0
+            ? emptyState('No additional mounts configured',
+                'Use the Edit button to add shared storage mounts (NFS, Lustre, BeeGFS, CIFS…). They are appended to /etc/fstab during deployment.')
+            : `<div class="table-wrap"><table>
+                <thead><tr>
+                    <th>Source</th>
+                    <th>Mount Point</th>
+                    <th>FS Type</th>
+                    <th>Options</th>
+                    <th>Auto-mkdir</th>
+                    <th>Dump / Pass</th>
+                    <th>Origin</th>
+                    <th>Comment</th>
+                </tr></thead>
+                <tbody>
+                ${mounts.map(m => `<tr>
+                    <td class="mono">${escHtml(m.source||'—')}</td>
+                    <td class="mono">${escHtml(m.mount_point||'—')}</td>
+                    <td><span class="badge badge-neutral badge-sm">${escHtml(m.fs_type||'—')}</span></td>
+                    <td class="mono dim" style="font-size:11px">${escHtml(m.options||'defaults')}</td>
+                    <td style="text-align:center">${m.auto_mkdir ? '✓' : '—'}</td>
+                    <td class="mono dim" style="text-align:center">${m.dump||0} / ${m.pass||0}</td>
+                    <td>${sourceLabel(m)}</td>
+                    <td class="dim" style="font-size:11px">${escHtml(m.comment||'—')}</td>
+                </tr>`).join('')}
+                </tbody>
+            </table></div>`;
+
+        return cardWrap('Effective Mounts',
+            `<div class="card-body">
+                <p style="margin:0 0 12px;color:var(--text-secondary);font-size:13px">
+                    Merged result of group-level and node-level extra mounts.
+                    These entries are appended to <code>/etc/fstab</code> after the base partition UUIDs are written.
+                    <strong>Node entries override group entries</strong> when the mount point matches.
+                </p>
+                ${mountsTable}
+            </div>`,
+            ``
+        );
     },
 
     _renderDiskLayoutTab(nodeId, effective, rec) {
