@@ -2,11 +2,16 @@ package deploy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
@@ -15,9 +20,10 @@ import (
 // BlockDeployer deploys a raw block image directly to a disk.
 // It supports two modes:
 //   - streaming: pipes the HTTP download directly into dd (no temp file needed)
-//   - buffered: downloads to a temp file first, then writes with dd
+//   - verified: downloads to a temp file first to compute sha256, then writes
 //
-// Streaming is the default — it avoids requiring disk space equal to the image size.
+// Streaming is used when SkipVerify is true. Verified mode is the default when
+// ExpectedChecksum is provided, to avoid writing corrupt data to disk.
 type BlockDeployer struct {
 	// layout and targetDisk are resolved by Preflight.
 	layout     api.DiskLayout
@@ -30,15 +36,26 @@ func (d *BlockDeployer) Preflight(ctx context.Context, layout api.DiskLayout, hw
 	if err != nil {
 		return err
 	}
+
+	// Validate disk size and produce an actionable error message.
+	diskSize, sizeErr := diskSizeBytes(target)
+	if sizeErr == nil {
+		needed := totalLayoutBytes(layout)
+		if needed > 0 && diskSize < needed {
+			return fmt.Errorf("%w: disk %s is too small (%s) — layout requires at least %s minimum",
+				ErrPreflightFailed, target,
+				humanReadableBytes(diskSize), humanReadableBytes(needed))
+		}
+	}
+
 	d.layout = layout
 	d.targetDisk = target
 	return nil
 }
 
-// Deploy streams the block image from opts.ImageURL and writes it directly
-// to the target disk using dd. No intermediate temp file is created.
-// The target disk is used from d.targetDisk (set by Preflight) unless
-// opts.TargetDisk is explicitly set.
+// Deploy streams the block image from opts.ImageURL and writes it to the target
+// disk. When opts.ExpectedChecksum is set and opts.SkipVerify is false, the blob
+// is downloaded to a temp file first for checksum verification before writing.
 func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
 	disk := opts.TargetDisk
 	if disk == "" {
@@ -48,52 +65,74 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 		return fmt.Errorf("deploy/block: Preflight must be called before Deploy")
 	}
 
-	// Build the HTTP download request.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
-	if err != nil {
-		return fmt.Errorf("deploy/block: build request: %w", err)
-	}
-	if opts.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("deploy/block: download: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("deploy/block: download: HTTP %d", resp.StatusCode)
+	// ── Rollback setup ────────────────────────────────────────────────────────
+	var rollbackPath string
+	if !opts.NoRollback {
+		backup, empty, err := backupPartitionTable(disk)
+		if err != nil {
+			log.Printf("deploy/block: WARNING: could not back up partition table on %s: %v — proceeding without rollback", disk, err)
+		} else if empty {
+			log.Printf("deploy/block: disk %s has no existing partition table — no rollback possible if deployment fails", disk)
+		} else {
+			rollbackPath = backup
+			log.Printf("deploy/block: partition table backup saved to %s (will restore on failure)", rollbackPath)
+		}
 	}
 
-	totalBytes := resp.ContentLength
-
-	// Open target disk for writing.
-	// O_SYNC ensures that data is flushed to the physical device before dd exits.
-	f, err := os.OpenFile(disk, os.O_WRONLY|os.O_SYNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("deploy/block: open disk %s: %w", disk, err)
-	}
-	defer f.Close()
-
-	// Stream download → disk with progress reporting.
-	pr := &progressReader{
-		r:     resp.Body,
-		total: totalBytes,
-		fn:    progress,
-		phase: "writing",
+	doRollback := func(reason string) {
+		if rollbackPath == "" {
+			return
+		}
+		log.Printf("deploy/block: ROLLBACK triggered (%s) — restoring partition table on %s", reason, disk)
+		if err := restorePartitionTable(disk, rollbackPath); err != nil {
+			log.Printf("deploy/block: ROLLBACK FAILED: %v — disk %s may be in an inconsistent state; re-run deployment to recover", err, disk)
+		} else {
+			log.Printf("deploy/block: rollback complete — partition table on %s restored to pre-deployment state", disk)
+			rollbackPath = ""
+		}
 	}
 
-	// Use a 4MB copy buffer — dd default (512 bytes) is too small for network I/O.
-	buf := make([]byte, 4*1024*1024)
-	if _, err := io.CopyBuffer(f, pr, buf); err != nil {
-		return fmt.Errorf("deploy/block: write to %s: %w", disk, err)
+	if progress != nil {
+		progress(0, 0, "downloading")
 	}
 
-	// Sync buffers to disk.
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("deploy/block: sync %s: %w", disk, err)
+	var writeErr error
+	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+		if attempt > 1 {
+			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			log.Printf("deploy/block: network error downloading image blob — retrying in %s (attempt %d/%d)",
+				backoff, attempt, maxDownloadAttempts)
+			if progress != nil {
+				progress(0, 0, fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxDownloadAttempts))
+			}
+			select {
+			case <-ctx.Done():
+				doRollback("context cancelled during retry")
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		writeErr = d.attemptBlockWrite(ctx, disk, opts, progress)
+		if writeErr == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			doRollback("context cancelled during download")
+			return ctx.Err()
+		}
+		log.Printf("deploy/block: download attempt %d/%d failed: %v", attempt, maxDownloadAttempts, writeErr)
+	}
+
+	if writeErr != nil {
+		doRollback("block write failed after all retries")
+		return fmt.Errorf("deploy/block: image write failed after %d attempts: %w", maxDownloadAttempts, writeErr)
+	}
+
+	// Deployment succeeded — remove the rollback backup.
+	if rollbackPath != "" {
+		os.Remove(rollbackPath)
+		log.Printf("deploy/block: deployment succeeded — partition table backup removed")
 	}
 
 	// Re-read the partition table after writing.
@@ -101,6 +140,109 @@ func (d *BlockDeployer) Deploy(ctx context.Context, opts DeployOpts, progress Pr
 	_ = exec.CommandContext(ctx, "udevadm", "settle").Run()
 
 	return nil
+}
+
+// attemptBlockWrite performs a single attempt at downloading and writing the block image.
+func (d *BlockDeployer) attemptBlockWrite(ctx context.Context, disk string, opts DeployOpts, progress ProgressFunc) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	if opts.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error downloading image blob: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("network error downloading image blob: HTTP %d from %s", resp.StatusCode, opts.ImageURL)
+	}
+
+	totalBytes := resp.ContentLength
+	needsVerify := !opts.SkipVerify && opts.ExpectedChecksum != ""
+
+	if needsVerify {
+		return d.downloadVerifyAndWrite(ctx, resp.Body, totalBytes, disk, opts, progress)
+	}
+
+	if opts.SkipVerify && opts.ExpectedChecksum != "" {
+		log.Printf("deploy/block: WARNING: checksum verification skipped (--skip-verify set)")
+	}
+	return d.streamBlockWrite(ctx, resp.Body, totalBytes, disk, progress)
+}
+
+// downloadVerifyAndWrite downloads the block image to a temp file, verifies
+// its checksum, then writes the temp file to disk.
+func (d *BlockDeployer) downloadVerifyAndWrite(ctx context.Context, body io.Reader, totalBytes int64, disk string, opts DeployOpts, progress ProgressFunc) error {
+	tmpFile, err := os.CreateTemp("", "clonr-block-*.img")
+	if err != nil {
+		return fmt.Errorf("create temp file for checksum verification: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Download and hash simultaneously.
+	hasher := sha256.New()
+	tee := io.TeeReader(body, hasher)
+	pr := &progressReader{r: tee, total: totalBytes, fn: progress, phase: "downloading"}
+
+	if _, err := io.Copy(tmpFile, pr); err != nil {
+		return fmt.Errorf("network error downloading image blob: %w", err)
+	}
+
+	// Verify checksum.
+	gotChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if gotChecksum != opts.ExpectedChecksum {
+		return fmt.Errorf("image integrity check failed: downloaded blob sha256=%s does not match "+
+			"expected=%s — the image may be corrupt or the server checksum is stale; "+
+			"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
+	}
+	log.Printf("deploy/block: image checksum verified: sha256=%s", gotChecksum)
+
+	// Seek to start for writing.
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek temp file for block write: %w", err)
+	}
+
+	if progress != nil {
+		progress(0, totalBytes, "writing")
+	}
+
+	// Open the target disk for writing.
+	f, err := os.OpenFile(disk, os.O_WRONLY|os.O_SYNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open disk %s: %w", disk, err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4*1024*1024)
+	pr2 := &progressReader{r: tmpFile, total: totalBytes, fn: progress, phase: "writing"}
+	if _, err := io.CopyBuffer(f, pr2, buf); err != nil {
+		return fmt.Errorf("write to %s: %w", disk, err)
+	}
+
+	return f.Sync()
+}
+
+// streamBlockWrite streams the download directly to disk without checksum verification.
+func (d *BlockDeployer) streamBlockWrite(ctx context.Context, body io.Reader, totalBytes int64, disk string, progress ProgressFunc) error {
+	f, err := os.OpenFile(disk, os.O_WRONLY|os.O_SYNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open disk %s: %w", disk, err)
+	}
+	defer f.Close()
+
+	pr := &progressReader{r: body, total: totalBytes, fn: progress, phase: "writing"}
+	buf := make([]byte, 4*1024*1024)
+	if _, err := io.CopyBuffer(f, pr, buf); err != nil {
+		return fmt.Errorf("write to %s: %w", disk, err)
+	}
+
+	return f.Sync()
 }
 
 // Finalize applies node-specific configuration to the deployed filesystem.
@@ -138,4 +280,25 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 	}()
 
 	return applyNodeConfig(ctx, cfg, mountRoot)
+}
+
+// verifyBlockSpotCheck does a basic integrity check on the deployed block image
+// by verifying presence of key files in the mounted filesystem.
+func verifyBlockSpotCheck(mountRoot string) error {
+	criticalPaths := []string{
+		"/etc/hostname",
+		"/etc/fstab",
+		"/sbin/init",
+	}
+	var missing []string
+	for _, p := range criticalPaths {
+		if _, err := os.Stat(mountRoot + p); os.IsNotExist(err) {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("deployed block image is missing critical files: %v — "+
+			"the image may be corrupt or the deployment was incomplete", missing)
+	}
+	return nil
 }

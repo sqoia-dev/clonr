@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -39,6 +40,14 @@ type DeployOpts struct {
 	// MountRoot is the temporary directory where partitions are mounted
 	// during a filesystem-format deployment. Unused for block deployments.
 	MountRoot string
+	// NoRollback disables partition table backup/restore on failure.
+	// Use this when intentionally wiping a disk that has no meaningful state.
+	NoRollback bool
+	// SkipVerify skips image checksum verification after download.
+	SkipVerify bool
+	// ExpectedChecksum is the sha256 hex string to verify the downloaded blob against.
+	// When empty and SkipVerify is false, verification is skipped with a warning.
+	ExpectedChecksum string
 }
 
 // Deployer is the interface implemented by all deployment backends.
@@ -105,6 +114,60 @@ func isBootDisk(disk hardware.Disk) bool {
 		}
 	}
 	return false
+}
+
+// backupPartitionTable saves the existing GPT/MBR partition table to a temp file
+// using sgdisk --backup. Returns the path to the backup file (caller must remove
+// on success). Returns ("", nil) if the disk appears to have no partition table
+// (empty disk) — in that case rollback is not possible and the caller should log
+// accordingly rather than treating it as an error.
+func backupPartitionTable(disk string) (backupPath string, isEmpty bool, err error) {
+	// Check whether the disk has any existing partition table by probing with
+	// sgdisk --print. Exit code 2 means "no partition table found".
+	probe := exec.Command("sgdisk", "--print", disk)
+	probeOut, probeErr := probe.CombinedOutput()
+	if probeErr != nil {
+		// sgdisk exits non-zero when no GPT is found. Check for "not found" indicator.
+		if strings.Contains(string(probeOut), "doesn't contain a valid partition table") ||
+			strings.Contains(string(probeOut), "Problem opening") ||
+			probe.ProcessState != nil && probe.ProcessState.ExitCode() == 2 {
+			return "", true, nil
+		}
+		// Could be a valid MBR disk or other condition — still attempt backup.
+	}
+
+	f, err := os.CreateTemp("", "clonr-ptbackup-*.sgdisk")
+	if err != nil {
+		return "", false, fmt.Errorf("rollback: create backup temp file: %w", err)
+	}
+	f.Close()
+	backupPath = f.Name()
+
+	cmd := exec.Command("sgdisk", "--backup="+backupPath, disk)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(backupPath)
+		return "", false, fmt.Errorf("rollback: sgdisk --backup %s: %w\noutput: %s", disk, err, string(out))
+	}
+
+	return backupPath, false, nil
+}
+
+// restorePartitionTable restores a previously saved partition table backup.
+// backupPath must be a file written by sgdisk --backup. The file is removed
+// after a successful restore.
+func restorePartitionTable(disk, backupPath string) error {
+	defer os.Remove(backupPath)
+
+	cmd := exec.Command("sgdisk", "--load-backup="+backupPath, disk)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("rollback: sgdisk --load-backup %s: %w\noutput: %s", disk, err, string(out))
+	}
+
+	// Re-read partition table so the kernel reflects the restored layout.
+	_ = exec.Command("partprobe", disk).Run()
+	_ = exec.Command("udevadm", "settle").Run()
+
+	return nil
 }
 
 // selectTargetDisk picks the best disk from hw for the given layout.

@@ -2,13 +2,18 @@ package deploy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
@@ -28,9 +33,36 @@ func (d *FilesystemDeployer) Preflight(ctx context.Context, layout api.DiskLayou
 	if err != nil {
 		return err
 	}
+
+	// Validate that the selected disk is large enough for the layout, producing
+	// an actionable error message that names both the disk and the image requirement.
+	diskSize, sizeErr := diskSizeBytes(target)
+	if sizeErr == nil {
+		needed := totalLayoutBytes(layout)
+		if needed > 0 && diskSize < needed {
+			return fmt.Errorf("%w: disk %s is too small (%s) — layout requires at least %s minimum",
+				ErrPreflightFailed, target,
+				humanReadableBytes(diskSize), humanReadableBytes(needed))
+		}
+	}
+
 	d.layout = layout
 	d.targetDisk = target
 	return nil
+}
+
+// humanReadableBytes formats bytes as a human-readable string (e.g. "40GB", "512MB").
+func humanReadableBytes(b int64) string {
+	const gb = 1 << 30
+	const mb = 1 << 20
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.0fGB", math.Round(float64(b)/gb))
+	case b >= mb:
+		return fmt.Sprintf("%.0fMB", math.Round(float64(b)/mb))
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
 }
 
 // Deploy partitions the disk, creates filesystems, mounts them, and extracts the tarball.
@@ -39,34 +71,94 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		return fmt.Errorf("deploy: Preflight must be called before Deploy")
 	}
 
+	disk := opts.TargetDisk
+	if disk == "" {
+		disk = d.targetDisk
+	}
+
+	// ── Rollback setup ────────────────────────────────────────────────────────
+	var rollbackPath string
+	if !opts.NoRollback {
+		backup, empty, err := backupPartitionTable(disk)
+		if err != nil {
+			// Non-fatal: log and continue. We still proceed, just without rollback.
+			log.Printf("deploy: WARNING: could not back up partition table on %s: %v — proceeding without rollback", disk, err)
+		} else if empty {
+			log.Printf("deploy: disk %s has no existing partition table — no rollback possible if deployment fails", disk)
+		} else {
+			rollbackPath = backup
+			log.Printf("deploy: partition table backup saved to %s (will restore on failure)", rollbackPath)
+		}
+	}
+
+	// doRollback restores the partition table if a backup was taken.
+	doRollback := func(reason string) {
+		if rollbackPath == "" {
+			return
+		}
+		log.Printf("deploy: ROLLBACK triggered (%s) — restoring partition table on %s", reason, disk)
+		if err := restorePartitionTable(disk, rollbackPath); err != nil {
+			log.Printf("deploy: ROLLBACK FAILED: %v — disk %s may be in an inconsistent state; re-run deployment to recover", err, disk)
+		} else {
+			log.Printf("deploy: rollback complete — partition table on %s restored to pre-deployment state", disk)
+			rollbackPath = "" // already removed by restorePartitionTable
+		}
+	}
+
+	// Emit progress: partitioning phase.
+	if progress != nil {
+		progress(0, 0, "partitioning")
+	}
+
 	// Create RAID arrays before partitioning, if any are specified.
 	if len(d.layout.RAIDArrays) > 0 {
 		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
+			doRollback("RAID array creation failed")
 			return fmt.Errorf("deploy: create raid arrays: %w", err)
 		}
 	}
 
 	// Partition the disk.
-	if err := d.partitionDisk(ctx, opts.TargetDisk); err != nil {
-		return fmt.Errorf("deploy: partition disk: %w", err)
+	if err := d.partitionDisk(ctx, disk); err != nil {
+		doRollback("partitioning failed")
+		return err // partitionDisk already produces an actionable error
+	}
+
+	// Emit progress: formatting phase.
+	if progress != nil {
+		progress(0, 0, "formatting")
 	}
 
 	// Create filesystems.
-	partDevs, err := d.createFilesystems(ctx, opts.TargetDisk)
+	partDevs, err := d.createFilesystems(ctx, disk)
 	if err != nil {
+		doRollback("filesystem creation failed")
 		return fmt.Errorf("deploy: create filesystems: %w", err)
 	}
 
 	// Mount partitions.
 	if err := d.mountPartitions(ctx, partDevs, opts.MountRoot); err != nil {
+		doRollback("partition mount failed")
 		return fmt.Errorf("deploy: mount partitions: %w", err)
 	}
 	// Always attempt unmount on exit.
 	defer d.unmountAll(opts.MountRoot)
 
-	// Download and extract.
-	if err := d.downloadAndExtract(ctx, opts, progress); err != nil {
+	// Emit progress: downloading/extracting phase.
+	if progress != nil {
+		progress(0, 0, "downloading")
+	}
+
+	// Download, verify checksum, and extract.
+	if err := d.downloadVerifyAndExtract(ctx, opts, progress); err != nil {
+		doRollback("image download/extract failed")
 		return fmt.Errorf("deploy: extract: %w", err)
+	}
+
+	// Deployment succeeded — remove the rollback backup.
+	if rollbackPath != "" {
+		os.Remove(rollbackPath)
+		log.Printf("deploy: deployment succeeded — partition table backup removed")
 	}
 
 	return nil
@@ -84,7 +176,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		if err := GenerateMdadmConf(ctx, mountRoot); err != nil {
 			// Non-fatal: log and continue. The node may still boot if the kernel
 			// auto-assembles the RAID arrays via superblock scanning.
-			_ = fmt.Errorf("deploy: generate mdadm.conf (non-fatal): %w", err)
+			log.Printf("deploy: generate mdadm.conf (non-fatal): %v", err)
 		}
 	}
 
@@ -98,7 +190,8 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	if err := runCmd(ctx, "sgdisk", "--zap-all", disk); err != nil {
 		// Fall back to wipefs if sgdisk is unavailable.
 		if err2 := runCmd(ctx, "wipefs", "-a", disk); err2 != nil {
-			return fmt.Errorf("wipe disk: %w (sgdisk: %v, wipefs: %v)", ErrPreflightFailed, err, err2)
+			return fmt.Errorf("wipe disk %s: sgdisk failed (%v) and wipefs also failed (%v) — "+
+				"check if the disk has an active RAID superblock (wipefs -a %s)", disk, err, err2, disk)
 		}
 	}
 
@@ -126,8 +219,16 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	}
 	args = append(args, disk)
 
-	if err := runCmd(ctx, "sgdisk", args...); err != nil {
-		return fmt.Errorf("sgdisk partition: %w", err)
+	cmd := exec.CommandContext(ctx, "sgdisk", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		return fmt.Errorf("failed to create partitions on %s: sgdisk exited with code %d — "+
+			"check if the disk has an existing RAID superblock (wipefs -a %s)\noutput: %s",
+			disk, exitCode, disk, string(out))
 	}
 
 	// Allow kernel to re-read the new partition table.
@@ -219,9 +320,48 @@ func (d *FilesystemDeployer) unmountAll(mountRoot string) {
 	_ = exec.Command("umount", "-R", mountRoot).Run()
 }
 
-// downloadAndExtract downloads the tarball from opts.ImageURL and extracts it
-// into opts.MountRoot. Progress is reported via opts progress callback.
-func (d *FilesystemDeployer) downloadAndExtract(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
+// maxDownloadAttempts is the number of download attempts before giving up.
+const maxDownloadAttempts = 3
+
+// downloadVerifyAndExtract downloads the image blob from opts.ImageURL, verifies
+// its sha256 checksum if opts.ExpectedChecksum is set, then extracts it into
+// opts.MountRoot. Retries up to maxDownloadAttempts with exponential backoff.
+func (d *FilesystemDeployer) downloadVerifyAndExtract(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+		if attempt > 1 {
+			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			log.Printf("deploy: network error downloading image blob — retrying in %s (attempt %d/%d)",
+				backoff, attempt, maxDownloadAttempts)
+			if progress != nil {
+				progress(0, 0, fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxDownloadAttempts))
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		err := d.attemptDownloadAndExtract(ctx, opts, progress)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		// Only retry on network-level errors (context cancelled means timeout — don't retry).
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("deploy: download attempt %d/%d failed: %v", attempt, maxDownloadAttempts, err)
+	}
+	return fmt.Errorf("image download failed after %d attempts: %w", maxDownloadAttempts, lastErr)
+}
+
+// attemptDownloadAndExtract performs a single download attempt. For filesystem
+// deployers it downloads the tarball into a temp file so we can verify its
+// checksum before extracting.
+func (d *FilesystemDeployer) attemptDownloadAndExtract(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
 	if err != nil {
 		return fmt.Errorf("build download request: %w", err)
@@ -232,25 +372,84 @@ func (d *FilesystemDeployer) downloadAndExtract(ctx context.Context, opts Deploy
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download image: %w", err)
+		return fmt.Errorf("network error downloading image blob: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("download image: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("network error downloading image blob: HTTP %d from %s", resp.StatusCode, opts.ImageURL)
 	}
 
 	totalBytes := resp.ContentLength
 
-	// Pipe the download directly into tar for extraction — avoids requiring
-	// enough temp disk to hold the full tarball.
-	tarCmd := exec.CommandContext(ctx, "tar", "-xzf", "-", "-C", opts.MountRoot)
-	tarCmd.Stdin = &progressReader{r: resp.Body, total: totalBytes, fn: progress, phase: "extracting"}
+	// If checksum verification is needed, write to a temp file first so we can
+	// hash the full stream before extracting. This avoids extracting a corrupt blob.
+	needsVerify := !opts.SkipVerify && opts.ExpectedChecksum != ""
 
+	if needsVerify {
+		return d.downloadToTempAndExtract(ctx, resp.Body, totalBytes, opts, progress)
+	}
+
+	// Skip-verify path: pipe directly into tar for extraction (avoids temp disk space).
+	if opts.SkipVerify && opts.ExpectedChecksum != "" {
+		log.Printf("deploy: WARNING: checksum verification skipped for image download (--skip-verify set)")
+	}
+	return d.streamExtract(ctx, resp.Body, totalBytes, opts.MountRoot, progress)
+}
+
+// downloadToTempAndExtract downloads the blob to a temp file, verifies its
+// checksum, then extracts it. The temp file is removed after extraction.
+func (d *FilesystemDeployer) downloadToTempAndExtract(ctx context.Context, body io.Reader, totalBytes int64, opts DeployOpts, progress ProgressFunc) error {
+	tmpFile, err := os.CreateTemp("", "clonr-blob-*.tar.gz")
+	if err != nil {
+		return fmt.Errorf("create temp file for checksum verification: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Download and hash simultaneously.
+	hasher := sha256.New()
+	tee := io.TeeReader(body, hasher)
+	pr := &progressReader{r: tee, total: totalBytes, fn: progress, phase: "downloading"}
+
+	if _, err := io.Copy(tmpFile, pr); err != nil {
+		return fmt.Errorf("network error downloading image blob: %w", err)
+	}
+
+	// Verify checksum.
+	gotChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if gotChecksum != opts.ExpectedChecksum {
+		return fmt.Errorf("image integrity check failed: downloaded blob sha256=%s does not match "+
+			"expected=%s — the image may be corrupt or the server checksum is stale; "+
+			"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
+	}
+	log.Printf("deploy: image checksum verified: sha256=%s", gotChecksum)
+
+	// Seek back to start for extraction.
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek temp file for extraction: %w", err)
+	}
+
+	if progress != nil {
+		progress(0, totalBytes, "extracting")
+	}
+
+	tarCmd := exec.CommandContext(ctx, "tar", "-xzf", "-", "-C", opts.MountRoot)
+	tarCmd.Stdin = &progressReader{r: tmpFile, total: totalBytes, fn: progress, phase: "extracting"}
 	if out, err := tarCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tar extract: %w\noutput: %s", err, string(out))
 	}
 
+	return nil
+}
+
+// streamExtract pipes the download body directly into tar without checksum verification.
+func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, totalBytes int64, mountRoot string, progress ProgressFunc) error {
+	tarCmd := exec.CommandContext(ctx, "tar", "-xzf", "-", "-C", mountRoot)
+	tarCmd.Stdin = &progressReader{r: body, total: totalBytes, fn: progress, phase: "extracting"}
+	if out, err := tarCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar extract: %w\noutput: %s", err, string(out))
+	}
 	return nil
 }
 
