@@ -84,7 +84,7 @@ clonr deploy \
   --fix-efi
 ```
 
-`deploy` auto-discovers the node's MAC address, fetches the matching node config from the server, runs preflight checks, downloads and writes the image, applies hostname/network/SSH config, streams logs back to the server in real-time, and optionally repairs EFI boot entries.
+`deploy` auto-discovers the node's MAC address, fetches the matching node config from the server, runs preflight checks, verifies image integrity (sha256), downloads and writes the image, applies hostname/network/SSH config, streams logs back to the server in real-time, and optionally repairs EFI boot entries. On failure the disk partition table is automatically restored from a pre-deploy backup.
 
 ---
 
@@ -255,19 +255,22 @@ Output includes: hostname, CPUs, memory, disks (lsblk), NICs, DMI/firmware info,
 
 ### `clonr deploy`
 
-Full deployment flow: discover hardware, fetch node config, preflight, write image, apply config, stream logs to server.
+Full deployment flow: discover hardware, fetch node config, preflight, verify image integrity, write image, apply config, stream logs to server. On failure, the disk partition table is automatically restored from a pre-deploy backup.
 
 ```
-clonr deploy --image <id> [--disk /dev/nvme0n1] [--fix-efi]
+clonr deploy --image <id> [--disk /dev/nvme0n1] [--fix-efi] [--timeout 30m]
 ```
 
-| Flag | Description |
-|---|---|
-| `--image` | Image ID to deploy (required without `--auto`) |
-| `--disk` | Target block device (auto-detected from disk layout if omitted) |
-| `--mount-root` | Temporary mount point directory (auto-created if omitted) |
-| `--fix-efi` | Repair EFI NVRAM boot entries after deployment |
-| `--auto` | Auto mode: register with server, wait for image assignment, then deploy (for PXE-booted nodes) |
+| Flag | Default | Description |
+|---|---|---|
+| `--image` | _(none)_ | Image ID to deploy (required without `--auto`) |
+| `--disk` | auto-detect | Target block device (auto-detected from disk layout if omitted) |
+| `--mount-root` | auto-create | Temporary mount point directory |
+| `--fix-efi` | false | Repair EFI NVRAM boot entries after deployment |
+| `--no-rollback` | false | Skip partition table rollback on failure |
+| `--skip-verify` | false | Skip sha256 integrity check before writing image |
+| `--timeout` | `30m` | Maximum time allowed for the full deployment (also `CLONR_DEPLOY_TIMEOUT`) |
+| `--auto` | false | Auto mode: register with server, wait for image assignment, then deploy (for PXE-booted nodes) |
 
 #### `--auto` mode
 
@@ -278,6 +281,18 @@ clonr deploy --auto
 ```
 
 The node discovers its hardware, registers with the server, and polls until an image is assigned. Intended for fully unattended PXE deployments.
+
+#### Rollback
+
+Before writing to disk, `deploy` snapshots the current partition table with `sgdisk --backup`. If the deployment fails at any point, it calls `sgdisk --load-backup` to restore the original layout. Pass `--no-rollback` to disable this behaviour (useful when deploying to a blank disk with no prior partition table).
+
+#### Image integrity verification
+
+Before writing, `deploy` downloads the image's recorded sha256 checksum from the server and verifies it against the local blob. Use `--skip-verify` to bypass this check if the server does not have a checksum on record for the image.
+
+#### Retry on download failure
+
+Blob downloads are retried up to 3 times with exponential backoff on transient network errors.
 
 ---
 
@@ -459,6 +474,20 @@ Build the initramfs for PXE nodes:
 | `CLONR_BOOT_DIR` | `/var/lib/clonr/boot` | Kernel and initramfs location |
 | `CLONR_TFTP_DIR` | `/var/lib/clonr/tftpboot` | TFTP root directory (iPXE binaries) |
 
+### E2E Tested Boot Chain
+
+The full PXE boot chain has been end-to-end tested on Proxmox VMs running Rocky Linux 9 across the following configurations:
+
+| Configuration | Status |
+|---|---|
+| UEFI boot | Tested |
+| BIOS / legacy boot | Tested |
+| Single-disk deployment | Tested |
+| Multi-disk deployment | Tested |
+| Multi-NIC nodes | Tested |
+
+Tests covered: DHCP lease, TFTP/iPXE chainload, initramfs boot, `clonr deploy --auto` self-registration, image write, finalization, and reboot into the deployed OS.
+
 ---
 
 ## Centralized Logging
@@ -496,6 +525,44 @@ NodeConfig supports IPoIB interface configuration, which is applied automaticall
 
 ---
 
+## Software RAID
+
+clonr supports hardware discovery and provisioning of Linux software RAID (md) arrays.
+
+**Discovery:** `clonr hardware` parses `/proc/mdstat` and sysfs to report all active md arrays alongside physical disks — including RAID level, component devices, and array state.
+
+**Provisioning:** A `RAIDSpec` field in `DiskLayout` lets you declare arrays as part of a node's disk config. During deployment, `deploy` runs `mdadm --create` to assemble the specified arrays before the filesystem is written. After deployment, `finalize` generates `/etc/mdadm.conf` so the array is persistent across reboots.
+
+Example `RAIDSpec` in a node config:
+
+```json
+"raid_arrays": [
+  {
+    "device": "/dev/md0",
+    "level": 1,
+    "members": ["/dev/sda", "/dev/sdb"]
+  }
+]
+```
+
+---
+
+## Security
+
+### SSRF protection
+
+The server validates image pull URLs before fetching. Requests to private RFC 1918 addresses, loopback, link-local, and other non-routable ranges are rejected. Set `CLONR_ALLOW_PRIVATE_URLS=true` to allow pulling from internal registries or storage hosts on private networks.
+
+### Request body size limits
+
+Unauthenticated endpoints have explicit body size limits to prevent abuse: 1 MB for node registration, 5 MB for log submissions.
+
+### ISO import path restriction
+
+The server only allows ISO imports from paths under `CLONR_ISO_DIR` (default: `/var/lib/clonr/iso`). Paths outside this directory are rejected. Symlinks inside the ISO are extracted with `--copy-unsafe-links` to prevent traversal.
+
+---
+
 ## Server Configuration
 
 `clonr-serverd` is configured via environment variables:
@@ -507,6 +574,9 @@ NodeConfig supports IPoIB interface configuration, which is applied automaticall
 | `CLONR_DB_PATH` | `/var/lib/clonr/clonr.db` | SQLite database path |
 | `CLONR_AUTH_TOKEN` | _(empty = auth disabled)_ | Bearer token for API auth |
 | `CLONR_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
+| `CLONR_ISO_DIR` | `/var/lib/clonr/iso` | Allowed directory for ISO imports |
+| `CLONR_ALLOW_PRIVATE_URLS` | `false` | Allow image pulls from private/loopback IPs |
+| `CLONR_DEPLOY_TIMEOUT` | `30m` | Default deployment timeout (overridable per-deploy with `--timeout`) |
 | `CLONR_PXE_ENABLED` | `false` | Enable built-in PXE server |
 | `CLONR_PXE_INTERFACE` | auto-detect | Network interface for PXE/DHCP/TFTP |
 | `CLONR_PXE_RANGE` | `10.99.0.100-10.99.0.200` | DHCP IP pool for PXE clients |
