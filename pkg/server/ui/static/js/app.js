@@ -26,6 +26,8 @@ const Router = {
         if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
         // Disconnect any active log stream.
         if (App._logStream) { App._logStream.disconnect(); App._logStream = null; }
+        // Disconnect any active progress stream.
+        if (App._progressStream) { App._progressStream.disconnect(); App._progressStream = null; }
 
         // Match exact or prefix.
         let handler = this._routes[hash];
@@ -205,44 +207,37 @@ function fmtHostname(hostname, mac) {
 
 // ─── Deployment phase helpers ──────────────────────────────────────────────
 
-function deployPhase(entry) {
-    const msg  = (entry.message || '').toLowerCase();
-    const comp = (entry.component || '').toLowerCase();
-    if (msg.includes('complete') || msg.includes('success') || msg.includes('finali')) return 'complete';
-    if (comp === 'efiboot' || msg.includes('bootloader')) return 'finalizing';
-    if (comp === 'chroot' || msg.includes('chroot')) return 'finalizing';
-    if (comp === 'deploy' && (msg.includes('extract') || msg.includes('rsync') || msg.includes('dd '))) return 'imaging';
-    if (comp === 'deploy' && (msg.includes('partition') || msg.includes('mkfs') || msg.includes('format'))) return 'partitioning';
-    if (comp === 'hardware' || msg.includes('discover')) return 'discovering';
-    if (msg.includes('preflight') || msg.includes('validat')) return 'preflight';
-    if (comp === 'deploy' || msg.includes('deploy')) return 'imaging';
-    if (entry.level === 'error') return 'error';
-    return 'in-progress';
-}
-
-const PHASE_ORDER = ['discovering', 'preflight', 'partitioning', 'imaging', 'finalizing', 'complete'];
-
 const PHASE_BADGE = {
     complete:     'badge-ready',
-    imaging:      'badge-info',
+    downloading:  'badge-info',
+    extracting:   'badge-info',
     partitioning: 'badge-info',
+    formatting:   'badge-info',
     finalizing:   'badge-info',
-    discovering:  'badge-info',
     preflight:    'badge-info',
-    'in-progress':'badge-info',
     error:        'badge-error',
     waiting:      'badge-neutral',
 };
 
 function phaseBadge(phase) {
-    const cls = PHASE_BADGE[phase] || 'badge-neutral';
+    const cls = PHASE_BADGE[phase] || 'badge-info';
     return `<span class="badge ${cls}">${escHtml(phase)}</span>`;
 }
 
-function phaseProgress(phase) {
-    const idx = PHASE_ORDER.indexOf(phase);
-    if (idx < 0) return 0;
-    return Math.round(((idx + 1) / PHASE_ORDER.length) * 100);
+// fmtSpeed formats bytes/sec as a human-readable speed string.
+function fmtSpeed(bps) {
+    if (!bps || bps <= 0) return '—';
+    if (bps >= 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+    if (bps >= 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+    return `${bps} B/s`;
+}
+
+// fmtETA formats remaining seconds as mm:ss.
+function fmtETA(secs) {
+    if (!secs || secs <= 0) return '—';
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 // ─── Pages ────────────────────────────────────────────────────────────────
@@ -255,23 +250,25 @@ const Pages = {
         App.render(loading('Loading dashboard…'));
 
         try {
-            const [imagesResp, nodesResp, logsResp] = await Promise.all([
+            const [imagesResp, nodesResp, progressEntries] = await Promise.all([
                 API.images.list(),
                 API.nodes.list(),
-                API.logs.query({ limit: '500' }),
+                API.progress.list().catch(() => []),
             ]);
 
             const images = imagesResp.images || [];
             const nodes  = nodesResp.nodes   || [];
-            const logs   = logsResp.logs     || [];
 
             const ready    = images.filter(i => i.status === 'ready').length;
             const building = images.filter(i => i.status === 'building').length;
             const errored  = images.filter(i => i.status === 'error').length;
             const configured = nodes.filter(n => n.base_image_id).length;
 
-            const deployProgress = this._buildDeployProgress(logs);
-            const recentActivity = this._buildRecentActivity(images, nodes, logs);
+            // Build a MAC → progress map for live updates.
+            const deployMap = new Map();
+            (progressEntries || []).forEach(p => deployMap.set(p.node_mac, p));
+
+            const recentActivity = this._buildRecentActivity(images, nodes);
 
             App.render(`
                 <div class="page-header">
@@ -328,8 +325,8 @@ const Pages = {
                             </svg>
                         </div>
                         <div class="stat-label">Active Deployments</div>
-                        <div class="stat-value">${deployProgress.filter(d => !d.stale && d.phase !== 'complete' && d.phase !== 'error').length}</div>
-                        <div class="stat-sub">${deployProgress.filter(d => d.phase === 'complete').length} completed recently</div>
+                        <div class="stat-value" id="dash-active-count">${Array.from(deployMap.values()).filter(d => d.phase !== 'complete' && d.phase !== 'error').length}</div>
+                        <div class="stat-sub" id="dash-complete-count">${Array.from(deployMap.values()).filter(d => d.phase === 'complete').length} completed recently</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon stat-icon-purple">
@@ -344,7 +341,7 @@ const Pages = {
                 </div>
 
                 ${cardWrap('Active Deployments',
-                    this._deployProgressTable(deployProgress))}
+                    `<div id="deploy-progress-container">${this._deployProgressTable(deployMap)}</div>`)}
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
                     ${cardWrap('Recent Images',
@@ -405,6 +402,18 @@ const Pages = {
                 App._logStream = stream;
             }
 
+            // ── Real-time deployment progress via SSE ──────────────────────
+            App._progressStream = new ProgressStream(deployMap, () => {
+                const container = document.getElementById('deploy-progress-container');
+                if (container) container.innerHTML = Pages._deployProgressTable(deployMap);
+                // Update stats counters.
+                const activeCount = document.getElementById('dash-active-count');
+                const completeCount = document.getElementById('dash-complete-count');
+                if (activeCount) activeCount.textContent = Array.from(deployMap.values()).filter(d => d.phase !== 'complete' && d.phase !== 'error').length;
+                if (completeCount) completeCount.textContent = Array.from(deployMap.values()).filter(d => d.phase === 'complete').length + ' completed recently';
+            });
+            App._progressStream.connect();
+
             App.setAutoRefresh(() => Pages.dashboard());
 
         } catch (e) {
@@ -412,78 +421,54 @@ const Pages = {
         }
     },
 
-    _buildDeployProgress(logs) {
-        const STALE_MS = 30 * 60 * 1000; // 30 minutes
-        const now = Date.now();
-        const nodeMap = new Map();
-        for (const entry of logs) {
-            const key = entry.node_mac || entry.hostname || 'unknown';
-            if (!nodeMap.has(key)) {
-                nodeMap.set(key, {
-                    key,
-                    mac:      entry.node_mac || '—',
-                    hostname: entry.hostname  || '',
-                    phase:    'waiting',
-                    lastTs:   entry.timestamp,
-                    hasError: false,
-                });
-            }
-            const state = nodeMap.get(key);
-            const phase = deployPhase(entry);
-            if (phase === 'error') {
-                state.hasError = true;
-            } else if (PHASE_ORDER.indexOf(phase) > PHASE_ORDER.indexOf(state.phase)) {
-                state.phase = phase;
-            }
-            if (new Date(entry.timestamp) > new Date(state.lastTs)) {
-                state.lastTs = entry.timestamp;
-            }
-        }
-        return Array.from(nodeMap.values())
-            .filter(s => s.phase !== 'waiting' || s.hasError)
-            .map(s => {
-                const age = now - new Date(s.lastTs).getTime();
-                return {
-                    ...s,
-                    phase: s.hasError && s.phase !== 'complete' ? 'error' : s.phase,
-                    stale: age > STALE_MS,
-                };
-            })
-            .sort((a, b) => new Date(b.lastTs) - new Date(a.lastTs))
+    // _deployProgressTable renders the active deployments table from a MAC → DeployProgress map.
+    _deployProgressTable(deployMap) {
+        const entries = Array.from(deployMap.values())
+            .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 20);
-    },
 
-    _deployProgressTable(nodes) {
-        const active = nodes.filter(n => !n.stale);
-        if (!active.length) return emptyState('No active deployments');
+        if (!entries.length) return emptyState('No active deployments');
+
         return `<div class="table-wrap"><table>
             <thead><tr>
-                <th>Node</th><th>Phase</th><th>Progress</th><th>Last Activity</th>
+                <th>Node</th><th>Phase</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Updated</th>
             </tr></thead>
             <tbody>
-            ${active.map(n => {
-                const pct = phaseProgress(n.phase);
-                const displayName = fmtHostname(n.hostname, n.mac);
-                const barClass = n.phase === 'complete' ? 'complete' : n.phase === 'error' ? 'error' : '';
-                return `<tr>
-                    <td>${displayName}</td>
-                    <td>${phaseBadge(n.phase)}</td>
-                    <td>
-                        <div style="display:flex;align-items:center;gap:8px">
-                            <div class="progress-bar-wrap">
-                                <div class="progress-bar-fill ${barClass}" style="width:${pct}%"></div>
-                            </div>
-                            <span class="text-dim text-sm">${pct}%</span>
+            ${entries.map(p => {
+                const pct = p.bytes_total > 0 ? Math.min(100, Math.round(p.bytes_done / p.bytes_total * 100)) : 0;
+                const displayName = fmtHostname(p.hostname, p.node_mac);
+                const barClass = p.phase === 'complete' ? 'complete' : p.phase === 'error' ? 'error' : '';
+
+                let progressCell;
+                if (p.phase === 'complete') {
+                    progressCell = `<span style="color:var(--success);font-weight:600">&#10003; Done</span>`;
+                } else if (p.phase === 'error') {
+                    progressCell = `<span style="color:var(--error)" title="${escHtml(p.error || '')}">&#10007; Error${p.error ? ': ' + escHtml(p.error.slice(0, 60)) : ''}</span>`;
+                } else if (p.bytes_total > 0) {
+                    progressCell = `<div style="display:flex;align-items:center;gap:8px">
+                        <div class="progress-bar-wrap" style="min-width:120px">
+                            <div class="progress-bar-fill ${barClass}" style="width:${pct}%"></div>
                         </div>
-                    </td>
-                    <td class="text-dim text-sm">${fmtRelative(n.lastTs)}</td>
+                        <span class="text-dim text-sm" style="white-space:nowrap">${pct}% &nbsp;${fmtBytes(p.bytes_done)} / ${fmtBytes(p.bytes_total)}</span>
+                    </div>`;
+                } else {
+                    progressCell = `<span class="text-dim text-sm">—</span>`;
+                }
+
+                return `<tr data-mac="${escHtml(p.node_mac)}">
+                    <td>${displayName}</td>
+                    <td>${phaseBadge(p.phase)}</td>
+                    <td>${progressCell}</td>
+                    <td class="text-dim text-sm">${fmtSpeed(p.speed_bps)}</td>
+                    <td class="text-dim text-sm">${p.phase !== 'complete' && p.phase !== 'error' ? fmtETA(p.eta_seconds) : '—'}</td>
+                    <td class="text-dim text-sm">${fmtRelative(p.updated_at)}</td>
                 </tr>`;
             }).join('')}
             </tbody>
         </table></div>`;
     },
 
-    _buildRecentActivity(images, nodes, logs) {
+    _buildRecentActivity(images, nodes) {
         const items = [];
         images.slice(0, 4).forEach(img => {
             items.push({ type: 'image', ts: img.created_at, data: img });
@@ -2311,6 +2296,70 @@ const Pages = {
         }
     },
 };
+
+// ─── ProgressStream ───────────────────────────────────────────────────────
+//
+// Subscribes to /api/v1/deploy/progress/stream (SSE) and updates the shared
+// deployMap (MAC → DeployProgress) on each event. Calls onUpdate() after each
+// update so the caller can re-render only the affected part of the DOM.
+//
+// Completed or failed entries are removed from the map after 60 seconds so they
+// don't accumulate in the table indefinitely.
+
+class ProgressStream {
+    constructor(deployMap, onUpdate) {
+        this._map       = deployMap;    // Map<mac, DeployProgress>
+        this._onUpdate  = onUpdate;     // () => void
+        this._es        = null;
+        this._timers    = new Map();    // mac → setTimeout handle
+        this._stopped   = false;
+    }
+
+    connect() {
+        if (this._stopped) return;
+        const url = API.progress.sseUrl();
+        this._es = new EventSource(url);
+
+        this._es.onmessage = (e) => {
+            let prog;
+            try { prog = JSON.parse(e.data); } catch { return; }
+            if (!prog || !prog.node_mac) return;
+
+            const mac = prog.node_mac;
+            this._map.set(mac, prog);
+
+            // Cancel any pending removal for this node (phase may have changed).
+            if (this._timers.has(mac)) {
+                clearTimeout(this._timers.get(mac));
+                this._timers.delete(mac);
+            }
+
+            // Schedule removal 60 seconds after the final state.
+            if (prog.phase === 'complete' || prog.phase === 'error') {
+                const t = setTimeout(() => {
+                    this._map.delete(mac);
+                    this._timers.delete(mac);
+                    if (this._onUpdate) this._onUpdate();
+                }, 60000);
+                this._timers.set(mac, t);
+            }
+
+            if (this._onUpdate) this._onUpdate();
+        };
+
+        this._es.onerror = () => {
+            if (this._stopped) return;
+            // EventSource will automatically attempt to reconnect — no action needed.
+        };
+    }
+
+    disconnect() {
+        this._stopped = true;
+        if (this._es) { this._es.close(); this._es = null; }
+        this._timers.forEach(t => clearTimeout(t));
+        this._timers.clear();
+    }
+}
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 

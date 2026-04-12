@@ -157,4 +157,15 @@ const API = {
     health: {
         get()                 { return API.get('/health'); },
     },
+    progress: {
+        list()                { return API.get('/deploy/progress'); },
+        get(mac)              { return API.get(`/deploy/progress/${encodeURIComponent(mac)}`); },
+
+        // sseUrl returns the URL for the SSE stream endpoint.
+        sseUrl() {
+            const tok = API._token();
+            const base = `${window.location.origin}/api/v1/deploy/progress/stream`;
+            return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
+        },
+    },
 };
