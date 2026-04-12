@@ -35,7 +35,7 @@ if [[ ! -f "$CLONR_BIN" ]]; then
 fi
 
 # Check required tools.
-for tool in cpio gzip; do
+for tool in cpio gzip sshpass; do
     if ! command -v "$tool" &>/dev/null; then
         echo "ERROR: required tool not found: $tool" >&2
         exit 1
@@ -49,9 +49,13 @@ trap "rm -rf '$WORKDIR'" EXIT
 echo "Building initramfs in $WORKDIR..."
 
 # Minimal Linux directory structure.
-mkdir -p "$WORKDIR"/{bin,sbin,dev,proc,sys,etc,run,tmp,var/log}
-mkdir -p "$WORKDIR"/usr/{bin,sbin,share/udhcpc}
+mkdir -p "$WORKDIR"/{bin,sbin,dev,proc,sys,etc,run,tmp,var/log,mnt}
+mkdir -p "$WORKDIR"/usr/{bin,sbin,share/udhcpc,lib64}
 mkdir -p "$WORKDIR"/lib64
+mkdir -p "$WORKDIR"/usr/lib64
+mkdir -p "$WORKDIR"/usr/lib64/systemd    # for libsystemd-shared (udevadm dep)
+mkdir -p "$WORKDIR"/usr/lib/grub         # grub2 platform modules
+mkdir -p "$WORKDIR"/usr/share/grub       # grub2 locale data
 
 # Pre-create essential device nodes so /dev is usable before devtmpfs mounts.
 mknod -m 622 "$WORKDIR/dev/console" c 5 1 2>/dev/null || true
@@ -196,6 +200,202 @@ if [[ "$LSBLK_INSTALLED" == "true" ]]; then
 else
     echo "  [!] WARNING: lsblk could not be installed — disk discovery will return empty results" >&2
     echo "               Run: sshpass -p clonr scp clonr@192.168.1.151:/usr/bin/lsblk initramfs-lsblk && rebuild" >&2
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Install deployment tools from clonr-server.
+#
+# The initramfs must be able to partition disks and create filesystems during
+# deployment. Without these binaries, sgdisk/mkfs calls fail silently and the
+# deploy loop hangs after "starting image write" with zero disk writes.
+#
+# Tools required:
+#   sgdisk        — GPT partitioning (from gdisk)
+#   mkfs.xfs      — XFS filesystem creation (from xfsprogs)
+#   mkfs.ext4     — ext4 filesystem creation (from e2fsprogs)
+#   mkfs.vfat     — FAT32 filesystem creation (for EFI partitions, from dosfstools)
+#   partprobe     — tell kernel about new partition table (from parted)
+#   tar           — GNU tar for archive extraction (busybox tar can't handle .tar.gz reliably)
+#   gzip          — full gzip for decompression (busybox gzip is limited)
+#   rsync         — file syncing (optional but common in deploy scripts)
+#   blockdev      — get disk size (from util-linux)
+#   mkswap        — swap partition creation (from util-linux)
+#
+# Strategy: SSH to clonr-server, copy binaries + their shared libraries.
+# We use ldd on the server to find all required .so files and scp them over.
+# ──────────────────────────────────────────────────────────────────────────────
+echo "  [+] Installing deployment tools from ${CLONR_SERVER_HOST}..."
+
+if ! command -v sshpass &>/dev/null; then
+    echo "  [!] WARNING: sshpass not found — cannot fetch deployment tools from server" >&2
+else
+    # ── Shared library helper ─────────────────────────────────────────────────────
+    # collect_libs_for_binary <remote_binary_path>
+    # Emits a newline-separated, deduplicated list of all .so paths needed by
+    # the binary, including transitive deps of any libs it pulls in.
+    # We do two rounds: first-order ldd on the binary, then ldd on each unique
+    # lib to catch transitive deps (e.g. libsystemd-shared → many more libs).
+    collect_libs_for_binary() {
+        local remote_path="$1"
+        # First-order libs
+        local first_order
+        first_order=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+            "ldd ${remote_path} 2>/dev/null" 2>/dev/null | \
+            grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
+
+        # Collect unique libs across binary + transitive layer
+        local all_libs="$first_order"
+        for lib in $first_order; do
+            local transitive
+            transitive=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+                "ldd ${lib} 2>/dev/null" 2>/dev/null | \
+                grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
+            all_libs="${all_libs}
+${transitive}"
+        done
+
+        echo "$all_libs" | grep -v '^$' | sort -u
+    }
+
+    # Helper: copy a binary + all its shared libs (including transitive deps)
+    # from the server into the initramfs.
+    install_server_binary() {
+        local remote_path="$1"
+        local dest_dir="${2:-$WORKDIR/usr/sbin}"
+        local bin_name
+        bin_name=$(basename "$remote_path")
+
+        # Copy the binary.
+        mkdir -p "$dest_dir"
+        if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${remote_path}" \
+            "${dest_dir}/${bin_name}" 2>/dev/null; then
+            echo "      WARNING: could not fetch ${remote_path}" >&2
+            return 1
+        fi
+        chmod 755 "${dest_dir}/${bin_name}"
+
+        # Check if static — if so, we're done.
+        local file_info
+        file_info=$(file "${dest_dir}/${bin_name}" 2>/dev/null || echo "")
+        if echo "$file_info" | grep -q "statically linked"; then
+            echo "      fetched static binary: ${bin_name}"
+            return 0
+        fi
+
+        # Dynamically linked: fetch all required shared libraries including
+        # transitive deps (e.g. udevadm pulls in libsystemd-shared which has
+        # its own large dep set that a single-pass ldd would miss).
+        local needed_libs
+        needed_libs=$(collect_libs_for_binary "$remote_path")
+
+        for lib in $needed_libs; do
+            local lib_dir
+            lib_dir="$WORKDIR$(dirname "$lib")"
+            mkdir -p "$lib_dir"
+            # scp the real file (resolving symlinks on the server side).
+            # We need the soname symlink too so the dynamic linker finds it by
+            # the name embedded in the binary's NEEDED entries.
+            local real_lib
+            real_lib=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+                "readlink -f ${lib} 2>/dev/null || echo ${lib}" 2>/dev/null || echo "$lib")
+            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${real_lib}" \
+                "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
+                echo "      WARNING: could not fetch lib ${lib}" >&2
+        done
+
+        # Ensure the dynamic linker itself is present under /lib64/
+        if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
+            local linker
+            linker=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+                "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
+            if [[ -n "$linker" ]]; then
+                mkdir -p "$WORKDIR/lib64"
+                sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+                    "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${linker}" \
+                    "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
+            fi
+        fi
+
+        echo "      fetched dynamic binary + libs: ${bin_name}"
+        return 0
+    }
+
+    # Find each binary on the server and install it.
+    # Uses 'which' to resolve the canonical path (handles /sbin vs /usr/sbin etc.)
+    find_and_install_bin() {
+        local bin_name="$1"
+        local dest_dir="${2:-$WORKDIR/usr/sbin}"
+        local remote_path
+        remote_path=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+            "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" 2>/dev/null || echo "")
+        if [[ -z "$remote_path" ]]; then
+            echo "      WARNING: ${bin_name} not found on ${CLONR_SERVER_HOST}" >&2
+            return 1
+        fi
+        install_server_binary "$remote_path" "$dest_dir"
+    }
+
+    # ── Disk tools → /usr/sbin ───────────────────────────────────────────────────
+    # These binaries live in /usr/sbin on Rocky 9 and are called via the PATH
+    # that the init script sets: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:...
+    DEPLOY_TOOLS_SBIN=(
+        sgdisk          # GPT partition table creation (gdisk package)
+        mkfs.xfs        # XFS filesystem creation (xfsprogs)
+        mkfs.ext4       # ext4 filesystem creation (e2fsprogs)
+        mkfs.vfat       # FAT32 for EFI System Partition (dosfstools)
+        partprobe       # kernel partition re-read after sgdisk (parted package)
+        wipefs          # wipe existing filesystem signatures before re-partitioning
+        blockdev        # sector count / disk size queries (util-linux)
+        mkswap          # swap partition setup (util-linux)
+        grub2-install   # bootloader install into deployed OS MBR/EFI (chroot use)
+        grub2-mkconfig  # generate /boot/grub2/grub.cfg inside chroot
+    )
+    for tool in "${DEPLOY_TOOLS_SBIN[@]}"; do
+        find_and_install_bin "$tool" "$WORKDIR/usr/sbin" || true
+    done
+
+    # ── GNU userland → /usr/bin ──────────────────────────────────────────────────
+    # tar: busybox tar cannot reliably handle .tar.gz with large files or extended
+    # headers. GNU tar at /usr/bin/tar overrides the busybox symlink at /bin/tar.
+    # gzip: similarly, GNU gzip handles multi-stream and large files correctly.
+    # rsync: used for incremental deploys; not in busybox.
+    # udevadm: 'udevadm settle' flushes kernel uevents after partprobe so that
+    # /dev/sda1 etc. exist before we try to mkfs them. Lives in /usr/bin on Rocky 9.
+    DEPLOY_TOOLS_BIN=(
+        tar             # GNU tar (image extraction — .tar.gz / .tar.xz)
+        gzip            # GNU gzip (decompression)
+        rsync           # incremental deploy sync
+        udevadm         # device settle after partition table changes
+    )
+    for tool in "${DEPLOY_TOOLS_BIN[@]}"; do
+        find_and_install_bin "$tool" "$WORKDIR/usr/bin" || true
+    done
+
+    # ── grub2 module data ────────────────────────────────────────────────────────
+    # grub2-install reads platform modules from /usr/lib/grub/<platform>/ and
+    # locale data from /usr/share/grub/. Without these, grub2-install fails with
+    # "cannot find a GRUB drive for /dev/...".
+    # Strategy: we use grub2-install in a chroot (chroot /mnt grub2-install /dev/sdX)
+    # so ideally these come from the deployed image. However we also copy them into
+    # the initramfs so grub2-install can fall back if the chroot path is missing.
+    echo "      fetching grub2 module data from ${CLONR_SERVER_HOST}..."
+    for grub_dir in /usr/lib/grub /usr/share/grub; do
+        local_dest="$WORKDIR${grub_dir}"
+        mkdir -p "$local_dest"
+        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no -r \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${grub_dir}/." \
+            "${local_dest}/" 2>/dev/null || \
+            echo "      WARNING: could not fetch ${grub_dir}" >&2
+    done
+
+    echo "  [+] Deployment tools installed"
 fi
 
 # Create symlinks for all busybox applets we need.
@@ -373,7 +573,7 @@ cat > "$WORKDIR/init" << INIT_EOF
 #!/bin/sh
 
 # ── Step 0: create /tmp and start logging to /tmp/init.log ───────────────────
-mkdir -p /tmp
+mkdir -p /tmp /mnt
 chmod 1777 /tmp
 LOG=/tmp/init.log
 touch "\$LOG"

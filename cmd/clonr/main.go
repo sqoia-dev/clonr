@@ -707,7 +707,20 @@ func sleepCtx(ctx context.Context, d time.Duration) <-chan struct{} {
 
 // runAutoDeployImage performs the full deployment given a NodeConfig with an assigned image.
 // The node config must have BaseImageID set.
-func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeConfig, deployLog zerolog.Logger) error {
+func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeConfig, deployLog zerolog.Logger) (retErr error) {
+	// Panic recovery: if any deployment sub-call panics (e.g. nil pointer in a
+	// hardware probe or partition library), catch it here, log the stack trace,
+	// and return it as an error rather than crashing PID 1 in the initramfs.
+	defer func() {
+		if r := recover(); r != nil {
+			deployLog.Error().
+				Interface("panic", r).
+				Stack().
+				Msg("deploy panicked — caught by recovery wrapper")
+			retErr = fmt.Errorf("deploy panicked: %v", r)
+		}
+	}()
+
 	cfg := config.LoadClientConfig()
 	if flagServer != "" {
 		cfg.ServerURL = flagServer
@@ -761,30 +774,49 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		MountRoot:  mountRoot,
 	}
 
+	var lastLoggedPct int64
 	progressFn := func(written, total int64, phase string) {
 		if total > 0 {
 			pct := float64(written) / float64(total) * 100
 			fmt.Fprintf(os.Stderr, "\r    %s: %.1f%% (%s / %s)",
 				phase, pct, humanBytes(written), humanBytes(total))
+			// Log via zerolog at every 10% milestone so the remote log stream
+			// shows download progress even in silent initramfs environments.
+			milestone := int64(pct/10) * 10
+			if milestone > lastLoggedPct && milestone > 0 {
+				lastLoggedPct = milestone
+				deployLog.Info().
+					Str("phase", phase).
+					Int64("pct", milestone).
+					Str("written", humanBytes(written)).
+					Str("total", humanBytes(total)).
+					Msg("image write progress")
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "\r    %s: %s written", phase, humanBytes(written))
 		}
 	}
 
+	deployLog.Info().Str("url", blobURL).Msg("downloading image blob from server")
 	start := time.Now()
 	if err := deployer.Deploy(ctx, opts, progressFn); err != nil {
 		fmt.Fprintln(os.Stderr)
+		deployLog.Error().Err(err).Msg("image deploy failed")
 		return fmt.Errorf("deploy: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "\n    Image written in %s\n", time.Since(start).Round(time.Second))
+	elapsed := time.Since(start).Round(time.Second)
+	fmt.Fprintf(os.Stderr, "\n    Image written in %s\n", elapsed)
+	deployLog.Info().Str("duration", elapsed.String()).Msg("image write complete")
 
-	deployLog.Info().Msg("applying node configuration")
+	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("applying node configuration (hostname, network, SSH keys)")
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
+		deployLog.Error().Err(err).Msg("finalize failed")
 		return fmt.Errorf("finalize: %w", err)
 	}
+	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Str("duration",
-		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete")
+		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete — rebooting")
 
 	fmt.Printf("\n[auto] Deployment complete.\n")
 	fmt.Printf("  Node:     %s\n", nodeCfg.Hostname)
