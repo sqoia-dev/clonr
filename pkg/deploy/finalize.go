@@ -482,29 +482,15 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 		_ = os.WriteFile(resolvDst, data, 0o644)
 	}
 
-	// Install kernel and grub2-pc. --setopt=install_weak_deps=False speeds this up.
-	// Use --releasever=9 explicitly so dnf doesn't try to auto-detect from the chroot
-	// (the chroot may not have os-release populated correctly during first deploy).
+	// Install kernel and grub2-pc inside the deployed chroot.
+	// We always use "chroot <mountRoot> dnf" because the initramfs (deployment host)
+	// does not have dnf — it must be invoked from within the deployed image, which
+	// is a full Rocky Linux 9 system with /usr/bin/dnf present.
 	packages := []string{"kernel", "grub2-pc", "grub2-tools"}
-	dnfArgs := append([]string{
-		"--installroot=" + mountRoot,
-		"--releasever=9",
-		"--setopt=install_weak_deps=False",
-		"-y",
-		"install",
-	}, packages...)
-
-	log.Info().Strs("packages", packages).Msg("finalize/boot: installing kernel + grub2 via dnf --installroot")
-	dnfCmd := exec.CommandContext(ctx, "dnf", dnfArgs...)
-	if err := runAndLog(ctx, "dnf-kernel-install", dnfCmd); err != nil {
-		// Try the chroot variant as fallback (some minimal environments only have
-		// dnf inside the deployed image, not on the deployment host).
-		log.Warn().Err(err).Msg("finalize/boot: dnf --installroot failed, trying chroot dnf")
-		chrootDnfArgs := []string{mountRoot, "dnf", "-y", "--setopt=install_weak_deps=False", "install"}
-		chrootDnfArgs = append(chrootDnfArgs, packages...)
-		if err2 := runAndLog(ctx, "chroot-dnf-kernel-install", exec.CommandContext(ctx, "chroot", chrootDnfArgs...)); err2 != nil {
-			return fmt.Errorf("dnf --installroot: %w; chroot dnf: %v", err, err2)
-		}
+	log.Info().Strs("packages", packages).Msg("finalize/boot: installing kernel + grub2 via chroot dnf")
+	chrootDnfArgs := append([]string{mountRoot, "dnf", "-y", "--setopt=install_weak_deps=False", "install"}, packages...)
+	if err := runAndLog(ctx, "chroot-dnf-kernel-install", exec.CommandContext(ctx, "chroot", chrootDnfArgs...)); err != nil {
+		return fmt.Errorf("chroot dnf install kernel+grub2: %w", err)
 	}
 
 	// Install GRUB to the target disk MBR now that the grub2-pc package is present.
