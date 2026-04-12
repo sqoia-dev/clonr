@@ -326,6 +326,24 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 				Msg("WARNING: finalize: grub2-install failed (non-fatal) — node may not boot; run grub2-install manually")
 		} else {
 			log.Info().Str("disk", d.targetDisk).Msg("finalize: GRUB bootloader installed")
+
+			// After installing the bootloader, regenerate grub.cfg inside the
+			// deployed root. The tar image's grub.cfg has UUIDs from the source
+			// system; after mkfs the partition UUIDs are new and GRUB will fail
+			// to find the root unless grub.cfg is regenerated with the live UUIDs.
+			grubCfgPath := findGrubCfg(mountRoot)
+			if grubCfgPath != "" {
+				log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize: regenerating grub.cfg via chroot grub2-mkconfig")
+				chrootArgs := []string{mountRoot, "grub2-mkconfig", "-o", grubCfgPath}
+				if err := runAndLog(ctx, "grub2-mkconfig", exec.CommandContext(ctx, "chroot", chrootArgs...)); err != nil {
+					log.Warn().Err(err).Str("grub_cfg", grubCfgPath).
+						Msg("WARNING: finalize: grub2-mkconfig failed (non-fatal) — node may boot with stale UUIDs in grub.cfg; run grub2-mkconfig manually")
+				} else {
+					log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize: grub.cfg regenerated with live partition UUIDs")
+				}
+			} else {
+				log.Warn().Str("mountRoot", mountRoot).Msg("finalize: grub.cfg not found — skipping grub2-mkconfig (node may not boot)")
+			}
 		}
 	}
 
