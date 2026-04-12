@@ -140,6 +140,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/factory/pull", factory.Pull)
 			r.Post("/factory/import", factory.Import)
 			r.Post("/factory/import-path", factory.ImportPath)
+			r.Post("/factory/import-iso", factory.ImportPath) // alias used by the web UI
 			r.Post("/factory/capture", factory.Capture)
 
 			// Shell sessions
