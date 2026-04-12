@@ -96,7 +96,9 @@ fi
 # but node registration still succeeds.
 for cmd in sh ash ls cat echo mount umount mkdir cp mv rm ip \
            ifconfig udhcpc modprobe insmod sleep printf \
-           grep sed awk cut tr head tail wc df free uname dmesg \
+           grep sed awk cut tr head tail tee wc df free uname dmesg \
+           basename dirname readlink ln \
+           httpd nc netcat \
            mdev switch_root pivot_root chroot; do
     ln -sf /bin/busybox "$WORKDIR/bin/$cmd"
 done
@@ -233,36 +235,48 @@ UDHCPC_EOF
 chmod 755 "$WORKDIR/usr/share/udhcpc/default.script"
 
 # init script — runs as PID 1 in the initramfs.
-# Always drops to a busybox shell on exit so the node stays debuggable.
-# NOTE: do NOT redirect to /dev/console at startup — the kernel already sets
-# up PID 1's stdio to /dev/console based on the 'console=' kernel param.
-# An explicit exec >/dev/console can hang if the device node isn't ready.
+#
+# Console strategy:
+#   1. Mount devtmpfs first (kernel creates proper /dev/console, /dev/ttyS0 nodes)
+#   2. Then exec to reopen all stdio on /dev/console so userspace output is visible
+#      on the serial socket. This must happen AFTER devtmpfs mount or the node
+#      might not exist yet.
+#   3. All output also tee'd to /tmp/init.log for post-mortem retrieval.
+#   4. After insmod attempts, assign static IP (10.99.0.100/24) so clonr-server
+#      can pull /tmp/init.log via netcat even if DHCP fails.
 cat > "$WORKDIR/init" << INIT_EOF
 #!/bin/sh
 
-# Log everything to both console and /tmp/init.log for post-mortem debugging.
-exec 2>&1
-LOG=/tmp/init.log
-log() { echo "\$*" | tee -a "\$LOG"; }
-
-# Mount virtual filesystems.
-mount -t proc  proc    /proc           2>/dev/null
-mount -t sysfs sysfs   /sys            2>/dev/null
-mount -t devtmpfs devtmpfs /dev        2>/dev/null || mount -t tmpfs tmpfs /dev
-mkdir -p /dev/pts
-mount -t devpts devpts /dev/pts        2>/dev/null
-mkdir -p /tmp /tmp/mnt
+# ── Step 0: create /tmp and start logging to /tmp/init.log ───────────────────
+mkdir -p /tmp
 chmod 1777 /tmp
+LOG=/tmp/init.log
 touch "\$LOG"
 
+# log() writes to both stdout (kernel-inherited console fd) and the log file.
+# We do NOT do 'exec >/dev/console' because opening a serial device can block
+# on DCD carrier until a client connects to the QEMU unix socket. Instead we
+# rely on the kernel setting up PID 1's stdio to /dev/console via console=
+# kernel parameter, and also write to /tmp/init.log for post-mortem retrieval.
+log() {
+    echo "\$*" >> "\$LOG"
+    echo "\$*"
+}
+
+# ── Step 1: mount virtual filesystems ─────────────────────────────────────────
+mount -t proc  proc    /proc    2>/dev/null
+mount -t sysfs sysfs   /sys     2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+
 log "============================================"
-log " clonr initramfs booted"
+log " clonr initramfs init started"
 log "============================================"
 log "cmdline: \$(cat /proc/cmdline)"
 log "kernel : \$(uname -r)"
-log ""
 
-# Parse kernel command line.
+# ── Step 3: parse kernel command line ─────────────────────────────────────────
 CLONR_SERVER=""
 CLONR_MAC=""
 for arg in \$(cat /proc/cmdline); do
@@ -271,89 +285,120 @@ for arg in \$(cat /proc/cmdline); do
         clonr.mac=*)    CLONR_MAC="\${arg#clonr.mac=}" ;;
     esac
 done
+log "server : \${CLONR_SERVER:-not set}"
+log "mac    : \${CLONR_MAC:-auto-detect}"
 
-log "Server : \${CLONR_SERVER:-not set}"
-log "MAC    : \${CLONR_MAC:-auto-detect}"
-log ""
-
-# Load kernel modules for virtio NIC using insmod with explicit paths.
+# ── Step 4: load virtio NIC modules ───────────────────────────────────────────
+# Dependency order: failover → net_failover → virtio_net
+# Modules are pre-decompressed (.ko, not .ko.xz) because busybox insmod
+# uses init_module syscall which requires uncompressed ELF.
 KVER=\$(uname -r)
 MODBASE="/lib/modules/\$KVER"
-log "Loading NIC modules for \$KVER..."
-log "  module dir exists: \$(ls \$MODBASE/kernel/net/core/ 2>/dev/null || echo MISSING)"
+log "modules dir: \$(ls \$MODBASE/kernel/net/core/ 2>&1)"
 
-insmod "\$MODBASE/kernel/net/core/failover.ko" 2>>/tmp/insmod.err
-RC=\$?; log "  insmod failover: exit=\$RC \$(cat /tmp/insmod.err 2>/dev/null)"
-: > /tmp/insmod.err
+# Wait for PCI enumeration to complete
+sleep 3
 
-insmod "\$MODBASE/kernel/drivers/net/net_failover.ko" 2>>/tmp/insmod.err
-RC=\$?; log "  insmod net_failover: exit=\$RC \$(cat /tmp/insmod.err 2>/dev/null)"
-: > /tmp/insmod.err
+# Pre-flight: check PCI devices and virtio bus
+log "virtio bus devs: \$(ls /sys/bus/virtio/devices/ 2>/dev/null | tr '\n' ' ' || echo NONE)"
+log "pci devs: \$(ls /sys/bus/pci/devices/ 2>/dev/null | tr '\n' ' ' | head -c 200 || echo NONE)"
+log "dmesg virtio: \$(dmesg 2>/dev/null | grep -iE 'virtio|net' | tail -5 | tr '\n' '|')"
 
-insmod "\$MODBASE/kernel/drivers/net/virtio_net.ko" 2>>/tmp/insmod.err
-RC=\$?; log "  insmod virtio_net: exit=\$RC \$(cat /tmp/insmod.err 2>/dev/null)"
-: > /tmp/insmod.err
+for mod in \
+    "\$MODBASE/kernel/net/core/failover.ko" \
+    "\$MODBASE/kernel/drivers/net/net_failover.ko" \
+    "\$MODBASE/kernel/drivers/net/virtio_net.ko"; do
+    name=\$(basename "\$mod")
+    if [ -f "\$mod" ]; then
+        err=\$(insmod "\$mod" 2>&1)
+        rc=\$?
+        log "insmod \$name: exit=\$rc err='\${err}'"
+        # Capture kernel ring buffer messages for module load failures
+        dmesg | tail -3 >> "\$LOG"
+    else
+        log "insmod \$name: FILE MISSING at \$mod"
+        ls -la "\$(dirname \$mod)" 2>&1 | tee -a "\$LOG"
+    fi
+done
 
-log ""
-log "Loaded modules: \$(cat /proc/modules 2>/dev/null | grep -E 'virtio|failover' | cut -d' ' -f1 | tr '\n' ' ')"
-log "Net interfaces: \$(ls /sys/class/net/ 2>/dev/null | tr '\n' ' ')"
-log ""
+log "loaded: \$(cat /proc/modules 2>/dev/null | grep -E 'virtio|failover' | cut -d' ' -f1 | tr '\n' ' ')"
+log "ifaces: \$(ls /sys/class/net/ 2>/dev/null | tr '\n' ' ')"
+# Also dump all interfaces for diagnostics
+ls -la /sys/class/net/ 2>/dev/null | tee -a "\$LOG"
 
-# Give the kernel a moment to enumerate the new NIC.
+# Give kernel time to enumerate the NIC after module load
 sleep 2
+log "ifaces after sleep: \$(ls /sys/class/net/ 2>/dev/null | tr '\n' ' ')"
 
-# Bring up loopback first.
+# ── Step 5: bring up loopback ─────────────────────────────────────────────────
 ip link set lo up 2>/dev/null
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null || true
 
-# Bring up networking — try DHCP on all non-loopback interfaces.
+# ── Step 6: DHCP on each non-loopback interface ───────────────────────────────
+# IMPORTANT: do NOT pipe udhcpc directly into tee inside an 'if' — the if
+# tests the pipe's last command (tee), which exits 0 even when udhcpc fails.
+# Instead capture exit code separately.
 IFACE_UP=""
 for iface_path in /sys/class/net/*/; do
     iface=\$(basename "\$iface_path")
     [ "\$iface" = "lo" ] && continue
-    log "Bringing up \$iface..."
+    log "dhcp: trying \$iface ..."
     ip link set "\$iface" up 2>/dev/null
-    if udhcpc -i "\$iface" -n -q -t 15 -T 3 -s /usr/share/udhcpc/default.script 2>&1 | tee -a "\$LOG"; then
+    udhcpc -i "\$iface" -n -q -t 10 -T 2 -s /usr/share/udhcpc/default.script 2>&1 >> "\$LOG"
+    DHCP_RC=\$?
+    log "dhcp: \$iface exit=\$DHCP_RC"
+    if [ \$DHCP_RC -eq 0 ]; then
         IFACE_UP="\$iface"
-        log "DHCP on \$iface: OK"
+        log "dhcp: \$iface OK"
         break
     else
-        log "DHCP on \$iface: failed"
+        log "dhcp: \$iface failed (rc=\$DHCP_RC)"
     fi
 done
 
 if [ -z "\$IFACE_UP" ]; then
-    log "WARNING: DHCP failed on all interfaces"
+    log "WARNING: DHCP failed on all interfaces — assigning static fallback IP"
+    # Assign static IP so clonr-server can reach us to pull /tmp/init.log
+    for iface_path in /sys/class/net/*/; do
+        iface=\$(basename "\$iface_path")
+        [ "\$iface" = "lo" ] && continue
+        ip link set "\$iface" up 2>/dev/null
+        ip addr add 10.99.0.100/24 dev "\$iface" 2>/dev/null && {
+            ip route add default via 10.99.0.1 dev "\$iface" 2>/dev/null || true
+            IFACE_UP="\$iface"
+            log "static: assigned 10.99.0.100/24 on \$iface, gw 10.99.0.1"
+            break
+        }
+    done
 fi
 
-log ""
-log "Network state:"
+log "net state:"
 ip addr show 2>/dev/null | tee -a "\$LOG"
 ip route show 2>/dev/null | tee -a "\$LOG"
-log ""
 
-# Build the clonr arguments.
+# ── Step 7: start log server so clonr-server can pull diagnostics ─────────────
+# Serve /tmp/init.log via busybox httpd on port 9999.
+# From clonr-server: curl http://10.99.0.100:9999/init.log
+mkdir -p /tmp/www
+ln -sf "\$LOG" /tmp/www/init.log
+httpd -p 9999 -h /tmp/www 2>/dev/null &
+HTTPPID=\$!
+# Also try nc as fallback
+(while true; do cat "\$LOG" | nc -l -p 9998 2>/dev/null; done) &
+log "log server: httpd :9999 (pid \$HTTPPID), nc :9998"
+
+# ── Step 8: run clonr deploy --auto ───────────────────────────────────────────
 export CLONR_SERVER="\${CLONR_SERVER:-http://10.99.0.1:8080}"
-SERVER_ARG="--server \${CLONR_SERVER}"
+log "running: /usr/bin/clonr deploy --auto --server \${CLONR_SERVER}"
 
-log "Running: /usr/bin/clonr deploy --auto \${SERVER_ARG}"
-log ""
-
-/usr/bin/clonr deploy --auto \${SERVER_ARG}
+/usr/bin/clonr deploy --auto --server "\${CLONR_SERVER}" 2>&1 >> "\$LOG"
 CLONR_EXIT=\$?
 
-log ""
-if [ \$CLONR_EXIT -eq 0 ]; then
-    log "clonr deploy --auto completed successfully (exit 0)"
-else
-    log "clonr deploy --auto exited with code \$CLONR_EXIT"
-fi
+log "clonr exit: \$CLONR_EXIT"
+log "init complete — sleeping forever to keep kernel alive"
+log "(pull log: nc 10.99.0.100 9999)"
 
-log ""
-log "Init complete. PID 1 sleeping to keep kernel alive."
-log "Connect to serial console for debug access."
-# Loop forever to prevent kernel panic from PID 1 exit.
-# In production, clonr deploy would reboot after success.
+# ── Step 9: loop forever — PID 1 must not exit ────────────────────────────────
 while true; do
     sleep 3600
 done
