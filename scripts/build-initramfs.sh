@@ -90,10 +90,115 @@ else
     exit 1
 fi
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Install lsblk.
+#
+# lsblk is not a busybox applet — it comes from util-linux. Without it, clonr's
+# hardware discovery returns an empty disk list and disk selection during deploy
+# fails. We fetch the binary directly from the clonr-server, which already has
+# util-linux installed.
+#
+# Strategy (in order):
+#   1. Fetch static lsblk from clonr-server at /usr/bin/lsblk (preferred).
+#   2. If the server binary is dynamically linked, copy it plus its required
+#      shared libraries from the server.
+#   3. If sshpass/server is unavailable, check the local system for a static
+#      lsblk binary (e.g. util-linux-static package on Debian/Ubuntu).
+# ──────────────────────────────────────────────────────────────────────────────
+echo "  [+] Installing lsblk..."
+
+LSBLK_INSTALLED=false
+LSBLK_DEST="$WORKDIR/usr/bin/lsblk"
+
+# Helper: try to fetch lsblk from the clonr-server.
+fetch_lsblk_from_server() {
+    if ! command -v sshpass &>/dev/null; then
+        echo "      sshpass not found — cannot fetch lsblk from server" >&2
+        return 1
+    fi
+
+    # Copy the binary.
+    if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+        "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:/usr/bin/lsblk" \
+        "$LSBLK_DEST" 2>/dev/null; then
+        echo "      failed to scp lsblk from ${CLONR_SERVER_HOST}" >&2
+        return 1
+    fi
+    chmod 755 "$LSBLK_DEST"
+
+    # Determine if the binary is statically linked.
+    LSBLK_FILE_INFO=$(file "$LSBLK_DEST" 2>/dev/null || echo "")
+    if echo "$LSBLK_FILE_INFO" | grep -q "statically linked"; then
+        echo "      fetched static lsblk from ${CLONR_SERVER_HOST}"
+        return 0
+    fi
+
+    # Dynamically linked — copy required shared libraries from the server.
+    echo "      lsblk is dynamically linked — fetching required libs..."
+    NEEDED_LIBS=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+        "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "ldd /usr/bin/lsblk 2>/dev/null" | \
+        grep -oP '/[^ ]+\.so[^ ]*' | sort -u 2>/dev/null || true)
+
+    if [[ -z "$NEEDED_LIBS" ]]; then
+        echo "      WARNING: could not determine lsblk dependencies" >&2
+        return 0  # keep the binary anyway, it may work if libs are already present
+    fi
+
+    for lib in $NEEDED_LIBS; do
+        lib_dir="$WORKDIR$(dirname "$lib")"
+        mkdir -p "$lib_dir"
+        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${lib}" \
+            "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
+            echo "      WARNING: could not fetch lib $lib" >&2
+    done
+
+    # Set up /lib64/ld-linux-x86-64.so.2 symlink if needed (glibc dynamic linker).
+    if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
+        LINKER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
+            "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
+        if [[ -n "$LINKER" ]]; then
+            mkdir -p "$WORKDIR/lib64"
+            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${LINKER}" \
+                "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
+        fi
+    fi
+
+    echo "      fetched dynamic lsblk + libs from ${CLONR_SERVER_HOST}"
+    return 0
+}
+
+if fetch_lsblk_from_server; then
+    LSBLK_INSTALLED=true
+else
+    # Fallback: check for a locally installed static lsblk.
+    # util-linux-static (Debian/Ubuntu) or util-linux-ng-static (some distros)
+    # installs a statically linked lsblk at /usr/bin/lsblk.static or similar.
+    for candidate in /usr/bin/lsblk.static /usr/lib/util-linux/lsblk \
+                     /usr/bin/lsblk /sbin/lsblk; do
+        if [[ -f "$candidate" ]]; then
+            FILE_INFO=$(file "$candidate" 2>/dev/null || echo "")
+            if echo "$FILE_INFO" | grep -q "statically linked"; then
+                cp "$candidate" "$LSBLK_DEST"
+                chmod 755 "$LSBLK_DEST"
+                echo "      using local static lsblk: $candidate"
+                LSBLK_INSTALLED=true
+                break
+            fi
+        fi
+    done
+fi
+
+if [[ "$LSBLK_INSTALLED" == "true" ]]; then
+    echo "  [+] lsblk installed at /usr/bin/lsblk ($(du -h "$LSBLK_DEST" | cut -f1))"
+else
+    echo "  [!] WARNING: lsblk could not be installed — disk discovery will return empty results" >&2
+    echo "               Run: sshpass -p clonr scp clonr@192.168.1.151:/usr/bin/lsblk initramfs-lsblk && rebuild" >&2
+fi
+
 # Create symlinks for all busybox applets we need.
-# Note: lsblk is NOT a busybox applet (it comes from util-linux).
-# clonr hardware discovery tolerates lsblk absence — disk list will be empty,
-# but node registration still succeeds.
 for cmd in sh ash ls cat echo mount umount mkdir cp mv rm ip \
            ifconfig udhcpc modprobe insmod sleep printf \
            grep sed awk cut tr head tail tee wc df free uname dmesg \
