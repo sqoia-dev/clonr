@@ -811,13 +811,22 @@ log "running: /usr/bin/clonr deploy --auto --server \${CLONR_SERVER}"
 CLONR_EXIT=\$?
 
 log "clonr exit: \$CLONR_EXIT"
-log "init complete — sleeping forever to keep kernel alive"
-log "(pull log: nc 10.99.0.100 9999)"
 
-# ── Step 9: loop forever — PID 1 must not exit ────────────────────────────────
-while true; do
-    sleep 3600
-done
+if [ "\$CLONR_EXIT" -eq 0 ]; then
+    log "deployment succeeded — rebooting into deployed OS in 3s"
+    sync
+    sleep 3
+    # reboot triggers the kernel to restart the machine. On BIOS/GPT systems
+    # with scsi0 first in boot order, the next boot loads GRUB from the disk.
+    reboot -f
+else
+    log "deployment failed (exit \$CLONR_EXIT) — sleeping to allow log collection"
+    log "(pull log: nc <node-ip> 9999)"
+    # ── Step 9: loop on failure — PID 1 must not exit ─────────────────────────
+    while true; do
+        sleep 3600
+    done
+fi
 INIT_EOF
 chmod 755 "$WORKDIR/init"
 
