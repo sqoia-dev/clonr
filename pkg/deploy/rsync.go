@@ -571,6 +571,13 @@ func (d *FilesystemDeployer) mountPartitions(ctx context.Context, devs []string,
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", target, err)
 		}
+		// If the device is already mounted at this target (e.g. Deploy's lazy
+		// umount left it attached), skip rather than failing with EBUSY.
+		if isMounted(m.dev, target) {
+			logger().Info().Str("dev", m.dev).Str("target", target).
+				Msg("mountPartitions: already mounted — skipping")
+			continue
+		}
 		if err := runCmd(ctx, "mount", m.dev, target); err != nil {
 			return fmt.Errorf("mount %s → %s: %w", m.dev, target, err)
 		}
@@ -578,10 +585,40 @@ func (d *FilesystemDeployer) mountPartitions(ctx context.Context, devs []string,
 	return nil
 }
 
+// isMounted reports whether dev is currently mounted at target by scanning
+// /proc/mounts. Returns false if /proc/mounts is unavailable (non-Linux).
+func isMounted(dev, target string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == dev && fields[1] == target {
+			return true
+		}
+	}
+	return false
+}
+
 // unmountAll unmounts everything under mountRoot in reverse order (deepest first).
+// Syncs first to flush pending writes, then attempts a clean umount -R.
+// If the clean umount fails (e.g. EBUSY from lingering kernel writeback or an
+// open fd left by a subprocess), falls back to a lazy detach (umount -l -R) so
+// the in-flight IO completes in the background but the mount point is released
+// immediately. This prevents the "Resource busy" error in Finalize's re-mount.
 func (d *FilesystemDeployer) unmountAll(mountRoot string) {
-	// umount -R handles reverse-order unmounting for nested mounts.
-	_ = exec.Command("umount", "-R", mountRoot).Run()
+	log := logger()
+	// Flush dirty pages before unmounting — reduces the chance of EBUSY.
+	_ = exec.Command("sync").Run()
+	if err := exec.Command("umount", "-R", mountRoot).Run(); err != nil {
+		log.Warn().Str("mountRoot", mountRoot).Err(err).
+			Msg("umount -R failed — falling back to lazy detach (umount -l -R)")
+		if lazyErr := exec.Command("umount", "-l", "-R", mountRoot).Run(); lazyErr != nil {
+			log.Error().Str("mountRoot", mountRoot).Err(lazyErr).
+				Msg("lazy umount also failed — filesystem may remain mounted")
+		}
+	}
 }
 
 // maxDownloadAttempts is the number of download attempts before giving up.
