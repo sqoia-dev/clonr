@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -661,6 +662,28 @@ func isMounted(dev, target string) bool {
 	return false
 }
 
+// hasAnymountUnder reports whether any filesystem is currently mounted at prefix
+// or under it (prefix + "/"), by reading /proc/mounts. This is the authoritative
+// check for whether a lazy umount actually detached — unlike umount exit codes,
+// which are unreliable on shared mounts.
+func hasAnymountUnder(prefix string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		target := fields[1]
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // fsSyncMountRoot freezes then immediately thaws every XFS filesystem mounted
 // under mountRoot using fsfreeze(8) (util-linux). freeze(-f) forces the XFS log
 // to fully commit all in-memory journal entries to disk and quiesces I/O;
@@ -759,25 +782,39 @@ func logMountBusyDiagnostics(mountRoot string) {
 }
 
 // unmountAll unmounts everything under mountRoot.
-// Before unmounting, it freezes-then-thaws every XFS filesystem under mountRoot
-// via fsfreeze(8) to force the XFS log to fully commit — this is the reliable fix
-// for EBUSY after large tar extractions on XFS. sync(2) alone is insufficient
-// because it flushes the page cache but does not drain XFS's internal log buffer.
 //
-// After the fsfreeze/thaw cycle, clean unmount should succeed immediately. We keep
-// three retries as a safety margin for non-XFS cases. Only falls back to lazy
-// detach if all retries fail. Lazy detach (umount -l) is intentionally a last
-// resort because it leaves the block device marked "in use" by the kernel, which
-// causes the subsequent Finalize remount to fail with EBUSY.
+// Three-step strategy:
+//
+//  1. fsfreeze/thaw — forces XFS delayed-log commit. sync(2) alone does not drain
+//     XFS's in-memory circular log buffer, which keeps the filesystem busy after
+//     large tar extractions. fsfreeze(8) is the only reliable way to drain it.
+//
+//  2. mount --make-rprivate — cuts shared mount propagation. In the initramfs the
+//     rootfs is typically a "shared" mount; filesystems mounted inside it inherit
+//     that propagation peer relationship. Linux refuses umount(2) and MNT_DETACH on
+//     shared mounts that have propagation peers, returning EBUSY even with no open
+//     fds. Making the subtree rprivate severs those peers, enabling clean unmount.
+//
+//  3. Recursive unmount with retries, falling back to lazy detach. Lazy detach
+//     success is verified via /proc/mounts rather than exit code — umount -l can
+//     return non-zero even when MNT_DETACH succeeded at the kernel level.
 func (d *FilesystemDeployer) unmountAll(mountRoot string) {
 	log := logger()
 
-	// Force XFS log commit before unmounting. This drains the async journal
-	// that keeps the filesystem busy after large writes.
+	// Step 1: Force XFS log commit before unmounting.
 	fsSyncMountRoot(mountRoot)
 
-	// After fsfreeze the filesystem should unmount cleanly on the first try.
-	// Keep three retries for safety (non-XFS filesystems, ext4 writeback, etc).
+	// Step 2: Break shared-mount propagation so umount(2) does not get EBUSY
+	// from propagation peers inherited from the initramfs rootfs.
+	if out, err := exec.Command("mount", "--make-rprivate", mountRoot).CombinedOutput(); err != nil {
+		log.Warn().Str("mountRoot", mountRoot).Err(err).Str("output", string(out)).
+			Msg("mount --make-rprivate failed — umount may still see EBUSY on shared mounts")
+	} else {
+		log.Info().Str("mountRoot", mountRoot).
+			Msg("mount --make-rprivate: shared propagation cut; subtree is now private")
+	}
+
+	// Step 3: Clean unmount with retries.
 	const maxUmountRetries = 3
 	for attempt := 1; attempt <= maxUmountRetries; attempt++ {
 		err := exec.Command("umount", "-R", mountRoot).Run()
@@ -791,26 +828,23 @@ func (d *FilesystemDeployer) unmountAll(mountRoot string) {
 		if attempt < maxUmountRetries {
 			log.Debug().Str("mountRoot", mountRoot).Err(err).Int("attempt", attempt).
 				Msg("umount -R not ready yet — retrying in 1s")
-			// Re-run fsfreeze in case a retry is needed — there may be a second
-			// partition (e.g. /boot) that was not yet drained on the first pass.
 			fsSyncMountRoot(mountRoot)
 			time.Sleep(time.Second)
 		} else {
 			log.Warn().Str("mountRoot", mountRoot).Err(err).
 				Msg("umount -R failed after all retries — collecting diagnostics then falling back to lazy detach")
 			logMountBusyDiagnostics(mountRoot)
-			// umount -l: lazy detach. The kernel detaches the mount from the filesystem
-			// namespace immediately but keeps the mount alive until all open file
-			// descriptors on it are closed. The block device is released when the last
-			// fd closes. In practice this means Finalize's re-mount attempt may still
-			// see EBUSY for a short window — mountPartitions already retries 5 times
-			// to handle this.
-			if lazyErr := exec.Command("umount", "-l", "-R", mountRoot).Run(); lazyErr != nil {
-				log.Error().Str("mountRoot", mountRoot).Err(lazyErr).
-					Msg("lazy umount also failed — filesystem may remain mounted; Finalize will retry mount")
+			// Lazy detach: removes the mount from the VFS namespace immediately.
+			// Do NOT trust the exit code — on some kernel/mount combinations
+			// MNT_DETACH succeeds but the syscall wrapper returns EINVAL or EBUSY.
+			// Use /proc/mounts as ground truth instead.
+			_ = exec.Command("umount", "-l", "-R", mountRoot).Run()
+			if hasAnymountUnder(mountRoot) {
+				log.Error().Str("mountRoot", mountRoot).
+					Msg("lazy umount: mount still visible in /proc/mounts — Finalize remount will likely fail")
 			} else {
 				log.Info().Str("mountRoot", mountRoot).
-					Msg("lazy umount succeeded — mount detached; block device will release when all fds close")
+					Msg("lazy umount: mount detached from namespace (verified via /proc/mounts)")
 			}
 		}
 	}
@@ -947,10 +981,18 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		if err := decompCmd.Start(); err != nil {
 			return fmt.Errorf("zstd start: %w", err)
 		}
-		// Close pw2 when zstd exits (success or error) so tar sees EOF.
+		// CloseWithError propagates any decompressor failure to tar's stdin pipe.
+		// Using pw2.Close() here would send a clean EOF even when zstd exits
+		// non-zero (e.g. truncated HTTP body), causing tar to silently extract a
+		// partial archive and exit 0. CloseWithError instead sends an error to
+		// the pipe reader so tar receives a read error and exits non-zero.
 		go func() {
-			_ = decompCmd.Wait()
-			pw2.Close()
+			if err := decompCmd.Wait(); err != nil {
+				log.Error().Err(err).Msg("zstd decompressor exited with error — stream may be truncated")
+				pw2.CloseWithError(fmt.Errorf("zstd decompressor failed: %w", err))
+			} else {
+				pw2.Close()
+			}
 		}()
 		tarSrc = pr2
 
@@ -966,9 +1008,15 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 			if err := decompCmd.Start(); err != nil {
 				return fmt.Errorf("pigz start: %w", err)
 			}
+			// Same CloseWithError pattern as zstd: propagate decompressor failure
+			// to tar's stdin so a truncated stream causes tar to exit non-zero.
 			go func() {
-				_ = decompCmd.Wait()
-				pw2.Close()
+				if err := decompCmd.Wait(); err != nil {
+					log.Error().Err(err).Msg("pigz decompressor exited with error — stream may be truncated")
+					pw2.CloseWithError(fmt.Errorf("pigz decompressor failed: %w", err))
+				} else {
+					pw2.Close()
+				}
 			}()
 			tarSrc = pr2
 		} else {
@@ -986,9 +1034,10 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		log.Info().Msg("no compression magic detected — treating stream as uncompressed tar")
 	}
 
-	// tar -xvf - streams each extracted filename to stdout, which runAndLog pipes
-	// through the logger at Info level. This gives per-file visibility during
-	// extraction without any extra logic.
+	// tar -xvf - streams each extracted filename to stdout, which we scan and log
+	// at Info level. Stderr is captured separately so we can inspect it for
+	// truncation indicators (e.g. "Unexpected EOF") before deciding whether a
+	// non-zero exit code is a tolerable warning or a hard failure.
 	//
 	// Flags used:
 	//   --numeric-owner        preserve UID/GID as numbers (no user DB needed in initramfs)
@@ -1016,24 +1065,106 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 	)
 	tarCmd.Stdin = tarSrc
 
-	if err := runAndLog(ctx, "tar", tarCmd); err != nil {
-		// tar exit code 2 on extraction often means a handful of files failed but
-		// most of the archive was written successfully. Log the error but don't
-		// fail the deployment if the critical system files are present.
-		// Check if /etc and /usr were extracted — if so, the failure was in something
-		// non-critical and we can continue.
+	// Capture tar stderr so we can detect truncation-specific errors. Stdout (the
+	// per-file list) is streamed to the logger as before.
+	tarStdoutPipe, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("tar stdout pipe: %w", err)
+	}
+	tarStderrPipe, err := tarCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("tar stderr pipe: %w", err)
+	}
+
+	if err := tarCmd.Start(); err != nil {
+		return fmt.Errorf("tar start: %w", err)
+	}
+
+	// Stream tar stdout (filenames) to the logger and tar stderr to a buffer.
+	var (
+		tarWg         sync.WaitGroup
+		tarStderrBuf  strings.Builder
+		tarStderrMu   sync.Mutex
+	)
+	tarWg.Add(2)
+	go func() {
+		defer tarWg.Done()
+		scanner := bufio.NewScanner(tarStdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line != "" {
+				log.Info().Str("cmd", "tar").Str("stream", "stdout").Msg(line)
+			}
+		}
+	}()
+	go func() {
+		defer tarWg.Done()
+		scanner := bufio.NewScanner(tarStderrPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			log.Warn().Str("cmd", "tar").Str("stream", "stderr").Msg(line)
+			tarStderrMu.Lock()
+			tarStderrBuf.WriteString(line)
+			tarStderrBuf.WriteByte('\n')
+			tarStderrMu.Unlock()
+		}
+	}()
+	tarWg.Wait()
+
+	tarErr := tarCmd.Wait()
+	tarStderr := tarStderrBuf.String()
+
+	if tarErr != nil {
+		// Truncation indicators in tar stderr always mean a hard failure — never
+		// mask them with the /etc+/usr presence check. A partially extracted archive
+		// will be missing /boot (and other tail content) even when /etc and /usr are
+		// present, which is exactly the failure mode we are fixing here.
+		truncationIndicators := []string{
+			"Unexpected EOF in archive",
+			"Unexpected EOF on archive file",
+			"Error is not recoverable",
+			"Cannot read: Is a directory",
+			"Archive is incomplete",
+		}
+		for _, indicator := range truncationIndicators {
+			if strings.Contains(tarStderr, indicator) {
+				return fmt.Errorf("tar extract failed: stream was truncated (%q detected in tar stderr) — "+
+					"the HTTP body was cut short before the archive end; stderr:\n%s", indicator, tarStderr)
+			}
+		}
+
+		// Non-truncation tar failures (exit code 2, xattr warnings, etc.): tolerate
+		// only if /etc and /usr are present AND the byte count matches expectations.
 		if _, etcErr := os.Stat(filepath.Join(opts.MountRoot, "etc", "os-release")); etcErr == nil {
 			if _, usrErr := os.Stat(filepath.Join(opts.MountRoot, "usr", "bin")); usrErr == nil {
-				log.Warn().Err(err).Msg("tar extract reported errors but /etc and /usr are present — continuing")
+				log.Warn().Err(tarErr).Msg("tar extract reported non-truncation errors but /etc and /usr are present — continuing")
 			} else {
-				return fmt.Errorf("tar extract failed: %w", err)
+				return fmt.Errorf("tar extract failed: %w", tarErr)
 			}
 		} else {
-			return fmt.Errorf("tar extract failed: %w", err)
+			return fmt.Errorf("tar extract failed: %w", tarErr)
 		}
 	}
 
-	log.Info().Str("read", humanReadableBytes(pr.written)).Msg("stream-extract complete")
+	// ── Byte-count integrity check ────────────────────────────────────────────
+	// pr.written counts bytes read from the HTTP body (compressed). Compare
+	// against the Content-Length from the server. A mismatch means the
+	// connection was cut before the full blob was received — fail loudly even
+	// if tar exited 0 (which can happen when the decompressor swallowed the
+	// truncation and closed its stdout pipe cleanly before we fixed the bug).
+	if totalBytes > 0 && pr.written != totalBytes {
+		return fmt.Errorf("stream truncated: HTTP body delivered %d bytes but Content-Length was %d "+
+			"(missing %d bytes) — the deploy is incomplete; re-run to retry",
+			pr.written, totalBytes, totalBytes-pr.written)
+	}
+
+	log.Info().
+		Str("read", humanReadableBytes(pr.written)).
+		Str("expected", humanReadableBytes(totalBytes)).
+		Msg("stream-extract complete")
 
 	// Post-extraction checksum verification. If this fails the data is on disk
 	// but potentially corrupt — the caller's retry loop will restart the download.
