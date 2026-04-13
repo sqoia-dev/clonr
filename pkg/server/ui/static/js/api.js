@@ -4,9 +4,11 @@
 const API = {
     BASE: '/api/v1',
 
-    // Read the auth token from localStorage.
+    // _token returns the legacy localStorage key if present (backwards compat
+    // for any CLI/scripted use that injected a Bearer token via the old modal).
+    // Session-cookie auth does not need this — the browser sends the cookie automatically.
     _token() {
-        return localStorage.getItem('clonr_admin_key') || '';
+        try { return localStorage.getItem('clonr_admin_key') || ''; } catch (_) { return ''; }
     },
 
     _headers(extra = {}) {
@@ -16,20 +18,22 @@ const API = {
         return h;
     },
 
+    // _redirectToLogin navigates to /login if not already there.
+    _redirectToLogin() {
+        if (window.location.pathname !== '/login') {
+            window.location.href = '/login';
+        }
+    },
+
     async _parse(resp) {
         const ct = resp.headers.get('Content-Type') || '';
         if (!resp.ok) {
-            // 401/403 means the stored key is wrong or expired — clear it and
-            // show the key entry modal so the user can re-authenticate.
+            // 401/403 — session expired or no auth. Redirect to login page.
             if (resp.status === 401 || resp.status === 403) {
-                let msg = 'API key invalid or expired. Please enter your admin key.';
-                if (ct.includes('application/json')) {
-                    const body = await resp.json().catch(() => null);
-                    if (body && body.error) msg = body.error + ' — please re-enter your admin key.';
-                }
-                localStorage.removeItem('clonr_admin_key');
-                if (typeof Auth !== 'undefined') Auth.showModal(msg);
-                throw new Error(msg);
+                try { localStorage.removeItem('clonr_admin_key'); } catch (_) {}
+                API._redirectToLogin();
+                // Throw so callers don't proceed with undefined data.
+                throw new Error('session expired — redirecting to login');
             }
             let msg = `HTTP ${resp.status}`;
             if (ct.includes('application/json')) {
@@ -46,7 +50,10 @@ const API = {
     async get(path, params = {}) {
         const url = new URL(this.BASE + path, window.location.origin);
         Object.entries(params).forEach(([k, v]) => { if (v !== '' && v != null) url.searchParams.set(k, v); });
-        const resp = await fetch(url.toString(), { headers: this._headers({ 'Content-Type': undefined }) });
+        const resp = await fetch(url.toString(), {
+            headers: this._headers({ 'Content-Type': undefined }),
+            credentials: 'same-origin',
+        });
         return this._parse(resp);
     },
 
@@ -55,6 +62,7 @@ const API = {
             method: 'POST',
             headers: this._headers(),
             body: JSON.stringify(body),
+            credentials: 'same-origin',
         });
         return this._parse(resp);
     },
@@ -64,6 +72,7 @@ const API = {
             method: 'PUT',
             headers: this._headers(),
             body: JSON.stringify(body),
+            credentials: 'same-origin',
         });
         return this._parse(resp);
     },
@@ -72,6 +81,7 @@ const API = {
         const resp = await fetch(this.BASE + path, {
             method: 'DELETE',
             headers: this._headers({ 'Content-Type': undefined }),
+            credentials: 'same-origin',
         });
         return this._parse(resp);
     },
@@ -83,6 +93,7 @@ const API = {
             headers: method === 'GET' || method === 'DELETE'
                 ? this._headers({ 'Content-Type': undefined })
                 : this._headers(),
+            credentials: 'same-origin',
         };
         if (body !== undefined && method !== 'GET' && method !== 'DELETE') {
             opts.body = JSON.stringify(body);

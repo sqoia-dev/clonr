@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>clonr — Login</title>
+    <link rel="stylesheet" href="/ui/css/style.css">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233b82f6'/><text x='5' y='23' font-size='20' font-family='monospace' font-weight='bold' fill='white'>c</text></svg>">
+    <style>
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: var(--bg-primary);
+        }
+
+        .login-wrap {
+            width: 100%;
+            max-width: 380px;
+            padding: 0 16px;
+        }
+
+        .login-logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            justify-content: center;
+            margin-bottom: 32px;
+        }
+
+        .login-logo-mark {
+            width: 36px;
+            height: 36px;
+            background: var(--accent);
+            border-radius: 9px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .login-logo-mark svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .login-logo-text {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: -0.3px;
+        }
+
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .login-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .login-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        .login-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 16px;
+        }
+
+        .login-field label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .login-field input {
+            width: 100%;
+            padding: 9px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-family: var(--font-mono);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            outline: none;
+            transition: border-color var(--transition);
+        }
+
+        .login-field input:focus {
+            border-color: var(--border-focus);
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+        }
+
+        .login-btn {
+            width: 100%;
+            justify-content: center;
+            padding: 10px 16px;
+            font-size: 14px;
+        }
+
+        .login-error {
+            display: none;
+            margin-top: 12px;
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            background: var(--error-bg);
+            color: var(--error-text);
+            font-size: 13px;
+            border: 1px solid #fca5a5;
+        }
+
+        .login-error.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<div class="login-wrap">
+    <div class="login-logo">
+        <div class="login-logo-mark">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+        </div>
+        <div class="login-logo-text">clonr</div>
+    </div>
+
+    <div class="login-card">
+        <div class="login-title">Sign in</div>
+        <div class="login-sub">Enter your admin API key to access the dashboard.</div>
+
+        <form id="login-form" autocomplete="off">
+            <div class="login-field">
+                <label for="api-key">Admin API key</label>
+                <input
+                    id="api-key"
+                    type="password"
+                    placeholder="clonr-admin-…"
+                    autocomplete="current-password"
+                    spellcheck="false"
+                    autofocus
+                >
+            </div>
+
+            <button type="submit" class="btn btn-primary login-btn" id="login-btn">
+                Sign in
+            </button>
+
+            <div class="login-error" id="login-error"></div>
+        </form>
+    </div>
+</div>
+
+<script src="/ui/js/login.js"></script>
+</body>
+</html>

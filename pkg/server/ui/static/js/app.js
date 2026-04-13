@@ -1553,6 +1553,7 @@ const Pages = {
                             <div class="kv-item"><div class="kv-key">OS</div><div class="kv-value">${escHtml(img.os || '—')}</div></div>
                             <div class="kv-item"><div class="kv-key">Arch</div><div class="kv-value">${escHtml(img.arch || '—')}</div></div>
                             <div class="kv-item"><div class="kv-key">Format</div><div class="kv-value">${escHtml(img.format || '—')}</div></div>
+                            <div class="kv-item"><div class="kv-key">Firmware</div><div class="kv-value">${img.firmware === 'bios' ? '<span class="badge badge-warning badge-sm">BIOS (legacy)</span>' : '<span class="badge badge-neutral badge-sm">UEFI</span>'}</div></div>
                             <div class="kv-item"><div class="kv-key">Size</div><div class="kv-value">${fmtBytes(img.size_bytes)}</div></div>
                             <div class="kv-item"><div class="kv-key">Checksum (sha256)</div><div class="kv-value" style="font-size:11px">${escHtml(img.checksum || '—')}</div></div>
                             <div class="kv-item" style="grid-column:1/-1"><div class="kv-key">Source URL</div>
@@ -5366,6 +5367,21 @@ const Pages = {
                         </div>
 
                         <div class="form-group" style="margin-bottom:16px">
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Firmware</label>
+                            <div style="display:flex;gap:20px;align-items:center">
+                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                                    <input type="radio" name="firmware" value="uefi" id="build-iso-fw-uefi" checked>
+                                    <span>UEFI <span class="badge badge-neutral badge-sm" style="margin-left:2px">default</span></span>
+                                </label>
+                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                                    <input type="radio" name="firmware" value="bios" id="build-iso-fw-bios">
+                                    <span>BIOS <span style="color:var(--text-secondary);font-size:11px">(legacy)</span></span>
+                                </label>
+                            </div>
+                            <div class="form-hint">UEFI: OVMF + ESP partition. BIOS: SeaBIOS + biosboot GPT partition. Use BIOS for legacy HPC nodes without EFI firmware.</div>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px">
                             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
                                 <input type="checkbox" name="install_updates" id="build-iso-updates">
                                 <span>Install OS updates during build</span>
@@ -5523,6 +5539,7 @@ const Pages = {
 
         const roleIds = [...form.querySelectorAll('input[name="role_ids"]:checked')].map(cb => cb.value);
 
+        const firmwareEl = form.querySelector('input[name="firmware"]:checked');
         const body = {
             url:              data.get('url'),
             name:             data.get('name'),
@@ -5532,6 +5549,7 @@ const Pages = {
             memory_mb:        parseInt(data.get('memory_gb') || '2', 10) * 1024,
             cpus:             parseInt(data.get('cpus') || '2', 10),
             role_ids:         roleIds,
+            firmware:         firmwareEl ? firmwareEl.value : 'uefi',
             install_updates:  form.querySelector('input[name="install_updates"]').checked,
             custom_kickstart: data.get('custom_kickstart') || '',
             default_username: data.get('default_username') || undefined,
@@ -6042,107 +6060,41 @@ class ProgressStream {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────
 //
-// Auth manages the admin API key stored in localStorage.
-// On load: if no key is present → show modal before App.init().
-// On 401/403: api.js calls Auth.showModal(errorMsg) which clears and re-prompts.
+// Auth manages the browser session (ADR-0006).
+// The session is carried by an HttpOnly cookie set by POST /api/v1/auth/login.
+// On 401/403 api.js redirects to /login — no modal needed.
+// Auth.logout() calls POST /api/v1/auth/logout then redirects to /login.
 
 const Auth = {
-    _STORAGE_KEY: 'clonr_admin_key',
-
-    key() {
-        return localStorage.getItem(this._STORAGE_KEY) || '';
+    async logout() {
+        try {
+            await fetch('/api/v1/auth/logout', {
+                method: 'POST',
+                credentials: 'same-origin',
+            });
+        } catch (_) {
+            // Best-effort; redirect regardless.
+        }
+        try { localStorage.removeItem('clonr_admin_key'); } catch (_) {}
+        window.location.href = '/login';
     },
 
-    save(key) {
-        localStorage.setItem(this._STORAGE_KEY, key.trim());
-    },
-
-    clear() {
-        localStorage.removeItem(this._STORAGE_KEY);
-    },
-
-    // showModal optionally shows an error message (e.g. after a 401).
-    // When the user saves a key the page reloads so App.init() runs fresh.
-    showModal(errorMsg = '') {
-        // Remove any existing modal first.
-        const existing = document.getElementById('auth-modal-overlay');
-        if (existing) existing.remove();
-
-        const overlay = document.createElement('div');
-        overlay.id = 'auth-modal-overlay';
-        overlay.className = 'modal-overlay';
-        overlay.style.cssText = 'display:flex;align-items:center;justify-content:center;z-index:10000';
-
-        overlay.innerHTML = `
-            <div class="modal" style="max-width:420px;width:100%">
-                <div class="modal-header">
-                    <span class="modal-title">Admin API Key Required</span>
-                </div>
-                <div class="modal-body" style="padding:24px">
-                    ${errorMsg ? `<div class="alert alert-error" style="margin-bottom:16px">${escHtml(errorMsg)}</div>` : ''}
-                    <p style="margin:0 0 16px;color:var(--text-secondary);font-size:14px">
-                        Enter your clonr admin API key to access the dashboard.
-                        The key is stored locally in your browser and never sent to any third party.
-                    </p>
-                    <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text-secondary)">Admin API Key</label>
-                    <input id="auth-key-input" type="password" class="form-input"
-                        placeholder="clonr-admin-…"
-                        style="width:100%;box-sizing:border-box;margin-bottom:16px;font-family:monospace"
-                        autocomplete="current-password" spellcheck="false" />
-                    <button id="auth-save-btn" class="btn btn-primary" style="width:100%">Save &amp; Continue</button>
-                </div>
-            </div>`;
-
-        document.body.appendChild(overlay);
-
-        const input = overlay.querySelector('#auth-key-input');
-        const btn   = overlay.querySelector('#auth-save-btn');
-
-        // Focus the input immediately.
-        setTimeout(() => input.focus(), 50);
-
-        const save = () => {
-            const val = input.value.trim();
-            if (!val) { input.focus(); return; }
-            Auth.save(val);
-            window.location.reload();
-        };
-
-        btn.addEventListener('click', save);
-        input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
-    },
-
-    // Renders the "Change key" link in the sidebar footer.
-    renderChangeKeyButton() {
-        const footer = document.querySelector('.sidebar-footer');
-        if (!footer) return;
-        if (footer.querySelector('#auth-change-key')) return; // already added
-
-        const link = document.createElement('button');
-        link.id = 'auth-change-key';
-        link.title = 'Change API key / sign out';
-        link.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;color:var(--text-dim);font-size:12px;margin-left:auto;opacity:0.6;transition:opacity 0.15s';
-        link.textContent = 'Change key';
-        link.addEventListener('mouseenter', () => { link.style.opacity = '1'; });
-        link.addEventListener('mouseleave', () => { link.style.opacity = '0.6'; });
-        link.addEventListener('click', () => {
-            Auth.clear();
-            Auth.showModal();
-        });
-        footer.appendChild(link);
-    },
-
-    // boot is called from DOMContentLoaded.
-    // If no key → show the modal and do NOT start the app.
-    // If key present → start the app normally.
-    boot() {
-        if (!this.key()) {
-            this.showModal();
-            return;
+    // boot verifies the session via GET /api/v1/auth/me.
+    // Valid session → start the app.
+    // No session / expired → redirect to /login.
+    async boot() {
+        try {
+            const resp = await fetch('/api/v1/auth/me', {
+                credentials: 'same-origin',
+            });
+            if (!resp.ok) {
+                window.location.href = '/login';
+                return;
+            }
+        } catch (_) {
+            // Network error — still try to start the app; api.js will redirect on 401.
         }
         App.init();
-        // Defer the button render until DOM is fully painted.
-        requestAnimationFrame(() => this.renderChangeKeyButton());
     },
 };
 
