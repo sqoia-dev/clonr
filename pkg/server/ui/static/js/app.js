@@ -28,6 +28,9 @@ const Router = {
         if (App._logStream) { App._logStream.disconnect(); App._logStream = null; }
         // Disconnect any active progress stream.
         if (App._progressStream) { App._progressStream.disconnect(); App._progressStream = null; }
+        // Close any ISO build SSE stream and elapsed timer.
+        if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
+        if (Pages._isoBuildElapsedTimer) { clearInterval(Pages._isoBuildElapsedTimer); Pages._isoBuildElapsedTimer = null; }
         // Remove node detail page click listener for actions dropdown.
         if (Pages._closeActionsDropdownOnOutsideClick) {
             document.removeEventListener('click', Pages._closeActionsDropdownOnOutsideClick);
@@ -4546,51 +4549,191 @@ const Pages = {
     // ── ISO build progress panel ───────────────────────────────────────────
 
     // _isoBuildInProgress returns the HTML for the inline build progress panel
-    // shown on the image detail page when status=building and build_method=iso.
+    // shown on the image detail page when status=building.
     _isoBuildInProgress(img) {
-        const isISO = img.build_method === 'iso';
-        if (!isISO) {
-            return `<div class="alert alert-info" style="margin-bottom:16px">Build in progress — auto-refreshing every 5 seconds.</div>`;
+        if (img.build_method !== 'iso') {
+            return `<div class="alert alert-info" style="margin-bottom:16px">Build in progress — connecting to live stream…</div>`;
         }
         return `
-            <div class="card iso-build-panel" style="margin-bottom:16px">
+            <div class="card iso-build-panel" style="margin-bottom:16px" id="iso-build-card">
                 <div class="card-header">
-                    <span class="card-title">Building ${escHtml(img.name)} from ISO…</span>
-                    <span class="badge badge-building">building</span>
+                    <span class="card-title">Building ${escHtml(img.name)} from ISO</span>
+                    <span class="badge badge-building" id="iso-build-badge">building</span>
                 </div>
                 <div class="card-body">
                     <div id="iso-build-phase" style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">
-                        Phase: <span style="font-weight:600;color:var(--text-primary)">Initializing</span>
+                        Phase: <span id="iso-build-phase-value" style="font-weight:600;color:var(--text-primary)">Connecting…</span>
                     </div>
-                    <div class="progress-bar-wrap" style="margin-bottom:10px">
-                        <div class="progress-bar-fill" id="iso-build-bar" style="width:0%;animation:indeterminate 1.5s ease infinite"></div>
+                    <div class="progress-bar-wrap" style="margin-bottom:6px">
+                        <div class="progress-bar-fill" id="iso-build-bar" style="width:5%;transition:width 0.4s ease"></div>
                     </div>
+                    <div id="iso-build-bytes" style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;min-height:16px"></div>
                     <div style="display:flex;gap:24px;font-size:12px;color:var(--text-secondary);margin-bottom:16px">
                         <span>Elapsed: <span id="iso-build-elapsed" class="text-mono">—</span></span>
-                        <span>ETA: <span id="iso-build-eta" class="text-mono">—</span></span>
                     </div>
-                    <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Serial console output</div>
-                    <div id="iso-serial-log" class="iso-serial-log log-viewer" style="height:220px"></div>
-                    <div style="margin-top:12px">
-                        <button class="btn btn-danger btn-sm" onclick="Pages._cancelIsoBuild('${escHtml(img.id)}')">Cancel Build</button>
+                    <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Serial console</div>
+                    <div id="iso-serial-log" class="iso-serial-log log-viewer" style="height:240px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg-tertiary);border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-all"></div>
+                    <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+                        <button class="btn btn-danger btn-sm" id="iso-cancel-btn" onclick="Pages._cancelIsoBuild('${escHtml(img.id)}')">Cancel Build</button>
+                        <a class="btn btn-secondary btn-sm" href="${escHtml(API.buildProgress.buildLogUrl(img.id))}" target="_blank" rel="noreferrer">Download Full Log</a>
                     </div>
                 </div>
             </div>`;
     },
 
-    _updateIsoBuildProgress(img) {
-        // Called on each 5s refresh tick while status=building.
-        // Update elapsed time. Actual phase/log data comes from the SSE log stream
-        // which Richard wires up with component=iso-build logs.
-        const startTime = new Date(img.created_at).getTime();
-        const elapsed   = Math.floor((Date.now() - startTime) / 1000);
-        const elEl = document.getElementById('iso-build-elapsed');
-        if (elEl) elEl.textContent = fmtETA(elapsed);
+    // _startIsoBuildSSE opens an SSE connection for an ISO build and wires all
+    // UI updates. Call this once after the page HTML is rendered.
+    _startIsoBuildSSE(imageId) {
+        const sseUrl = API.buildProgress.sseUrl(imageId);
+        const es = new EventSource(sseUrl);
+        let userScrolled = false;
+        let _elapsedTimer = null;
+
+        const serialEl  = document.getElementById('iso-serial-log');
+        const phaseEl   = document.getElementById('iso-build-phase-value');
+        const barEl     = document.getElementById('iso-build-bar');
+        const bytesEl   = document.getElementById('iso-build-bytes');
+        const elapsedEl = document.getElementById('iso-build-elapsed');
+        const badgeEl   = document.getElementById('iso-build-badge');
+
+        if (serialEl) {
+            serialEl.addEventListener('scroll', () => {
+                const atBottom = serialEl.scrollHeight - serialEl.scrollTop - serialEl.clientHeight < 40;
+                userScrolled = !atBottom;
+            });
+        }
+
+        const _appendSerial = (line) => {
+            if (!serialEl) return;
+            const div = document.createElement('div');
+            div.className = Pages._serialLineClass(line);
+            div.textContent = line;
+            serialEl.appendChild(div);
+            // Trim to 500 visible lines to avoid runaway DOM growth.
+            while (serialEl.children.length > 500) serialEl.removeChild(serialEl.firstChild);
+            if (!userScrolled) serialEl.scrollTop = serialEl.scrollHeight;
+        };
+
+        const _applyPhase = (phase, elapsedMs) => {
+            if (!phase) return;
+            if (phaseEl) phaseEl.textContent = Pages._phaseLabel(phase);
+            if (badgeEl) {
+                badgeEl.className = 'badge ' + Pages._phaseBadgeClass(phase);
+                badgeEl.textContent = phase.replace(/_/g, ' ');
+            }
+            if (barEl) {
+                const pct = Pages._phasePercent(phase);
+                barEl.style.width = pct + '%';
+            }
+            if (phase === 'complete' || phase === 'failed' || phase === 'canceled') {
+                clearInterval(_elapsedTimer);
+                es.close();
+                setTimeout(() => Pages.imageDetail(imageId), 1800);
+            }
+        };
+
+        const _applyProgress = (done, total) => {
+            if (!barEl) return;
+            if (total > 0) {
+                const pct = Math.min(100, Math.round((done / total) * 100));
+                if (bytesEl) bytesEl.textContent = `${fmtBytes(done)} / ${fmtBytes(total)}`;
+                barEl.style.width = pct + '%';
+            } else if (done > 0) {
+                if (bytesEl) bytesEl.textContent = fmtBytes(done);
+            }
+        };
+
+        const _startElapsedTimer = (initialMs) => {
+            clearInterval(_elapsedTimer);
+            const base = Date.now() - (initialMs || 0);
+            _elapsedTimer = setInterval(() => {
+                const secs = Math.floor((Date.now() - base) / 1000);
+                if (elapsedEl) elapsedEl.textContent = fmtETA(secs);
+            }, 1000);
+        };
+
+        // Initial snapshot event (sent immediately on connect by the server).
+        es.addEventListener('snapshot', (e) => {
+            try {
+                const state = JSON.parse(e.data);
+                _startElapsedTimer(state.elapsed_ms);
+                _applyPhase(state.phase, state.elapsed_ms);
+                _applyProgress(state.bytes_done, state.bytes_total);
+                if (serialEl && Array.isArray(state.serial_tail)) {
+                    serialEl.innerHTML = '';
+                    state.serial_tail.forEach(_appendSerial);
+                    if (!userScrolled) serialEl.scrollTop = serialEl.scrollHeight;
+                }
+            } catch (_) {}
+        });
+
+        // Incremental update events.
+        es.onmessage = (e) => {
+            try {
+                const ev = JSON.parse(e.data);
+                if (ev.phase)       _applyPhase(ev.phase, ev.elapsed_ms);
+                if (ev.bytes_done)  _applyProgress(ev.bytes_done, ev.bytes_total);
+                if (ev.serial_line) _appendSerial(ev.serial_line);
+                if (ev.elapsed_ms && elapsedEl) {
+                    elapsedEl.textContent = fmtETA(Math.floor(ev.elapsed_ms / 1000));
+                }
+            } catch (_) {}
+        };
+
+        es.onerror = () => { clearInterval(_elapsedTimer); };
+
+        Pages._isoBuildSSE = es;
+        Pages._isoBuildElapsedTimer = _elapsedTimer;
     },
+
+    _serialLineClass(line) {
+        if (/kernel panic|BUG:|OOPS:|call trace/i.test(line)) return 'serial-line serial-panic';
+        if (/\[\s*OK\s*\]/.test(line))                         return 'serial-line serial-ok';
+        if (/warning|warn/i.test(line))                        return 'serial-line serial-warn';
+        if (/error|fail|failed/i.test(line))                   return 'serial-line serial-error';
+        return 'serial-line';
+    },
+
+    _phaseLabel(phase) {
+        const labels = {
+            downloading_iso:   'Downloading ISO',
+            generating_config: 'Generating config',
+            creating_disk:     'Creating disk',
+            launching_vm:      'Launching VM',
+            installing:        'Installing OS',
+            extracting:        'Extracting rootfs',
+            scrubbing:         'Scrubbing identity',
+            finalizing:        'Finalizing',
+            complete:          'Complete',
+            failed:            'Failed',
+            canceled:          'Canceled',
+        };
+        return labels[phase] || phase;
+    },
+
+    _phaseBadgeClass(phase) {
+        if (phase === 'complete') return 'badge-success';
+        if (phase === 'failed' || phase === 'canceled') return 'badge-error';
+        return 'badge-building';
+    },
+
+    _phasePercent(phase) {
+        const pcts = {
+            downloading_iso:   10, generating_config: 20, creating_disk: 25,
+            launching_vm: 30, installing: 60, extracting: 80,
+            scrubbing: 90, finalizing: 95, complete: 100, failed: 100, canceled: 100,
+        };
+        return pcts[phase] || 5;
+    },
+
+    // _updateIsoBuildProgress is kept as a no-op; ISO builds now use SSE.
+    _updateIsoBuildProgress() {},
 
     async _cancelIsoBuild(imageId) {
         if (!confirm('Cancel this build? The in-progress VM will be stopped and the image will remain in error state.')) return;
         try {
+            if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
+            clearInterval(Pages._isoBuildElapsedTimer);
             await API.images.delete(imageId);
             Router.navigate('/images');
         } catch (e) {

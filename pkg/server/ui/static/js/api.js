@@ -182,6 +182,24 @@ const API = {
             });
         },
     },
+    buildProgress: {
+        // get returns the current BuildState snapshot for an image.
+        get(imageId)        { return API.get(`/images/${imageId}/build-progress`); },
+        // sseUrl returns the URL for the SSE stream endpoint for a given image.
+        sseUrl(imageId) {
+            const tok = API._token();
+            const base = `${window.location.origin}/api/v1/images/${imageId}/build-progress/stream`;
+            return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
+        },
+        // buildLogUrl returns the URL for the full build log download.
+        buildLogUrl(imageId) {
+            const tok = API._token();
+            const base = `${window.location.origin}/api/v1/images/${imageId}/build-log`;
+            return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
+        },
+        // manifest returns the JSON build summary written after a completed build.
+        manifest(imageId)   { return API.get(`/images/${imageId}/build-manifest`); },
+    },
     imageRoles: {
         list()              { return API.get('/image-roles'); },
     },
