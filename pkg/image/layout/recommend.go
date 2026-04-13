@@ -64,20 +64,27 @@ type Recommendation struct {
 
 // Recommend generates a DiskLayout from discovered hardware.
 // imageFormat is one of api.ImageFormatFilesystem or api.ImageFormatBlock.
-func Recommend(hw hardware.SystemInfo, imageFormat string) (Recommendation, error) {
+// imageFirmware overrides DMI-based UEFI detection when non-empty: pass "bios"
+// to force biosboot+GPT regardless of what the DMI reports, or "uefi" to force
+// an ESP layout. When empty, firmware is auto-detected from DMI data.
+func Recommend(hw hardware.SystemInfo, imageFormat, imageFirmware string) (Recommendation, error) {
 	b := &recommendBuilder{
-		hw:          hw,
-		imageFormat: imageFormat,
+		hw:             hw,
+		imageFormat:    imageFormat,
+		imageFirmware:  imageFirmware,
 	}
 	return b.run()
 }
 
 // recommendBuilder holds state while building the recommendation.
 type recommendBuilder struct {
-	hw          hardware.SystemInfo
-	imageFormat string
-	reasons     []string
-	warnings    []string
+	hw             hardware.SystemInfo
+	imageFormat    string
+	// imageFirmware, when non-empty, overrides DMI-based UEFI detection.
+	// "bios" forces biosboot+GPT; "uefi" forces ESP. Empty = auto from DMI.
+	imageFirmware  string
+	reasons        []string
+	warnings       []string
 }
 
 func (b *recommendBuilder) reason(msg string) {
@@ -94,14 +101,25 @@ func (b *recommendBuilder) run() (Recommendation, error) {
 		return Recommendation{}, fmt.Errorf("layout: no disks discovered — cannot generate recommendation")
 	}
 
-	// Detect boot mode (UEFI or BIOS) from DMI data.
-	// We look for "UEFI" or "EFI" in the BIOS vendor/version strings since
-	// DMIInfo does not yet carry a BootMode field directly.
-	isUEFI := b.detectUEFI()
-	if isUEFI {
-		b.reason("UEFI detected (DMI BIOS vendor/version contains 'EFI' or 'UEFI') — using ESP instead of biosboot partition")
-	} else {
-		b.reason("BIOS/legacy boot detected — using biosboot partition for GRUB2 on GPT")
+	// Detect boot mode (UEFI or BIOS).
+	// When the caller supplies imageFirmware, honour it unconditionally so the
+	// layout matches the image the node will receive. Fall back to DMI detection
+	// when no firmware preference is given.
+	var isUEFI bool
+	switch strings.ToLower(b.imageFirmware) {
+	case "bios":
+		isUEFI = false
+		b.reason("image firmware=bios — using biosboot partition for GRUB2 on GPT (DMI detection overridden)")
+	case "uefi":
+		isUEFI = true
+		b.reason("image firmware=uefi — using ESP partition (DMI detection overridden)")
+	default:
+		isUEFI = b.detectUEFI()
+		if isUEFI {
+			b.reason("UEFI detected (DMI BIOS vendor/version contains 'EFI' or 'UEFI') — using ESP instead of biosboot partition")
+		} else {
+			b.reason("BIOS/legacy boot detected — using biosboot partition for GRUB2 on GPT")
+		}
 	}
 
 	// Determine RAM for swap-skip heuristic.
