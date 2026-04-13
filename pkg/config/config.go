@@ -5,17 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // ServerConfig holds all runtime configuration for clonr-serverd.
 // Values can be loaded from a JSON file or from environment variables.
 type ServerConfig struct {
-	ListenAddr string    `json:"listen_addr"` // default ":8080"
-	ImageDir   string    `json:"image_dir"`   // default "/var/lib/clonr/images"
-	DBPath     string    `json:"db_path"`     // default "/var/lib/clonr/clonr.db"
-	AuthToken  string    `json:"auth_token"`  // from CLONR_AUTH_TOKEN; empty = auth disabled
-	LogLevel   string    `json:"log_level"`   // debug, info, warn, error — default "info"
-	PXE        PXEConfig `json:"pxe"`
+	ListenAddr   string        `json:"listen_addr"`   // default ":8080"
+	ImageDir     string        `json:"image_dir"`     // default "/var/lib/clonr/images"
+	DBPath       string        `json:"db_path"`       // default "/var/lib/clonr/clonr.db"
+	AuthToken    string        `json:"auth_token"`    // from CLONR_AUTH_TOKEN; empty = auth disabled
+	LogLevel     string        `json:"log_level"`     // debug, info, warn, error — default "info"
+	LogRetention time.Duration `json:"log_retention"` // from CLONR_LOG_RETENTION; default 14d
+	PXE          PXEConfig     `json:"pxe"`
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -53,13 +55,29 @@ type Config struct {
 // sensible production defaults. Environment variables take precedence over defaults.
 func LoadServerConfig() ServerConfig {
 	return ServerConfig{
-		ListenAddr: envOrDefault("CLONR_LISTEN_ADDR", ":8080"),
-		ImageDir:   envOrDefault("CLONR_IMAGE_DIR", "/var/lib/clonr/images"),
-		DBPath:     envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/clonr.db"),
-		AuthToken:  os.Getenv("CLONR_AUTH_TOKEN"),
-		LogLevel:   envOrDefault("CLONR_LOG_LEVEL", "info"),
-		PXE:        LoadPXEConfig(),
+		ListenAddr:   envOrDefault("CLONR_LISTEN_ADDR", ":8080"),
+		ImageDir:     envOrDefault("CLONR_IMAGE_DIR", "/var/lib/clonr/images"),
+		DBPath:       envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/clonr.db"),
+		AuthToken:    os.Getenv("CLONR_AUTH_TOKEN"),
+		LogLevel:     envOrDefault("CLONR_LOG_LEVEL", "info"),
+		LogRetention: parseLogRetention(),
+		PXE:          LoadPXEConfig(),
 	}
+}
+
+// parseLogRetention parses CLONR_LOG_RETENTION as a Go duration string.
+// Falls back to 0 (meaning "use the server default") on parse error or
+// when the env var is not set. The server's runLogPurger treats 0 as 14d.
+func parseLogRetention() time.Duration {
+	v := os.Getenv("CLONR_LOG_RETENTION")
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // LoadPXEConfig populates PXEConfig from environment variables.

@@ -102,6 +102,40 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// SQLite log-batch transactions and silently drop deploy logs.
 	s.logsHandler.ServerCtx = ctx
 	go s.reimageOrchestrator.Scheduler(ctx)
+	go s.runLogPurger(ctx)
+}
+
+// runLogPurger ticks every hour and deletes log entries older than the
+// configured retention window. Retention is read from CLONR_LOG_RETENTION
+// (Go duration string, e.g. "336h" for 14 days); defaults to 336h (14d).
+// Uses the server-lifetime context so it shuts down cleanly on SIGTERM.
+func (s *Server) runLogPurger(ctx context.Context) {
+	retention := 14 * 24 * time.Hour // default 14 days
+	if v := s.cfg.LogRetention; v != 0 {
+		retention = v
+	}
+	log.Info().Str("retention", retention.String()).Msg("log purger: started")
+
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("log purger: stopping")
+			return
+		case <-ticker.C:
+			olderThan := time.Now().Add(-retention)
+			n, err := s.db.PurgeLogs(ctx, olderThan)
+			if err != nil {
+				log.Error().Err(err).Str("older_than", olderThan.Format(time.RFC3339)).
+					Msg("log purger: PurgeLogs failed")
+			} else {
+				log.Info().Int64("rows_purged", n).Str("older_than", olderThan.Format(time.RFC3339)).
+					Str("retention", retention.String()).Msg("log purger: purge complete")
+			}
+		}
+	}
 }
 
 // buildRouter constructs the chi router and registers all routes.
