@@ -26,11 +26,11 @@ func newTestServer(t *testing.T) (*server.Server, *httptest.Server) {
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.ServerConfig{
-		ListenAddr: ":0",
-		ImageDir:   filepath.Join(dir, "images"),
-		DBPath:     filepath.Join(dir, "test.db"),
-		AuthToken:  "test-token",
-		LogLevel:   "error",
+		ListenAddr:  ":0",
+		ImageDir:    filepath.Join(dir, "images"),
+		DBPath:      filepath.Join(dir, "test.db"),
+		AuthDevMode: true, // existing tests use a mock token; dev mode bypasses DB lookup
+		LogLevel:    "error",
 	}
 
 	srv := server.New(cfg, database)
@@ -96,7 +96,23 @@ func TestHealth(t *testing.T) {
 }
 
 func TestAuth_RequiresToken(t *testing.T) {
-	_, ts := newTestServer(t)
+	// Create a server without dev mode to verify auth enforcement.
+	dir := t.TempDir()
+	database, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	cfg := config.ServerConfig{
+		ListenAddr: ":0",
+		ImageDir:   filepath.Join(dir, "images"),
+		DBPath:     filepath.Join(dir, "test.db"),
+		LogLevel:   "error",
+		// AuthDevMode intentionally false — auth should be enforced.
+	}
+	srv := server.New(cfg, database)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/images", nil)
 	resp, err := http.DefaultClient.Do(req)
