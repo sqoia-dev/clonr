@@ -1159,6 +1159,10 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		// The node-assignment UI uses this to warn when an admin assigns a gpu-compute
 		// image to a node tagged as plain "compute" (or vice versa).
 		BuiltForRoles: req.RoleIDs,
+		// BuildMethod marks this image as built from an ISO installer. The web UI
+		// checks this field to know when to show the live build progress panel
+		// (with SSE serial console streaming) instead of the static image detail view.
+		BuildMethod: "iso",
 		// Disk layout is determined from what the installer actually creates.
 		// We set a bios-boot default here; it gets overwritten after extraction.
 		DiskLayout: api.DiskLayout{
