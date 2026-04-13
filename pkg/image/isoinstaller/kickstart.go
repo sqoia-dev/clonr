@@ -29,11 +29,20 @@ type AutoInstallConfig struct {
 }
 
 // templateData holds the variables injected into each install config template.
+// targetDisk is the block device name exposed to the install VM. The install
+// VM attaches the target disk via virtio-blk (-drive if=virtio,...), which the
+// kernel enumerates as vda — NOT sda. All installer templates must use this
+// name; hardcoding sda causes Anaconda/preseed/AutoYaST to abort with
+// "disk does not exist".
+const targetDisk = "vda"
+
 type templateData struct {
 	// RootPasswordHash is a SHA-512 crypt(3) hash of a fixed per-build password.
 	RootPasswordHash string
 	// DiskSizeGB is the target disk size, used in preseed size hints.
 	DiskSizeGB int
+	// TargetDisk is the block device name for the install target (e.g. "vda").
+	TargetDisk string
 }
 
 const defaultRootPasswordHash = "$6$rounds=4096$clonr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1"
@@ -45,6 +54,7 @@ func GenerateAutoInstallConfig(distro Distro, opts BuildOptions, customKickstart
 	data := templateData{
 		RootPasswordHash: defaultRootPasswordHash,
 		DiskSizeGB:       opts.DiskSizeGB,
+		TargetDisk:       targetDisk,
 	}
 
 	switch distro.Format() {
@@ -102,10 +112,10 @@ firstboot --disabled
 
 zerombr
 clearpart --all --initlabel --disklabel=gpt
-bootloader --location=mbr --driveorder=sda --append="console=ttyS0,115200"
-part biosboot --fstype=biosboot   --size=1     --ondisk=sda --label=biosboot
-part /boot    --fstype=xfs        --size=1024  --ondisk=sda --label=boot
-part /        --fstype=xfs        --size=1     --grow        --ondisk=sda --label=root
+bootloader --location=mbr --driveorder={{.TargetDisk}} --append="console=ttyS0,115200"
+part biosboot --fstype=biosboot   --size=1     --ondisk={{.TargetDisk}} --label=biosboot
+part /boot    --fstype=xfs        --size=1024  --ondisk={{.TargetDisk}} --label=boot
+part /        --fstype=xfs        --size=1     --grow        --ondisk={{.TargetDisk}} --label=root
 
 %packages --ignoremissing
 @^minimal-environment
@@ -282,7 +292,7 @@ d-i passwd/root-password-crypted password {{.RootPasswordHash}}
 d-i passwd/make-user boolean false
 d-i clock-setup/utc boolean true
 d-i time/zone string UTC
-d-i partman-auto/disk string /dev/sda
+d-i partman-auto/disk string /dev/{{.TargetDisk}}
 d-i partman-auto/method string regular
 d-i partman-auto/choose_recipe select atomic
 d-i partman-partitioning/confirm_write_new_label boolean true
@@ -297,7 +307,7 @@ d-i pkgsel/include string openssh-server
 d-i pkgsel/upgrade select none
 d-i grub-installer/only_debian boolean true
 d-i grub-installer/with_other_os boolean true
-d-i grub-installer/bootdev string /dev/sda
+d-i grub-installer/bootdev string /dev/{{.TargetDisk}}
 d-i finish-install/reboot_in_progress note
 d-i preseed/late_command string \
   in-target systemctl enable ssh; \
@@ -341,7 +351,7 @@ var autoYaSTTemplate = template.Must(template.New("autoyast").Parse(`<?xml versi
   </networking>
   <partitioning config:type="list">
     <drive>
-      <device>/dev/sda</device>
+      <device>/dev/{{.TargetDisk}}</device>
       <disklabel>gpt</disklabel>
       <initialize config:type="boolean">true</initialize>
       <use>all</use>
@@ -415,7 +425,7 @@ PROXYOPTS="none"
 APKREPOSOPTS="-1"
 SSHDOPTS="-c openssh"
 NTPOPTS="-c chrony"
-DISKOPTS="-m sys /dev/sda"
+DISKOPTS="-m sys /dev/{{.TargetDisk}}"
 `))
 
 func generateAlpineAnswers(data templateData) (*AutoInstallConfig, error) {
