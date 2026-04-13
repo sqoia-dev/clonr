@@ -5651,9 +5651,11 @@ const Pages = {
             }
         };
 
-        const _startElapsedTimer = (initialMs) => {
+        const _startElapsedTimer = (startedAt) => {
             clearInterval(_elapsedTimer);
-            const base = Date.now() - (initialMs || 0);
+            // Derive the base time from the server-provided wall-clock timestamp so
+            // the elapsed display is correct across page reloads and reconnects.
+            const base = startedAt ? new Date(startedAt).getTime() : Date.now();
             _elapsedTimer = setInterval(() => {
                 const secs = Math.floor((Date.now() - base) / 1000);
                 if (elapsedEl) elapsedEl.textContent = fmtETA(secs);
@@ -5664,7 +5666,7 @@ const Pages = {
         es.addEventListener('snapshot', (e) => {
             try {
                 const state = JSON.parse(e.data);
-                _startElapsedTimer(state.elapsed_ms);
+                _startElapsedTimer(state.started_at);
                 _applyPhase(state.phase, state.elapsed_ms);
                 _applyProgress(state.bytes_done, state.bytes_total);
                 if (serialEl && Array.isArray(state.serial_tail)) {
