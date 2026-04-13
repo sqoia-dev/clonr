@@ -37,6 +37,7 @@ type Server struct {
 	reimageOrchestrator *reimage.Orchestrator
 	router              chi.Router
 	http                *http.Server
+	logsHandler         *handlers.LogsHandler
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -96,6 +97,10 @@ func New(cfg config.ServerConfig, database *db.DB) *Server {
 // StartBackgroundWorkers starts long-running background goroutines.
 // Call this after New() and before ListenAndServe().
 func (s *Server) StartBackgroundWorkers(ctx context.Context) {
+	// Wire the server-lifetime context into the logs ingest handler so that
+	// client disconnects (r.Context() cancellations) do not abort in-flight
+	// SQLite log-batch transactions and silently drop deploy logs.
+	s.logsHandler.ServerCtx = ctx
 	go s.reimageOrchestrator.Scheduler(ctx)
 }
 
@@ -153,6 +158,7 @@ func (s *Server) buildRouter() chi.Router {
 		ImageDir: s.cfg.ImageDir,
 	}
 	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
+	s.logsHandler = logs
 	progress := &handlers.ProgressHandler{Store: s.progress}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
 	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}

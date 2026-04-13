@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,8 +22,12 @@ type LogBroker interface {
 
 // LogsHandler handles all /api/v1/logs routes.
 type LogsHandler struct {
-	DB     *db.DB
-	Broker LogBroker
+	DB         *db.DB
+	Broker     LogBroker
+	// ServerCtx is a server-lifetime context used for DB writes so that a
+	// client disconnect (r.Context() cancellation) does not abort an in-flight
+	// SQLite transaction and silently drop a log batch.
+	ServerCtx  context.Context
 }
 
 // IngestLogs handles POST /api/v1/logs
@@ -72,7 +77,18 @@ func (h *LogsHandler) IngestLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.DB.InsertLogBatch(r.Context(), entries); err != nil {
+	// Use the server-lifetime context (not r.Context()) for the DB write so
+	// that a client disconnect mid-request does not cancel the SQLite
+	// transaction and silently drop the batch. Bound it to 30s so a real
+	// deadlock still surfaces.
+	writeCtx := h.ServerCtx
+	if writeCtx == nil {
+		writeCtx = r.Context()
+	}
+	writeCtx, cancel := context.WithTimeout(writeCtx, 30*time.Second)
+	defer cancel()
+
+	if err := h.DB.InsertLogBatch(writeCtx, entries); err != nil {
 		log.Error().Err(err).Msg("ingest logs")
 		writeError(w, err)
 		return
