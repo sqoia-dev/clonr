@@ -123,12 +123,16 @@ const App = {
         });
         Router.register('/nodes',   (h)   => {
             const parts = h.split('/');
-            if (parts.length === 3 && parts[2]) Pages.nodeDetail(parts[2]);
+            if (parts.length === 3 && parts[2] === 'groups') Pages.nodeGroups();
+            else if (parts.length === 4 && parts[2] === 'groups' && parts[3]) Pages.nodeGroupDetail(parts[3]);
+            else if (parts.length === 3 && parts[2]) Pages.nodeDetail(parts[2]);
             else Pages.nodes();
         });
         Router.register('/nodes/*', (h)   => {
             const parts = h.split('/');
-            Pages.nodeDetail(parts[2]);
+            if (parts[2] === 'groups' && parts[3]) Pages.nodeGroupDetail(parts[3]);
+            else if (parts[2] === 'groups') Pages.nodeGroups();
+            else Pages.nodeDetail(parts[2]);
         });
         Router.register('/logs',    ()    => Pages.logs());
     },
@@ -1864,12 +1868,26 @@ const Pages = {
                         <div class="page-title">Nodes</div>
                         <div class="page-subtitle" id="nodes-subtitle">${nodes.length} node${nodes.length !== 1 ? 's' : ''} total</div>
                     </div>
-                    <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                        </svg>
-                        Add Node
-                    </button>
+                    <div class="flex gap-8">
+                        <button class="btn btn-secondary" onclick="Router.navigate('/nodes/groups')">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                                <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+                            </svg>
+                            Manage Groups
+                        </button>
+                        <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            Add Node
+                        </button>
+                    </div>
+                </div>
+
+                <div class="tab-bar" style="margin-bottom:20px">
+                    <div class="tab active" onclick="Router.navigate('/nodes')">All Nodes</div>
+                    <div class="tab" onclick="Router.navigate('/nodes/groups')">Groups</div>
                 </div>
 
                 ${cardWrap(`All Nodes`,
@@ -3679,70 +3697,297 @@ const Pages = {
         }
     },
 
-    // _onMountsTabOpen fetches the effective-mounts response and renders it.
+    // _onMountsTabOpen fetches both effective-mounts and node data, then renders the two-section editor.
     async _onMountsTabOpen(nodeId) {
         const container = document.getElementById('mounts-content');
         if (!container) return;
-        // Don't reload if already populated.
-        if (container.dataset.loaded === nodeId) return;
+        // Don't reload if already populated and not dirty.
+        const state = Pages._nodeEditorState['mounts'];
+        if (container.dataset.loaded === nodeId && !(state && state.dirty)) return;
         container.innerHTML = `<div class="loading"><div class="spinner"></div>Loading mounts…</div>`;
         try {
-            const resp = await API.request('GET', `/nodes/${nodeId}/effective-mounts`);
-            container.innerHTML = Pages._renderEffectiveMountsTab(resp);
+            const [effectiveResp, node] = await Promise.all([
+                API.request('GET', `/nodes/${nodeId}/effective-mounts`),
+                API.nodes.get(nodeId),
+            ]);
+            // Sync editor state with fresh node data (in case another tab saved something).
+            if (state && !state.dirty) {
+                state.original = { extra_mounts: JSON.parse(JSON.stringify(node.extra_mounts || [])) };
+            }
+            container.innerHTML = Pages._renderEffectiveMountsTab(nodeId, effectiveResp, node);
             container.dataset.loaded = nodeId;
+            // Wire up live validation on the editable tbody.
+            const tbody = document.getElementById('mounts-node-tbody');
+            if (tbody) {
+                tbody.addEventListener('input', () => Pages._tabMarkDirty('mounts'));
+                tbody.addEventListener('change', (e) => {
+                    if (e.target && e.target.name === 'mount_fs_type') {
+                        Pages._onFSTypeChange(e.target);
+                    }
+                    Pages._tabMarkDirty('mounts');
+                });
+            }
         } catch (e) {
-            container.innerHTML = alertBox(`Failed to load effective mounts: ${e.message}`);
+            container.innerHTML = alertBox(`Failed to load mounts: ${e.message}`);
         }
     },
 
-    // _renderEffectiveMountsTab renders the merged fstab entry list for the Mounts tab.
-    _renderEffectiveMountsTab(resp) {
-        const mounts = (resp && resp.mounts) || [];
+    // _renderEffectiveMountsTab renders a two-section layout:
+    //   Section 1 — inherited group mounts (read-only)
+    //   Section 2 — node-level mounts (inline editable)
+    _renderEffectiveMountsTab(nodeId, resp, node) {
+        const allMounts  = (resp && resp.mounts) || [];
+        const groupId    = (resp && resp.group_id) || '';
+        const groupMounts = allMounts.filter(m => m.source === 'group');
+        const nodeMounts  = (node && node.extra_mounts) || [];
 
-        const sourceLabel = (m) => {
-            if (m.source === 'group') return `<span class="badge badge-neutral badge-sm" title="Inherited from group ${escHtml(m.group_id||'')}">group</span>`;
-            return `<span class="badge badge-info badge-sm">node</span>`;
-        };
+        // ── Section 1: Inherited from group ──────────────────────────────────
+        const groupSection = (() => {
+            if (groupMounts.length === 0) {
+                const noGroupMsg = groupId
+                    ? `<div class="text-dim" style="padding:12px;font-size:13px">No mounts defined on the assigned group.</div>`
+                    : `<div class="text-dim" style="padding:12px;font-size:13px">Node is not assigned to a group.</div>`;
+                return cardWrap('Inherited from Group',
+                    `<div class="card-body">${noGroupMsg}</div>`);
+            }
+            const rows = groupMounts.map(m => `<tr>
+                <td class="mono">${escHtml(m.source_device||m.source||'—')}</td>
+                <td class="mono">${escHtml(m.mount_point||'—')}</td>
+                <td><span class="badge badge-neutral badge-sm">${escHtml(m.fs_type||'—')}</span></td>
+                <td class="mono dim" style="font-size:11px">${escHtml(m.options||'defaults')}</td>
+                <td style="text-align:center">${m.auto_mkdir ? '✓' : '—'}</td>
+                <td class="dim" style="font-size:11px">${escHtml(m.comment||'—')}</td>
+            </tr>`).join('');
+            return cardWrap('Inherited from Group',
+                `<div class="card-body">
+                    <p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
+                        These mounts come from the node's group and cannot be edited here.
+                        Node-level entries with the same mount point will override the group entry.
+                    </p>
+                    <div class="table-wrap"><table>
+                        <thead><tr>
+                            <th>Source</th><th>Mount Point</th><th>FS Type</th>
+                            <th>Options</th><th>Auto-mkdir</th><th>Comment</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table></div>
+                </div>`);
+        })();
 
-        const mountsTable = mounts.length === 0
-            ? emptyState('No additional mounts configured',
-                'Use the Edit button to add shared storage mounts (NFS, Lustre, BeeGFS, CIFS…). They are appended to /etc/fstab during deployment.')
-            : `<div class="table-wrap"><table>
-                <thead><tr>
-                    <th>Source</th>
-                    <th>Mount Point</th>
-                    <th>FS Type</th>
-                    <th>Options</th>
-                    <th>Auto-mkdir</th>
-                    <th>Dump / Pass</th>
-                    <th>Origin</th>
-                    <th>Comment</th>
-                </tr></thead>
-                <tbody>
-                ${mounts.map(m => `<tr>
-                    <td class="mono">${escHtml(m.source||'—')}</td>
-                    <td class="mono">${escHtml(m.mount_point||'—')}</td>
-                    <td><span class="badge badge-neutral badge-sm">${escHtml(m.fs_type||'—')}</span></td>
-                    <td class="mono dim" style="font-size:11px">${escHtml(m.options||'defaults')}</td>
-                    <td style="text-align:center">${m.auto_mkdir ? '✓' : '—'}</td>
-                    <td class="mono dim" style="text-align:center">${m.dump||0} / ${m.pass||0}</td>
-                    <td>${sourceLabel(m)}</td>
-                    <td class="dim" style="font-size:11px">${escHtml(m.comment||'—')}</td>
-                </tr>`).join('')}
-                </tbody>
-            </table></div>`;
+        // ── Section 2: Node-level mounts (editable) ──────────────────────────
+        const nodeRows = nodeMounts.map((m, i) => Pages._mountsNodeRowHTML(i, m)).join('');
+        const emptyRow = nodeMounts.length === 0
+            ? `<div id="mounts-node-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No node-level mounts configured</div>`
+            : '';
 
-        return cardWrap('Effective Mounts',
+        const nodeSection = cardWrap('Node-Level Mounts',
             `<div class="card-body">
-                <p style="margin:0 0 12px;color:var(--text-secondary);font-size:13px">
-                    Merged result of group-level and node-level extra mounts.
-                    These entries are appended to <code>/etc/fstab</code> after the base partition UUIDs are written.
-                    <strong>Node entries override group entries</strong> when the mount point matches.
+                <p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
+                    Added to <code>/etc/fstab</code> during deployment.
+                    These entries override group entries when the mount point matches.
                 </p>
-                ${mountsTable}
-            </div>`,
-            ``
-        );
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                    <select id="mounts-preset-select" class="form-select" style="font-size:12px;padding:4px 8px;width:auto">
+                        <option value="">— Apply preset —</option>
+                        <option value="nfs-home">NFS home</option>
+                        <option value="lustre">Lustre scratch</option>
+                        <option value="beegfs">BeeGFS data</option>
+                        <option value="cifs">CIFS / Samba</option>
+                        <option value="bind">Bind mount</option>
+                        <option value="tmpfs">tmpfs</option>
+                    </select>
+                    <button type="button" class="btn btn-secondary btn-sm"
+                        onclick="Pages._mountsApplyPreset()">Apply</button>
+                    <button type="button" class="btn btn-secondary btn-sm"
+                        onclick="Pages._mountsAddRow()">+ Add Mount</button>
+                </div>
+                <div id="mounts-node-table-wrap">
+                    <div class="table-wrap" style="overflow-x:auto${nodeMounts.length === 0 ? ';display:none' : ''}">
+                        <table id="mounts-node-table" style="width:100%;font-size:12px;border-collapse:collapse">
+                            <thead><tr style="border-bottom:1px solid var(--border)">
+                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Source</th>
+                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Mount Point</th>
+                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">FS Type</th>
+                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Options</th>
+                                <th style="text-align:center;padding:4px 6px;font-weight:500;color:var(--text-secondary)" title="Auto-create mount point directory">mkd</th>
+                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Comment</th>
+                                <th style="padding:4px"></th>
+                            </tr></thead>
+                            <tbody id="mounts-node-tbody">${nodeRows}</tbody>
+                        </table>
+                    </div>
+                    ${emptyRow}
+                </div>
+            </div>`);
+
+        return `${groupSection}${nodeSection}`;
+    },
+
+    // _mountsNodeRowHTML builds one editable row for a node-level mount entry.
+    _mountsNodeRowHTML(idx, m) {
+        m = m || {};
+        const fsTypes = ['nfs','nfs4','cifs','beegfs','lustre','gpfs','xfs','ext4','bind','9p','tmpfs','vfat','ext3','smbfs'];
+        const fsSelect = fsTypes.map(t =>
+            `<option value="${t}"${m.fs_type === t ? ' selected' : ''}>${t}</option>`
+        ).join('');
+        return `<tr data-mount-idx="${idx}" style="border-bottom:1px solid var(--border)">
+            <td style="padding:4px 3px">
+                <input type="text" name="mount_source" value="${escHtml(m.source||'')}"
+                    placeholder="nfs-server:/export/home" style="width:100%;min-width:130px;font-size:12px" required>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="mount_point" value="${escHtml(m.mount_point||'')}"
+                    placeholder="/mnt/share" style="width:100%;min-width:110px;font-size:12px" required pattern="/.+">
+            </td>
+            <td style="padding:4px 3px">
+                <select name="mount_fs_type" style="font-size:12px;padding:2px 4px">${fsSelect}</select>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="mount_options" value="${escHtml(m.options||'')}"
+                    placeholder="defaults,_netdev" style="width:100%;min-width:130px;font-size:12px">
+            </td>
+            <td style="padding:4px 3px;text-align:center">
+                <input type="checkbox" name="mount_auto_mkdir" ${m.auto_mkdir !== false ? 'checked' : ''}>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="mount_comment" value="${escHtml(m.comment||'')}"
+                    placeholder="optional note" style="width:100%;min-width:80px;font-size:12px">
+            </td>
+            <td style="padding:4px 3px">
+                <button type="button" class="btn btn-danger btn-sm"
+                    onclick="Pages._mountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
+            </td>
+        </tr>`;
+    },
+
+    // _mountsAddRow appends a blank (or preset) row to the node mounts table.
+    _mountsAddRow(preset) {
+        const tbody = document.getElementById('mounts-node-tbody');
+        if (!tbody) return;
+        const idx = tbody.querySelectorAll('tr').length;
+        tbody.insertAdjacentHTML('beforeend', Pages._mountsNodeRowHTML(idx, preset || {}));
+        Pages._mountsShowTable();
+        Pages._tabMarkDirty('mounts');
+    },
+
+    // _mountsRemoveRow removes the row containing the given button.
+    _mountsRemoveRow(btn) {
+        const row = btn.closest('tr');
+        if (row) row.remove();
+        Pages._mountsUpdateEmpty();
+        Pages._tabMarkDirty('mounts');
+    },
+
+    // _mountsApplyPreset reads the preset dropdown and inserts the preset row.
+    _mountsApplyPreset() {
+        const sel = document.getElementById('mounts-preset-select');
+        if (!sel || !sel.value) return;
+        const presets = {
+            'nfs-home': { source: 'nfs-server:/export/home', mount_point: '/home/shared',  fs_type: 'nfs4',   options: 'defaults,_netdev,vers=4',              auto_mkdir: true,  comment: 'NFS home directory' },
+            'lustre':   { source: 'mgs@tcp:/scratch',        mount_point: '/scratch',       fs_type: 'lustre', options: 'defaults,_netdev,flock',               auto_mkdir: true,  comment: 'Lustre scratch' },
+            'beegfs':   { source: 'beegfs',                  mount_point: '/mnt/beegfs',    fs_type: 'beegfs', options: 'defaults,_netdev',                     auto_mkdir: true,  comment: 'BeeGFS data' },
+            'cifs':     { source: '//winserver/share',        mount_point: '/mnt/share',     fs_type: 'cifs',   options: 'defaults,_netdev,vers=3.0,sec=ntlmssp',auto_mkdir: true,  comment: 'CIFS (Windows) share' },
+            'bind':     { source: '/data/src',               mount_point: '/data/dst',      fs_type: 'bind',   options: 'defaults,bind',                        auto_mkdir: true,  comment: 'Bind mount' },
+            'tmpfs':    { source: 'tmpfs',                   mount_point: '/tmp',           fs_type: 'tmpfs',  options: 'defaults,size=4G,mode=1777',           auto_mkdir: false, comment: 'tmpfs /tmp' },
+        };
+        const p = presets[sel.value];
+        if (p) Pages._mountsAddRow(p);
+        sel.value = '';
+    },
+
+    // _mountsShowTable reveals the table wrapper (used after first row is added).
+    _mountsShowTable() {
+        const wrap = document.getElementById('mounts-node-table-wrap');
+        if (!wrap) return;
+        const tableWrap = wrap.querySelector('.table-wrap');
+        if (tableWrap) tableWrap.style.display = '';
+        const empty = document.getElementById('mounts-node-empty');
+        if (empty) empty.remove();
+    },
+
+    // _mountsUpdateEmpty shows the empty-state message when the tbody is empty,
+    // and hides the table wrapper.
+    _mountsUpdateEmpty() {
+        const tbody = document.getElementById('mounts-node-tbody');
+        const wrap  = document.getElementById('mounts-node-table-wrap');
+        if (!tbody || !wrap) return;
+        const hasRows = tbody.querySelectorAll('tr').length > 0;
+        const tableWrap = wrap.querySelector('.table-wrap');
+        if (tableWrap) tableWrap.style.display = hasRows ? '' : 'none';
+        const existing = document.getElementById('mounts-node-empty');
+        if (!hasRows && !existing) {
+            wrap.insertAdjacentHTML('beforeend',
+                `<div id="mounts-node-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No node-level mounts configured</div>`);
+        } else if (hasRows && existing) {
+            existing.remove();
+        }
+    },
+
+    // _mountsCollect reads all editable rows and returns an array of FstabEntry objects.
+    // Returns null (with inline validation errors shown) if any row is invalid.
+    _mountsCollect() {
+        const tbody = document.getElementById('mounts-node-tbody');
+        if (!tbody) return [];
+        const fsTypeWhitelist = new Set(['nfs','nfs4','cifs','beegfs','lustre','gpfs','xfs','ext4','bind','9p','tmpfs','vfat','ext3','smbfs']);
+        const mounts = [];
+        let valid = true;
+        tbody.querySelectorAll('tr').forEach(row => {
+            const srcEl  = row.querySelector('[name="mount_source"]');
+            const mpEl   = row.querySelector('[name="mount_point"]');
+            const fsEl   = row.querySelector('[name="mount_fs_type"]');
+            const optEl  = row.querySelector('[name="mount_options"]');
+            const mkdEl  = row.querySelector('[name="mount_auto_mkdir"]');
+            const cmtEl  = row.querySelector('[name="mount_comment"]');
+            const source     = (srcEl?.value || '').trim();
+            const mountPoint = (mpEl?.value || '').trim();
+            const fsType     = fsEl?.value || 'nfs';
+            const options    = (optEl?.value || '').trim();
+            const autoMkdir  = mkdEl ? mkdEl.checked : true;
+            const comment    = (cmtEl?.value || '').trim();
+
+            // Validate required fields.
+            if (!source) { if (srcEl) srcEl.style.border = '1px solid var(--error)'; valid = false; }
+            else if (srcEl) srcEl.style.border = '';
+            if (!mountPoint || mountPoint[0] !== '/') { if (mpEl) mpEl.style.border = '1px solid var(--error)'; valid = false; }
+            else if (mpEl) mpEl.style.border = '';
+            if (!fsTypeWhitelist.has(fsType)) { valid = false; return; }
+
+            mounts.push({ source, mount_point: mountPoint, fs_type: fsType, options, auto_mkdir: autoMkdir, comment, dump: 0, pass: 0 });
+        });
+        return valid ? mounts : null;
+    },
+
+    // _tabSaveMounts saves the node-level mounts via PUT /nodes/:id.
+    async _tabSaveMounts(nodeId) {
+        Pages._tabMarkSaving('mounts');
+        const saveBtn = document.getElementById('tab-save-mounts');
+
+        const mounts = Pages._mountsCollect();
+        if (mounts === null) {
+            Pages._tabMarkError('mounts', 'Fix validation errors before saving');
+            if (saveBtn) saveBtn.disabled = false;
+            return;
+        }
+
+        try {
+            const existing = await API.nodes.get(nodeId);
+            const body = Object.assign({}, existing, { extra_mounts: mounts });
+            await API.nodes.update(nodeId, body);
+
+            // Update editor state so revert has the new baseline.
+            const state = Pages._nodeEditorState['mounts'];
+            if (state) state.original = { extra_mounts: JSON.parse(JSON.stringify(mounts)) };
+
+            Pages._tabMarkClean('mounts');
+            App.toast('Mounts saved', 'success');
+
+            // Force tab to re-render on next open so effective view is fresh.
+            const container = document.getElementById('mounts-content');
+            if (container) delete container.dataset.loaded;
+        } catch (e) {
+            Pages._tabMarkError('mounts', `Save failed: ${e.message}`);
+            if (saveBtn) saveBtn.disabled = false;
+        }
     },
 
     _renderDiskLayoutTab(nodeId, effective, rec) {
