@@ -585,22 +585,32 @@ PXE-booted nodes running from initramfs.`,
 			deployLog.Info().Str("component", "chroot").Msg("node configuration applied")
 			progressReporter.EndPhase("")
 
-			// Step 7: EFI boot repair (optional).
+			// Step 7: EFI boot repair (UEFI images only, optional).
+			// For BIOS images, grub2-install into the biosboot partition (run by
+			// Finalize when a biosboot partition is detected) is the complete boot
+			// setup — efibootmgr is not applicable and must not be called.
+			isBIOSImage := img.Firmware == "bios"
 			if flagFixEFI {
-				fmt.Fprintln(os.Stderr, "[+] Repairing EFI boot entries...")
-				deployLog.Info().Str("component", "efiboot").Msg("repairing EFI boot entries")
-				disk := flagDisk
-				if disk == "" {
-					disk = "/dev/sda"
-				}
-				label := img.Name
-				if err := deploy.FixEFIBoot(ctx, disk, 1, label, `\EFI\rocky\grubx64.efi`); err != nil {
-					// Non-fatal — log the error but don't fail the deployment.
-					fmt.Fprintf(os.Stderr, "    Warning: EFI boot repair failed: %v\n", err)
-					deployLog.Warn().Str("component", "efiboot").Err(err).Msg("EFI boot repair failed (non-fatal)")
+				if isBIOSImage {
+					fmt.Fprintln(os.Stderr, "[+] Skipping EFI boot repair — image firmware=bios (grub2-install handled by Finalize)")
+					deployLog.Info().Str("component", "efiboot").Str("firmware", "bios").
+						Msg("skipping FixEFIBoot — BIOS image; grub2-install into biosboot partition is sufficient")
 				} else {
-					fmt.Fprintln(os.Stderr, "    EFI boot entry set.")
-					deployLog.Info().Str("component", "efiboot").Msg("EFI boot entry set")
+					fmt.Fprintln(os.Stderr, "[+] Repairing EFI boot entries...")
+					deployLog.Info().Str("component", "efiboot").Msg("repairing EFI boot entries")
+					disk := flagDisk
+					if disk == "" {
+						disk = "/dev/sda"
+					}
+					label := img.Name
+					if err := deploy.FixEFIBoot(ctx, disk, 1, label, `\EFI\rocky\grubx64.efi`); err != nil {
+						// Non-fatal — log the error but don't fail the deployment.
+						fmt.Fprintf(os.Stderr, "    Warning: EFI boot repair failed: %v\n", err)
+						deployLog.Warn().Str("component", "efiboot").Err(err).Msg("EFI boot repair failed (non-fatal)")
+					} else {
+						fmt.Fprintln(os.Stderr, "    EFI boot entry set.")
+						deployLog.Info().Str("component", "efiboot").Msg("EFI boot entry set")
+					}
 				}
 			}
 
@@ -929,26 +939,28 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 	reporter.EndPhase("")
 
-	// ── EFI BootOrder: ensure PXE is first ────────────────────────────────
-	// After grub2-install runs inside the chroot during finalize, the firmware
-	// NVRAM BootOrder may promote the new OS entry to position 0. On the next
-	// reboot the node would boot straight to disk, bypassing clonr's PXE server
-	// entirely — the server would lose visibility and couldn't reconcile state.
-	//
-	// SetPXEBootFirst reorders BootOrder so the PXE entry is first and the OS
-	// entry is second. The iPXE boot handler then routes the node to disk via
-	// "#!ipxe\nexit" once it sees NodeStateDeployed — both paths remain intact.
-	//
-	// On BIOS systems or when efibootmgr is unavailable, this is a non-fatal
-	// warning: the iPXE exit / FlipToDisk paths still handle boot routing.
-	efiCtx, efiCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if efiErr := deploy.SetPXEBootFirst(efiCtx); efiErr != nil {
-		deployLog.Warn().Err(efiErr).
-			Msg("EFI BootOrder: SetPXEBootFirst failed (non-fatal — BIOS system or no PXE entry in NVRAM)")
+	// ── EFI BootOrder: ensure PXE is first (UEFI images only) ────────────────
+	// For BIOS images, there are no NVRAM EFI variables — efibootmgr is not
+	// applicable and calling it would produce a misleading warning. The PXE
+	// boot routing for BIOS nodes is controlled by DHCP/TFTP + iPXE exit alone.
+	if img.Firmware == "bios" {
+		deployLog.Info().Str("firmware", "bios").
+			Msg("EFI BootOrder: skipping SetPXEBootFirst — BIOS image has no EFI NVRAM")
 	} else {
-		deployLog.Info().Msg("EFI BootOrder: PXE entry promoted to first position in NVRAM BootOrder")
+		// After grub2-install runs inside the chroot during finalize, the firmware
+		// NVRAM BootOrder may promote the new OS entry to position 0. On the next
+		// reboot the node would boot straight to disk, bypassing clonr's PXE server.
+		// SetPXEBootFirst reorders BootOrder so the PXE entry is first and the OS
+		// entry is second.
+		efiCtx, efiCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if efiErr := deploy.SetPXEBootFirst(efiCtx); efiErr != nil {
+			deployLog.Warn().Err(efiErr).
+				Msg("EFI BootOrder: SetPXEBootFirst failed (non-fatal — BIOS system or no PXE entry in NVRAM)")
+		} else {
+			deployLog.Info().Msg("EFI BootOrder: PXE entry promoted to first position in NVRAM BootOrder")
+		}
+		efiCancel()
 	}
-	efiCancel()
 	// ──────────────────────────────────────────────────────────────────────
 
 	// ── Deploy complete callback ────────────────────────────────────────────
