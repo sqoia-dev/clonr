@@ -996,6 +996,29 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	}
 	// ───────────────────────────────────────────────────────────────────────
 
+	// ── Belt-and-suspenders: flip boot device to disk via power provider ──
+	// Even though the PXE handler returns "#!ipxe\nexit" when state=deployed
+	// (which should cause BIOS to fall through to local disk), some hypervisors
+	// and BIOS implementations don't honour iPXE exit cleanly. Explicitly set
+	// the next-boot device to disk so the node never re-enters a PXE loop.
+	// We pass cycle=false — the init script handles the reboot below.
+	// If the node has no power provider configured, or the call fails for any
+	// reason, we log a warning and continue: the iPXE fallthrough path still
+	// works on most hardware.
+	flipCtx, flipCancel := context.WithTimeout(completeBaseCtx, 15*time.Second)
+	if flipErr := c.FlipToDisk(flipCtx, nodeCfg.ID, false); flipErr != nil {
+		deployLog.Warn().Err(flipErr).
+			Str("node_id", nodeCfg.ID).
+			Msg("FlipToDisk call failed (no power provider, or provider error) — " +
+				"relying on iPXE exit fallthrough for boot routing")
+	} else {
+		deployLog.Info().
+			Str("node_id", nodeCfg.ID).
+			Msg("boot device flipped to disk via power provider")
+	}
+	flipCancel()
+	// ──────────────────────────────────────────────────────────────────────
+
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Str("duration",
 		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete — rebooting")
 
