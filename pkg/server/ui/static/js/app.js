@@ -4586,7 +4586,7 @@ const Pages = {
                     <td>
                         <div class="flex gap-6">
                             <button class="btn btn-secondary btn-sm"
-                                onclick="Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})">Edit</button>
+                                onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})'>Edit</button>
                             <button class="btn btn-danger btn-sm"
                                 onclick="Pages.deleteNodeGroup('${escHtml(g.id)}', '${escHtml(g.name)}')">Delete</button>
                         </div>
@@ -4711,7 +4711,7 @@ const Pages = {
                         ${group.description ? `<div class="page-subtitle">${escHtml(group.description)}</div>` : ''}
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-secondary" onclick="Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})">Edit Group</button>
+                        <button class="btn btn-secondary" onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})'>Edit Group</button>
                         <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeGroup('${escHtml(group.id)}', '${escHtml(group.name)}')">Delete</button>
                     </div>
                 </div>
