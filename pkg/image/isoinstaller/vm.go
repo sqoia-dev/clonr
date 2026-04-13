@@ -65,6 +65,19 @@ type BuildOptions struct {
 	// call to the %post section so the resulting image is fully patched at capture
 	// time. Adds roughly 5-10 minutes to the build.
 	InstallUpdates bool
+
+	// OnPhase, when set, is called each time the VM installer transitions to a
+	// new named phase (e.g. "launching_vm", "installing"). Used by the progress
+	// subsystem to update the build status panel in the UI.
+	OnPhase func(phase string)
+
+	// OnSerialLine, when set, is called for each line read from the QEMU serial
+	// console log in near-real-time. Used to stream the VM console to the UI.
+	OnSerialLine func(line string)
+
+	// OnStderrLine, when set, is called for each line read from QEMU's own
+	// stderr (process-level errors, not guest OS output).
+	OnStderrLine func(line string)
 }
 
 // BuildResult is returned by a successful Build call.
@@ -113,6 +126,13 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 
 	log := opts.Logger
 
+	// callPhase is a nil-safe phase callback helper.
+	callPhase := func(phase string) {
+		if opts.OnPhase != nil {
+			opts.OnPhase(phase)
+		}
+	}
+
 	// ── Generate automated-install config ─────────────────────────────────
 	log.Info().
 		Str("distro", string(opts.Distro)).
@@ -125,6 +145,7 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	}
 
 	// ── Write seed ISO ─────────────────────────────────────────────────────
+	callPhase("generating_config")
 	seedISOPath := filepath.Join(opts.WorkDir, "seed.iso")
 	if err := writeSeedISO(opts.WorkDir, seedISOPath, cfg); err != nil {
 		return nil, fmt.Errorf("isoinstaller: write seed ISO: %w", err)
@@ -132,6 +153,7 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	log.Info().Str("seed_iso", seedISOPath).Msg("isoinstaller: seed ISO written")
 
 	// ── Create blank target disk ───────────────────────────────────────────
+	callPhase("creating_disk")
 	rawDiskPath := filepath.Join(opts.WorkDir, "disk.raw")
 	diskSize := fmt.Sprintf("%dG", opts.DiskSizeGB)
 	log.Info().Str("disk", rawDiskPath).Str("size", diskSize).Msg("isoinstaller: creating blank disk")
@@ -151,6 +173,7 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	qmpSocketPath := filepath.Join(opts.WorkDir, "qmp.sock")
 
 	// ── Build QEMU command ─────────────────────────────────────────────────
+	callPhase("launching_vm")
 	qemuArgs := buildQEMUArgs(opts, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath)
 	log.Info().
 		Strs("args", qemuArgs).
@@ -167,13 +190,30 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 
 	qemu := exec.CommandContext(installCtx, qemuBin, qemuArgs...)
 
-	// Capture stdout/stderr for debug logging (serial output goes to the log file).
-	qemuStderr := &strings.Builder{}
-	qemu.Stderr = qemuStderr
+	// Capture QEMU stderr via a pipe so we can stream it to the progress store.
+	stderrPipe, pipeErr := qemu.StderrPipe()
+	if pipeErr != nil {
+		// Non-fatal: fall back to discarding stderr.
+		stderrPipe = nil
+	}
 
 	start := time.Now()
 	if err := qemu.Start(); err != nil {
 		return nil, fmt.Errorf("isoinstaller: start QEMU: %w", err)
+	}
+
+	// ── Tail serial log in background ────────────────────────────────────
+	callPhase("installing")
+	serialTailCtx, serialTailCancel := context.WithCancel(installCtx)
+	defer serialTailCancel()
+
+	if opts.OnSerialLine != nil {
+		go tailFile(serialTailCtx, serialLogPath, opts.OnSerialLine)
+	}
+
+	// ── Scan QEMU stderr in background ───────────────────────────────────
+	if stderrPipe != nil && opts.OnStderrLine != nil {
+		go scanPipeLines(stderrPipe, opts.OnStderrLine)
 	}
 
 	// ── Wait for install to complete ───────────────────────────────────────
@@ -190,17 +230,21 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 		procDone <- qemu.Wait()
 	}()
 
+	var procExitErr error
 	select {
 	case <-installCtx.Done():
 		// Timeout or parent cancellation.
 		_ = qemu.Process.Kill()
 		<-procDone
+		serialTailCancel()
 		elapsed := time.Since(start)
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("isoinstaller: install cancelled after %v", elapsed.Round(time.Second))
+			return &BuildResult{SerialLogPath: serialLogPath},
+				fmt.Errorf("isoinstaller: install cancelled after %v", elapsed.Round(time.Second))
 		}
-		return nil, fmt.Errorf("isoinstaller: install timed out after %v (limit: %v) — check serial log at %s",
-			elapsed.Round(time.Second), opts.Timeout, serialLogPath)
+		return &BuildResult{SerialLogPath: serialLogPath},
+			fmt.Errorf("isoinstaller: install timed out after %v (limit: %v) — check serial log at %s",
+				elapsed.Round(time.Second), opts.Timeout, serialLogPath)
 
 	case qmpErr := <-qmpDone:
 		// QMP reported a clean shutdown; wait for the QEMU process to exit.
@@ -211,27 +255,29 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 		exitCtx, exitCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer exitCancel()
 		select {
-		case procErr := <-procDone:
-			if procErr != nil {
-				// QEMU exited with non-zero; check if this is a normal shutdown.
-				// qemu-system-x86_64 exits 0 on -no-reboot halt in most versions,
-				// but some versions exit 1. We check the disk exists rather than
-				// trusting the exit code.
-				log.Debug().Err(procErr).Msg("isoinstaller: QEMU exited with non-zero (may be normal for -no-reboot)")
+		case err := <-procDone:
+			if err != nil {
+				log.Debug().Err(err).Msg("isoinstaller: QEMU exited with non-zero (may be normal for -no-reboot)")
 			}
+			procExitErr = err
 		case <-exitCtx.Done():
 			_ = qemu.Process.Kill()
 			<-procDone
-			return nil, fmt.Errorf("isoinstaller: QEMU did not exit within 60s after shutdown event")
+			return &BuildResult{SerialLogPath: serialLogPath},
+				fmt.Errorf("isoinstaller: QEMU did not exit within 60s after shutdown event")
 		}
 
-	case procErr := <-procDone:
+	case err := <-procDone:
 		// Process exited on its own (triggered by -no-reboot on guest halt).
-		if procErr != nil {
-			log.Debug().Err(procErr).Str("qemu_stderr", qemuStderr.String()).
-				Msg("isoinstaller: QEMU process exited with error")
+		procExitErr = err
+		if err != nil {
+			log.Debug().Err(err).Msg("isoinstaller: QEMU process exited with error")
 		}
 	}
+
+	// Stop the serial tail goroutine now that QEMU has exited.
+	serialTailCancel()
+	_ = procExitErr // already logged above
 
 	elapsed := time.Since(start)
 	log.Info().
@@ -242,12 +288,14 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	// ── Verify the disk image was written ─────────────────────────────────
 	fi, err := os.Stat(rawDiskPath)
 	if err != nil {
-		return nil, fmt.Errorf("isoinstaller: raw disk not found after install: %w", err)
+		return &BuildResult{SerialLogPath: serialLogPath},
+			fmt.Errorf("isoinstaller: raw disk not found after install: %w", err)
 	}
 	minExpectedBytes := int64(500 * 1024 * 1024) // sanity: at least 500 MB written
 	if fi.Size() < minExpectedBytes {
-		return nil, fmt.Errorf("isoinstaller: raw disk too small (%d bytes) — install likely failed; check serial log at %s",
-			fi.Size(), serialLogPath)
+		return &BuildResult{SerialLogPath: serialLogPath},
+			fmt.Errorf("isoinstaller: raw disk too small (%d bytes) — install likely failed; check serial log at %s",
+				fi.Size(), serialLogPath)
 	}
 
 	return &BuildResult{
@@ -255,6 +303,55 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 		ElapsedTime:   elapsed,
 		SerialLogPath: serialLogPath,
 	}, nil
+}
+
+// tailFile reads lines from path in near-real-time (tail -F semantics),
+// calling onLine for each line until ctx is cancelled.
+func tailFile(ctx context.Context, path string, onLine func(string)) {
+	// Wait for the file to appear.
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			onLine(strings.TrimRight(line, "\r\n"))
+		}
+		if err == io.EOF {
+			select {
+			case <-time.After(200 * time.Millisecond):
+				continue
+			case <-ctx.Done():
+				return
+			}
+		} else if err != nil {
+			return
+		}
+	}
+}
+
+// scanPipeLines reads from r line by line, calling onLine for each.
+// Returns when the reader is exhausted or closed.
+func scanPipeLines(r io.Reader, onLine func(string)) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		onLine(scanner.Text())
+	}
 }
 
 // applyDefaults fills in zero-value BuildOptions fields with sensible defaults.
