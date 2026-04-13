@@ -755,6 +755,36 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		}
 	}()
 
+	// Deferred failure reporter: if retErr is non-nil when this function returns
+	// (including from early pre-deploy error paths like image-not-ready, preflight
+	// fail, or temp-dir creation failure), unconditionally POST deploy-failed so
+	// the server transitions the node to NodeStateFailed and the admin can see it.
+	//
+	// This is defensive against the VM202-style hang where a pre-deploy error caused
+	// the node to remain in reimage_pending indefinitely, blocking all future deploys
+	// until an admin manually reset the state.
+	//
+	// NOTE: We use a fresh context.Background() so the report is not cancelled if
+	// the parent ctx is already done (e.g. signal received mid-deploy). The
+	// deploy-complete path uses ReportDeployCompleteWithRetry with its own contexts,
+	// so by the time we reach a successful return retErr is nil and this defer is a no-op.
+	deployCompleted := false
+	defer func() {
+		if retErr == nil {
+			return // successful deploy — do not send deploy-failed
+		}
+		if deployCompleted {
+			return // server already received deploy-complete — do not double-transition
+		}
+		deployLog.Error().Err(retErr).Msg("deploy failed — reporting to server (deferred)")
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer reportCancel()
+		if reportErr := c.ReportDeployFailed(reportCtx, nodeCfg.ID); reportErr != nil {
+			deployLog.Warn().Err(reportErr).Msg("deferred deploy-failed report to server failed (non-fatal)")
+		}
+		remoteWriter.FlushSync()
+	}()
+
 	cfg := config.LoadClientConfig()
 	if flagServer != "" {
 		cfg.ServerURL = flagServer
@@ -1021,6 +1051,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Str("duration",
 		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete — rebooting")
+
+	// Mark deploy as complete before returning nil so the deferred failure
+	// reporter knows NOT to post deploy-failed (node already transitioned).
+	deployCompleted = true
 
 	// Flush remote logs before the init script calls reboot. This ensures the
 	// "deployment complete" log lines reach the server before the kernel kills
