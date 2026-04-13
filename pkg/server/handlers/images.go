@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,6 +20,12 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/db"
 )
 
+// defaultBlobMaxConcurrent is the default maximum number of simultaneous blob
+// streams. Each stream can saturate a LAN link and consume significant memory
+// for kernel socket buffers + the tar subprocess; limit to prevent OOM when an
+// entire fleet reimages simultaneously.
+const defaultBlobMaxConcurrent = 8
+
 // ImagesHandler handles all /api/v1/images routes.
 type ImagesHandler struct {
 	DB       *db.DB
@@ -25,6 +33,29 @@ type ImagesHandler struct {
 	// Progress is used by DeleteImage to check for active deploys.
 	// It is optional — when nil, the active-deploy guard is skipped.
 	Progress ProgressStoreIface
+	// blobSem is the semaphore controlling max concurrent blob streams.
+	// Initialised lazily on first use via blobSemaphore().
+	blobSem chan struct{}
+	// activeBlobStreams tracks the current count for metrics/logging.
+	activeBlobStreams atomic.Int64
+}
+
+// blobSemaphore returns the blob concurrency semaphore, reading
+// CLONR_BLOB_MAX_CONCURRENT from the environment on first call.
+// The channel capacity is the configured limit; acquiring a slot is a
+// non-blocking send (if full → 503); releasing is a receive.
+func (h *ImagesHandler) blobSemaphore() chan struct{} {
+	if h.blobSem != nil {
+		return h.blobSem
+	}
+	cap := defaultBlobMaxConcurrent
+	if v := os.Getenv("CLONR_BLOB_MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cap = n
+		}
+	}
+	h.blobSem = make(chan struct{}, cap)
+	return h.blobSem
 }
 
 // ListImages handles GET /api/v1/images
@@ -334,6 +365,29 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 // For "filesystem" format images: streams an uncompressed tar of rootfs/ on the fly.
 func (h *ImagesHandler) DownloadBlob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	// Concurrency cap: limit simultaneous blob streams to prevent OOM under
+	// fleet-wide reimage bursts. Return 503 with Retry-After when at capacity.
+	sem := h.blobSemaphore()
+	select {
+	case sem <- struct{}{}:
+		// Acquired a slot. Release it when the handler returns.
+		active := h.activeBlobStreams.Add(1)
+		defer func() {
+			<-sem
+			h.activeBlobStreams.Add(-1)
+		}()
+		log.Info().Int64("active_streams", active).Int("cap", cap(sem)).Msg("blob stream: acquired slot")
+	default:
+		active := h.activeBlobStreams.Load()
+		log.Warn().Int64("active_streams", active).Int("cap", cap(sem)).
+			Msg("blob stream: semaphore full — returning 503 to client")
+		w.Header().Set("Retry-After", "10")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"error":"too many concurrent blob streams (max %d) — retry in 10s"}`, cap(sem))
+		return
+	}
 
 	img, err := h.DB.GetBaseImage(r.Context(), id)
 	if err != nil {
