@@ -723,6 +723,18 @@ type BuildFromISORequest struct {
 	// For other distros, this field is silently ignored.
 	CustomKickstart string `json:"custom_kickstart,omitempty"`
 
+	// DefaultUsername, when non-empty, creates a named user in the installed OS
+	// with sudo/wheel access. Supported for RHEL-family (Rocky, Alma, CentOS, RHEL)
+	// kickstart builds. Silently ignored for other distros.
+	DefaultUsername string `json:"default_username,omitempty"`
+
+	// DefaultPassword is the plaintext password for DefaultUsername and for the
+	// root account. It is hashed server-side before being written to the installer
+	// config; it is never stored or logged in plaintext.
+	// When omitted, the root account uses a fixed per-build hash and no user
+	// directive is emitted.
+	DefaultPassword string `json:"default_password,omitempty"`
+
 	// Tags is an optional list of string tags attached to the resulting image.
 	Tags []string `json:"tags,omitempty"`
 

@@ -5385,6 +5385,23 @@ const Pages = {
                             </div>
                         </div>
 
+                        <div style="margin-bottom:16px">
+                            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px">Default Login (optional)</div>
+                            <div class="form-hint" style="margin-bottom:10px">Creates a user account in the image with sudo/wheel access. Supported for RHEL-family (Rocky, Alma, RHEL) builds. Leave blank to use only the built-in root account.</div>
+                            <div class="form-grid">
+                                <div class="form-group">
+                                    <label for="build-iso-username">Username</label>
+                                    <input type="text" name="default_username" id="build-iso-username"
+                                        placeholder="e.g. admin" autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="build-iso-password">Password</label>
+                                    <input type="password" name="default_password" id="build-iso-password"
+                                        autocomplete="new-password">
+                                </div>
+                            </div>
+                        </div>
+
                         <details id="build-iso-advanced">
                             <summary style="font-size:12px;font-weight:600;color:var(--text-secondary);cursor:pointer;user-select:none;margin-bottom:10px">
                                 Advanced: Custom Kickstart
@@ -5505,6 +5522,8 @@ const Pages = {
             role_ids:         roleIds,
             install_updates:  form.querySelector('input[name="install_updates"]').checked,
             custom_kickstart: data.get('custom_kickstart') || '',
+            default_username: data.get('default_username') || undefined,
+            default_password: data.get('default_password') || undefined,
         };
 
         try {

@@ -67,6 +67,19 @@ type BuildOptions struct {
 	// time. Adds roughly 5-10 minutes to the build.
 	InstallUpdates bool
 
+	// DefaultUsername, when non-empty, creates a named user account in the
+	// installed OS. The user is added to the wheel/sudo group for admin access.
+	// Only supported for RHEL-family kickstart builds; ignored for other distros
+	// unless explicitly handled in their templates.
+	DefaultUsername string
+
+	// DefaultPassword is the plaintext password for DefaultUsername (and for
+	// the root account). It is hashed with SHA-512 crypt before being written
+	// to any installer config and is NEVER stored or logged in plaintext.
+	// When empty, the pre-baked defaultRootPasswordHash is used for root and
+	// no user directive is emitted.
+	DefaultPassword string
+
 	// OnPhase, when set, is called each time the VM installer transitions to a
 	// new named phase (e.g. "launching_vm", "installing"). Used by the progress
 	// subsystem to update the build status panel in the UI.

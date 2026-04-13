@@ -1419,6 +1419,8 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
+		DefaultUsername: req.DefaultUsername,
+		DefaultPassword: req.DefaultPassword, // plaintext; hashed inside GenerateAutoInstallConfig
 		// Progress callbacks — feed events into the build handle.
 		OnPhase:       ph.SetPhase,
 		OnSerialLine:  ph.AddSerialLine,
@@ -1576,6 +1578,8 @@ func (f *Factory) buildFromISOFile(
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
+		DefaultUsername: req.DefaultUsername,
+		DefaultPassword: req.DefaultPassword,
 	}
 
 	result, err := isoinstaller.Build(ctx, buildOpts)

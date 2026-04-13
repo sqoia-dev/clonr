@@ -3,6 +3,7 @@ package isoinstaller
 import (
 	"bytes"
 	"fmt"
+	"os/exec"
 	"strings"
 	"text/template"
 )
@@ -37,24 +38,58 @@ type AutoInstallConfig struct {
 const targetDisk = "vda"
 
 type templateData struct {
-	// RootPasswordHash is a SHA-512 crypt(3) hash of a fixed per-build password.
+	// RootPasswordHash is a SHA-512 crypt(3) hash of the root password.
 	RootPasswordHash string
 	// DiskSizeGB is the target disk size, used in preseed size hints.
 	DiskSizeGB int
 	// TargetDisk is the block device name for the install target (e.g. "vda").
 	TargetDisk string
+	// DefaultUser is the optional non-root username to create in the image.
+	// Empty string means no user directive is emitted.
+	DefaultUser string
+	// DefaultPasswordHash is the SHA-512 crypt hash used for both the root
+	// account and the DefaultUser account when a password was supplied.
+	DefaultPasswordHash string
 }
 
 const defaultRootPasswordHash = "$6$rounds=4096$clonr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1"
+
+// hashPassword hashes a plaintext password with SHA-512 crypt using
+// openssl passwd -6, which is available on all modern Linux systems.
+// It is safe to call with an empty password — returns an empty string
+// so callers can distinguish "no password supplied" from a hash.
+func hashPassword(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	out, err := exec.Command("openssl", "passwd", "-6", plaintext).Output()
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
 
 // GenerateAutoInstallConfig produces the automated-install configuration for
 // the given distro and build options. Returns an AutoInstallConfig with the
 // rendered file content(s) ready to be written to a seed ISO.
 func GenerateAutoInstallConfig(distro Distro, opts BuildOptions, customKickstart string) (*AutoInstallConfig, error) {
+	// Hash the caller-supplied password (if any) once, reuse across all templates.
+	// Never log opts.DefaultPassword — it is plaintext.
+	pwHash := defaultRootPasswordHash
+	if opts.DefaultPassword != "" {
+		h, err := hashPassword(opts.DefaultPassword)
+		if err != nil {
+			return nil, fmt.Errorf("generate config: %w", err)
+		}
+		pwHash = h
+	}
+
 	data := templateData{
-		RootPasswordHash: defaultRootPasswordHash,
-		DiskSizeGB:       opts.DiskSizeGB,
-		TargetDisk:       targetDisk,
+		RootPasswordHash:    pwHash,
+		DiskSizeGB:          opts.DiskSizeGB,
+		TargetDisk:          targetDisk,
+		DefaultUser:         opts.DefaultUsername,
+		DefaultPasswordHash: pwHash,
 	}
 
 	switch distro.Format() {
@@ -86,6 +121,8 @@ type ksTemplateData struct {
 	NeedsNVIDIA    bool
 	NeedsLustre    bool
 	NeedsBeeGFS    bool
+	// HasDefaultUser is true when a non-root user should be created.
+	HasDefaultUser bool
 }
 
 // joinStrings is the template func for joining slices — kept here so the
@@ -104,6 +141,9 @@ lang en_US.UTF-8
 keyboard us
 timezone UTC --utc
 rootpw --iscrypted {{.RootPasswordHash}}
+{{- if .HasDefaultUser}}
+user --name={{.DefaultUser}} --password={{.DefaultPasswordHash}} --iscrypted --groups=wheel
+{{- end}}
 selinux --permissive
 firewall --disabled
 network --bootproto=dhcp --device=link --activate
@@ -189,6 +229,7 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		NeedsNVIDIA:    hasRole(opts.RoleIDs, "gpu-compute"),
 		NeedsLustre:    hasRole(opts.RoleIDs, "storage"),
 		NeedsBeeGFS:    hasRole(opts.RoleIDs, "storage"),
+		HasDefaultUser: opts.DefaultUsername != "",
 	}
 
 	var buf bytes.Buffer
