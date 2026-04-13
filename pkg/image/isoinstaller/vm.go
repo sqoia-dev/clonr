@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -190,11 +191,15 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 
 	qemu := exec.CommandContext(installCtx, qemuBin, qemuArgs...)
 
-	// Capture QEMU stderr via a pipe so we can stream it to the progress store.
+	// Capture QEMU stderr into an in-memory ring buffer (capped at 16 KB) so
+	// startup errors are always available, regardless of whether a caller has
+	// registered an OnStderrLine callback.
+	var stderrBuf cappedBuffer
 	stderrPipe, pipeErr := qemu.StderrPipe()
 	if pipeErr != nil {
-		// Non-fatal: fall back to discarding stderr.
+		// Non-fatal: attach buffer directly so at least the ring is populated.
 		stderrPipe = nil
+		qemu.Stderr = &stderrBuf
 	}
 
 	start := time.Now()
@@ -211,9 +216,16 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 		go tailFile(serialTailCtx, serialLogPath, opts.OnSerialLine)
 	}
 
-	// ── Scan QEMU stderr in background ───────────────────────────────────
-	if stderrPipe != nil && opts.OnStderrLine != nil {
-		go scanPipeLines(stderrPipe, opts.OnStderrLine)
+	// ── Drain QEMU stderr into ring buffer (+ optional callback) ─────────
+	if stderrPipe != nil {
+		go func() {
+			scanner := bufio.NewScanner(io.TeeReader(stderrPipe, &stderrBuf))
+			for scanner.Scan() {
+				if opts.OnStderrLine != nil {
+					opts.OnStderrLine(scanner.Text())
+				}
+			}
+		}()
 	}
 
 	// ── Wait for install to complete ───────────────────────────────────────
@@ -294,9 +306,24 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	// see exactly why QEMU failed.
 	if procExitErr != nil && elapsed < 60*time.Second {
 		tail := readSerialLogTail(serialLogPath, 30)
-		return &BuildResult{SerialLogPath: serialLogPath},
-			fmt.Errorf("isoinstaller: QEMU exited after %v with status %v — install failed to start (check serial log at %s)\n%s",
-				elapsed.Round(time.Second), procExitErr, serialLogPath, tail)
+		qemuStderr := strings.TrimSpace(stderrBuf.String())
+		qemuInvocation := qemuBin + " " + strings.Join(qemuArgs, " ")
+
+		var errMsg strings.Builder
+		fmt.Fprintf(&errMsg, "isoinstaller: QEMU exited after %v with status %v — install failed to start (check serial log at %s)",
+			elapsed.Round(time.Second), procExitErr, serialLogPath)
+		fmt.Fprintf(&errMsg, "\n\n[qemu invocation]\n%s", qemuInvocation)
+		if qemuStderr != "" {
+			fmt.Fprintf(&errMsg, "\n\n[qemu stderr]\n%s", qemuStderr)
+		} else {
+			fmt.Fprintf(&errMsg, "\n\n[qemu stderr]\n(empty)")
+		}
+		if tail != "" {
+			fmt.Fprintf(&errMsg, "\n\n[serial log tail]\n%s", tail)
+		} else {
+			fmt.Fprintf(&errMsg, "\n\n[serial log tail]\n(empty — QEMU may have failed before writing any output)")
+		}
+		return &BuildResult{SerialLogPath: serialLogPath}, fmt.Errorf("%s", errMsg.String())
 	}
 
 	// ── Verify the disk image was written ─────────────────────────────────
@@ -610,6 +637,33 @@ func waitForQMPShutdown(ctx context.Context, socketPath string, log zerolog.Logg
 	}
 	// Scanner EOF means the QEMU process closed the socket — treat as shutdown.
 	return nil
+}
+
+// ── Capped stderr ring buffer ─────────────────────────────────────────────────
+
+// cappedBuffer is a goroutine-safe io.Writer that keeps the last maxBytes bytes
+// of written data. It is used to capture QEMU stderr for error reporting.
+const cappedBufferMax = 16 * 1024 // 16 KB
+
+type cappedBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > cappedBufferMax {
+		b.buf = b.buf[len(b.buf)-cappedBufferMax:]
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
 }
 
 // ── Serial log wiring ─────────────────────────────────────────────────────────
