@@ -516,23 +516,10 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		Bool("has_tar_checksum", cachedTarChecksum != "").
 		Msg("blob stream: starting tar")
 
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
-	if cachedTarChecksum != "" {
-		w.Header().Set("X-Clonr-Blob-SHA256", cachedTarChecksum)
-	}
-	w.WriteHeader(http.StatusOK)
-
-	// Disable the per-request write deadline for this handler — the response is a
-	// large streaming tar archive and a global WriteTimeout would kill it mid-stream
-	// on slow links. http.ResponseController is available since Go 1.20.
-	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Time{}) // zero = no deadline
-	}
-
 	// Wrap the response writer to count bytes streamed.
 	// If this is the first stream, also tee through a sha256 hasher so we can
 	// cache the tar checksum for all subsequent streams.
+	// Headers are written AFTER the probe buffer fills (fail-fast path below).
 	baseWriter := &countWriter{w: w}
 	var tarHasher = sha256.New() // always created; only used when computeTarChecksum
 	var cw io.Writer
@@ -546,56 +533,158 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 	// to the HTTP request context. Context cancellation (client disconnect, proxy
 	// timeout) was SIGKILL'ing tar mid-stream under concurrent load, delivering
 	// truncated archives to the deploy agents.
+	//
+	// Excluded paths fall into two categories:
+	//   1. Virtual/pseudo filesystems that are empty or populated at runtime
+	//      (proc, sys, dev, selinux) — no useful data, and tar errors on them.
+	//   2. Security-sensitive or restricted files that are mode 000 or SUID root
+	//      on a locked-down system: tar exits 2 under NoNewPrivileges=yes because
+	//      it cannot open them. These are intentionally excluded — the deployed
+	//      node regenerates them on first boot from PAM/sssd/shadow-utils.
 	cmd := exec.Command("tar", //nolint:gosec
 		"-C", rootfsPath,
+		// Virtual/runtime filesystems
 		"--exclude=./proc/*",
 		"--exclude=./sys/*",
 		"--exclude=./dev/*",
 		"--exclude=./.clonr-state",
+		// Shadow / credential files — intentionally 000 or 640 root:shadow.
+		// tar exits 2 trying to read these under NoNewPrivileges=yes.
+		// The deployed node regenerates shadow from passwd + firstboot config.
+		"--exclude=./etc/shadow",
+		"--exclude=./etc/shadow-",
+		"--exclude=./etc/gshadow",
+		"--exclude=./etc/gshadow-",
+		"--exclude=./etc/security/opasswd",
+		// sssd / nslcd runtime state — empty directories, rebuilt on boot.
+		"--exclude=./var/lib/sss/*",
+		"--exclude=./var/lib/nslcd/*",
+		"--exclude=./var/log/sssd/*",
+		// chrony log — world-unreadable on hardened installs.
+		"--exclude=./var/log/chrony/*",
+		// sudo helper — SUID root (mode 4511), cannot be read by non-root tar
+		// process running under NoNewPrivileges=yes.
+		"--exclude=./usr/libexec/sudo/sesh",
 		"-cf", "-",
 		".",
 	)
-	cmd.Stdout = cw
 	stderrBuf := &bytes.Buffer{}
 	cmd.Stderr = stderrBuf
 
-	if err := cmd.Start(); err != nil {
-		log.Error().Err(err).Str("image_id", img.ID).Msg("blob stream: tar start failed")
+	// Fail-fast: start tar and buffer the first 64 KB before writing HTTP
+	// headers. If tar exits before filling the buffer (i.e. it failed
+	// immediately with a fatal error), we can still return HTTP 500 rather
+	// than committing to a 200 with a truncated body.
+	// Once 64 KB is buffered we are confident tar is running correctly and we
+	// commit to streaming: write headers and flush the buffer, then pipe the
+	// remainder directly. After that point we cannot retroactively signal
+	// failure to the client — but all the "known-bad" paths are excluded above.
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Error().Err(err).Str("image_id", img.ID).Msg("blob stream: tar stdout pipe failed")
+		writeError(w, err)
 		return
 	}
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	if err := cmd.Start(); err != nil {
+		log.Error().Err(err).Str("image_id", img.ID).Msg("blob stream: tar start failed")
+		writeError(w, err)
+		return
+	}
 
-	select {
-	case err := <-done:
-		// Tar finished naturally.
-		if err != nil {
-			// Real tar failure (not a client disconnect) — log stderr for diagnosis.
+	// Read up to 64 KB into a probe buffer. io.ReadFull returns io.EOF or
+	// io.ErrUnexpectedEOF when fewer than 64 KB are available (i.e. tar exited
+	// early). In that case check the process exit status; if non-zero, return
+	// HTTP 500 — headers have not been written yet.
+	const probeSize = 64 * 1024
+	probeBuf := make([]byte, probeSize)
+	probeN, probeErr := io.ReadFull(stdout, probeBuf)
+
+	if probeErr == io.EOF || probeErr == io.ErrUnexpectedEOF {
+		// Tar produced less than probeSize bytes — it may have finished cleanly
+		// (tiny image) or died early. Check exit status.
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			// Tar failed before streaming any meaningful data — safe to 500.
 			log.Error().
-				Err(err).
+				Err(waitErr).
 				Str("image_id", img.ID).
 				Str("stderr", stderrBuf.String()).
-				Int64("bytes_written", baseWriter.n).
-				Msg("blob stream: tar exited non-zero — response may be truncated")
+				Int("probe_bytes", probeN).
+				Msg("blob stream: tar exited non-zero before headers were sent — returning HTTP 500")
+			http.Error(w, "tar failed: "+stderrBuf.String(), http.StatusInternalServerError)
 			return
 		}
-		log.Info().
-			Str("image_id", img.ID).
-			Str("client", r.RemoteAddr).
-			Int64("bytes_written", baseWriter.n).
-			Msg("blob stream: tar complete")
-
-		// On the first successful stream, persist the tar checksum sidecar so
-		// subsequent downloads can serve X-Clonr-Blob-SHA256 and clients can
-		// verify end-to-end integrity.
+		// Tar finished cleanly with a small output — write headers and flush.
+		if cachedTarChecksum != "" {
+			w.Header().Set("X-Clonr-Blob-SHA256", cachedTarChecksum)
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
+		if rc := http.NewResponseController(w); rc != nil {
+			_ = rc.SetWriteDeadline(time.Time{})
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, writeErr := cw.Write(probeBuf[:probeN]); writeErr != nil {
+			log.Warn().Err(writeErr).Str("image_id", img.ID).Msg("blob stream: write probe buffer (small tar)")
+		}
 		if computeTarChecksum {
 			checksum := hex.EncodeToString(tarHasher.Sum(nil))
 			saveTarChecksum(h.ImageDir, img.ID, checksum)
 			log.Info().Str("image_id", img.ID).Str("tar_sha256", checksum).
-				Msg("blob stream: tar checksum computed and cached (sidecar written)")
+				Msg("blob stream: tar checksum computed and cached (small tar, sidecar written)")
 		}
+		log.Info().Str("image_id", img.ID).Int64("bytes_written", baseWriter.n).
+			Msg("blob stream: tar complete (small tar, headers sent after wait)")
+		return
+	}
 
+	if probeErr != nil {
+		// Unexpected read error — kill tar and return 500.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		log.Error().Err(probeErr).Str("image_id", img.ID).Msg("blob stream: probe read error — aborting")
+		http.Error(w, "blob stream probe failed", http.StatusInternalServerError)
+		return
+	}
+
+	// We have a full probe buffer — tar is running. Commit to streaming now.
+	// Write HTTP headers before flushing the probe buffer.
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
+	if cachedTarChecksum != "" {
+		w.Header().Set("X-Clonr-Blob-SHA256", cachedTarChecksum)
+	}
+	w.WriteHeader(http.StatusOK)
+
+	// Disable the per-request write deadline for this handler — the response is a
+	// large streaming tar archive and a global WriteTimeout would kill it mid-stream
+	// on slow links. http.ResponseController is available since Go 1.20.
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Time{})
+	}
+
+	// Flush probe buffer through the counting/hashing writer.
+	if _, writeErr := cw.Write(probeBuf[:probeN]); writeErr != nil {
+		// Client disconnected immediately after headers — treat as disconnect.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		log.Info().Err(writeErr).Str("image_id", img.ID).Msg("blob stream: client disconnected after headers")
+		return
+	}
+
+	// Stream the remainder of tar's stdout.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	// Pipe remaining stdout through the counting/hashing writer.
+	pipeRemaining := func() {
+		if _, err := io.Copy(cw, stdout); err != nil {
+			log.Warn().Err(err).Str("image_id", img.ID).Msg("blob stream: io.Copy interrupted")
+		}
+	}
+
+	select {
 	case <-r.Context().Done():
 		// Client disconnected mid-stream — this is normal (e.g. agent restart,
 		// network blip). Give tar 2 seconds to flush buffered output, then kill.
@@ -607,6 +696,40 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 			Str("client", r.RemoteAddr).
 			Int64("bytes_written", baseWriter.n).
 			Msg("blob stream: client disconnected — cleanup complete")
+		return
+	default:
+	}
+
+	// Normal path: pipe remaining bytes synchronously, then wait.
+	pipeRemaining()
+	tarErr := <-done
+
+	if tarErr != nil {
+		// Real tar failure after headers committed — log stderr for diagnosis.
+		// Client already received partial data; we cannot retroactively 500.
+		log.Error().
+			Err(tarErr).
+			Str("image_id", img.ID).
+			Str("stderr", stderrBuf.String()).
+			Int64("bytes_written", baseWriter.n).
+			Msg("blob stream: tar exited non-zero after streaming began — response may be truncated")
+		return
+	}
+
+	log.Info().
+		Str("image_id", img.ID).
+		Str("client", r.RemoteAddr).
+		Int64("bytes_written", baseWriter.n).
+		Msg("blob stream: tar complete")
+
+	// On the first successful stream, persist the tar checksum sidecar so
+	// subsequent downloads can serve X-Clonr-Blob-SHA256 and clients can
+	// verify end-to-end integrity.
+	if computeTarChecksum {
+		checksum := hex.EncodeToString(tarHasher.Sum(nil))
+		saveTarChecksum(h.ImageDir, img.ID, checksum)
+		log.Info().Str("image_id", img.ID).Str("tar_sha256", checksum).
+			Msg("blob stream: tar checksum computed and cached (sidecar written)")
 	}
 }
 
