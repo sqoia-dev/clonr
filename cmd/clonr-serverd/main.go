@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
 	"github.com/sqoia-dev/clonr/pkg/pxe"
@@ -31,6 +32,28 @@ var flagPXE bool
 func init() {
 	rootCmd.Flags().BoolVar(&flagPXE, "pxe", false,
 		"Enable built-in DHCP/TFTP PXE server (also set via CLONR_PXE_ENABLED=true)")
+
+	// apikey subcommand — for operator key rotation.
+	apikeyCmd := &cobra.Command{
+		Use:   "apikey",
+		Short: "Manage clonr-serverd API keys",
+	}
+
+	var flagScope string
+	var flagDesc string
+	createCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Generate a new API key for the given scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runApikeyCreate(flagScope, flagDesc)
+		},
+	}
+	createCmd.Flags().StringVar(&flagScope, "scope", "", "Key scope: admin or node (required)")
+	createCmd.Flags().StringVar(&flagDesc, "description", "", "Human-readable description for this key")
+	_ = createCmd.MarkFlagRequired("scope")
+
+	apikeyCmd.AddCommand(createCmd)
+	rootCmd.AddCommand(apikeyCmd)
 }
 
 func main() {
@@ -43,6 +66,30 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func runApikeyCreate(scopeStr, description string) error {
+	scope := api.KeyScope(scopeStr)
+	if scope != api.KeyScopeAdmin && scope != api.KeyScopeNode {
+		return fmt.Errorf("invalid scope %q: must be 'admin' or 'node'", scopeStr)
+	}
+
+	cfg := config.LoadServerConfig()
+	database, err := db.Open(cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	rawKey, id, err := server.CreateAPIKey(ctx, database, scope, description)
+	if err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+
+	fmt.Printf("\nNew %s API key created (ID: %s)\n", scopeStr, id)
+	fmt.Printf("Raw key (save this — it will NOT be shown again):\n\n  clonr-%s-%s\n\n", scopeStr, rawKey)
+	return nil
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -103,6 +150,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 			Str("interface", cfg.PXE.Interface).
 			Str("range", cfg.PXE.IPRange).
 			Msg("PXE server enabled")
+	}
+
+	// Bootstrap initial admin API key if none exists.
+	// Prints the raw key to stdout ONCE — operator must capture it.
+	if !cfg.AuthDevMode {
+		if err := server.BootstrapAdminKey(ctx, database); err != nil {
+			return fmt.Errorf("failed to bootstrap admin key: %w", err)
+		}
 	}
 
 	// Wire up and start the HTTP server.

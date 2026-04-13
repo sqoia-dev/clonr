@@ -146,11 +146,12 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(panicRecovery)
 	r.Use(requestLogger)
 	r.Use(chimiddleware.StripSlashes)
+	r.Use(apiVersionHeader) // sets API-Version: v1 on all /api/v1/* responses
 
-	if s.cfg.AuthToken == "" {
-		log.Warn().Msg("CLONR_AUTH_TOKEN not set — auth is disabled (dev mode only)")
+	if s.cfg.AuthDevMode {
+		log.Warn().Msg("CLONR_AUTH_DEV_MODE=1 — authentication is DISABLED (dev mode only, never use in production)")
 	}
-	// bearerAuth is applied only to the /api/v1 subrouter below,
+	// apiKeyAuth is applied only to the /api/v1 subrouter below,
 	// so that the embedded web UI at / and /ui/* is always accessible.
 
 	// Derive public server URL from listen addr for boot script generation.
@@ -212,21 +213,26 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/", serveIndex(staticFS))
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public endpoints — no auth required.
-		// PXE-booted nodes fetch boot files and register themselves before any
-		// admin has configured credentials on them.
+		// All /api/v1 routes: resolve the API key scope from the Bearer token.
+		// Public endpoints (boot files, node register, logs) accept node-scope keys
+		// OR unauthenticated requests (nodes may not yet have a key at PXE time).
+		r.Use(apiKeyAuth(s.db, s.cfg.AuthDevMode))
+
+		// Fully public — no key required (PXE-booted nodes before any key is issued).
 		r.Get("/boot/ipxe", boot.ServeIPXEScript)
 		r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
 		r.Get("/boot/initramfs.img", boot.ServeInitramfs)
 		r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
 		r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
-		r.Post("/nodes/register", nodes.RegisterNode)
-		r.Post("/logs", logs.IngestLogs)                   // nodes ship logs without tokens
-		r.Post("/deploy/progress", progress.IngestProgress) // nodes ship progress without tokens
 
-		// Authenticated endpoints.
+		// Node-scope callbacks — accept both node and admin keys, or no key (legacy PXE nodes).
+		r.Post("/nodes/register", nodes.RegisterNode)
+		r.Post("/logs", logs.IngestLogs)
+		r.Post("/deploy/progress", progress.IngestProgress)
+
+		// Admin-only routes — require admin scope.
 		r.Group(func(r chi.Router) {
-			r.Use(bearerAuth(s.cfg.AuthToken))
+			r.Use(requireScope(true)) // admin scope required
 
 			// Health
 			r.Get("/health", health.ServeHTTP)

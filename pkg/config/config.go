@@ -14,7 +14,8 @@ type ServerConfig struct {
 	ListenAddr   string        `json:"listen_addr"`   // default ":8080"
 	ImageDir     string        `json:"image_dir"`     // default "/var/lib/clonr/images"
 	DBPath       string        `json:"db_path"`       // default "/var/lib/clonr/clonr.db"
-	AuthToken    string        `json:"auth_token"`    // from CLONR_AUTH_TOKEN; empty = auth disabled
+	AuthToken    string        `json:"auth_token"`    // legacy: from CLONR_AUTH_TOKEN; superseded by api_keys table
+	AuthDevMode  bool          `json:"auth_dev_mode"` // from CLONR_AUTH_DEV_MODE=1; bypasses auth for local dev ONLY
 	LogLevel     string        `json:"log_level"`     // debug, info, warn, error — default "info"
 	LogRetention time.Duration `json:"log_retention"` // from CLONR_LOG_RETENTION; default 14d
 	PXE          PXEConfig     `json:"pxe"`
@@ -58,7 +59,8 @@ func LoadServerConfig() ServerConfig {
 		ListenAddr:   envOrDefault("CLONR_LISTEN_ADDR", ":8080"),
 		ImageDir:     envOrDefault("CLONR_IMAGE_DIR", "/var/lib/clonr/images"),
 		DBPath:       envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/clonr.db"),
-		AuthToken:    os.Getenv("CLONR_AUTH_TOKEN"),
+		AuthToken:    os.Getenv("CLONR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
+		AuthDevMode:  os.Getenv("CLONR_AUTH_DEV_MODE") == "1",
 		LogLevel:     envOrDefault("CLONR_LOG_LEVEL", "info"),
 		LogRetention: parseLogRetention(),
 		PXE:          LoadPXEConfig(),

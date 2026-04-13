@@ -2,7 +2,12 @@ package server
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -10,40 +15,141 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clonr/pkg/db"
 )
 
-// bearerAuth returns a middleware that enforces the given token.
-// If token is empty the middleware is a no-op (useful for local dev).
-func bearerAuth(token string) func(http.Handler) http.Handler {
+// ctxKeyScope is the context key used to store the resolved API key scope.
+type ctxKeyScope struct{}
+
+// scopeFromContext returns the KeyScope stored in the request context, or "".
+func scopeFromContext(ctx context.Context) api.KeyScope {
+	v, _ := ctx.Value(ctxKeyScope{}).(api.KeyScope)
+	return v
+}
+
+// apiKeyAuth returns a middleware that resolves the API key scope from the
+// Bearer token, stores it in the context, and continues.
+//
+// This middleware does NOT reject unauthenticated requests — it is a resolver.
+// Use requireScope to enforce a minimum scope on specific route groups.
+//
+// Dev-mode escape hatch: if CLONR_AUTH_DEV_MODE=1 is explicitly set,
+// all requests are treated as admin scope. Never the default.
+func apiKeyAuth(database *db.DB, devMode bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		if token == "" {
-			// Auth disabled — warn once at startup (handled by caller), pass through.
-			return next
-		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Accept token from Authorization header (REST) or ?token= query param
-			// (WebSocket — browsers cannot set headers during WS handshake).
-			var provided string
-			auth := r.Header.Get("Authorization")
-			parts := strings.SplitN(auth, " ", 2)
-			if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
-				provided = parts[1]
-			} else if q := r.URL.Query().Get("token"); q != "" {
-				provided = q
+			if devMode {
+				ctx := context.WithValue(r.Context(), ctxKeyScope{}, api.KeyScopeAdmin)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
 			}
 
-			if provided != token {
+			raw := extractBearerToken(r)
+			if raw == "" {
+				// No key provided — pass through with empty scope.
+				// requireScope will reject if the route needs auth.
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			hash := sha256Hex(raw)
+			scope, err := database.LookupAPIKey(r.Context(), hash)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeUnauthorized(w, "invalid API key")
+					return
+				}
+				log.Error().Err(err).Msg("api key auth: db lookup failed")
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(api.ErrorResponse{
-					Error: "unauthorized",
-					Code:  "unauthorized",
-				})
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "internal server error", Code: "internal_error"})
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), ctxKeyScope{}, scope)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// requireScope returns a middleware that enforces a minimum scope on the route.
+// It must be placed after apiKeyAuth in the middleware chain (which populates the context).
+// adminOnly=true → only admin keys pass; adminOnly=false → both admin and node keys pass.
+func requireScope(adminOnly bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if adminOnly && scope != api.KeyScopeAdmin {
+				writeForbidden(w, "this route requires an admin-scope API key")
+				return
+			}
+			if scope != api.KeyScopeAdmin && scope != api.KeyScopeNode {
+				writeUnauthorized(w, "unrecognized scope")
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// extractBearerToken pulls the raw token from Authorization: Bearer <token>.
+// Falls back to ?token= query param for WebSocket compatibility.
+func extractBearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	parts := strings.SplitN(auth, " ", 2)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		return parts[1]
+	}
+	return r.URL.Query().Get("token")
+}
+
+// sha256Hex returns the lowercase hex-encoded SHA-256 of s.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// writeUnauthorized writes a 401 JSON response.
+func writeUnauthorized(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: msg, Code: "unauthorized"})
+}
+
+// writeForbidden writes a 403 JSON response.
+func writeForbidden(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: msg, Code: "forbidden"})
+}
+
+// apiVersionHeader returns a middleware that sets API-Version: v1 on all responses
+// under /api/v1/* and enforces Accept header tolerance (accepts both
+// application/vnd.clonr.v1+json and the standard application/json).
+func apiVersionHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1") {
+			w.Header().Set("API-Version", "v1")
+
+			// Tolerate both the versioned vendor MIME type and plain application/json.
+			// Only enforce on non-GET, non-HEAD requests that actually send a body.
+			accept := r.Header.Get("Accept")
+			if accept != "" &&
+				accept != "*/*" &&
+				!strings.Contains(accept, "application/json") &&
+				!strings.Contains(accept, "application/vnd.clonr.v1+json") &&
+				!strings.Contains(accept, "*/*") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotAcceptable)
+				_ = json.NewEncoder(w).Encode(api.ErrorResponse{
+					Error: "Accept header must include application/json or application/vnd.clonr.v1+json",
+					Code:  "not_acceptable",
+				})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requestLogger logs each request with method, path, status, and duration.

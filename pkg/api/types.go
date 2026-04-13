@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// KeyScope defines the access level of an API key.
+type KeyScope string
+
+const (
+	KeyScopeAdmin KeyScope = "admin" // full access to all admin routes
+	KeyScopeNode  KeyScope = "node"  // limited: register, deploy-complete, logs ingest
+)
+
 // ImageStatus represents the lifecycle state of a BaseImage.
 type ImageStatus string
 
