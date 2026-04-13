@@ -729,19 +729,24 @@ done
 # Wait for storage devices to enumerate after module load.
 # virtio_scsi probes asynchronously — the SCSI device appears in dmesg almost
 # immediately, but the block device node (/dev/sda) is created by the kernel
-# slightly later. Poll /sys/class/block/ until at least one disk appears (or
-# 10 seconds elapse). Exclude loop devices and ram disks.
+# slightly later. SeaBIOS + virtio-scsi can take 30-45 seconds to enumerate
+# disks (BIOS firmware initialisation is slower than UEFI/OVMF). Poll
+# /sys/class/block/ until at least one disk appears (or 45 seconds elapse).
+# Exclude loop devices and ram disks. Run mdev -s every 5 seconds to ensure
+# device nodes are created for any newly enumerated block devices.
 log "waiting for block devices to appear in /sys/class/block/..."
-for _wait in 1 2 3 4 5 6 7 8 9 10; do
+for _wait in \$(seq 1 45); do
     BLKDEVS=\$(ls /sys/class/block/ 2>/dev/null | grep -vE '^(loop|ram)' | tr '\n' ' ')
     if [ -n "\$BLKDEVS" ]; then
         log "block devices appeared after \${_wait}s: \$BLKDEVS"
         break
     fi
+    # Re-run mdev every 5 seconds to catch late-arriving block device uevents
+    case "\$_wait" in 5|10|15|20|25|30|35|40) /bin/mdev -s 2>/dev/null || true ;; esac
     sleep 1
 done
 if [ -z "\$BLKDEVS" ]; then
-    log "WARNING: no block devices appeared after 10s — disk discovery will return empty"
+    log "WARNING: no block devices appeared after 45s — disk discovery will return empty"
 fi
 log "block devices: \$(ls /sys/class/block/ 2>/dev/null | tr '\n' ' ' || echo NONE)"
 log "/dev contents: \$(ls /dev/ 2>/dev/null | tr '\n' ' ' | head -c 200)"
@@ -778,7 +783,7 @@ for iface_path in /sys/class/net/*/; do
     [ "\$iface" = "lo" ] && continue
     log "dhcp: trying \$iface ..."
     ip link set "\$iface" up 2>/dev/null
-    udhcpc -i "\$iface" -n -q -t 10 -T 2 -s /usr/share/udhcpc/default.script 2>&1 >> "\$LOG"
+    udhcpc -i "\$iface" -n -q -t 10 -T 2 -V "PXEClient" -s /usr/share/udhcpc/default.script 2>&1 >> "\$LOG"
     DHCP_RC=\$?
     log "dhcp: \$iface exit=\$DHCP_RC"
     if [ \$DHCP_RC -eq 0 ]; then
