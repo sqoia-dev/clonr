@@ -565,6 +565,21 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		// sudo helper — SUID root (mode 4511), cannot be read by non-root tar
 		// process running under NoNewPrivileges=yes.
 		"--exclude=./usr/libexec/sudo/sesh",
+		// Deterministic output flags — required for stable sha256 across repeated
+		// streams of the same image content. Without these, entry order and embedded
+		// timestamps vary between runs (directory readdir order, ctime drift),
+		// producing different byte streams and therefore different hashes.
+		//
+		// --sort=name: emit entries in alphabetic order (POSIX-stable across runs).
+		// --mtime: normalize all file timestamps to the UNIX epoch so a file whose
+		//          mtime changed between streams doesn't invalidate the cached hash.
+		//
+		// Note: the sidecar hash is computed on the first stream and reused for all
+		// subsequent streams. On server restart the sidecar file persists so the hash
+		// survives across restarts without requiring a re-stream. If the sidecar is
+		// missing, the next stream recomputes it.
+		"--sort=name",
+		"--mtime=1970-01-01 00:00:00",
 		"-cf", "-",
 		".",
 	)
