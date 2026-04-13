@@ -675,6 +675,11 @@ func runAutoDeployMode() error {
 		Str("node_id", regResp.NodeConfig.ID).
 		Msg("registered with server")
 
+	// Update log writer with the server-assigned hostname now that we have it.
+	if regResp.NodeConfig != nil && regResp.NodeConfig.Hostname != "" {
+		remoteWriter.SetHostname(regResp.NodeConfig.Hostname)
+	}
+
 	// Step 3: Act on server directive.
 	switch regResp.Action {
 	case "deploy":
@@ -699,6 +704,10 @@ func runAutoDeployMode() error {
 			if nodeCfg.BaseImageID != "" {
 				deployLog.Info().Str("image_id", nodeCfg.BaseImageID).Msg("image assigned, starting deployment")
 				fmt.Fprintln(os.Stderr, "[auto] Image assigned — proceeding with deployment")
+				// Admin may have assigned a hostname since registration — update now.
+				if nodeCfg.Hostname != "" {
+					remoteWriter.SetHostname(nodeCfg.Hostname)
+				}
 				return runAutoDeployImage(ctx, c, *nodeCfg, deployLog, remoteWriter)
 			}
 			deployLog.Debug().Msg("no image assigned yet, still waiting")
@@ -749,6 +758,12 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	cfg := config.LoadClientConfig()
 	if flagServer != "" {
 		cfg.ServerURL = flagServer
+	}
+
+	// Ensure the log writer reflects the final resolved hostname (covers the
+	// case where group inheritance or a late admin assignment changed it).
+	if nodeCfg.Hostname != "" {
+		remoteWriter.SetHostname(nodeCfg.Hostname)
 	}
 
 	// Create progress reporter — best-effort, failures don't abort deployment.
