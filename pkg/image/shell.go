@@ -3,6 +3,7 @@ package image
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -54,9 +55,13 @@ func NewShellManager(store *db.DB, imageDir string, logger zerolog.Logger) *Shel
 	return m
 }
 
-// OpenSession creates and enters a chroot session for imageID.
-// The image must have status "ready" or "building".
+// OpenSession creates a shell session for imageID.
+// The image must have status "ready".
 // Returns an error if the session limit is already reached.
+//
+// Shell sessions use systemd-nspawn to provide proper namespace isolation
+// (UTS, PID, mount). The chroot.Session is retained for ExecInSession
+// which uses it for non-interactive commands.
 func (m *ShellManager) OpenSession(ctx context.Context, imageID string) (*ShellSession, error) {
 	img, err := m.Store.GetBaseImage(ctx, imageID)
 	if err != nil {
@@ -64,6 +69,11 @@ func (m *ShellManager) OpenSession(ctx context.Context, imageID string) (*ShellS
 	}
 	if img.Status != api.ImageStatusReady {
 		return nil, fmt.Errorf("shell: image %s has status %q — must be ready to open a shell session", imageID, img.Status)
+	}
+
+	// Validate imageID is a UUID to guard against path traversal.
+	if _, err := uuid.Parse(imageID); err != nil {
+		return nil, fmt.Errorf("shell: invalid image ID %q", imageID)
 	}
 
 	rootDir := filepath.Join(m.ImageDir, imageID, "rootfs")
@@ -75,12 +85,11 @@ func (m *ShellManager) OpenSession(ctx context.Context, imageID string) (*ShellS
 		return nil, fmt.Errorf("shell: maximum concurrent sessions (%d) reached", maxSessions)
 	}
 
+	// NewSession validates that rootDir exists; no Enter() — systemd-nspawn
+	// handles all virtual filesystem mounts itself.
 	sess, err := chroot.NewSession(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("shell: create chroot session: %w", err)
-	}
-	if err := sess.Enter(); err != nil {
-		return nil, fmt.Errorf("shell: enter chroot: %w", err)
 	}
 
 	now := time.Now()
@@ -121,14 +130,16 @@ func (m *ShellManager) CloseSession(sessionID string) error {
 
 func (m *ShellManager) closeSession(s *ShellSession) error {
 	m.Logger.Info().Str("session_id", s.ID).Str("image_id", s.ImageID).Msg("shell: closing session")
+	// Close is a no-op when Enter was never called (nspawn sessions),
+	// but safe to call regardless.
 	if err := s.Chroot.Close(); err != nil {
-		return fmt.Errorf("shell: unmount chroot: %w", err)
+		return fmt.Errorf("shell: close session: %w", err)
 	}
 	return nil
 }
 
-// ExecInSession runs a command inside the named session's chroot and returns
-// the combined stdout+stderr output.
+// ExecInSession runs a command inside the named session's container using
+// systemd-nspawn and returns the combined stdout+stderr output.
 func (m *ShellManager) ExecInSession(ctx context.Context, sessionID string, cmd string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	s, ok := m.sessions[sessionID]
@@ -141,7 +152,13 @@ func (m *ShellManager) ExecInSession(ctx context.Context, sessionID string, cmd 
 		return nil, fmt.Errorf("shell: session %s not found", sessionID)
 	}
 
-	out, err := s.Chroot.Exec(cmd, args...)
+	nspawnArgs := append([]string{
+		"--quiet",
+		"-D", s.RootDir,
+		"--",
+		cmd,
+	}, args...)
+	out, err := exec.CommandContext(ctx, "systemd-nspawn", nspawnArgs...).CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("shell: exec in session %s: %w", sessionID, err)
 	}

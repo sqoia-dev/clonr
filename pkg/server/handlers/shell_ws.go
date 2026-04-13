@@ -40,14 +40,15 @@ type wsMsg struct {
 
 // ShellWSHandler handles GET /api/v1/images/:id/shell-session/:sid/ws
 //
-// Upgrades the HTTP connection to WebSocket, forks /bin/bash inside the
-// image's chroot with a PTY attached, then bidirectionally pipes:
+// Upgrades the HTTP connection to WebSocket, forks a shell inside the image
+// using systemd-nspawn (providing UTS, PID, and mount namespace isolation)
+// with a PTY attached, then bidirectionally pipes:
 //
 //	client keystrokes → PTY stdin
 //	PTY stdout        → client
 //
 // The session identified by :sid must already exist (created via
-// POST /api/v1/images/:id/shell-session). On WebSocket close, the bash
+// POST /api/v1/images/:id/shell-session). On WebSocket close, the nspawn
 // process is killed and the PTY is released.
 func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 	imageID := chi.URLParam(r, "id")
@@ -82,13 +83,22 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 	log.Info().Str("session_id", sessionID).Str("image_id", imageID).Str("rootdir", rootDir).
 		Msg("shell ws: terminal session started")
 
-	// Fork bash inside the chroot with a PTY.
+	// Determine which shell binary is available inside the image.
 	shell := "/bin/bash"
 	if _, statErr := os.Stat(rootDir + shell); statErr != nil {
 		shell = "/bin/sh"
 	}
 
-	cmd := exec.Command("chroot", rootDir, shell, "--login")
+	// Use systemd-nspawn for proper namespace isolation: UTS (hostname),
+	// PID, and mount namespaces are all handled automatically. This prevents
+	// the shell from inheriting the management server's hostname and avoids
+	// the need to manually bind-mount /proc, /sys, /dev, etc.
+	cmd := exec.Command("systemd-nspawn",
+		"--quiet",
+		"-D", rootDir,
+		"--",
+		shell, "--login",
+	)
 	cmd.Env = []string{
 		"TERM=xterm-256color",
 		"HOME=/root",
@@ -105,10 +115,11 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		ptmx.Close()
 		if cmd.Process != nil {
-			cmd.Process.Kill()
+			_ = cmd.Process.Kill()
 		}
 		_ = cmd.Wait()
-		log.Info().Str("session_id", sessionID).Msg("shell ws: terminal session ended")
+		log.Info().Str("session_id", sessionID).Str("image_id", imageID).
+			Msg("shell ws: terminal session ended")
 	}()
 
 	// PTY → WebSocket: stream shell output to browser.
