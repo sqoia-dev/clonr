@@ -5,6 +5,35 @@
 
 ---
 
+## Deploy Integration Test Scaffold
+
+The loopback-backed integration test harness for `pkg/deploy` lives at:
+
+| Path | Purpose |
+|------|---------|
+| `pkg/deploy/testutil/` | Test helpers: `NewFakeDisk`, `FakeRootfs`, `FakeRootfsTar`, `VerifyRootfs` |
+| `pkg/deploy/rsync_test.go` | `TestExtractSmoke` — proof-of-concept full-pipeline test |
+| `scripts/test-deploy.sh` | CI/dev helper that sets up environment and runs the tag |
+
+**Build tag:** `deploy_integration` — all loopback tests are excluded from `go test ./...` and only compile/run when the tag is set.
+
+**Root requirement:** loopback ioctls require `CAP_SYS_ADMIN`. Tests skip automatically when not root. To run:
+
+```bash
+# Developer machine
+sudo go test -tags=deploy_integration -run TestExtractSmoke -v ./pkg/deploy/...
+
+# Or via the helper script (handles sudo automatically)
+./scripts/test-deploy.sh -run TestExtractSmoke
+
+# Full integration suite
+./scripts/test-deploy.sh
+```
+
+**CI:** The privileged job must set `privileged: true` (GitHub Actions) or grant `CAP_SYS_ADMIN`. See `scripts/test-deploy.sh` for the exact invocation and loopback cleanup on exit.
+
+---
+
 ## What "Works, Testable, Validated" Means
 
 A contract, not a guideline.
