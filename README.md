@@ -118,6 +118,137 @@ clonr logs --follow --hostname compute-001
 
 ---
 
+## Server Requirements
+
+### Hardware
+
+| Resource | Minimum | Recommended |
+|---|---|---|
+| CPU | 2 cores | 4+ cores (2 for the server, 2+ reserved for ISO build VMs) |
+| RAM | 8 GB | 16 GB (ISO builds spin up temporary VMs — budget 2–4 GB per concurrent build) |
+| Disk | 100 GB | 200 GB+ for the image store (each base image is 1–5 GB) |
+| Virtualization | KVM support (`/dev/kvm` accessible) | Nested virt required if running clonr-serverd inside a VM |
+
+**Network:** A dedicated provisioning network interface for PXE is strongly recommended. Separating the management network from the provisioning network avoids DHCP conflicts and makes firewall rules easier to reason about.
+
+---
+
+### Operating System
+
+- Rocky Linux 9 / RHEL 9 / AlmaLinux 9 (primary, most tested)
+- Ubuntu 22.04 / Ubuntu 24.04 (also supported)
+
+Requires systemd.
+
+---
+
+### Required System Packages
+
+**Rocky Linux / RHEL / AlmaLinux:**
+
+```bash
+sudo dnf install -y \
+    qemu-kvm qemu-img \
+    genisoimage xorriso \
+    rsync tar gzip pigz zstd \
+    e2fsprogs xfsprogs dosfstools \
+    util-linux parted gdisk \
+    kpartx multipath-tools \
+    ipmitool \
+    edk2-ovmf seabios \
+    grub2-tools grub2-tools-extra \
+    efibootmgr \
+    dracut
+```
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt install -y \
+    qemu-kvm qemu-utils \
+    genisoimage xorriso \
+    rsync tar gzip pigz zstd \
+    e2fsprogs xfsprogs dosfstools \
+    util-linux parted gdisk \
+    kpartx multipath-tools \
+    ipmitool \
+    ovmf seabios \
+    grub-efi-amd64 grub-pc \
+    efibootmgr \
+    dracut
+```
+
+---
+
+### Optional Packages
+
+| Package | Purpose |
+|---|---|
+| `cdrkit` | Alternative ISO tooling — only needed as a fallback if `genisoimage`/`xorriso` are unavailable |
+| `libvirt-daemon-driver-qemu` | libvirt integration (planned future feature) |
+| `swtpm` | TPM emulation in build VMs, required only if customer nodes need Secure Boot |
+
+---
+
+### KVM Access
+
+clonr-serverd needs read/write access to `/dev/kvm` for ISO build VMs.
+
+- **Run as root** (default in the systemd unit) — simplest, no additional setup.
+- **Run as a service user** — add the user to the `kvm` group: `usermod -aG kvm clonr`
+
+Verify access:
+
+```bash
+ls -la /dev/kvm
+# Expected: crw-rw---- 1 root kvm ...
+```
+
+---
+
+### Network Dependencies
+
+- **Outbound HTTPS** to distro mirrors for `clonr image pull` and ISO-based builds.
+- **Air-gapped environments:** use `clonr image import-iso` with a local file path. No outbound access required.
+- **Firewall rules** on the provisioning interface:
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| 8080 | TCP | HTTP API and web UI |
+| 67 | UDP | DHCP (PXE only, `--pxe` flag) |
+| 69 | UDP | TFTP (PXE only, `--pxe` flag) |
+
+---
+
+### Required Directories
+
+clonr-serverd creates these on first run. The parent path (`/var/lib/clonr/`) must exist and have adequate free space.
+
+| Path | Config variable | Notes |
+|---|---|---|
+| `/var/lib/clonr/images` | `CLONR_IMAGE_DIR` | Image blob storage — needs 200 GB+ free |
+| `/var/lib/clonr/clonr.db` | `CLONR_DB_PATH` | SQLite database |
+| `/var/lib/clonr/boot` | `CLONR_BOOT_DIR` | Kernel and initramfs for PXE |
+| `/var/lib/clonr/tftpboot` | `CLONR_TFTP_DIR` | TFTP root (iPXE binaries) |
+| `/var/lib/clonr/iso` | `CLONR_ISO_DIR` | ISO import staging area |
+
+**Filesystem requirements:** the image store must be on XFS or ext4 block storage. tmpfs and NFS are not supported — block storage only.
+
+---
+
+### Verifying Dependencies
+
+Check all required binaries are present before starting the server:
+
+```bash
+for bin in qemu-kvm qemu-img genisoimage xorriso rsync tar zstd sgdisk mkfs.xfs mkfs.ext4; do
+    command -v $bin >/dev/null && echo "  $bin" || echo "MISSING: $bin"
+done
+ls -la /dev/kvm
+```
+
+---
+
 ## Web UI
 
 The server embeds a web UI accessible at `http://server:8080/`. Dark theme. No build step required — static assets are compiled into the binary via Go embed.
@@ -761,3 +892,50 @@ pkg/
   ipmi/       IPMI/BMC management via ipmitool
   pxe/        Built-in DHCP/TFTP/PXE server with iPXE chainloading
 ```
+
+---
+
+## Troubleshooting
+
+### KVM not available
+
+**Symptom:** clonr-serverd fails to start ISO builds with a permission error or "no such file or directory" on `/dev/kvm`.
+
+**Check:**
+```bash
+ls -la /dev/kvm
+```
+
+If the device does not exist, KVM is not available on the host. Verify:
+- CPU virtualization extensions are enabled in BIOS/UEFI (`vmx` for Intel, `svm` for AMD).
+- The `kvm` and `kvm_intel`/`kvm_amd` kernel modules are loaded: `lsmod | grep kvm`.
+- If running inside a VM, nested virtualization must be enabled on the hypervisor.
+
+If the device exists but the process lacks permission, add the service user to the `kvm` group or run as root.
+
+---
+
+### ISO build fails with "no such file or directory"
+
+**Symptom:** `clonr image import-iso` or an ISO-based build fails with a message about a missing binary.
+
+**Cause:** `genisoimage` or `xorriso` is not installed, or is not on the `PATH` of the user running clonr-serverd.
+
+**Fix:** Install the missing package (see [Required System Packages](#required-system-packages)) and verify:
+```bash
+command -v genisoimage && command -v xorriso
+```
+
+---
+
+### Deploy fails with "Unexpected EOF in archive"
+
+**Symptom:** `clonr deploy` fails during image extraction with an EOF or truncation error.
+
+**Cause:** The image blob on disk is corrupted or was not fully written (e.g., interrupted pull or disk full condition).
+
+**Fix:**
+1. Check available disk space on the server: `df -h /var/lib/clonr/`.
+2. Check the image status via `clonr image list` — a failed pull will show a non-`ready` status.
+3. Delete and re-pull the image: `clonr image pull --url ...`.
+4. If the blob was manually copied, re-verify its checksum against the source.
