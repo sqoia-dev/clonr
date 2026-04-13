@@ -28,6 +28,10 @@ const Router = {
         if (App._logStream) { App._logStream.disconnect(); App._logStream = null; }
         // Disconnect any active progress stream.
         if (App._progressStream) { App._progressStream.disconnect(); App._progressStream = null; }
+        // Remove node detail page click listener for actions dropdown.
+        if (Pages._closeActionsDropdownOnOutsideClick) {
+            document.removeEventListener('click', Pages._closeActionsDropdownOnOutsideClick);
+        }
 
         // Match exact or prefix.
         let handler = this._routes[hash];
@@ -1538,18 +1542,21 @@ const Pages = {
             `);
 
             if (img.status === 'building') {
-                App.setAutoRefresh(async () => {
-                    try {
-                        const fresh = await API.images.get(id);
-                        if (fresh.status !== 'building') {
-                            // Transition out of building — reload the full detail page.
-                            Pages.imageDetail(id);
-                        } else {
-                            // Still building: update elapsed time display in-place.
-                            Pages._updateIsoBuildProgress(fresh);
-                        }
-                    } catch (_) {}
-                }, 5000);
+                if (img.build_method === 'iso') {
+                    // ISO build: subscribe to the SSE build progress stream for
+                    // live phase, serial console, and byte progress updates.
+                    Pages._startIsoBuildSSE(id);
+                } else {
+                    // Non-ISO build (pull, capture, import): fall back to polling.
+                    App.setAutoRefresh(async () => {
+                        try {
+                            const fresh = await API.images.get(id);
+                            if (fresh.status !== 'building') {
+                                Pages.imageDetail(id);
+                            }
+                        } catch (_) {}
+                    }, 5000);
+                }
             }
         } catch (e) {
             App.render(alertBox(`Failed to load image: ${e.message}`));
