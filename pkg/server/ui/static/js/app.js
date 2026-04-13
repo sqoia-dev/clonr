@@ -4061,10 +4061,10 @@ const Pages = {
                     ${layoutToTable(effective.layout)}
                 </div>`,
                 `<div class="flex gap-8">
-                    <button class="btn btn-secondary btn-sm" onclick="Pages._showLayoutOverrideEditor('${nodeId}', ${JSON.stringify(JSON.stringify(effective.layout))})">
+                    <button class="btn btn-secondary btn-sm" onclick='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
                         Edit Override
                     </button>
-                    ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" onclick="Pages._clearLayoutOverride('${nodeId}')">Clear Override</button>` : ''}
+                    ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" onclick='Pages._clearLayoutOverride(${JSON.stringify(nodeId)})'>Clear Override</button>` : ''}
                 </div>`
             );
         }
@@ -4080,7 +4080,7 @@ const Pages = {
                     ${warnings}
                     ${rec.reasoning ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Reasoning</summary><pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;color:var(--text-secondary)">${escHtml(rec.reasoning)}</pre></details>` : ''}
                 </div>`,
-                `<button class="btn btn-primary btn-sm" onclick="Pages._applyRecommendedLayout('${nodeId}', ${JSON.stringify(JSON.stringify(rec.layout))})">Apply Recommended Layout</button>`
+                `<button class="btn btn-primary btn-sm" onclick='Pages._applyRecommendedLayout(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(rec.layout))})'>Apply Recommended Layout</button>`
             );
         } else if (rec === null) {
             recSection = cardWrap('Recommended Layout',
