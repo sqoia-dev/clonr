@@ -929,6 +929,28 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 	reporter.EndPhase("")
 
+	// ── EFI BootOrder: ensure PXE is first ────────────────────────────────
+	// After grub2-install runs inside the chroot during finalize, the firmware
+	// NVRAM BootOrder may promote the new OS entry to position 0. On the next
+	// reboot the node would boot straight to disk, bypassing clonr's PXE server
+	// entirely — the server would lose visibility and couldn't reconcile state.
+	//
+	// SetPXEBootFirst reorders BootOrder so the PXE entry is first and the OS
+	// entry is second. The iPXE boot handler then routes the node to disk via
+	// "#!ipxe\nexit" once it sees NodeStateDeployed — both paths remain intact.
+	//
+	// On BIOS systems or when efibootmgr is unavailable, this is a non-fatal
+	// warning: the iPXE exit / FlipToDisk paths still handle boot routing.
+	efiCtx, efiCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if efiErr := deploy.SetPXEBootFirst(efiCtx); efiErr != nil {
+		deployLog.Warn().Err(efiErr).
+			Msg("EFI BootOrder: SetPXEBootFirst failed (non-fatal — BIOS system or no PXE entry in NVRAM)")
+	} else {
+		deployLog.Info().Msg("EFI BootOrder: PXE entry promoted to first position in NVRAM BootOrder")
+	}
+	efiCancel()
+	// ──────────────────────────────────────────────────────────────────────
+
 	// ── Deploy complete callback ────────────────────────────────────────────
 	// Tell the server the deploy succeeded. This sets last_deploy_succeeded_at
 	// and clears reimage_pending, transitioning the node to NodeStateDeployed.

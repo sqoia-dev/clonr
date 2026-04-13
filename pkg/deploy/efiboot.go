@@ -151,3 +151,98 @@ func setBootOrderFirst(ctx context.Context) error {
 	}
 	return fmt.Errorf("efiboot: no active boot entries found")
 }
+
+// parseBootOrder parses the "BootOrder: XXXX,YYYY,..." line from efibootmgr output.
+// Returns a slice of boot numbers in current order, or nil if not found.
+func parseBootOrder(output string) []string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "BootOrder:") {
+			raw := strings.TrimPrefix(line, "BootOrder:")
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				return nil
+			}
+			return strings.Split(raw, ",")
+		}
+	}
+	return nil
+}
+
+// SetPXEBootFirst reorders the NVRAM BootOrder so the first PXE entry (IPv4 or
+// IPv6) precedes any OS boot entries. This is called after finalize to ensure
+// that OVMF/EDK2 and physical UEFI firmware come back to clonr's PXE server on
+// the next reboot, allowing the server to confirm state before routing the node
+// to disk via iPXE exit.
+//
+// On BIOS systems (where efibootmgr is not available or EFI variables are
+// inaccessible), this function logs a warning and returns nil — it is a no-op
+// on non-EFI systems.
+//
+// Logic:
+//  1. Read current BootOrder from efibootmgr.
+//  2. Find the first PXE entry (label contains "PXE" or "IPv4" or "IPv6").
+//  3. Move the PXE entry to position 0 in BootOrder (before the OS entry).
+//  4. Write the new BootOrder via efibootmgr -o.
+//
+// Both PXE and OS entries are kept — only the order changes. The OS entry
+// remains second so disk boot works after the server routes via iPXE exit.
+func SetPXEBootFirst(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "efibootmgr", "-v").Output()
+	if err != nil {
+		// efibootmgr unavailable or EFI vars not accessible — BIOS system.
+		return fmt.Errorf("efiboot: SetPXEBootFirst: efibootmgr unavailable (BIOS system?): %w", err)
+	}
+
+	currentOrder := parseBootOrder(string(out))
+	if len(currentOrder) == 0 {
+		return fmt.Errorf("efiboot: SetPXEBootFirst: no BootOrder found in efibootmgr output")
+	}
+
+	entries, err := listBootEntries(ctx)
+	if err != nil {
+		return fmt.Errorf("efiboot: SetPXEBootFirst: list entries: %w", err)
+	}
+
+	// Build a map of bootNum → label for quick lookup.
+	labelByNum := make(map[string]string, len(entries))
+	for _, e := range entries {
+		labelByNum[e.BootNum] = e.Label
+	}
+
+	// Find the first PXE entry in the current boot order.
+	pxeIdx := -1
+	for i, num := range currentOrder {
+		label := strings.ToUpper(labelByNum[strings.TrimSpace(num)])
+		if strings.Contains(label, "PXE") || strings.Contains(label, "IPV4") || strings.Contains(label, "IPV6") {
+			pxeIdx = i
+			break
+		}
+	}
+
+	if pxeIdx < 0 {
+		return fmt.Errorf("efiboot: SetPXEBootFirst: no PXE entry found in BootOrder %v", currentOrder)
+	}
+
+	if pxeIdx == 0 {
+		// PXE is already first — nothing to do.
+		return nil
+	}
+
+	// Build new order: PXE entry first, then everything else in original order.
+	newOrder := make([]string, 0, len(currentOrder))
+	newOrder = append(newOrder, strings.TrimSpace(currentOrder[pxeIdx]))
+	for i, num := range currentOrder {
+		if i != pxeIdx {
+			newOrder = append(newOrder, strings.TrimSpace(num))
+		}
+	}
+
+	orderStr := strings.Join(newOrder, ",")
+	cmd := exec.CommandContext(ctx, "efibootmgr", "-o", orderStr)
+	if cmdOut, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("efiboot: SetPXEBootFirst: set BootOrder %s: %w\noutput: %s",
+			orderStr, err, string(cmdOut))
+	}
+
+	return nil
+}

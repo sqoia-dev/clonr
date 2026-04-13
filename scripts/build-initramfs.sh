@@ -359,6 +359,7 @@ ${transitive}"
         grub2-install   # bootloader install into deployed OS MBR/EFI (chroot use)
         grub2-mkconfig  # generate /boot/grub2/grub.cfg inside chroot
         fsfreeze        # force filesystem log commit before unmount (prevents EBUSY on umount)
+        efibootmgr      # EFI NVRAM BootOrder management — SetPXEBootFirst after finalize
     )
     for tool in "${DEPLOY_TOOLS_SBIN[@]}"; do
         find_and_install_bin "$tool" "$WORKDIR/usr/sbin" || true
