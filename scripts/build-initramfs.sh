@@ -475,6 +475,7 @@ else
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/xfs"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/ext4"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/jbd2"
+    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/fat"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/lib"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/arch/x86/crypto"
 
@@ -493,6 +494,8 @@ else
     #   xfs          — XFS filesystem (required for mount after mkfs.xfs)
     #   jbd2         — journaling block device (required by ext4)
     #   ext4         — ext4 filesystem
+    #   fat          — FAT/vFAT base layer (required by vfat; no deps)
+    #   vfat         — vFAT filesystem (required for ESP/EFI System Partition mount)
     MODULES=(
         "net/core/failover.ko.xz"
         "drivers/net/net_failover.ko.xz"
@@ -505,6 +508,8 @@ else
         "fs/xfs/xfs.ko.xz"
         "fs/jbd2/jbd2.ko.xz"
         "fs/ext4/ext4.ko.xz"
+        "fs/fat/fat.ko.xz"
+        "fs/fat/vfat.ko.xz"
     )
 
     for mod_rel in "${MODULES[@]}"; do
@@ -543,6 +548,8 @@ kernel/lib/libcrc32c.ko: kernel/arch/x86/crypto/crc32c-intel.ko
 kernel/fs/xfs/xfs.ko: kernel/lib/libcrc32c.ko
 kernel/fs/jbd2/jbd2.ko:
 kernel/fs/ext4/ext4.ko: kernel/fs/jbd2/jbd2.ko
+kernel/fs/fat/fat.ko:
+kernel/fs/fat/vfat.ko: kernel/fs/fat/fat.ko
 MODDEP
 
     cat > "$MODDEP_DIR/modules.alias" << MODALIAS
@@ -702,7 +709,9 @@ for mod in \
     "\$MODBASE/kernel/lib/libcrc32c.ko" \
     "\$MODBASE/kernel/fs/xfs/xfs.ko" \
     "\$MODBASE/kernel/fs/jbd2/jbd2.ko" \
-    "\$MODBASE/kernel/fs/ext4/ext4.ko"; do
+    "\$MODBASE/kernel/fs/ext4/ext4.ko" \
+    "\$MODBASE/kernel/fs/fat/fat.ko" \
+    "\$MODBASE/kernel/fs/fat/vfat.ko"; do
     name=\$(basename "\$mod")
     if [ -f "\$mod" ]; then
         err=\$(insmod "\$mod" 2>&1)
