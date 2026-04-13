@@ -1237,6 +1237,35 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		os_ = string(distro)
 	}
 
+	// Normalize and default the firmware field.
+	firmware := api.ImageFirmware(req.Firmware)
+	if firmware != api.FirmwareBIOS && firmware != api.FirmwareUEFI {
+		firmware = api.FirmwareUEFI
+	}
+
+	// Build the placeholder disk layout that matches the requested firmware.
+	// This is replaced after rootfs extraction with the detected actual layout.
+	var placeholderLayout api.DiskLayout
+	if firmware == api.FirmwareBIOS {
+		placeholderLayout = api.DiskLayout{
+			Partitions: []api.PartitionSpec{
+				{Label: "biosboot", SizeBytes: 1 * 1024 * 1024, Filesystem: "biosboot", MountPoint: "", Flags: []string{"bios_grub"}},
+				{Label: "boot", SizeBytes: 1 * 1024 * 1024 * 1024, Filesystem: "xfs", MountPoint: "/boot"},
+				{Label: "root", SizeBytes: 0, Filesystem: "xfs", MountPoint: "/"},
+			},
+			Bootloader: api.Bootloader{Type: "grub2", Target: "i386-pc"},
+		}
+	} else {
+		placeholderLayout = api.DiskLayout{
+			Partitions: []api.PartitionSpec{
+				{Label: "esp", SizeBytes: 512 * 1024 * 1024, Filesystem: "vfat", MountPoint: "/boot/efi", Flags: []string{"esp", "boot"}},
+				{Label: "boot", SizeBytes: 1 * 1024 * 1024 * 1024, Filesystem: "xfs", MountPoint: "/boot"},
+				{Label: "root", SizeBytes: 0, Filesystem: "xfs", MountPoint: "/"},
+			},
+			Bootloader: api.Bootloader{Type: "grub2", Target: "x86_64-efi"},
+		}
+	}
+
 	img := api.BaseImage{
 		ID:        id,
 		Name:      req.Name,
@@ -1245,6 +1274,7 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		Arch:      req.Arch,
 		Status:    api.ImageStatusBuilding,
 		Format:    api.ImageFormatFilesystem,
+		Firmware:  firmware,
 		Tags:      req.Tags,
 		Notes:     req.Notes,
 		SourceURL: req.URL,
@@ -1257,16 +1287,7 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		// checks this field to know when to show the live build progress panel
 		// (with SSE serial console streaming) instead of the static image detail view.
 		BuildMethod: "iso",
-		// Disk layout is determined from what the installer actually creates.
-		// We set a bios-boot default here; it gets overwritten after extraction.
-		DiskLayout: api.DiskLayout{
-			Partitions: []api.PartitionSpec{
-				{Label: "biosboot", SizeBytes: 1 * 1024 * 1024, Filesystem: "", MountPoint: "", Flags: []string{"bios_grub"}},
-				{Label: "boot", SizeBytes: 1 * 1024 * 1024 * 1024, Filesystem: "xfs", MountPoint: "/boot"},
-				{Label: "root", SizeBytes: 0, Filesystem: "xfs", MountPoint: "/"},
-			},
-			Bootloader: api.Bootloader{Type: "grub2", Target: "i386-pc"},
-		},
+		DiskLayout:  placeholderLayout,
 	}
 
 	f.Logger.Info().
@@ -1421,6 +1442,7 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		InstallUpdates:  req.InstallUpdates,
 		DefaultUsername: req.DefaultUsername,
 		DefaultPassword: req.DefaultPassword, // plaintext; hashed inside GenerateAutoInstallConfig
+		Firmware:        req.Firmware,
 		// Progress callbacks — feed events into the build handle.
 		OnPhase:       ph.SetPhase,
 		OnSerialLine:  ph.AddSerialLine,
