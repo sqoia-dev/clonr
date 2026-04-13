@@ -824,3 +824,53 @@ type ListReimagesResponse struct {
 	Requests []ReimageRequest `json:"requests"`
 	Total    int              `json:"total"`
 }
+
+// ─── ISO build progress types ─────────────────────────────────────────────────
+
+// BuildPhase is a named step in the ISO build pipeline.
+type BuildPhase = string
+
+const (
+	BuildPhaseDownloadingISO   = "downloading_iso"
+	BuildPhaseGeneratingConfig = "generating_config"
+	BuildPhaseCreatingDisk     = "creating_disk"
+	BuildPhaseLaunchingVM      = "launching_vm"
+	BuildPhaseInstalling       = "installing"
+	BuildPhaseExtracting       = "extracting"
+	BuildPhaseScrubbing        = "scrubbing"
+	BuildPhaseFinalizing       = "finalizing"
+	BuildPhaseComplete         = "complete"
+	BuildPhaseFailed           = "failed"
+	BuildPhaseCanceled         = "canceled"
+)
+
+// BuildState is a snapshot of the current progress for one ISO build job.
+// Returned by GET /api/v1/images/:id/build-progress.
+type BuildState struct {
+	ImageID      string    `json:"image_id"`
+	Phase        string    `json:"phase"`
+	StartedAt    time.Time `json:"started_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	BytesTotal   int64     `json:"bytes_total"`
+	BytesDone    int64     `json:"bytes_done"`
+	ElapsedMS    int64     `json:"elapsed_ms"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	// SerialTail holds up to 100 recent lines from the QEMU serial console.
+	SerialTail []string `json:"serial_tail,omitempty"`
+	// QEMUStderr holds up to 50 recent lines from QEMU's own stderr output.
+	QEMUStderr []string `json:"qemu_stderr,omitempty"`
+}
+
+// BuildEvent is one SSE message sent to subscribers of the build progress stream.
+// It carries either a full state snapshot (on initial connect) or an incremental
+// update (phase change, serial line, progress tick).
+type BuildEvent struct {
+	ImageID    string `json:"image_id"`
+	Phase      string `json:"phase,omitempty"`
+	SerialLine string `json:"serial_line,omitempty"` // non-empty = append-only line event
+	StderrLine string `json:"stderr_line,omitempty"`
+	BytesTotal int64  `json:"bytes_total,omitempty"`
+	BytesDone  int64  `json:"bytes_done,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
