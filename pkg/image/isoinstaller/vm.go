@@ -173,9 +173,36 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	// ── QMP socket path ────────────────────────────────────────────────────
 	qmpSocketPath := filepath.Join(opts.WorkDir, "qmp.sock")
 
+	// ── Direct kernel boot (Rocky/RHEL family only) ───────────────────────
+	// For Anaconda-based distros we bypass the GRUB/isolinux boot menu entirely
+	// by extracting vmlinuz + initrd.img from the ISO and passing them directly
+	// to QEMU via -kernel/-initrd/-append. This skips the "Test this media &
+	// install" default menu entry and the full SHA verification pass, saving
+	// 5–10 minutes per build. The ISO is still attached as a CD-ROM so that
+	// inst.stage2=hd:LABEL=<label> can find the stage2 squashfs.
+	//
+	// For other distros (Ubuntu, Debian, etc.) we fall back to the legacy CD
+	// boot path. Add direct-kernel support for those families when needed.
+	var kbf *KernelBootFiles
+	if kernelBootSupported(opts.Distro) {
+		log.Info().
+			Str("distro", string(opts.Distro)).
+			Msg("isoinstaller: extracting kernel/initrd for direct boot (skipping boot menu)")
+		kbf, err = PrepareKernelBoot(opts.ISOPath, opts.WorkDir, log)
+		if err != nil {
+			log.Warn().Err(err).
+				Msg("isoinstaller: direct kernel boot unavailable — falling back to CD boot (install will include media check)")
+			kbf = nil
+		}
+	} else {
+		log.Info().
+			Str("distro", string(opts.Distro)).
+			Msg("isoinstaller: direct kernel boot not implemented for this distro — using CD boot (TODO)")
+	}
+
 	// ── Build QEMU command ─────────────────────────────────────────────────
 	callPhase("launching_vm")
-	qemuArgs := buildQEMUArgs(opts, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath)
+	qemuArgs := buildQEMUArgs(opts, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath, kbf)
 	log.Info().
 		Strs("args", qemuArgs).
 		Msg("isoinstaller: launching QEMU")
@@ -430,7 +457,15 @@ func applyDefaults(opts *BuildOptions) {
 }
 
 // buildQEMUArgs constructs the qemu-system-x86_64 argument list.
-func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string) []string {
+//
+// When kbf is non-nil the installer ISO is booted via direct kernel boot
+// (-kernel/-initrd/-append), bypassing the GRUB/isolinux boot menu and the
+// media-check step. The ISO is still attached as a CD-ROM so Anaconda's
+// inst.stage2 can find the stage2 squashfs by label.
+//
+// When kbf is nil (unsupported distro or extraction failure) the legacy
+// CD-ROM boot path is used (-boot order=d,once=d).
+func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string, kbf *KernelBootFiles) []string {
 	args := []string{
 		// Machine and acceleration.
 		"-machine", "pc,accel=kvm:tcg", // prefer KVM, fall back to TCG automatically
@@ -459,16 +494,34 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 		// Target disk (where the OS will be installed).
 		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio,cache=none", rawDiskPath),
 
-		// Installer ISO as first CD-ROM (boot device).
+		// Installer ISO as CD-ROM. In direct-kernel-boot mode this is not the
+		// boot device — the kernel/initrd are loaded by QEMU directly — but
+		// Anaconda still needs it present so inst.stage2=hd:LABEL=<label> can
+		// find the stage2 squashfs. In legacy boot mode this is the boot device.
 		"-drive", fmt.Sprintf("file=%s,media=cdrom,readonly=on,if=ide,index=0", opts.ISOPath),
 
 		// Seed ISO (kickstart / cloud-init) as second CD-ROM.
 		// Anaconda detects OEMDRV label automatically; Ubuntu detects CIDATA.
 		"-drive", fmt.Sprintf("file=%s,media=cdrom,readonly=on,if=ide,index=1", seedISOPath),
+	)
 
-		// Boot from CD first.
-		"-boot", "order=d,once=d",
+	if kbf != nil {
+		// Direct kernel boot: QEMU loads the kernel and initrd from the host
+		// filesystem and jumps straight into Anaconda, bypassing the boot menu
+		// and the 5–10 minute media-integrity check entirely.
+		args = append(args,
+			"-kernel", kbf.Vmlinuz,
+			"-initrd", kbf.InitrdImg,
+			"-append", buildKernelAppendLine(kbf.ISOLabel),
+		)
+	} else {
+		// Legacy CD boot: rely on the ISO's GRUB/isolinux menu.
+		// The default entry on Rocky/RHEL ISOs runs a media check before
+		// installing — acceptable only when direct kernel boot is unavailable.
+		args = append(args, "-boot", "order=d,once=d")
+	}
 
+	args = append(args,
 		// Networking: user-mode NAT so the installer can reach package mirrors.
 		"-netdev", "user,id=net0",
 		"-device", "virtio-net-pci,netdev=net0",
