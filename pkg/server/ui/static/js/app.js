@@ -2634,6 +2634,11 @@ const Pages = {
                                 <div class="kv-item"><div class="kv-key">Current Image</div><div class="kv-value">
                                     ${img ? `<a href="#/images/${img.id}">${escHtml(img.name)}</a> ${badge(img.status)}` : (node.base_image_id ? escHtml(node.base_image_id) : '—')}
                                 </div></div>
+                                <div class="kv-item"><div class="kv-key">Node Group</div><div class="kv-value">
+                                    ${node.group_id
+                                        ? (() => { const g = nodeGroups.find(x => x.id === node.group_id); return g ? `<a href="#/nodes/groups/${g.id}">${escHtml(g.name)}</a>` : `<span class="text-mono text-dim text-sm">${escHtml(node.group_id)}</span>`; })()
+                                        : '<span class="text-dim">—</span>'}
+                                </div></div>
                                 <div class="kv-item"><div class="kv-key">Last Deploy OK</div><div class="kv-value">${node.last_deploy_succeeded_at ? fmtDate(node.last_deploy_succeeded_at) : '—'}</div></div>
                                 <div class="kv-item"><div class="kv-key">Last Deploy Failed</div><div class="kv-value">${node.last_deploy_failed_at ? fmtDate(node.last_deploy_failed_at) : '—'}</div></div>
                                 <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(node.created_at)}</div></div>
@@ -4535,6 +4540,680 @@ const Pages = {
         }
     },
 
+    // ── Node Groups ───────────────────────────────────────────────────────────
+
+    async nodeGroups() {
+        App.render(loading('Loading node groups…'));
+        try {
+            const [groupsResp, nodesResp] = await Promise.all([
+                API.nodeGroups.list(),
+                API.nodes.list(),
+            ]);
+            const groups = (groupsResp && groupsResp.node_groups) || [];
+            const nodes  = (nodesResp  && nodesResp.nodes)        || [];
+
+            // Count nodes per group.
+            const nodeCountMap = {};
+            nodes.forEach(n => { if (n.group_id) nodeCountMap[n.group_id] = (nodeCountMap[n.group_id] || 0) + 1; });
+
+            const tbody = groups.map(g => {
+                const nodeCount = nodeCountMap[g.id] || 0;
+                const hasLayout = !!(g.disk_layout_override && g.disk_layout_override.partitions && g.disk_layout_override.partitions.length);
+                const partCount = hasLayout ? g.disk_layout_override.partitions.length : 0;
+                const mountCount = (g.extra_mounts || []).length;
+
+                return `<tr data-key="${escHtml(g.id)}">
+                    <td style="font-weight:600">
+                        <a href="#/nodes/groups/${g.id}" style="color:var(--text-primary)">${escHtml(g.name)}</a>
+                    </td>
+                    <td class="text-dim text-sm">${escHtml(g.description || '—')}</td>
+                    <td style="text-align:center">
+                        ${nodeCount > 0
+                            ? `<span class="badge badge-info">${nodeCount}</span>`
+                            : `<span class="text-dim">0</span>`}
+                    </td>
+                    <td style="text-align:center">
+                        ${hasLayout
+                            ? `<span class="badge badge-ready" title="${partCount} partition${partCount !== 1 ? 's' : ''}">yes</span>`
+                            : `<span class="text-dim">—</span>`}
+                    </td>
+                    <td style="text-align:center">
+                        ${mountCount > 0
+                            ? `<span class="badge badge-neutral">${mountCount}</span>`
+                            : `<span class="text-dim">—</span>`}
+                    </td>
+                    <td class="text-dim text-sm">${fmtRelative(g.updated_at)}</td>
+                    <td>
+                        <div class="flex gap-6">
+                            <button class="btn btn-secondary btn-sm"
+                                onclick="Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})">Edit</button>
+                            <button class="btn btn-danger btn-sm"
+                                onclick="Pages.deleteNodeGroup('${escHtml(g.id)}', '${escHtml(g.name)}')">Delete</button>
+                        </div>
+                    </td>
+                </tr>`;
+            }).join('');
+
+            const tableHtml = groups.length
+                ? `<div class="table-wrap"><table>
+                    <thead><tr>
+                        <th>Name</th>
+                        <th>Description</th>
+                        <th style="text-align:center">Nodes</th>
+                        <th style="text-align:center">Disk Layout Override</th>
+                        <th style="text-align:center">Extra Mounts</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                    </tr></thead>
+                    <tbody>${tbody}</tbody>
+                </table></div>`
+                : emptyState(
+                    'No node groups yet',
+                    'Groups let you share disk layouts, mounts, and config across nodes with similar roles.',
+                    `<button class="btn btn-primary" onclick="Pages.showNodeGroupModal(null)">Create First Group</button>`
+                );
+
+            App.render(`
+                <div class="page-header">
+                    <div>
+                        <div class="page-title">Node Groups</div>
+                        <div class="page-subtitle">${groups.length} group${groups.length !== 1 ? 's' : ''} defined</div>
+                    </div>
+                    <button class="btn btn-primary" onclick="Pages.showNodeGroupModal(null)">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Create Group
+                    </button>
+                </div>
+
+                <div class="tab-bar" style="margin-bottom:20px">
+                    <div class="tab" onclick="Router.navigate('/nodes')">All Nodes</div>
+                    <div class="tab active" onclick="Router.navigate('/nodes/groups')">Groups</div>
+                </div>
+
+                ${cardWrap('All Groups', tableHtml)}
+            `);
+        } catch (e) {
+            App.render(alertBox(`Failed to load node groups: ${e.message}`));
+        }
+    },
+
+    // nodeGroupDetail shows a read-only detail page for a single group.
+    async nodeGroupDetail(id) {
+        App.render(loading('Loading group…'));
+        try {
+            const [group, nodesResp] = await Promise.all([
+                API.nodeGroups.get(id),
+                API.nodes.list(),
+            ]);
+            const nodes = ((nodesResp && nodesResp.nodes) || []).filter(n => n.group_id === id);
+            const hasLayout = !!(group.disk_layout_override && group.disk_layout_override.partitions && group.disk_layout_override.partitions.length);
+            const mounts = group.extra_mounts || [];
+
+            const nodesHtml = nodes.length === 0
+                ? `<div class="text-dim" style="padding:12px;font-size:13px">No nodes currently assigned to this group.</div>`
+                : `<div class="table-wrap"><table>
+                    <thead><tr><th>Hostname</th><th>MAC</th><th>Status</th><th>Updated</th></tr></thead>
+                    <tbody>
+                    ${nodes.map(n => `<tr>
+                        <td><a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">${escHtml(n.hostname || '(unassigned)')}</a></td>
+                        <td class="text-mono text-dim text-sm">${escHtml(n.primary_mac || '—')}</td>
+                        <td>${nodeBadge(n)}</td>
+                        <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table></div>`;
+
+            const layoutHtml = hasLayout
+                ? (() => {
+                    const parts = group.disk_layout_override.partitions;
+                    const rows = parts.map(p => `<tr>
+                        <td>${escHtml(p.label || '—')}</td>
+                        <td>${p.size_bytes ? fmtBytes(p.size_bytes) : '<span class="badge badge-neutral" style="font-size:10px">fill</span>'}</td>
+                        <td><span class="badge badge-neutral" style="font-size:10px">${escHtml(p.filesystem || '—')}</span></td>
+                        <td class="text-mono">${escHtml(p.mountpoint || '—')}</td>
+                    </tr>`).join('');
+                    return `<div class="table-wrap"><table>
+                        <thead><tr><th>Label</th><th>Size</th><th>Filesystem</th><th>Mountpoint</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table></div>`;
+                })()
+                : `<div class="text-dim" style="padding:12px;font-size:13px">No disk layout override — nodes in this group use their image default.</div>`;
+
+            const mountsHtml = mounts.length === 0
+                ? `<div class="text-dim" style="padding:12px;font-size:13px">No extra mounts defined on this group.</div>`
+                : `<div class="table-wrap"><table>
+                    <thead><tr><th>Source</th><th>Mount Point</th><th>FS Type</th><th>Options</th><th>Auto-mkdir</th><th>Comment</th></tr></thead>
+                    <tbody>
+                    ${mounts.map(m => `<tr>
+                        <td class="text-mono">${escHtml(m.source || '—')}</td>
+                        <td class="text-mono">${escHtml(m.mount_point || '—')}</td>
+                        <td><span class="badge badge-neutral badge-sm">${escHtml(m.fs_type || '—')}</span></td>
+                        <td class="text-mono text-dim" style="font-size:11px">${escHtml(m.options || 'defaults')}</td>
+                        <td style="text-align:center">${m.auto_mkdir ? '✓' : '—'}</td>
+                        <td class="text-dim" style="font-size:11px">${escHtml(m.comment || '—')}</td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table></div>`;
+
+            App.render(`
+                <div class="breadcrumb">
+                    <a href="#/nodes">Nodes</a>
+                    <span class="breadcrumb-sep">/</span>
+                    <a href="#/nodes/groups">Groups</a>
+                    <span class="breadcrumb-sep">/</span>
+                    <span>${escHtml(group.name)}</span>
+                </div>
+                <div class="page-header">
+                    <div>
+                        <div class="page-title">${escHtml(group.name)}</div>
+                        ${group.description ? `<div class="page-subtitle">${escHtml(group.description)}</div>` : ''}
+                    </div>
+                    <div class="flex gap-8">
+                        <button class="btn btn-secondary" onclick="Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})">Edit Group</button>
+                        <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeGroup('${escHtml(group.id)}', '${escHtml(group.name)}')">Delete</button>
+                    </div>
+                </div>
+
+                <div class="kv-grid mb-16" style="max-width:480px;margin-bottom:20px">
+                    <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value text-mono text-sm">${escHtml(group.id)}</div></div>
+                    <div class="kv-item"><div class="kv-key">Nodes</div><div class="kv-value">${nodes.length}</div></div>
+                    <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(group.created_at)}</div></div>
+                    <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(group.updated_at)}</div></div>
+                </div>
+
+                ${cardWrap('Nodes in this Group', `<div class="card-body">${nodesHtml}</div>`)}
+                ${cardWrap('Disk Layout Override', `<div class="card-body">${layoutHtml}</div>`)}
+                ${cardWrap('Extra Mounts', `<div class="card-body">${mountsHtml}</div>`)}
+            `);
+        } catch (e) {
+            App.render(alertBox(`Failed to load group: ${e.message}`));
+        }
+    },
+
+    // showNodeGroupModal opens the Create or Edit group modal.
+    showNodeGroupModal(groupJSON) {
+        const group = groupJSON ? JSON.parse(groupJSON) : null;
+        const isEdit = !!group;
+        const mounts = (group && group.extra_mounts) || [];
+        const hasLayout = !!(group && group.disk_layout_override && group.disk_layout_override.partitions && group.disk_layout_override.partitions.length);
+
+        const existingMountRows = mounts.map((m, i) => Pages._ngMountRowHTML(i, m)).join('');
+        const existingLayoutRows = hasLayout
+            ? group.disk_layout_override.partitions.map((p, i) => Pages._ngLayoutRowHTML(i, p)).join('')
+            : '';
+
+        const overlay = document.createElement('div');
+        overlay.id = 'node-group-modal';
+        overlay.className = 'modal-overlay';
+
+        // Store state for the layout editor.
+        overlay._layoutState = hasLayout
+            ? JSON.parse(JSON.stringify(group.disk_layout_override))
+            : { partitions: [] };
+
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:760px;width:96vw;max-height:90vh;overflow-y:auto">
+                <div class="modal-header">
+                    <span class="modal-title">${isEdit ? 'Edit Group' : 'Create Node Group'}</span>
+                    <button class="modal-close" onclick="document.getElementById('node-group-modal').remove()">×</button>
+                </div>
+                <div class="modal-body" style="padding:20px">
+                    <div id="ng-form-result" style="margin-bottom:10px"></div>
+
+                    <!-- Basic fields -->
+                    <div class="form-grid" style="margin-bottom:16px">
+                        <div class="form-group">
+                            <label>Name <span style="color:var(--error)">*</span></label>
+                            <input type="text" id="ng-name" value="${escHtml(group ? group.name : '')}"
+                                placeholder="compute-nodes"
+                                pattern="^[a-zA-Z0-9][a-zA-Z0-9_\\-]*$"
+                                oninput="Pages._ngValidateName(this)"
+                                required>
+                            <div id="ng-name-hint" class="form-hint" style="min-height:16px"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <input type="text" id="ng-description" value="${escHtml(group ? (group.description || '') : '')}"
+                                placeholder="Standard CPU compute nodes">
+                        </div>
+                    </div>
+
+                    <!-- Disk Layout Override -->
+                    <details id="ng-layout-details" ${hasLayout ? 'open' : ''} style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px">
+                        <summary style="padding:10px 14px;cursor:pointer;font-weight:600;font-size:14px;user-select:none">
+                            Disk Layout Override
+                            <span style="font-weight:400;font-size:12px;color:var(--text-secondary);margin-left:8px">
+                                ${hasLayout ? `${group.disk_layout_override.partitions.length} partition${group.disk_layout_override.partitions.length !== 1 ? 's' : ''} defined` : 'inherits from image'}
+                            </span>
+                        </summary>
+                        <div style="padding:14px;border-top:1px solid var(--border)">
+                            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                                    <input type="radio" name="ng-layout-mode" value="inherit"
+                                        ${!hasLayout ? 'checked' : ''} onchange="Pages._ngLayoutModeChange(this.value)">
+                                    Inherit from image (default)
+                                </label>
+                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
+                                    <input type="radio" name="ng-layout-mode" value="custom"
+                                        ${hasLayout ? 'checked' : ''} onchange="Pages._ngLayoutModeChange(this.value)">
+                                    Use custom layout for this group
+                                </label>
+                            </div>
+                            <div id="ng-layout-editor" style="display:${hasLayout ? '' : 'none'}">
+                                <div id="ng-layout-warnings" style="margin-bottom:8px"></div>
+                                <div class="table-wrap">
+                                    <table id="ng-layout-table">
+                                        <thead><tr>
+                                            <th>Label</th><th>Size</th><th>Filesystem</th><th>Mountpoint</th><th></th>
+                                        </tr></thead>
+                                        <tbody id="ng-layout-tbody">${existingLayoutRows}</tbody>
+                                    </table>
+                                </div>
+                                <div style="margin-top:8px;display:flex;gap:8px">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngLayoutAddRow()">Add Partition</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngLayoutFillLast()">Set Last → Fill</button>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <!-- Extra Mounts -->
+                    <details id="ng-mounts-details" ${mounts.length > 0 ? 'open' : ''} style="margin-bottom:20px;border:1px solid var(--border);border-radius:6px">
+                        <summary style="padding:10px 14px;cursor:pointer;font-weight:600;font-size:14px;user-select:none">
+                            Extra Mounts
+                            <span style="font-weight:400;font-size:12px;color:var(--text-secondary);margin-left:8px" id="ng-mounts-count">
+                                ${mounts.length > 0 ? `${mounts.length} mount${mounts.length !== 1 ? 's' : ''} defined` : 'none'}
+                            </span>
+                        </summary>
+                        <div style="padding:14px;border-top:1px solid var(--border)">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                                <select id="ng-mounts-preset" style="font-size:12px;padding:4px 8px;width:auto">
+                                    <option value="">— Apply preset —</option>
+                                    <option value="nfs-home">NFS home</option>
+                                    <option value="lustre">Lustre scratch</option>
+                                    <option value="beegfs">BeeGFS data</option>
+                                    <option value="cifs">CIFS / Samba</option>
+                                    <option value="bind">Bind mount</option>
+                                    <option value="tmpfs">tmpfs</option>
+                                </select>
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngMountsApplyPreset()">Apply</button>
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngMountsAddRow()">+ Add Mount</button>
+                            </div>
+                            <div id="ng-mounts-wrap">
+                                ${mounts.length > 0 ? `<div class="table-wrap" style="overflow-x:auto"><table id="ng-mounts-table" style="width:100%;font-size:12px;border-collapse:collapse">
+                                    <thead><tr style="border-bottom:1px solid var(--border)">
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Source</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Mount Point</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">FS Type</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Options</th>
+                                        <th style="text-align:center;padding:4px 6px;font-weight:500;color:var(--text-secondary)" title="Auto-mkdir">mkd</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Comment</th>
+                                        <th style="padding:4px"></th>
+                                    </tr></thead>
+                                    <tbody id="ng-mounts-tbody">${existingMountRows}</tbody>
+                                </table></div>` : `<div class="table-wrap" style="overflow-x:auto;display:none"><table id="ng-mounts-table" style="width:100%;font-size:12px;border-collapse:collapse">
+                                    <thead><tr style="border-bottom:1px solid var(--border)">
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Source</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Mount Point</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">FS Type</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Options</th>
+                                        <th style="text-align:center;padding:4px 6px;font-weight:500;color:var(--text-secondary)" title="Auto-mkdir">mkd</th>
+                                        <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Comment</th>
+                                        <th style="padding:4px"></th>
+                                    </tr></thead>
+                                    <tbody id="ng-mounts-tbody"></tbody>
+                                </table></div>
+                                <div id="ng-mounts-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No mounts configured</div>`}
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('node-group-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" id="ng-save-btn"
+                            onclick="Pages._ngSubmit(${isEdit ? `'${escHtml(group.id)}'` : 'null'})">
+                            ${isEdit ? 'Save Changes' : 'Create Group'}
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+        // Initialise layout state reference on the overlay.
+        // (already set above, but re-read after DOM insert for clarity)
+        const modal = document.getElementById('node-group-modal');
+        if (modal) modal._layoutState = overlay._layoutState;
+    },
+
+    _ngValidateName(input) {
+        const hint = document.getElementById('ng-name-hint');
+        if (!hint) return;
+        const val = input.value;
+        if (!val) { hint.textContent = ''; return; }
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_\-]*$/.test(val)) {
+            hint.style.color = 'var(--error)';
+            hint.textContent = 'Use letters, digits, hyphens, or underscores only';
+        } else {
+            hint.style.color = 'var(--success)';
+            hint.textContent = '';
+        }
+    },
+
+    _ngLayoutModeChange(mode) {
+        const editor = document.getElementById('ng-layout-editor');
+        if (!editor) return;
+        editor.style.display = mode === 'custom' ? '' : 'none';
+    },
+
+    _ngGetModal() {
+        return document.getElementById('node-group-modal');
+    },
+
+    // ── Group layout editor ───────────────────────────────────────────────────
+
+    _ngLayoutRowHTML(idx, p) {
+        p = p || {};
+        return `<tr>
+            <td><input type="text" value="${escHtml(p.label||'')}"
+                onchange="Pages._ngLayoutUpdate(${idx},'label',this.value)" style="width:90px"></td>
+            <td><input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}"
+                onchange="Pages._ngLayoutParseSize(${idx},this.value)" style="width:80px" placeholder="e.g. 100GB or fill"></td>
+            <td><select onchange="Pages._ngLayoutUpdate(${idx},'filesystem',this.value)">
+                ${['xfs','ext4','vfat','swap','biosboot'].map(fs =>
+                    `<option value="${fs}" ${p.filesystem===fs?'selected':''}>${fs}</option>`).join('')}
+            </select></td>
+            <td><input type="text" value="${escHtml(p.mountpoint||'')}"
+                onchange="Pages._ngLayoutUpdate(${idx},'mountpoint',this.value)" style="width:90px"></td>
+            <td><button class="btn btn-danger btn-sm" onclick="Pages._ngLayoutRemoveRow(${idx})"
+                style="padding:2px 8px">✕</button></td>
+        </tr>`;
+    },
+
+    _ngLayoutUpdate(idx, field, value) {
+        const modal = this._ngGetModal();
+        if (!modal) return;
+        modal._layoutState.partitions[idx][field] = value;
+        this._ngLayoutValidate(modal);
+    },
+
+    _ngLayoutParseSize(idx, value) {
+        const modal = this._ngGetModal();
+        if (!modal) return;
+        const trimmed = value.trim().toLowerCase();
+        let bytes = 0;
+        if (trimmed !== 'fill' && trimmed !== '0' && trimmed !== '') {
+            const match = trimmed.match(/^([\d.]+)\s*(mb|gb|tb|kb|b)?$/);
+            if (match) {
+                const n = parseFloat(match[1]);
+                const unit = match[2] || 'b';
+                const mult = {b:1, kb:1024, mb:1024**2, gb:1024**3, tb:1024**4};
+                bytes = Math.round(n * (mult[unit]||1));
+            }
+        }
+        modal._layoutState.partitions[idx].size_bytes = bytes;
+        this._ngLayoutValidate(modal);
+    },
+
+    _ngLayoutRemoveRow(idx) {
+        const modal = this._ngGetModal();
+        if (!modal) return;
+        modal._layoutState.partitions.splice(idx, 1);
+        this._ngLayoutRebuildRows(modal);
+        this._ngLayoutValidate(modal);
+    },
+
+    _ngLayoutAddRow() {
+        const modal = this._ngGetModal();
+        if (!modal) return;
+        if (!modal._layoutState) modal._layoutState = { partitions: [] };
+        modal._layoutState.partitions.push({ label: '', size_bytes: 0, filesystem: 'xfs', mountpoint: '' });
+        this._ngLayoutRebuildRows(modal);
+    },
+
+    _ngLayoutFillLast() {
+        const modal = this._ngGetModal();
+        if (!modal || !modal._layoutState || !modal._layoutState.partitions.length) return;
+        modal._layoutState.partitions[modal._layoutState.partitions.length - 1].size_bytes = 0;
+        this._ngLayoutRebuildRows(modal);
+    },
+
+    _ngLayoutRebuildRows(modal) {
+        const tbody = document.getElementById('ng-layout-tbody');
+        if (!tbody) return;
+        tbody.innerHTML = (modal._layoutState.partitions || []).map((p, i) =>
+            this._ngLayoutRowHTML(i, p)
+        ).join('');
+        this._ngLayoutValidate(modal);
+    },
+
+    _ngLayoutValidate(modal) {
+        const warnEl  = document.getElementById('ng-layout-warnings');
+        const saveBtn = document.getElementById('ng-save-btn');
+        if (!warnEl || !modal || !modal._layoutState) return;
+        const mode = document.querySelector('input[name="ng-layout-mode"]:checked');
+        if (!mode || mode.value !== 'custom') { warnEl.innerHTML = ''; if (saveBtn) saveBtn.disabled = false; return; }
+        const parts = modal._layoutState.partitions || [];
+        const errs = [];
+        if (!parts.some(p => p.mountpoint === '/')) errs.push('Must have a / (root) partition');
+        if (parts.filter(p => !p.size_bytes).length > 1) errs.push('Only one partition may use "fill"');
+        warnEl.innerHTML = errs.map(e => `<div class="alert alert-error" style="margin:2px 0;font-size:12px">${escHtml(e)}</div>`).join('');
+        if (saveBtn) saveBtn.disabled = errs.length > 0;
+    },
+
+    // ── Group mounts editor ───────────────────────────────────────────────────
+
+    _ngMountRowHTML(idx, m) {
+        m = m || {};
+        const fsTypes = ['nfs','nfs4','cifs','beegfs','lustre','gpfs','xfs','ext4','bind','9p','tmpfs','vfat','ext3','smbfs'];
+        const fsSelect = fsTypes.map(t =>
+            `<option value="${t}"${m.fs_type === t ? ' selected' : ''}>${t}</option>`
+        ).join('');
+        return `<tr data-ng-mount-idx="${idx}" style="border-bottom:1px solid var(--border)">
+            <td style="padding:4px 3px">
+                <input type="text" name="ng_mount_source" value="${escHtml(m.source||'')}"
+                    placeholder="nfs-server:/export/home" style="width:100%;min-width:130px;font-size:12px" required>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="ng_mount_point" value="${escHtml(m.mount_point||'')}"
+                    placeholder="/mnt/share" style="width:100%;min-width:110px;font-size:12px" required>
+            </td>
+            <td style="padding:4px 3px">
+                <select name="ng_mount_fs_type" style="font-size:12px;padding:2px 4px">${fsSelect}</select>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="ng_mount_options" value="${escHtml(m.options||'')}"
+                    placeholder="defaults,_netdev" style="width:100%;min-width:120px;font-size:12px">
+            </td>
+            <td style="padding:4px 3px;text-align:center">
+                <input type="checkbox" name="ng_mount_auto_mkdir" ${m.auto_mkdir !== false ? 'checked' : ''}>
+            </td>
+            <td style="padding:4px 3px">
+                <input type="text" name="ng_mount_comment" value="${escHtml(m.comment||'')}"
+                    placeholder="optional note" style="width:100%;min-width:80px;font-size:12px">
+            </td>
+            <td style="padding:4px 3px">
+                <button type="button" class="btn btn-danger btn-sm"
+                    onclick="Pages._ngMountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
+            </td>
+        </tr>`;
+    },
+
+    _ngMountsAddRow(preset) {
+        const tbody = document.getElementById('ng-mounts-tbody');
+        const wrap  = document.getElementById('ng-mounts-wrap');
+        if (!tbody) return;
+        const idx = tbody.querySelectorAll('tr').length;
+        tbody.insertAdjacentHTML('beforeend', Pages._ngMountRowHTML(idx, preset || {}));
+        // Show table if hidden.
+        const tableWrap = wrap ? wrap.querySelector('.table-wrap') : null;
+        if (tableWrap) tableWrap.style.display = '';
+        const empty = document.getElementById('ng-mounts-empty');
+        if (empty) empty.remove();
+        this._ngUpdateMountsCount();
+    },
+
+    _ngMountsRemoveRow(btn) {
+        const row = btn.closest('tr');
+        if (row) row.remove();
+        const tbody = document.getElementById('ng-mounts-tbody');
+        const wrap  = document.getElementById('ng-mounts-wrap');
+        if (tbody && tbody.querySelectorAll('tr').length === 0) {
+            const tableWrap = wrap ? wrap.querySelector('.table-wrap') : null;
+            if (tableWrap) tableWrap.style.display = 'none';
+            if (wrap && !document.getElementById('ng-mounts-empty')) {
+                wrap.insertAdjacentHTML('beforeend',
+                    `<div id="ng-mounts-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No mounts configured</div>`);
+            }
+        }
+        this._ngUpdateMountsCount();
+    },
+
+    _ngMountsApplyPreset() {
+        const sel = document.getElementById('ng-mounts-preset');
+        if (!sel || !sel.value) return;
+        const presets = {
+            'nfs-home': { source: 'nfs-server:/export/home', mount_point: '/home/shared',  fs_type: 'nfs4',   options: 'defaults,_netdev,vers=4',               auto_mkdir: true,  comment: 'NFS home directory' },
+            'lustre':   { source: 'mgs@tcp:/scratch',        mount_point: '/scratch',       fs_type: 'lustre', options: 'defaults,_netdev,flock',                auto_mkdir: true,  comment: 'Lustre scratch' },
+            'beegfs':   { source: 'beegfs',                  mount_point: '/mnt/beegfs',    fs_type: 'beegfs', options: 'defaults,_netdev',                      auto_mkdir: true,  comment: 'BeeGFS data' },
+            'cifs':     { source: '//winserver/share',        mount_point: '/mnt/share',     fs_type: 'cifs',   options: 'defaults,_netdev,vers=3.0,sec=ntlmssp', auto_mkdir: true,  comment: 'CIFS (Windows) share' },
+            'bind':     { source: '/data/src',               mount_point: '/data/dst',      fs_type: 'bind',   options: 'defaults,bind',                         auto_mkdir: true,  comment: 'Bind mount' },
+            'tmpfs':    { source: 'tmpfs',                   mount_point: '/tmp',           fs_type: 'tmpfs',  options: 'defaults,size=4G,mode=1777',            auto_mkdir: false, comment: 'tmpfs /tmp' },
+        };
+        const p = presets[sel.value];
+        if (p) Pages._ngMountsAddRow(p);
+        sel.value = '';
+    },
+
+    _ngUpdateMountsCount() {
+        const count = document.getElementById('ng-mounts-count');
+        if (!count) return;
+        const tbody = document.getElementById('ng-mounts-tbody');
+        const n = tbody ? tbody.querySelectorAll('tr').length : 0;
+        count.textContent = n > 0 ? `${n} mount${n !== 1 ? 's' : ''} defined` : 'none';
+    },
+
+    _ngCollectMounts() {
+        const tbody = document.getElementById('ng-mounts-tbody');
+        if (!tbody) return [];
+        const mounts = [];
+        tbody.querySelectorAll('tr').forEach(row => {
+            const source    = (row.querySelector('[name="ng_mount_source"]')?.value || '').trim();
+            const mountPoint = (row.querySelector('[name="ng_mount_point"]')?.value || '').trim();
+            const fsType    = row.querySelector('[name="ng_mount_fs_type"]')?.value || 'nfs';
+            const options   = (row.querySelector('[name="ng_mount_options"]')?.value || '').trim();
+            const autoMkdir = row.querySelector('[name="ng_mount_auto_mkdir"]')?.checked !== false;
+            const comment   = (row.querySelector('[name="ng_mount_comment"]')?.value || '').trim();
+            if (!source || !mountPoint) return;
+            mounts.push({ source, mount_point: mountPoint, fs_type: fsType, options, auto_mkdir: autoMkdir, comment, dump: 0, pass: 0 });
+        });
+        return mounts;
+    },
+
+    // ── Group form submit ─────────────────────────────────────────────────────
+
+    async _ngSubmit(groupId) {
+        const nameEl   = document.getElementById('ng-name');
+        const descEl   = document.getElementById('ng-description');
+        const resultEl = document.getElementById('ng-form-result');
+        const saveBtn  = document.getElementById('ng-save-btn');
+        const modal    = this._ngGetModal();
+
+        if (!nameEl || !modal) return;
+
+        const name = (nameEl.value || '').trim();
+        const desc = (descEl ? descEl.value : '').trim();
+
+        if (!name) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Name is required</div>`;
+            return;
+        }
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_\-]*$/.test(name)) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Name must contain only letters, digits, hyphens, and underscores</div>`;
+            return;
+        }
+
+        // Determine layout override.
+        const modeEl = document.querySelector('input[name="ng-layout-mode"]:checked');
+        const useCustomLayout = modeEl && modeEl.value === 'custom';
+        let diskLayoutOverride = null;
+        if (useCustomLayout) {
+            const parts = (modal._layoutState && modal._layoutState.partitions) || [];
+            if (!parts.some(p => p.mountpoint === '/')) {
+                if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Disk layout must include a root (/) partition</div>`;
+                return;
+            }
+            if (parts.filter(p => !p.size_bytes).length > 1) {
+                if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Only one partition may use "fill"</div>`;
+                return;
+            }
+            diskLayoutOverride = { partitions: parts };
+        }
+
+        const extraMounts = this._ngCollectMounts();
+
+        const body = {
+            name,
+            description: desc,
+            disk_layout_override: diskLayoutOverride,
+            extra_mounts: extraMounts,
+        };
+
+        if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+        if (resultEl) resultEl.innerHTML = '';
+
+        try {
+            if (groupId) {
+                await API.nodeGroups.update(groupId, body);
+                App.toast(`Group "${name}" updated`, 'success');
+            } else {
+                await API.nodeGroups.create(body);
+                App.toast(`Group "${name}" created`, 'success');
+            }
+            document.getElementById('node-group-modal').remove();
+            Pages.nodeGroups();
+        } catch (e) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = groupId ? 'Save Changes' : 'Create Group'; }
+        }
+    },
+
+    // deleteNodeGroup deletes a group after checking whether nodes are using it.
+    async deleteNodeGroup(id, name) {
+        // Fetch current nodes to see if any are using this group.
+        let usingNodes = [];
+        try {
+            const resp = await API.nodes.list();
+            usingNodes = ((resp && resp.nodes) || []).filter(n => n.group_id === id);
+        } catch (_) {}
+
+        let confirmed = false;
+        if (usingNodes.length > 0) {
+            const names = usingNodes.map(n => n.hostname || n.primary_mac).join(', ');
+            confirmed = confirm(
+                `${usingNodes.length} node${usingNodes.length !== 1 ? 's are' : ' is'} using this group: ${names}.\n\n` +
+                `Deleting it will remove the group assignment from those nodes but keep them as standalone nodes.\n\nContinue?`
+            );
+        } else {
+            confirmed = confirm(`Delete group "${name}"? This cannot be undone.`);
+        }
+        if (!confirmed) return;
+
+        try {
+            await API.nodeGroups.del(id);
+            App.toast(`Group "${name}" deleted`, 'success');
+            Pages.nodeGroups();
+        } catch (e) {
+            if (e.message && e.message.includes('409')) {
+                alert(`Cannot delete group — it is still in use. Remove all node assignments first or contact the admin.`);
+            } else {
+                App.toast(`Delete failed: ${e.message}`, 'error');
+            }
+        }
+    },
 
     // ── Build from ISO modal ─────────────────────────────────────────���─────
 
