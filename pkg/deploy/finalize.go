@@ -600,6 +600,43 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	}
 	log.Info().Msg("finalize/boot: /etc/fstab written with target UUIDs")
 
+	// ── 2b. BLS boot entry UUID update ──────────────────────────────────────
+	// On Rocky/RHEL 9 with Boot Loader Specification (BLS) enabled, the kernel
+	// cmdline — including root=UUID=... — is stored in individual boot entry
+	// files under /boot/loader/entries/*.conf, NOT in grub.cfg.
+	// grub2-mkconfig reads these entries (via blscfg) but does NOT modify them.
+	// The UUID in these files was baked in when the kernel package was installed
+	// on the capture source, so it references the source machine's root UUID.
+	// We must update each entry's "options" line to reference the target disk's
+	// root UUID so the deployed OS can find its root filesystem at boot time.
+	//
+	// Find the root partition device by matching layout.Partitions[i].MountPoint == "/".
+	rootUUID := ""
+	for i, p := range layout.Partitions {
+		if p.MountPoint == "/" {
+			if i < len(partDevs) {
+				uuid, err := getUUID(ctx, partDevs[i])
+				if err != nil {
+					log.Warn().Err(err).Str("device", partDevs[i]).
+						Msg("finalize/boot: could not get root UUID for BLS update — deployed OS may fail to boot")
+				} else {
+					rootUUID = uuid
+				}
+			}
+			break
+		}
+	}
+	if rootUUID != "" {
+		if err := updateBLSEntries(mountRoot, rootUUID); err != nil {
+			log.Warn().Err(err).Str("root_uuid", rootUUID).
+				Msg("finalize/boot: BLS entry update failed — deployed OS may fail to boot (wrong root= in kernel cmdline)")
+		} else {
+			log.Info().Str("root_uuid", rootUUID).Msg("finalize/boot: BLS boot entries updated with target root UUID")
+		}
+	} else {
+		log.Warn().Msg("finalize/boot: no root partition found in layout — skipping BLS entry update")
+	}
+
 	log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: regenerating GRUB config via grub2-mkconfig")
 
 	// Ensure the standard virtual filesystem mount points exist in the deployed
@@ -694,6 +731,61 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 			Msg("finalize/boot: SSH host keys removed — sshd will regenerate on first boot")
 	}
 
+	return nil
+}
+
+// updateBLSEntries rewrites the root=UUID=... argument in every Boot Loader
+// Specification (BLS) entry under /boot/loader/entries/*.conf so that the
+// kernel cmdline references the target disk's root filesystem UUID rather than
+// the capture source's UUID.
+//
+// On Rocky/RHEL 9 with blscfg, GRUB reads kernel cmdlines from these .conf
+// files. grub2-mkconfig does not modify them — they are managed by kernel-install
+// and grubby. Without this fix, the deployed OS kernel panics with
+// "Unable to find root filesystem" because it tries to mount the OLD UUID.
+func updateBLSEntries(mountRoot, rootUUID string) error {
+	log := logger()
+	entriesDir := filepath.Join(mountRoot, "boot", "loader", "entries")
+
+	// Glob all BLS entries.
+	entries, err := filepath.Glob(filepath.Join(entriesDir, "*.conf"))
+	if err != nil || len(entries) == 0 {
+		// Not a BLS system, or /boot/loader/entries doesn't exist.
+		// This is non-fatal — the system may use a legacy grub.cfg directly.
+		log.Info().Str("dir", entriesDir).Msg("finalize/boot: no BLS entries found — skipping BLS UUID update (non-BLS system)")
+		return nil
+	}
+
+	uuidRe := regexp.MustCompile(`root=UUID=[0-9a-fA-F-]+`)
+	updated := 0
+	for _, path := range entries {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Warn().Err(err).Str("path", path).Msg("finalize/boot: could not read BLS entry")
+			continue
+		}
+
+		original := string(data)
+		// Replace any existing root=UUID=... on the "options" line.
+		newContent := uuidRe.ReplaceAllString(original, "root=UUID="+rootUUID)
+		if newContent == original {
+			// No UUID in this entry's options — already up to date or non-standard.
+			continue
+		}
+
+		if err := os.WriteFile(path, []byte(newContent), 0o644); err != nil {
+			log.Warn().Err(err).Str("path", path).Msg("finalize/boot: could not write BLS entry")
+			continue
+		}
+		log.Info().Str("path", filepath.Base(path)).Str("root_uuid", rootUUID).
+			Msg("finalize/boot: updated root UUID in BLS entry")
+		updated++
+	}
+
+	if updated == 0 && len(entries) > 0 {
+		log.Warn().Str("dir", entriesDir).
+			Msg("finalize/boot: BLS entries found but none had root=UUID= — may already be correct or using non-standard cmdline")
+	}
 	return nil
 }
 
