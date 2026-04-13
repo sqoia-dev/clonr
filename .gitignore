@@ -1,0 +1,30 @@
+# Build artifacts
+/bin/
+/clonr
+/clonr-serverd
+/clonr-serverd-*
+/clonr-static
+/initramfs-clonr.img
+*.tar.gz
+*.tar.zst
+*.blob
+
+# Go build cache
+*.test
+*.out
+/coverage.html
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
