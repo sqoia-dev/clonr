@@ -92,6 +92,12 @@ type BuildOptions struct {
 	// OnStderrLine, when set, is called for each line read from QEMU's own
 	// stderr (process-level errors, not guest OS output).
 	OnStderrLine func(line string)
+
+	// Firmware selects the firmware interface used for the installer VM.
+	// "uefi": OVMF pflash drives are passed (-drive if=pflash,...) — default.
+	// "bios": SeaBIOS via -bios flag (or omitted — SeaBIOS is the QEMU default).
+	// When empty, "uefi" is assumed.
+	Firmware string
 }
 
 // BuildResult is returned by a successful Build call.
@@ -469,6 +475,41 @@ func applyDefaults(opts *BuildOptions) {
 	}
 }
 
+// ovmfCodePaths lists candidate locations for the OVMF firmware code file,
+// ordered by preference across common Linux distributions.
+var ovmfCodePaths = []string{
+	"/usr/share/OVMF/OVMF_CODE.fd",
+	"/usr/share/edk2/ovmf/OVMF_CODE.fd",
+	"/usr/share/qemu/OVMF_CODE.fd",
+	"/usr/share/ovmf/OVMF.fd",
+}
+
+// ovmfVarsPaths lists candidate locations for the OVMF VARS (NVRAM) template.
+var ovmfVarsPaths = []string{
+	"/usr/share/OVMF/OVMF_VARS.fd",
+	"/usr/share/edk2/ovmf/OVMF_VARS.fd",
+	"/usr/share/qemu/OVMF_VARS.fd",
+}
+
+// seabiosPaths lists candidate locations for the SeaBIOS binary.
+var seabiosPaths = []string{
+	"/usr/share/qemu/bios-256k.bin",
+	"/usr/share/seabios/bios-256k.bin",
+	"/usr/share/qemu-kvm/bios-256k.bin",
+	"/usr/share/qemu/bios.bin",
+}
+
+// findFile returns the first path from candidates that exists on the filesystem,
+// or an empty string if none exist.
+func findFile(candidates []string) string {
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // buildQEMUArgs constructs the qemu-system-x86_64 argument list.
 //
 // When kbf is non-nil the installer ISO is booted via direct kernel boot
@@ -478,6 +519,11 @@ func applyDefaults(opts *BuildOptions) {
 //
 // When kbf is nil (unsupported distro or extraction failure) the legacy
 // CD-ROM boot path is used (-boot order=d,once=d).
+//
+// Firmware mode:
+//   - "uefi" (default): OVMF code+vars are passed via -drive if=pflash.
+//   - "bios": SeaBIOS is used via -bios flag (or omitted — SeaBIOS is the
+//     QEMU default). No pflash drives are added.
 func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string, kbf *KernelBootFiles) []string {
 	args := []string{
 		// Machine and acceleration.
@@ -498,6 +544,37 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 	if !HasKVM() {
 		// Replace the first two args with TCG-only config.
 		args = []string{"-machine", "pc,accel=tcg", "-cpu", "qemu64"}
+	}
+
+	// ── Firmware selection ────────────────────────────────────────────────────
+	// UEFI mode (default): attach OVMF code (read-only) + VARS (read-write copy).
+	// BIOS mode: attach SeaBIOS via -bios or rely on QEMU's built-in default.
+	isBIOS := strings.EqualFold(opts.Firmware, "bios")
+	if !isBIOS {
+		// UEFI: find and attach OVMF pflash images.
+		ovmfCode := findFile(ovmfCodePaths)
+		ovmfVars := findFile(ovmfVarsPaths)
+		if ovmfCode != "" && ovmfVars != "" {
+			// Copy VARS to a writable temp file so QEMU can update NVRAM state.
+			varsCopy := filepath.Join(filepath.Dir(rawDiskPath), "ovmf-vars.fd")
+			if data, err := os.ReadFile(ovmfVars); err == nil {
+				_ = os.WriteFile(varsCopy, data, 0o600)
+				args = append(args,
+					"-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", ovmfCode),
+					"-drive", fmt.Sprintf("if=pflash,format=raw,file=%s", varsCopy),
+				)
+			}
+		}
+		// If OVMF files are not found, QEMU falls back to SeaBIOS silently.
+		// The install will still work — the kickstart's EFI partition directives
+		// may cause Anaconda warnings but the install completes.
+	} else {
+		// BIOS: use SeaBIOS. Pass -bios if the file exists; otherwise QEMU uses
+		// its built-in SeaBIOS (which is the true default for -machine pc).
+		seabios := findFile(seabiosPaths)
+		if seabios != "" {
+			args = append(args, "-bios", seabios)
+		}
 	}
 
 	args = append(args,

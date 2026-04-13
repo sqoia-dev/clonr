@@ -123,6 +123,10 @@ type ksTemplateData struct {
 	NeedsBeeGFS    bool
 	// HasDefaultUser is true when a non-root user should be created.
 	HasDefaultUser bool
+	// Firmware is the firmware mode: "uefi" or "bios".
+	// Controls whether an ESP (vfat /boot/efi) or a biosboot partition is
+	// included in the kickstart partition directives.
+	Firmware string
 }
 
 // joinStrings is the template func for joining slices — kept here so the
@@ -131,9 +135,11 @@ func joinStrings(sep string, elems []string) string { return strings.Join(elems,
 
 var kickstartTemplate = template.Must(template.New("ks").Funcs(template.FuncMap{
 	"join": func(elems []string, sep string) string { return strings.Join(elems, sep) },
+	"eq":   func(a, b string) bool { return a == b },
 }).Parse(`# clonr auto-generated kickstart
-# Distro: {{.Distro}}
-# Roles:  {{join .RoleIDs ", "}}
+# Distro:   {{.Distro}}
+# Roles:    {{join .RoleIDs ", "}}
+# Firmware: {{.Firmware}}
 # This kickstart produces a minimal, identity-scrubbed base image suitable
 # for capture as a clonr BaseImage. It is NOT intended as a production kickstart.
 cdrom
@@ -152,10 +158,14 @@ firstboot --disabled
 
 zerombr
 clearpart --all --initlabel --disklabel=gpt
-bootloader --location=mbr --driveorder={{.TargetDisk}} --append="console=ttyS0,115200"
-part biosboot --fstype=biosboot   --size=1     --ondisk={{.TargetDisk}} --label=biosboot
-part /boot    --fstype=xfs        --size=1024  --ondisk={{.TargetDisk}} --label=boot
-part /        --fstype=xfs        --size=1     --grow        --ondisk={{.TargetDisk}} --label=root
+bootloader --location=mbr --boot-drive={{.TargetDisk}} --append="console=ttyS0,115200"
+{{- if eq .Firmware "uefi"}}
+part /boot/efi --fstype=vfat --size=512  --ondisk={{.TargetDisk}} --label=esp --fsoptions="umask=0077,shortname=winnt"
+{{- else}}
+part biosboot  --fstype=biosboot --size=1    --ondisk={{.TargetDisk}} --label=biosboot
+{{- end}}
+part /boot     --fstype=xfs     --size=1024 --ondisk={{.TargetDisk}} --label=boot
+part /         --fstype=xfs     --size=1    --grow      --ondisk={{.TargetDisk}} --label=root
 
 %packages --ignoremissing
 @^minimal-environment
@@ -219,6 +229,11 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		roleIDs = []string{"(none — minimal install)"}
 	}
 
+	firmware := opts.Firmware
+	if firmware == "" || (firmware != "bios" && firmware != "uefi") {
+		firmware = "uefi"
+	}
+
 	d := ksTemplateData{
 		templateData:   data,
 		Distro:         distro.FamilyName(),
@@ -230,6 +245,7 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		NeedsLustre:    hasRole(opts.RoleIDs, "storage"),
 		NeedsBeeGFS:    hasRole(opts.RoleIDs, "storage"),
 		HasDefaultUser: opts.DefaultUsername != "",
+		Firmware:       firmware,
 	}
 
 	var buf bytes.Buffer
