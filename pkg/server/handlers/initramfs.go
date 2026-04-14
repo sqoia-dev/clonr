@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,11 +17,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
 )
+
+//go:embed scripts/build-initramfs.sh
+var buildInitramfsScript []byte // embedded at compile time — no on-disk dependency at runtime
 
 // InitramfsHandler handles system-level initramfs management endpoints.
 type InitramfsHandler struct {
@@ -220,19 +225,34 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 }
 
 // runScript executes build-initramfs.sh and streams output to lines.
+// The script is written from the embedded copy to a temp file at call time,
+// making the binary self-contained with no on-disk script dependency.
 // Closes lines when done.
 func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- string) error {
 	defer close(lines)
 
-	// Resolve paths.
-	scriptPath := h.ScriptPath
-	if !filepath.IsAbs(scriptPath) {
-		abs, err := filepath.Abs(scriptPath)
-		if err != nil {
-			return fmt.Errorf("resolve script path: %w", err)
-		}
-		scriptPath = abs
+	// Write the embedded script to a temp file so the binary is self-contained.
+	// The handler's ScriptPath field is ignored at runtime; the embedded bytes
+	// are always used. This fixes "exit status 127" caused by relative ScriptPath
+	// not existing in the service's WorkingDirectory (/var/lib/clonr).
+	tmpScript, err := os.CreateTemp("", "clonr-build-initramfs-*.sh")
+	if err != nil {
+		return fmt.Errorf("create temp script: %w", err)
 	}
+	tmpScriptPath := tmpScript.Name()
+	defer os.Remove(tmpScriptPath)
+
+	if _, err := tmpScript.Write(buildInitramfsScript); err != nil {
+		tmpScript.Close()
+		return fmt.Errorf("write temp script: %w", err)
+	}
+	if err := tmpScript.Chmod(0o700); err != nil {
+		tmpScript.Close()
+		return fmt.Errorf("chmod temp script: %w", err)
+	}
+	tmpScript.Close()
+
+	scriptPath := tmpScriptPath
 
 	clonrBin := h.ClonrBinPath
 	if clonrBin == "" {
@@ -348,6 +368,35 @@ func extractKeyPrefix(r *http.Request) string {
 		return key
 	}
 	return "session"
+}
+
+// DeleteInitramfsHistory handles DELETE /api/v1/system/initramfs/history/{id}.
+// Deletes a single history entry by ID. Refuses to delete the most recent
+// successful entry (the live initramfs) to prevent orphaning the active image.
+func (h *InitramfsHandler) DeleteInitramfsHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: "missing id", Code: "bad_request"})
+		return
+	}
+
+	ctx := r.Context()
+
+	// Guard: refuse to delete the most recent successful entry (that's the live initramfs).
+	liveID, err := h.DB.LatestSuccessfulInitramfsBuildID(ctx)
+	if err == nil && liveID == id {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "cannot delete the most recent successful build — it points to the live initramfs",
+			Code:  "live_entry_cannot_delete",
+		})
+		return
+	}
+
+	if err := h.DB.DeleteInitramfsBuild(ctx, id); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GetBuildLog returns the full build log for an initramfs build.
