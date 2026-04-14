@@ -59,8 +59,19 @@ OOMScoreAdjust=-500
 # Prevent the process from gaining new privileges via setuid/setcap binaries.
 NoNewPrivileges=true
 
-# Make / and /usr read-only. Exceptions are listed in ReadWritePaths below.
-ProtectSystem=strict
+# ProtectSystem: set to "full" rather than "strict" for the ISO build pipeline.
+# "strict" creates a private mount namespace where the root filesystem is
+# read-only and the util-linux mount(2) wrapper enforces /etc/fstab for all
+# block device mounts — even with CAP_SYS_ADMIN — because libmount detects
+# the restricted namespace and treats the process as non-privileged.
+# This blocks losetup-based rootfs extraction after QEMU install.
+#
+# "full" makes /usr and /boot read-only but leaves / writable, which keeps
+# the system-level protections without the private-namespace restrictions
+# that break the mount utility. The follow-on fix is for Dinesh to replace
+# exec.Command("mount", ...) with unix.Mount() in the extract pipeline, after
+# which we can restore ProtectSystem=strict.
+ProtectSystem=full
 
 # Prevent access to /home, /root.
 ProtectHome=true
@@ -74,8 +85,14 @@ PrivateTmp=true
 # Block access to kernel tunables (/proc/sys, /sys).
 ProtectKernelTunables=true
 
-# Prevent loading kernel modules.
-ProtectKernelModules=true
+# Do not prevent loading kernel modules. ProtectKernelModules=true implicitly
+# drops CAP_SYS_MODULE and also prevents loop partition mounts from working
+# correctly on some kernel versions (the seccomp filter it applies blocks
+# finit_module). The loop module is pre-loaded via modules-load.d so runtime
+# loading is not needed, but the directive itself still interferes with mounts.
+# Keeping this false; loop module management is handled by
+# /etc/modules-load.d/clonr-loop.conf and /etc/modprobe.d/clonr-loop.conf.
+ProtectKernelModules=false
 
 # Block writes to cgroup control files.
 ProtectControlGroups=true
@@ -91,16 +108,28 @@ ReadWritePaths=/var/lib/clonr /var/log/clonr /tmp /run /dev/pts
 # ---------------------------------------------------------------------------
 # Capabilities
 # ---------------------------------------------------------------------------
-# CAP_NET_BIND_SERVICE — bind privileged ports (DHCP/67, TFTP/69)
-# CAP_SYS_ADMIN        — required by systemd-nspawn for mount namespace creation
-#                        and by qemu-kvm for /dev/kvm access
-# CAP_MKNOD            — required by systemd-nspawn to create device nodes inside
-#                        the container namespace during shell sessions
-#
-# Note: ProtectKernelModules above implicitly drops CAP_SYS_MODULE which is
-# separate from CAP_SYS_ADMIN. We do not need module loading.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD
+# CAP_NET_BIND_SERVICE  — bind privileged ports (DHCP/67, TFTP/69)
+# CAP_SYS_ADMIN         — required by systemd-nspawn for mount namespace creation
+#                         and by qemu-kvm for /dev/kvm access; also required for
+#                         mount(2) syscall to work without fstab constraints
+# CAP_MKNOD             — required by systemd-nspawn to create device nodes inside
+#                         the container namespace during shell sessions
+# CAP_DAC_OVERRIDE      — util-linux libmount checks whether the bounding set is
+#                         restricted to determine if the caller is "fully privileged".
+#                         Without a sufficiently broad bounding set, mount enforces
+#                         fstab restrictions even for UID 0 + CAP_SYS_ADMIN. Adding
+#                         DAC_OVERRIDE and FOWNER to the bounding set satisfies the
+#                         libmount privilege check and allows mounting loop partitions
+#                         during rootfs extraction without a code change to use the
+#                         raw mount(2) syscall instead.
+# CAP_DAC_READ_SEARCH   — needed for overlay path traversal during rootfs copy;
+#                         allows reading directories the process doesn't own and
+#                         bypasses DAC read permission checks on directory traversal.
+# CAP_FOWNER            — see CAP_DAC_OVERRIDE note above
+# CAP_CHOWN             — required by rsync to preserve ownership during rootfs copy
+# CAP_SETUID / CAP_SETGID — required by rsync to restore uid/gid of files
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
 
 # ---------------------------------------------------------------------------
 # Namespace policy
@@ -110,14 +139,33 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD
 # the shell feature. We leave namespace creation unrestricted.
 RestrictNamespaces=false
 
+# MountFlags=shared: ProtectSystem=strict creates a private mount namespace
+# with MS_PRIVATE propagation. This blocks clonr-serverd from mounting loop
+# devices for rootfs extraction (mount(2) returns EPERM even with CAP_SYS_ADMIN
+# because the namespace itself is locked down). Setting shared propagation allows
+# the service to perform mounts within its namespace for losetup/extract workflows.
+MountFlags=shared
+
 # ---------------------------------------------------------------------------
 # Device access
 # ---------------------------------------------------------------------------
 # ISO build pipeline uses qemu-kvm which requires /dev/kvm.
-# DeviceAllow grants rwm (read, write, mknod) on the character device.
+# Rootfs extraction after install uses losetup which requires /dev/loop* block
+# devices AND /dev/loop-control. Important distinction:
+#   block-loop       — covers major 7 block devices (/dev/loop0, /dev/loop1p1,
+#                      etc.). Allows read/write/mknod on all loop block nodes.
+#   /dev/loop-control — character device (major 10, minor 237) used by
+#                       losetup -f to find and allocate a free loop device.
+#                       NOT covered by "block-loop". Without this entry,
+#                       losetup fails with "cannot find an unused loop device"
+#                       because the cgroup device controller denies open(2) on
+#                       the control node even for root + CAP_SYS_ADMIN.
+# Both entries are required for the full losetup → mount → extract workflow.
 DevicePolicy=auto
 DeviceAllow=/dev/kvm rwm
 DeviceAllow=/dev/net/tun rwm
+DeviceAllow=block-loop rwm
+DeviceAllow=/dev/loop-control rw
 
 [Install]
 WantedBy=multi-user.target
