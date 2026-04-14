@@ -94,8 +94,13 @@ ProtectKernelTunables=true
 # /etc/modules-load.d/clonr-loop.conf and /etc/modprobe.d/clonr-loop.conf.
 ProtectKernelModules=false
 
-# Block writes to cgroup control files.
-ProtectControlGroups=true
+# nspawn shell sessions (spawned via systemd-run --scope --slice=clonr-shells.slice)
+# must create a sub-cgroup for the container process. The service's mount namespace
+# makes /sys/fs/cgroup read-only when ProtectControlGroups=true, which causes
+# nspawn to fail with "Failed to create ... subcgroup: Read-only file system".
+# Setting false allows child processes in the same mount namespace to manage their
+# own cgroups. The shells slice itself limits resource usage.
+ProtectControlGroups=false
 
 # Explicit read-write paths required by clonr-serverd:
 #   /var/lib/clonr — all runtime data (DB, images, tftpboot, boot, tmp, iso-cache)
