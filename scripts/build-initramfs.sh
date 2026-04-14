@@ -397,6 +397,10 @@ ${transitive}"
         zstd            # zstandard — fast decompression of .tar.zst images
         rsync           # incremental deploy sync
         udevadm         # device settle after partition table changes
+        curl            # HTTP client for deploy-complete POST and connectivity tests
+                        # (requires shared libs: libcurl, libssl, libcrypto, libz, etc.)
+                        # busybox wget cannot do POST with Authorization headers or
+                        # capture HTTP response codes via -w "%{http_code}"
     )
     for tool in "${DEPLOY_TOOLS_BIN[@]}"; do
         find_and_install_bin "$tool" "$WORKDIR/usr/bin" || true
@@ -431,12 +435,21 @@ ${transitive}"
 fi
 
 # Create symlinks for all busybox applets we need.
+# NOTE: which, ping, reboot, sync, touch, seq are busybox applets — they must
+# be explicitly symlinked or the init script fails with "command not found".
+# which: used in init for `which lsblk` diagnostics
+# ping:  used in init for connectivity test
+# reboot: used in init after successful deploy
+# sync:  used in init before reboot
+# touch: used in init for LOG file creation
+# seq:   used in init for the block-device wait loop
 for cmd in sh ash ls cat echo mount umount mkdir cp mv rm ip \
            ifconfig udhcpc modprobe insmod sleep printf \
            grep sed awk cut tr head tail tee wc df free uname dmesg \
            basename dirname readlink ln \
            httpd nc netcat \
-           mdev switch_root pivot_root chroot; do
+           mdev switch_root pivot_root chroot \
+           which ping reboot sync touch seq; do
     ln -sf /bin/busybox "$WORKDIR/bin/$cmd"
 done
 
@@ -956,6 +969,81 @@ if command -v file &>/dev/null; then
         echo ""
     fi
 fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Validation: verify every command the init script invokes is present in the
+# staging rootfs. Fail loudly if anything is missing — catches future drift.
+# We check each command under its expected PATH locations.
+# ──────────────────────────────────────────────────────────────────────────────
+echo "Validating initramfs binary coverage..."
+VALIDATION_FAILED=0
+
+# Commands the init script calls, mapped to where they should live in the rootfs.
+# Format: "command:path1,path2,..." — any one match is sufficient.
+REQUIRED_CMDS=(
+    "sh:/bin/sh,/usr/bin/sh"
+    "mount:/bin/mount,/usr/sbin/mount"
+    "umount:/bin/umount,/usr/sbin/umount"
+    "mkdir:/bin/mkdir"
+    "cat:/bin/cat"
+    "echo:/bin/echo"
+    "grep:/bin/grep"
+    "head:/bin/head"
+    "tail:/bin/tail"
+    "tr:/bin/tr"
+    "cut:/bin/cut"
+    "seq:/bin/seq"
+    "touch:/bin/touch"
+    "ln:/bin/ln"
+    "ls:/bin/ls"
+    "rm:/bin/rm"
+    "sleep:/bin/sleep"
+    "uname:/bin/uname"
+    "dmesg:/bin/dmesg"
+    "ip:/bin/ip,/usr/sbin/ip"
+    "ifconfig:/bin/ifconfig"
+    "udhcpc:/bin/udhcpc"
+    "insmod:/bin/insmod"
+    "ping:/bin/ping"
+    "which:/bin/which"
+    "sync:/bin/sync"
+    "reboot:/bin/reboot"
+    "httpd:/bin/httpd"
+    "nc:/bin/nc"
+    "mdev:/bin/mdev"
+    "basename:/bin/basename"
+    "lsblk:/usr/bin/lsblk"
+    "curl:/usr/bin/curl"
+)
+
+for entry in "${REQUIRED_CMDS[@]}"; do
+    cmd="${entry%%:*}"
+    paths="${entry#*:}"
+    found=false
+    IFS=',' read -ra path_list <<< "$paths"
+    for p in "${path_list[@]}"; do
+        if [[ -f "$WORKDIR$p" && -x "$WORKDIR$p" ]]; then
+            found=true
+            break
+        fi
+    done
+    if [[ "$found" == "false" ]]; then
+        echo "  MISSING: $cmd (expected at: $paths)" >&2
+        VALIDATION_FAILED=1
+    else
+        echo "  OK: $cmd"
+    fi
+done
+
+if [[ "$VALIDATION_FAILED" -eq 1 ]]; then
+    echo "" >&2
+    echo "ERROR: initramfs validation failed — missing binaries listed above." >&2
+    echo "       The initramfs will NOT boot correctly. Fix the missing tools and rebuild." >&2
+    echo "" >&2
+    exit 1
+fi
+
+echo "  [+] All required binaries present in initramfs rootfs"
 
 # Build the cpio archive and compress with gzip.
 echo "Packing cpio archive..."
