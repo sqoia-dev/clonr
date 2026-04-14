@@ -1443,6 +1443,7 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		DefaultUsername: req.DefaultUsername,
 		DefaultPassword: req.DefaultPassword, // plaintext; hashed inside GenerateAutoInstallConfig
 		Firmware:        req.Firmware,
+		BuildID:         imageID, // used to name the systemd-run scope unit
 		// Progress callbacks — feed events into the build handle.
 		OnPhase:       ph.SetPhase,
 		OnSerialLine:  ph.AddSerialLine,
