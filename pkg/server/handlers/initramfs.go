@@ -183,10 +183,18 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 
 	if buildErr != nil {
 		h.failBuild(buildID, buildErr)
+		// Log collected output so the error is visible in the service journal.
+		if len(logLines) > 0 {
+			log.Error().
+				Str("build_id", buildID).
+				Strs("script_output", logLines).
+				Msg("initramfs rebuild: script output before failure")
+		}
 		log.Error().Err(buildErr).Str("build_id", buildID).Msg("initramfs rebuild: failed")
-		writeJSON(w, http.StatusInternalServerError, api.ErrorResponse{
-			Error: fmt.Sprintf("initramfs rebuild failed: %v", buildErr),
-			Code:  "rebuild_failed",
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":     fmt.Sprintf("initramfs rebuild failed: %v", buildErr),
+			"code":      "rebuild_failed",
+			"log_lines": logLines,
 		})
 		return
 	}
@@ -198,13 +206,16 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Finalize DB record.
+	// Finalize DB record — use a background context so a slow or disconnected
+	// HTTP client does not cancel the write after a successful build.
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
 	outcome := "success"
-	if err := h.DB.FinishInitramfsBuild(ctx, buildID, scriptSHA256, scriptSize, kernelVer, outcome); err != nil {
+	if err := h.DB.FinishInitramfsBuild(dbCtx, buildID, scriptSHA256, scriptSize, kernelVer, outcome); err != nil {
 		log.Warn().Err(err).Str("build_id", buildID).Msg("initramfs rebuild: failed to update db record (non-fatal)")
 	}
 	// Trim history to 5 rows.
-	if err := h.DB.TrimInitramfsBuilds(ctx, 5); err != nil {
+	if err := h.DB.TrimInitramfsBuilds(dbCtx, 5); err != nil {
 		log.Warn().Err(err).Msg("initramfs rebuild: trim history failed (non-fatal)")
 	}
 
@@ -271,7 +282,16 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 
 	cmd := exec.CommandContext(ctx, "bash", scriptPath, clonrBin, outputPath) //nolint:gosec
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
+	// Include /root/bin in PATH so busybox-static and other root-installed tools
+	// are visible to the script even when running under a restricted systemd unit.
+	env := os.Environ()
+	for i, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			env[i] = e + ":/root/bin"
+			break
+		}
+	}
+	cmd.Env = append(env,
 		"CLONR_SERVER_HOST=127.0.0.1",
 	)
 
