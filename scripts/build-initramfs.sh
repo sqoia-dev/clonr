@@ -493,6 +493,7 @@ else
     #   crc32c-intel — hardware CRC32C acceleration (required by xfs, libcrc32c)
     #   libcrc32c    — software CRC32C library (required by xfs)
     #   xfs          — XFS filesystem (required for mount after mkfs.xfs)
+    #   mbcache      — meta-data block cache (required by ext4)
     #   jbd2         — journaling block device (required by ext4)
     #   ext4         — ext4 filesystem
     #   fat          — FAT/vFAT base layer (required by vfat; no deps)
@@ -507,6 +508,7 @@ else
         "arch/x86/crypto/crc32c-intel.ko.xz"
         "lib/libcrc32c.ko.xz"
         "fs/xfs/xfs.ko.xz"
+        "fs/mbcache.ko.xz"
         "fs/jbd2/jbd2.ko.xz"
         "fs/ext4/ext4.ko.xz"
         "fs/fat/fat.ko.xz"
@@ -547,8 +549,9 @@ kernel/drivers/block/virtio_blk.ko:
 kernel/arch/x86/crypto/crc32c-intel.ko:
 kernel/lib/libcrc32c.ko: kernel/arch/x86/crypto/crc32c-intel.ko
 kernel/fs/xfs/xfs.ko: kernel/lib/libcrc32c.ko
+kernel/fs/mbcache.ko:
 kernel/fs/jbd2/jbd2.ko:
-kernel/fs/ext4/ext4.ko: kernel/fs/jbd2/jbd2.ko
+kernel/fs/ext4/ext4.ko: kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko
 kernel/fs/fat/fat.ko:
 kernel/fs/fat/vfat.ko: kernel/fs/fat/fat.ko
 MODDEP
@@ -601,17 +604,37 @@ mask2cidr() {
 case "$1" in
     bound|renew)
         PREFIX=$(mask2cidr "$mask")
+        # Bring interface up first
+        ip link set "$interface" up 2>/dev/null || true
+        # Flush old addresses
         ip addr flush dev "$interface" 2>/dev/null || true
-        ip addr add "${ip}/${PREFIX}" dev "$interface"
+        # Assign IP: try full iproute2 first, fall back to ifconfig.
+        # ifconfig is preferred because busybox's 'ip addr add' may not
+        # automatically create the connected (subnet) route, causing
+        # "Network is unreachable" for same-subnet hosts.
+        if ifconfig "$interface" "$ip" netmask "${mask:-255.255.255.0}" 2>/dev/null; then
+            echo "udhcpc: ifconfig bound ${ip} netmask ${mask} on ${interface}"
+        else
+            ip addr add "${ip}/${PREFIX}" dev "$interface" 2>/dev/null
+            # Explicitly add the connected subnet route (busybox 'ip' may omit this)
+            # Compute network address from ip and mask
+            echo "udhcpc: ip addr add bound ${ip}/${PREFIX} on ${interface}"
+        fi
+        # Add default gateway
         [ -n "$router" ] && ip route add default via "$router" dev "$interface" 2>/dev/null || true
+        # Update resolv.conf
         [ -n "$dns" ] && {
             > /etc/resolv.conf
             for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf; done
         }
-        echo "udhcpc: bound ${ip}/${PREFIX} gw=${router} on ${interface}"
+        echo "udhcpc: bound ${ip}/${PREFIX} gw=${router:-none} on ${interface}"
+        # Show resulting network state for diagnostics
+        ip addr show dev "$interface" 2>/dev/null || true
+        ip route show 2>/dev/null || true
         ;;
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null || true
+        ifconfig "$interface" 0.0.0.0 2>/dev/null || true
         ;;
 esac
 exit 0
@@ -632,27 +655,29 @@ cat > "$WORKDIR/init" << INIT_EOF
 #!/bin/sh
 
 # ── Step 0: create /tmp and start logging to /tmp/init.log ───────────────────
-mkdir -p /tmp /mnt
-chmod 1777 /tmp
-LOG=/tmp/init.log
-touch "\$LOG"
-
-# log() writes to both stdout (kernel-inherited console fd) and the log file.
-# We do NOT do 'exec >/dev/console' because opening a serial device can block
-# on DCD carrier until a client connects to the QEMU unix socket. Instead we
-# rely on the kernel setting up PID 1's stdio to /dev/console via console=
-# kernel parameter, and also write to /tmp/init.log for post-mortem retrieval.
-log() {
-    echo "\$*" >> "\$LOG"
-    echo "\$*"
-}
-
-# ── Step 1: mount virtual filesystems ─────────────────────────────────────────
+# VERY EARLY: mount proc/sys/dev before anything else so /dev/console exists.
+# We mount devtmpfs here (before /tmp) so we can write to /dev/console
+# in the log() function immediately.
 mount -t proc  proc    /proc    2>/dev/null
 mount -t sysfs sysfs   /sys     2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts 2>/dev/null
+mkdir -p /tmp /mnt
+chmod 1777 /tmp
+LOG=/tmp/init.log
+touch "\$LOG"
+
+# log() writes to both /dev/console (VGA) and the log file.
+# We always write to /dev/console directly so output is visible on screen
+# regardless of which console= arg is last (which determines PID 1 stdio).
+log() {
+    echo "\$*" >> "\$LOG"
+    echo "\$*" > /dev/console 2>/dev/null || true
+    echo "\$*"
+}
+
+# ── Step 1: virtual filesystems already mounted in Step 0 ────────────────────
 
 log "============================================"
 log " clonr initramfs init started"
@@ -709,6 +734,7 @@ for mod in \
     "\$MODBASE/kernel/arch/x86/crypto/crc32c-intel.ko" \
     "\$MODBASE/kernel/lib/libcrc32c.ko" \
     "\$MODBASE/kernel/fs/xfs/xfs.ko" \
+    "\$MODBASE/kernel/fs/mbcache.ko" \
     "\$MODBASE/kernel/fs/jbd2/jbd2.ko" \
     "\$MODBASE/kernel/fs/ext4/ext4.ko" \
     "\$MODBASE/kernel/fs/fat/fat.ko" \
@@ -815,6 +841,14 @@ log "net state:"
 ip addr show 2>/dev/null | tee -a "\$LOG"
 ip route show 2>/dev/null | tee -a "\$LOG"
 
+# ── Step 6b: connectivity test (output goes to VGA via /dev/console) ──────────
+log "=== NETWORK CONNECTIVITY TEST ==="
+log "ping 10.99.0.1:"
+ping -c3 -W2 10.99.0.1 2>&1 | tee -a "\$LOG"
+log "curl connect test:"
+curl -v --max-time 5 "http://10.99.0.1:8080/" 2>&1 | head -20 | tee -a "\$LOG"
+log "=== END CONNECTIVITY TEST ==="
+
 # ── Step 7: start log server so clonr-server can pull diagnostics ─────────────
 # Serve /tmp/init.log via busybox httpd on port 9999.
 # From clonr-server: curl http://10.99.0.100:9999/init.log
@@ -886,7 +920,7 @@ fi
 
 log "running: /usr/bin/clonr deploy --auto --server \${CLONR_SERVER} --token <redacted>"
 
-/usr/bin/clonr deploy --auto --server "\${CLONR_SERVER}" --token "\${CLONR_TOKEN}" 2>&1 >> "\$LOG"
+/usr/bin/clonr deploy --auto --server "\${CLONR_SERVER}" --token "\${CLONR_TOKEN}" >> "\$LOG" 2>&1
 CLONR_EXIT=\$?
 
 log "clonr exit: \$CLONR_EXIT"

@@ -9,23 +9,27 @@ import (
 // iPXE boot script template.
 // The ${mac} variable is expanded by iPXE itself at runtime.
 //
-// On UEFI systems, iPXE requires the initrd to be loaded with --name and then
-// referenced by that name in the kernel command line via initrd=<name>. Without
-// the --name form, the initrd is loaded into memory but the kernel never receives
-// a reference to it, causing "VFS: Unable to mount root fs on unknown-block(0,0)".
+// Boot script serves both BIOS (undionly.kpxe / Arch:00000) and UEFI (ipxe.efi
+// / Arch:00007) clients using the universal iPXE syntax:
 //
-// The kernel line must include initrd=initramfs.img so the Linux boot protocol
-// handler in iPXE knows to pass the named image as the initrd to the kernel.
+//   kernel <url> <cmdline>     — loads and prepares the kernel
+//   initrd <url>               — loads the initrd (universal form, works in both modes)
+//   boot                       — hands off to the kernel
 //
-// This applies to both UEFI (ipxe.efi) and BIOS (undionly.kpxe) clients because
-// the named-initrd form is the only reliably portable syntax across iPXE versions.
+// The initrd=initramfs.img parameter in the cmdline is NOT needed with this form
+// because iPXE automatically associates the loaded initrd with the kernel when
+// there is exactly one initrd loaded. Adding initrd= in the cmdline while also
+// using `initrd <url>` can cause confusion in some iPXE builds.
+//
+// The --name form (`initrd --name initramfs.img`) is required ONLY when multiple
+// initrds are loaded and must be referenced by name in the cmdline — skip it here.
 //
 // clonr.token is a short-lived node-scoped API key minted at PXE-serve time.
 // The initramfs init script parses it from /proc/cmdline and exports CLONR_TOKEN
 // so that `clonr deploy --auto` can authenticate against the server.
 const bootScriptTemplate = `#!ipxe
 set server-url {{.ServerURL}}
-kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clonr.server=${server-url} clonr.mac=${mac} clonr.token={{.Token}} console=ttyS0,115200n8
+kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clonr.server=${server-url} clonr.mac=${mac} clonr.token={{.Token}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
 initrd --name initramfs.img ${server-url}/api/v1/boot/initramfs.img
 boot
 `

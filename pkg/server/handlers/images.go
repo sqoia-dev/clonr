@@ -734,14 +734,21 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 
 	// Normal path: pipe remaining bytes synchronously, then wait.
 	pipeRemaining()
-	// After pipeRemaining returns, tar may still be alive (writing into a full
-	// kernel pipe buffer) if the client disconnected mid-stream via TCP reset
-	// rather than HTTP-level close (in which case r.Context().Done() may not yet
-	// be signalled when the default branch above was taken). Kill the process so
-	// the goroutine below can unblock from cmd.Wait() immediately. Killing a
-	// process that already exited is a no-op on Linux (ESRCH).
-	_ = cmd.Process.Kill()
-	tarErr := <-done
+	// pipeRemaining returns when tar's stdout reaches EOF, which happens after
+	// tar exits. Wait for cmd.Wait() to collect the exit status. If the client
+	// disconnected mid-stream via TCP reset (r.Context().Done() not yet
+	// signalled above), tar may be blocked writing into a full kernel pipe
+	// buffer — give it 5s to drain, then kill so cmd.Wait() can unblock.
+	var tarErr error
+	select {
+	case tarErr = <-done:
+		// tar exited on its own — normal completion.
+	case <-time.After(5 * time.Second):
+		// tar is still alive 5s after stdout EOF — client likely disconnected
+		// via TCP reset without triggering context cancellation. Kill it.
+		_ = cmd.Process.Kill()
+		tarErr = <-done
+	}
 
 	if tarErr != nil {
 		// Real tar failure after headers committed — log stderr for diagnosis.

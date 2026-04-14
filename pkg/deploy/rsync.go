@@ -243,8 +243,12 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	}
 
 	// Prefer the server-advertised tar checksum (X-Clonr-Blob-SHA256) over the
-	// image-record checksum (which for filesystem images is a directory-level hash,
-	// not a tar stream hash). If neither is available, skip verification with a warning.
+	// image-record checksum. For filesystem-format images the image record stores a
+	// directory-level hash (sha256 of the rootfs tree), NOT a tar stream hash, so it
+	// cannot be used to verify the tar blob. Only use it when the server confirms it
+	// is a tar stream hash via X-Clonr-Blob-SHA256. Without the header, skip
+	// verification entirely so the first-stream case (before the server caches the
+	// tar checksum sidecar) does not falsely reject a correct download.
 	expectedChecksum := opts.ExpectedChecksum
 	if blob.serverChecksum != "" {
 		if expectedChecksum != "" && expectedChecksum != blob.serverChecksum {
@@ -256,8 +260,17 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		expectedChecksum = blob.serverChecksum
 		logger().Info().Str("sha256", expectedChecksum).
 			Msg("using server-advertised tar checksum for integrity verification")
-	} else if expectedChecksum == "" {
-		logger().Warn().Msg("server did not advertise X-Clonr-Blob-SHA256 and no checksum in image record — skipping integrity verification")
+	} else {
+		// No X-Clonr-Blob-SHA256 header: the image record checksum is a directory
+		// hash, not a tar stream hash — using it would cause a false mismatch.
+		// Skip integrity verification; the server will cache the tar checksum after
+		// the first successful stream and advertise it on subsequent downloads.
+		if expectedChecksum != "" {
+			logger().Warn().Msg("server did not advertise X-Clonr-Blob-SHA256; image record checksum is a directory hash and cannot verify the tar stream — skipping integrity verification for this stream")
+			expectedChecksum = ""
+		} else {
+			logger().Warn().Msg("server did not advertise X-Clonr-Blob-SHA256 and no checksum in image record — skipping integrity verification")
+		}
 	}
 
 	// Update opts with the resolved checksum for streamExtract.
