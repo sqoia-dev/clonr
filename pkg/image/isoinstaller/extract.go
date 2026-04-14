@@ -1,15 +1,121 @@
 package isoinstaller
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+// extractSystemdRunAvailable is detected once at package init and used to
+// decide whether ExtractViaSubprocess can use systemd-run scope isolation.
+var extractSystemdRunAvailable bool
+
+func init() {
+	_, err := exec.LookPath("systemd-run")
+	extractSystemdRunAvailable = (err == nil)
+}
+
+// ExtractViaSubprocess runs rootfs extraction in a subprocess via
+// "clonr-serverd extract ..." so that losetup/mount operations happen outside
+// clonr-serverd's own hardened unit (NoNewPrivileges, tight capabilities, etc.).
+//
+// When systemd-run is available the subprocess is placed in
+// clonr-builders.slice, which has the capability grants and device permissions
+// required for block-device work.  When systemd-run is unavailable (dev
+// machines, containers) the subprocess is exec'd directly — it still runs as
+// the same user but inherits a less-restricted environment than the parent
+// service unit.
+//
+// buildID is used to name the transient scope unit so operators can correlate
+// it in `systemctl status`.  The line callbacks are optional; when non-nil they
+// receive stdout/stderr lines from the subprocess in real time (fed to the
+// build's progress store so the serial-console panel in the UI shows extraction
+// progress).
+func ExtractViaSubprocess(buildID string, opts ExtractOptions, onStdout, onStderr func(string)) error {
+	selfBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: locate own binary: %w", err)
+	}
+
+	extractArgs := []string{
+		"extract",
+		"--disk=" + opts.RawDiskPath,
+		"--out=" + opts.RootfsDestDir,
+	}
+
+	var bin string
+	var args []string
+
+	if extractSystemdRunAvailable {
+		unitName := "clonr-extract-" + buildID + ".scope"
+		bin = "systemd-run"
+		args = []string{
+			"--scope",
+			"--slice=clonr-builders.slice",
+			"--unit=" + unitName,
+			"--quiet",
+			"--",
+			selfBin,
+		}
+		args = append(args, extractArgs...)
+	} else {
+		bin = selfBin
+		args = extractArgs
+	}
+
+	cmd := exec.Command(bin, args...)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("extract subprocess: start: %w", err)
+	}
+
+	// Drain stdout and stderr in the background, forwarding to callbacks.
+	drain := func(r io.Reader, cb func(string)) {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			if cb != nil {
+				cb(scanner.Text())
+			}
+		}
+	}
+	go drain(stdoutPipe, onStdout)
+	go drain(stderrPipe, onStderr)
+
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		return nil
+	}
+
+	// Classify exit errors the same way the QEMU wrapper does.
+	exitErr, ok := waitErr.(*exec.ExitError)
+	if !ok {
+		return fmt.Errorf("extract subprocess: %w", waitErr)
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+		if status.Signaled() {
+			return fmt.Errorf("extract subprocess killed by signal %v (check dmesg for OOM)", status.Signal())
+		}
+		return fmt.Errorf("extract subprocess exited with code %d", status.ExitStatus())
+	}
+	return fmt.Errorf("extract subprocess: %w", waitErr)
+}
 
 // ExtractOptions configures the filesystem extraction from an installed raw disk.
 type ExtractOptions struct {

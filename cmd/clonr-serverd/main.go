@@ -15,6 +15,7 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/image/isoinstaller"
 	"github.com/sqoia-dev/clonr/pkg/pxe"
 	"github.com/sqoia-dev/clonr/pkg/server"
 )
@@ -54,6 +55,25 @@ func init() {
 
 	apikeyCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(apikeyCmd)
+
+	// extract subcommand — rootfs extraction in a subprocess.
+	// Invoked by ExtractViaSubprocess; runs under clonr-builders.slice so it
+	// has the capabilities (CAP_SYS_ADMIN, CAP_MKNOD, etc.) needed for
+	// losetup/mount operations without relaxing clonr-serverd's own unit.
+	var flagDisk, flagOut string
+	extractCmd := &cobra.Command{
+		Use:    "extract",
+		Short:  "Extract rootfs from a raw disk image (internal — invoked via systemd-run)",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runExtract(flagDisk, flagOut)
+		},
+	}
+	extractCmd.Flags().StringVar(&flagDisk, "disk", "", "Path to the raw disk image (required)")
+	extractCmd.Flags().StringVar(&flagOut, "out", "", "Destination directory for the extracted rootfs (required)")
+	_ = extractCmd.MarkFlagRequired("disk")
+	_ = extractCmd.MarkFlagRequired("out")
+	rootCmd.AddCommand(extractCmd)
 }
 
 func main() {
@@ -89,6 +109,25 @@ func runApikeyCreate(scopeStr, description string) error {
 
 	fmt.Printf("\nNew %s API key created (ID: %s)\n", scopeStr, id)
 	fmt.Printf("Raw key (save this — it will NOT be shown again):\n\n  clonr-%s-%s\n\n", scopeStr, rawKey)
+	return nil
+}
+
+// runExtract is the implementation of "clonr-serverd extract".  It is designed
+// to be invoked as a subprocess via systemd-run under clonr-builders.slice so
+// that losetup/mount calls inherit the slice's capability grants rather than
+// clonr-serverd's hardened unit restrictions.
+//
+// Progress output is written to stdout/stderr so the parent process (via pipe)
+// can forward it to the build's progress store.
+func runExtract(disk, out string) error {
+	opts := isoinstaller.ExtractOptions{
+		RawDiskPath:   disk,
+		RootfsDestDir: out,
+	}
+	if err := isoinstaller.ExtractRootfs(opts); err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	fmt.Printf("extract: rootfs extracted successfully to %s\n", out)
 	return nil
 }
 
