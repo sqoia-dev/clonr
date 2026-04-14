@@ -338,6 +338,73 @@ func buildLogsPath(base string, filter api.LogFilter) string {
 	return base + "?" + q.Encode()
 }
 
+// ─── API key management ──────────────────────────────────────────────────────
+
+// APIKeyResponse mirrors the handler's apiKeyResponse wire type.
+// Defined here so the CLI can use it without importing the handlers package.
+type APIKeyResponse struct {
+	ID         string  `json:"id"`
+	Scope      string  `json:"scope"`
+	NodeID     string  `json:"node_id,omitempty"`
+	Label      string  `json:"label,omitempty"`
+	CreatedBy  string  `json:"created_by,omitempty"`
+	HashPrefix string  `json:"hash_prefix"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  *string `json:"expires_at,omitempty"`
+	LastUsedAt *string `json:"last_used_at,omitempty"`
+}
+
+// CreateKeyRequest is the body for POST /admin/api-keys.
+type CreateKeyRequest struct {
+	Scope     string `json:"scope"`
+	Label     string `json:"label"`
+	NodeID    string `json:"node_id,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// CreateKeyResponse holds the newly minted key (shown once) and the record.
+type CreateKeyResponse struct {
+	Key    string         `json:"key"`
+	APIKey APIKeyResponse `json:"api_key"`
+}
+
+// listAPIKeysResponse wraps the array returned by GET /admin/api-keys.
+type listAPIKeysResponse struct {
+	APIKeys []APIKeyResponse `json:"api_keys"`
+}
+
+// ListAPIKeys returns all non-revoked API keys.
+func (c *Client) ListAPIKeys(ctx context.Context) ([]APIKeyResponse, error) {
+	var resp listAPIKeysResponse
+	if err := c.get(ctx, "/api/v1/admin/api-keys", &resp); err != nil {
+		return nil, err
+	}
+	return resp.APIKeys, nil
+}
+
+// CreateAPIKeyRemote creates a new key via the REST API. Returns the raw key (shown once).
+func (c *Client) CreateAPIKeyRemote(ctx context.Context, req CreateKeyRequest) (*CreateKeyResponse, error) {
+	var resp CreateKeyResponse
+	if err := c.post(ctx, "/api/v1/admin/api-keys", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// RevokeAPIKey revokes a key by ID.
+func (c *Client) RevokeAPIKey(ctx context.Context, id string) error {
+	return c.del(ctx, "/api/v1/admin/api-keys/"+id)
+}
+
+// RotateAPIKey atomically rotates a key by ID. Returns the new raw key.
+func (c *Client) RotateAPIKey(ctx context.Context, id string) (*CreateKeyResponse, error) {
+	var resp CreateKeyResponse
+	if err := c.post(ctx, "/api/v1/admin/api-keys/"+id+"/rotate", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
@@ -347,6 +414,15 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	}
 	c.setHeaders(req)
 	return c.do(req, out)
+}
+
+func (c *Client) del(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, nil)
 }
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {

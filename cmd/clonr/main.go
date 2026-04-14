@@ -86,6 +86,24 @@ func init() {
 	)
 	rootCmd.AddCommand(nodeCmd)
 
+	// admin subcommand group.
+	adminCmd := &cobra.Command{
+		Use:   "admin",
+		Short: "Server administration commands",
+	}
+	keysCmd := &cobra.Command{
+		Use:   "keys",
+		Short: "Manage API keys",
+	}
+	keysCmd.AddCommand(
+		newAdminKeysListCmd(),
+		newAdminKeysCreateCmd(),
+		newAdminKeysRotateCmd(),
+		newAdminKeysRevokeCmd(),
+	)
+	adminCmd.AddCommand(keysCmd)
+	rootCmd.AddCommand(adminCmd)
+
 	// ipmi subcommand group.
 	ipmiCmd := &cobra.Command{
 		Use:   "ipmi",
@@ -1830,4 +1848,163 @@ Examples:
 	cmd.Flags().StringVar(&flagNotes, "notes", "", "Free-text notes")
 
 	return cmd
+}
+
+// ─── admin keys ──────────────────────────────────────────────────────────────
+
+func newAdminKeysListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List all non-revoked API keys",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			c := clientFromFlags()
+			keys, err := c.ListAPIKeys(ctx)
+			if err != nil {
+				return fmt.Errorf("list api keys: %w", err)
+			}
+			if len(keys) == 0 {
+				fmt.Println("No API keys found.")
+				return nil
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tSCOPE\tLABEL\tCREATED_BY\tHASH_PREFIX\tCREATED_AT\tLAST_USED\tEXPIRES")
+			for _, k := range keys {
+				lastUsed := "—"
+				if k.LastUsedAt != nil {
+					lastUsed = *k.LastUsedAt
+				}
+				expires := "never"
+				if k.ExpiresAt != nil {
+					expires = *k.ExpiresAt
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s…\t%s\t%s\t%s\n",
+					k.ID,
+					k.Scope,
+					k.Label,
+					k.CreatedBy,
+					k.HashPrefix,
+					k.CreatedAt,
+					lastUsed,
+					expires,
+				)
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func newAdminKeysCreateCmd() *cobra.Command {
+	var (
+		flagScope   string
+		flagLabel   string
+		flagExpires string
+		flagNodeID  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new API key",
+		Long:  "Create a new API key. The raw key is shown once and cannot be retrieved later.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagScope != "admin" && flagScope != "node" {
+				return fmt.Errorf("--scope must be 'admin' or 'node'")
+			}
+			if flagScope == "node" && flagNodeID == "" {
+				return fmt.Errorf("--node-id is required when scope is 'node'")
+			}
+
+			var expiresAt string
+			if flagExpires != "" {
+				d, err := time.ParseDuration(flagExpires)
+				if err != nil {
+					return fmt.Errorf("--expires must be a Go duration (e.g. 24h, 720h): %w", err)
+				}
+				expiresAt = time.Now().Add(d).UTC().Format(time.RFC3339)
+			}
+
+			ctx := context.Background()
+			c := clientFromFlags()
+			resp, err := c.CreateAPIKeyRemote(ctx, client.CreateKeyRequest{
+				Scope:     flagScope,
+				Label:     flagLabel,
+				NodeID:    flagNodeID,
+				ExpiresAt: expiresAt,
+			})
+			if err != nil {
+				return fmt.Errorf("create api key: %w", err)
+			}
+
+			fmt.Printf("\n"+
+				"╔═══════════════════════════════════════════════════════════════════╗\n"+
+				"║  NEW API KEY — Save this. It will NOT be shown again.            ║\n"+
+				"╠═══════════════════════════════════════════════════════════════════╣\n"+
+				"║  %s\n"+
+				"╚═══════════════════════════════════════════════════════════════════╝\n\n",
+				resp.Key,
+			)
+			fmt.Printf("  ID:    %s\n", resp.APIKey.ID)
+			fmt.Printf("  Scope: %s\n", resp.APIKey.Scope)
+			if resp.APIKey.Label != "" {
+				fmt.Printf("  Label: %s\n", resp.APIKey.Label)
+			}
+			if resp.APIKey.ExpiresAt != nil {
+				fmt.Printf("  Expires: %s\n", *resp.APIKey.ExpiresAt)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&flagScope, "scope", "admin", "Key scope: admin or node")
+	cmd.Flags().StringVar(&flagLabel, "label", "", "Human-readable label (e.g. 'ci-runner', 'robert-laptop')")
+	cmd.Flags().StringVar(&flagExpires, "expires", "", "Optional TTL duration (e.g. 24h, 720h)")
+	cmd.Flags().StringVar(&flagNodeID, "node-id", "", "Node ID to bind (required when scope=node)")
+	return cmd
+}
+
+func newAdminKeysRotateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rotate <id>",
+		Short: "Rotate an API key (revoke old, mint new with same label/scope)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			c := clientFromFlags()
+			resp, err := c.RotateAPIKey(ctx, args[0])
+			if err != nil {
+				return fmt.Errorf("rotate api key: %w", err)
+			}
+
+			fmt.Printf("\n"+
+				"╔═══════════════════════════════════════════════════════════════════╗\n"+
+				"║  ROTATED API KEY — Save this. It will NOT be shown again.        ║\n"+
+				"╠═══════════════════════════════════════════════════════════════════╣\n"+
+				"║  %s\n"+
+				"╚═══════════════════════════════════════════════════════════════════╝\n\n",
+				resp.Key,
+			)
+			fmt.Printf("  New ID: %s\n", resp.APIKey.ID)
+			fmt.Printf("  Scope:  %s\n", resp.APIKey.Scope)
+			fmt.Printf("  Label:  %s\n", resp.APIKey.Label)
+			fmt.Println("\nThe old key has been revoked and will no longer authenticate.")
+			return nil
+		},
+	}
+}
+
+func newAdminKeysRevokeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "revoke <id>",
+		Short: "Revoke an API key (soft delete)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			c := clientFromFlags()
+			if err := c.RevokeAPIKey(ctx, args[0]); err != nil {
+				return fmt.Errorf("revoke api key: %w", err)
+			}
+			fmt.Printf("API key %s has been revoked.\n", args[0])
+			return nil
+		},
+	}
 }
