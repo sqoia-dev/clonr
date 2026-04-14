@@ -217,6 +217,17 @@ func (s *Server) buildRouter() chi.Router {
 		Store:    s.buildProgress,
 		ImageDir: s.cfg.ImageDir,
 	}
+	resumeH := &handlers.ResumeHandler{
+		DB:       s.db,
+		ImageDir: s.cfg.ImageDir,
+		Factory:  imgFactory,
+	}
+	initramfsH := &handlers.InitramfsHandler{
+		DB:            s.db,
+		ScriptPath:    "scripts/build-initramfs.sh",
+		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clonr.img",
+		ClonrBinPath:  "bin/clonr-static",
+	}
 	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
 	s.logsHandler = logs
 	progress := &handlers.ProgressHandler{Store: s.progress}
@@ -317,6 +328,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/build-progress", buildProgressH.GetBuildProgress)
 			r.Get("/images/{id}/build-log", buildProgressH.GetBuildLog)
 			r.Get("/images/{id}/build-manifest", buildProgressH.GetBuildManifest)
+
+			// Build resume (F2) — resume an interrupted build from last phase.
+			r.Post("/images/{id}/resume", resumeH.ResumeImageBuild)
+
+			// System initramfs management (F1).
+			r.Get("/system/initramfs", initramfsH.GetInitramfs)
+			r.Post("/system/initramfs/rebuild", initramfsH.RebuildInitramfs)
 
 			// Shell sessions
 			r.Post("/images/{id}/shell-session", factory.OpenShellSession)
