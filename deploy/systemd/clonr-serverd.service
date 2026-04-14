@@ -56,8 +56,19 @@ OOMScoreAdjust=-500
 # ---------------------------------------------------------------------------
 # Security hardening
 # ---------------------------------------------------------------------------
-# Prevent the process from gaining new privileges via setuid/setcap binaries.
-NoNewPrivileges=true
+# NoNewPrivileges is intentionally set to false here. Setting it to true would
+# be inherited by ALL child processes across fork()/exec() — including the
+# systemd-nspawn processes launched via "systemd-run --scope" for shell
+# sessions. The NoNewPrivileges flag is a per-process Linux security bit set
+# via prctl(PR_SET_NO_NEW_PRIVS, 1); it is inherited and cannot be unset by
+# child processes. Even when nspawn runs in a separate cgroup scope, it still
+# inherits the flag from the clonr-serverd parent, causing pivot_root(2) to
+# fail with EPERM ("Failed to move root directory: Operation not permitted").
+#
+# Security is still enforced by CapabilityBoundingSet and AmbientCapabilities
+# below, which tightly restrict which capabilities are available. The process
+# and its children cannot gain capabilities beyond what is listed there.
+NoNewPrivileges=false
 
 # ProtectSystem: set to "full" rather than "strict" for the ISO build pipeline.
 # "strict" creates a private mount namespace where the root filesystem is
