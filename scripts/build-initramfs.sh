@@ -346,6 +346,8 @@ ${transitive}"
     # These binaries live in /usr/sbin on Rocky 9 and are called via the PATH
     # that the init script sets: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:...
     DEPLOY_TOOLS_SBIN=(
+        mdadm           # Linux Software RAID management — required for RAID disk layouts
+                        # (raid1/5/6 over multiple disks; seabios-vm206 uses md0 over sda+sdb)
         sgdisk          # GPT partition table creation (gdisk package)
         mkfs.xfs        # XFS filesystem creation (xfsprogs)
         mkfs.ext4       # ext4 filesystem creation (e2fsprogs)
@@ -1014,6 +1016,7 @@ REQUIRED_CMDS=(
     "basename:/bin/basename"
     "lsblk:/usr/bin/lsblk"
     "curl:/usr/bin/curl"
+    "mdadm:/usr/sbin/mdadm,/sbin/mdadm"
 )
 
 for entry in "${REQUIRED_CMDS[@]}"; do
