@@ -762,7 +762,10 @@ const Pages = {
     async images() {
         App.render(loading('Loading images…'));
         try {
-            const resp   = await API.images.list();
+            const [resp, initramfsInfo] = await Promise.all([
+                API.images.list(),
+                API.system.initramfs().catch(() => null),
+            ]);
             const images = resp.images || [];
 
             App.render(`
@@ -794,6 +797,8 @@ const Pages = {
                     </div>
                 </div>
 
+                ${this._initramfsCard(initramfsInfo)}
+
                 ${images.length === 0
                     ? `<div class="card"><div class="card-body">${emptyState(
                         'No images yet',
@@ -804,7 +809,7 @@ const Pages = {
                 }
             `);
 
-            const hasBuilding = images.some(i => i.status === 'building');
+            const hasBuilding = images.some(i => i.status === 'building' || i.status === 'interrupted');
             App.setAutoRefresh(() => Pages.images(), hasBuilding ? 5000 : 30000);
 
         } catch (e) {
@@ -812,13 +817,150 @@ const Pages = {
         }
     },
 
+    // ── System initramfs card ───────────────────────────────────────────────
+
+    _initramfsCard(info) {
+        const sha = info && info.sha256 ? info.sha256.slice(0, 16) + '…' : 'not built';
+        const size = info && info.size_bytes ? fmtBytes(info.size_bytes) : '—';
+        const builtAt = info && info.build_time ? fmtRelative(info.build_time) : '—';
+        const kernel = info && info.kernel_version ? escHtml(info.kernel_version) : '—';
+
+        const historyRows = (info && info.history && info.history.length > 0)
+            ? info.history.map(h => `<tr>
+                <td class="text-mono text-sm">${escHtml(h.sha256 ? h.sha256.slice(0,16)+'…' : '—')}</td>
+                <td class="text-sm">${escHtml(h.kernel_version || '—')}</td>
+                <td class="text-sm">${fmtBytes(h.size_bytes)}</td>
+                <td class="text-sm"><span class="badge ${h.outcome === 'success' ? 'badge-ready' : h.outcome === 'pending' ? 'badge-building' : 'badge-error'}">${escHtml(h.outcome)}</span></td>
+                <td class="text-dim text-sm">${fmtRelative(h.started_at)}</td>
+                <td class="text-dim text-sm">${escHtml(h.triggered_by_prefix || '—')}</td>
+            </tr>`).join('')
+            : `<tr><td colspan="6" class="text-dim text-sm" style="text-align:center;padding:12px">No rebuild history</td></tr>`;
+
+        return `<div class="card" style="margin-bottom:20px;border-left:3px solid var(--accent)">
+            <div class="card-header">
+                <span class="card-title">System Initramfs</span>
+                <div class="flex gap-8">
+                    <button class="btn btn-secondary btn-sm" onclick="Pages.showRebuildInitramfsModal()">
+                        Rebuild
+                    </button>
+                </div>
+            </div>
+            <div style="padding:0 20px 12px">
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+                    <div>
+                        <div class="text-dim text-sm">SHA256</div>
+                        <div class="text-mono text-sm" style="margin-top:2px">${escHtml(sha)}</div>
+                    </div>
+                    <div>
+                        <div class="text-dim text-sm">Size</div>
+                        <div style="margin-top:2px">${size}</div>
+                    </div>
+                    <div>
+                        <div class="text-dim text-sm">Built</div>
+                        <div style="margin-top:2px">${builtAt}</div>
+                    </div>
+                    <div>
+                        <div class="text-dim text-sm">Kernel</div>
+                        <div style="margin-top:2px">${kernel}</div>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table style="font-size:13px">
+                        <thead><tr>
+                            <th>SHA256</th><th>Kernel</th><th>Size</th><th>Outcome</th><th>When</th><th>By</th>
+                        </tr></thead>
+                        <tbody>${historyRows}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+    },
+
+    showRebuildInitramfsModal() {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'rebuild-initramfs-modal';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:480px">
+                <div class="modal-header">
+                    <span class="modal-title">Rebuild System Initramfs</span>
+                    <button class="modal-close" onclick="document.getElementById('rebuild-initramfs-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p style="color:var(--text-secondary);margin-bottom:16px">
+                        This will shell out to <code>scripts/build-initramfs.sh</code>, build a new initramfs image,
+                        verify its sha256, and atomically replace the current one. The build takes 1–5 minutes.
+                    </p>
+                    <p style="color:var(--warning,#f59e0b);font-size:13px">
+                        Rejected if any node has an active deployment in progress.
+                    </p>
+                    <div id="rebuild-log-pane" style="display:none;margin-top:16px;max-height:300px;overflow-y:auto;
+                         background:var(--bg-tertiary,#0f1923);border-radius:6px;padding:12px;
+                         font-family:monospace;font-size:12px;line-height:1.6;color:var(--text-secondary)">
+                    </div>
+                    <div id="rebuild-result" style="margin-top:12px;display:none"></div>
+                </div>
+                <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+                    <button class="btn btn-secondary" onclick="document.getElementById('rebuild-initramfs-modal').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="rebuild-confirm-btn" onclick="Pages.confirmRebuildInitramfs()">Rebuild</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    },
+
+    async confirmRebuildInitramfs() {
+        const btn = document.getElementById('rebuild-confirm-btn');
+        const logPane = document.getElementById('rebuild-log-pane');
+        const resultDiv = document.getElementById('rebuild-result');
+        if (btn) { btn.disabled = true; btn.textContent = 'Building…'; }
+        if (logPane) { logPane.style.display = 'block'; logPane.textContent = 'Starting rebuild…\n'; }
+
+        try {
+            const result = await API.system.rebuildInitramfs();
+            if (logPane && result && result.log_lines) {
+                logPane.textContent = result.log_lines.join('\n');
+                logPane.scrollTop = logPane.scrollHeight;
+            }
+            if (resultDiv) {
+                resultDiv.style.display = 'block';
+                resultDiv.innerHTML = `<div class="alert alert-success" style="background:rgba(16,185,129,0.1);border:1px solid var(--success);border-radius:6px;padding:12px;color:var(--success)">
+                    Rebuild complete. New sha256: <code>${escHtml((result && result.sha256 || '').slice(0,16))}…</code>
+                </div>`;
+            }
+            if (btn) { btn.textContent = 'Done'; }
+            // Refresh the page after a moment to show new hash.
+            setTimeout(() => {
+                const modal = document.getElementById('rebuild-initramfs-modal');
+                if (modal) modal.remove();
+                Pages.images();
+            }, 2000);
+        } catch (e) {
+            if (resultDiv) {
+                resultDiv.style.display = 'block';
+                resultDiv.innerHTML = `<div class="alert alert-error" style="background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:6px;padding:12px;color:var(--error)">Rebuild failed: ${escHtml(e.message)}</div>`;
+            }
+            if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+        }
+    },
+
+    // ── Image card with resume button ──────────────────────────────────────
+
     _imageCard(img) {
         const statusClass = {
-            ready:    'badge-ready',
-            building: 'badge-building',
-            error:    'badge-error',
-            archived: 'badge-archived',
+            ready:       'badge-ready',
+            building:    'badge-building',
+            error:       'badge-error',
+            archived:    'badge-archived',
+            interrupted: 'badge-error',
         }[img.status] || 'badge-archived';
+
+        const isResumable = img.status === 'interrupted' || img.status === 'error';
+        const resumeBtn = isResumable
+            ? `<button class="btn btn-secondary btn-sm" style="margin-top:8px;font-size:11px"
+                onclick="event.stopPropagation();Pages.resumeImageBuild('${escHtml(img.id)}')">
+                &#9654; Resume
+               </button>`
+            : '';
 
         return `<div class="image-card" onclick="Router.navigate('/images/${img.id}')">
             <div class="image-card-name" title="${escHtml(img.name)}">${escHtml(img.name)}</div>
@@ -832,7 +974,18 @@ const Pages = {
                 <span class="text-mono">${fmtBytes(img.size_bytes)}</span>
                 <span>${fmtRelative(img.created_at)}</span>
             </div>
+            ${resumeBtn}
         </div>`;
+    },
+
+    async resumeImageBuild(imageId) {
+        try {
+            await API.resume.image(imageId);
+            App.toast('Build resumed — polling for progress…', 'success');
+            Pages.images();
+        } catch (e) {
+            App.toast(`Resume failed: ${e.message}`, 'error');
+        }
     },
 
     showPullModal() {

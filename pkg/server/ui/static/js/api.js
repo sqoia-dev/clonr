@@ -235,6 +235,15 @@ const API = {
     health: {
         get()                 { return API.get('/health'); },
     },
+    system: {
+        // initramfs — GET current status + history, POST to rebuild.
+        initramfs()           { return API.get('/system/initramfs'); },
+        rebuildInitramfs()    { return API.post('/system/initramfs/rebuild', {}); },
+    },
+    resume: {
+        // resume — POST to resume an interrupted image build.
+        image(id)             { return API.post(`/images/${id}/resume`, {}); },
+    },
     progress: {
         list()                { return API.get('/deploy/progress'); },
         get(mac)              { return API.get(`/deploy/progress/${encodeURIComponent(mac)}`); },
