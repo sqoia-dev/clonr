@@ -497,12 +497,17 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 				//   any filesystem. This flag tells GRUB to write directly to the raw
 				//   disk's MBR boot sector without probing.
 				//
-				// --modules: bake mdraid1x and diskfilter into core.img so GRUB can
-				//   locate /boot on the md array at runtime before loading its own
-				//   module files from any partition.
+				// --modules: bake mdraid1x, diskfilter, and the /boot filesystem
+				//   driver into core.img so GRUB can locate and READ /boot on the md
+				//   array at runtime before loading any module files from a partition.
+				//   Without the filesystem module (xfs, ext2, etc.), GRUB can assemble
+				//   the md array but cannot read grub.cfg from it and drops to rescue.
+				//
+				//   part_gpt is required to read GPT partition tables on the raw disks.
+				//   xfs and ext2 cover the two common /boot filesystems on RHEL/Rocky.
 				grubArgs = append(grubArgs,
 					"--skip-fs-probe",
-					"--modules=mdraid1x diskfilter",
+					"--modules=mdraid1x diskfilter part_gpt xfs ext2",
 				)
 			}
 			grubArgs = append(grubArgs, grubDisk)
@@ -533,6 +538,19 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 	}
 
+	// If the layout includes RAID arrays, write /etc/mdadm.conf BEFORE running
+	// applyBootConfig so that the single dracut invocation in applyBootConfig
+	// picks up the conf and bakes it into the initramfs. GenerateMdadmConf no
+	// longer triggers its own dracut run — the one in applyBootConfig is
+	// sufficient and is built with the correct RAID module flags.
+	if len(d.layout.RAIDArrays) > 0 {
+		if err := GenerateMdadmConf(ctx, mountRoot); err != nil {
+			// Non-fatal: log and continue. The node may still boot if the kernel
+			// auto-assembles the RAID arrays via superblock scanning.
+			logger().Warn().Err(err).Msg("generate mdadm.conf failed (non-fatal)")
+		}
+	}
+
 	// Apply boot-critical post-install steps: grub2-mkconfig, dracut, fstab
 	// UUID regen, machine-id truncation, and SSH host key removal.
 	// These steps are unconditional — they must run on every filesystem
@@ -558,16 +576,6 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// Non-fatal: a bad shared-storage config must not prevent the node from
 		// booting. The operator can correct and redeploy.
 		logger().Warn().Err(err).Msg("WARNING: finalize: extra mounts failed (non-fatal)")
-	}
-
-	// If the layout includes RAID arrays, write mdadm.conf and update initramfs
-	// so the deployed system can reassemble its arrays on next boot.
-	if len(d.layout.RAIDArrays) > 0 {
-		if err := GenerateMdadmConf(ctx, mountRoot); err != nil {
-			// Non-fatal: log and continue. The node may still boot if the kernel
-			// auto-assembles the RAID arrays via superblock scanning.
-			logger().Warn().Err(err).Msg("generate mdadm.conf failed (non-fatal)")
-		}
 	}
 
 	return nil

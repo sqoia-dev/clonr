@@ -95,22 +95,19 @@ func (d *DHCPServer) Start(ctx context.Context) error {
 
 // handleDHCP is the per-packet handler called by the server4.Server.
 func (d *DHCPServer) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
-	// Only serve PXE clients. Option 60 (VendorClassIdentifier) must contain
-	// "PXEClient". Clients already running iPXE set user-class to "iPXE".
 	vendorClass := req.ClassIdentifier()
 	userClass := string(req.Options.Get(dhcpv4.OptionUserClassInformation))
 
 	isPXEClient := strings.HasPrefix(vendorClass, "PXEClient")
 	isIPXE := strings.Contains(userClass, "iPXE")
-
-	if !isPXEClient && !isIPXE {
-		// Not a PXE/iPXE client -- ignore.
-		return
-	}
+	// isNonPXE covers deployed-OS clients that request DHCP for network
+	// configuration after first boot. The clonr provisioning network is also
+	// the OS management network, so we serve all DHCP clients — not just PXE.
+	isNonPXE := !isPXEClient && !isIPXE
 
 	mac := req.ClientHWAddr.String()
 	log.Debug().Str("mac", mac).Str("type", req.MessageType().String()).
-		Bool("ipxe", isIPXE).Msg("DHCP PXE request")
+		Bool("ipxe", isIPXE).Bool("non_pxe", isNonPXE).Msg("DHCP request")
 
 	switch req.MessageType() {
 	case dhcpv4.MessageTypeDiscover:

@@ -119,6 +119,12 @@ func DestroyRAIDArrays(ctx context.Context, devices []string) error {
 
 // GenerateMdadmConf writes /etc/mdadm.conf inside the deployed filesystem so
 // the initramfs can assemble the arrays on next boot.
+//
+// This function only writes the conf file — it does NOT regenerate the
+// initramfs. The caller (BlockDeployer.Deploy) ensures that applyBootConfig
+// runs AFTER this function, so the single dracut invocation in applyBootConfig
+// picks up the freshly-written mdadm.conf. A separate dracut run here would
+// overwrite the initramfs that applyBootConfig builds with RAID module support.
 func GenerateMdadmConf(ctx context.Context, mountRoot string) error {
 	etcDir := filepath.Join(mountRoot, "etc")
 	if err := os.MkdirAll(etcDir, 0o755); err != nil {
@@ -144,31 +150,6 @@ func GenerateMdadmConf(ctx context.Context, mountRoot string) error {
 	}
 	logger().Info().Str("path", confPath).Msg("wrote mdadm.conf")
 
-	// Regenerate initramfs so it includes the RAID configuration.
-	// Try dracut first (RHEL/Rocky), then update-initramfs (Debian/Ubuntu).
-	if err := runInitramfs(ctx, mountRoot); err != nil {
-		logger().Warn().Err(err).Msg("initramfs update failed (non-fatal)")
-	}
-
-	return nil
-}
-
-// runInitramfs attempts to regenerate the initramfs inside the chroot.
-func runInitramfs(ctx context.Context, mountRoot string) error {
-	log := logger()
-	// Try dracut first.
-	log.Info().Str("mount_root", mountRoot).Msg("regenerating initramfs with dracut")
-	dracut := exec.CommandContext(ctx, "chroot", mountRoot, "dracut", "--force", "--regenerate-all")
-	if err := runAndLog(ctx, "dracut", dracut); err == nil {
-		return nil
-	}
-
-	// Fall back to update-initramfs.
-	log.Info().Str("mount_root", mountRoot).Msg("dracut not available, trying update-initramfs")
-	ui := exec.CommandContext(ctx, "chroot", mountRoot, "update-initramfs", "-u", "-k", "all")
-	if err := runAndLog(ctx, "update-initramfs", ui); err != nil {
-		return fmt.Errorf("update-initramfs: %w", err)
-	}
 	return nil
 }
 
