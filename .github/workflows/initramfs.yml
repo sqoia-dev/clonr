@@ -30,7 +30,7 @@ jobs:
               ./cmd/clonr
 
       - name: Build initramfs
-        run: bash scripts/build-initramfs.sh
+        run: bash scripts/build-initramfs.sh bin/clonr
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
