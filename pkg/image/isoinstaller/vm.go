@@ -527,7 +527,10 @@ func findFile(candidates []string) string {
 func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string, kbf *KernelBootFiles) []string {
 	args := []string{
 		// Machine and acceleration.
-		"-machine", "pc,accel=kvm:tcg", // prefer KVM, fall back to TCG automatically
+		// q35 is the modern PCIe chipset — no deprecation warnings, works with
+		// both SeaBIOS and OVMF/UEFI firmware, and is preferred over the legacy
+		// i440fx (pc) machine type in all current QEMU versions.
+		"-machine", "q35,accel=kvm:tcg", // prefer KVM, fall back to TCG automatically
 		// -cpu host passes through all available host CPU features to the guest.
 		// Previously included +vmx for nested virt, but when clonr-server runs
 		// inside a VM (as in our Proxmox lab), the parent hypervisor doesn't
@@ -543,7 +546,7 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 	// but we emit a log line upstream so the admin knows it will be slow.
 	if !HasKVM() {
 		// Replace the first two args with TCG-only config.
-		args = []string{"-machine", "pc,accel=tcg", "-cpu", "qemu64"}
+		args = []string{"-machine", "q35,accel=tcg", "-cpu", "qemu64"}
 	}
 
 	// ── Firmware selection ────────────────────────────────────────────────────
