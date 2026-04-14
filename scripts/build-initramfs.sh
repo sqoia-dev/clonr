@@ -488,6 +488,7 @@ else
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/net"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/scsi"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/block"
+    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/md"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/xfs"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/ext4"
     mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/jbd2"
@@ -513,6 +514,13 @@ else
     #   ext4         — ext4 filesystem
     #   fat          — FAT/vFAT base layer (required by vfat; no deps)
     #   vfat         — vFAT filesystem (required for ESP/EFI System Partition mount)
+    # Software RAID (md):
+    #   raid1        — RAID1 (mirror) personality; required for nodes with RAID1 disk layouts
+    #   raid0        — RAID0 (stripe) personality; included for completeness
+    #   raid10       — RAID10 personality
+    #   raid456      — RAID4/5/6 personalities
+    # NOTE: md_mod is typically built-in to Rocky 9 kernel. If RUN_ARRAY fails with
+    # ENODEV, it means raid1.ko (the personality) is not loaded — insmod it here.
     MODULES=(
         "net/core/failover.ko.xz"
         "drivers/net/net_failover.ko.xz"
@@ -528,6 +536,10 @@ else
         "fs/ext4/ext4.ko.xz"
         "fs/fat/fat.ko.xz"
         "fs/fat/vfat.ko.xz"
+        "drivers/md/raid1.ko.xz"
+        "drivers/md/raid0.ko.xz"
+        "drivers/md/raid10.ko.xz"
+        "drivers/md/raid456.ko.xz"
     )
 
     for mod_rel in "${MODULES[@]}"; do
@@ -569,6 +581,10 @@ kernel/fs/jbd2/jbd2.ko:
 kernel/fs/ext4/ext4.ko: kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko
 kernel/fs/fat/fat.ko:
 kernel/fs/fat/vfat.ko: kernel/fs/fat/fat.ko
+kernel/drivers/md/raid1.ko:
+kernel/drivers/md/raid0.ko:
+kernel/drivers/md/raid10.ko:
+kernel/drivers/md/raid456.ko:
 MODDEP
 
     cat > "$MODDEP_DIR/modules.alias" << MODALIAS
@@ -753,7 +769,11 @@ for mod in \
     "\$MODBASE/kernel/fs/jbd2/jbd2.ko" \
     "\$MODBASE/kernel/fs/ext4/ext4.ko" \
     "\$MODBASE/kernel/fs/fat/fat.ko" \
-    "\$MODBASE/kernel/fs/fat/vfat.ko"; do
+    "\$MODBASE/kernel/fs/fat/vfat.ko" \
+    "\$MODBASE/kernel/drivers/md/raid1.ko" \
+    "\$MODBASE/kernel/drivers/md/raid0.ko" \
+    "\$MODBASE/kernel/drivers/md/raid10.ko" \
+    "\$MODBASE/kernel/drivers/md/raid456.ko"; do
     name=\$(basename "\$mod")
     if [ -f "\$mod" ]; then
         err=\$(insmod "\$mod" 2>&1)
