@@ -15,6 +15,32 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/db"
 )
 
+// nspawnSystemdRunAvailable is true when systemd-run(1) is present on PATH.
+var nspawnSystemdRunAvailable = func() bool {
+	_, err := exec.LookPath("systemd-run")
+	return err == nil
+}()
+
+// nspawnCommand returns a *exec.Cmd for running systemd-nspawn, wrapping it in
+// a systemd-run --scope --slice=clonr-shells.slice when systemd-run is available.
+// This escapes the clonr-serverd cgroup's NoNewPrivileges=true restriction so
+// nspawn can call pivot_root(2) and create mount namespaces.
+func nspawnCommand(ctx context.Context, scopeID string, nspawnArgs []string) *exec.Cmd {
+	if !nspawnSystemdRunAvailable {
+		return exec.CommandContext(ctx, "systemd-nspawn", nspawnArgs...)
+	}
+	args := []string{
+		"--scope",
+		"--slice=clonr-shells.slice",
+		"--unit=clonr-shell-" + scopeID + ".scope",
+		"--quiet",
+		"--",
+		"systemd-nspawn",
+	}
+	args = append(args, nspawnArgs...)
+	return exec.CommandContext(ctx, "systemd-run", args...)
+}
+
 const (
 	// maxSessions is the maximum number of concurrently open chroot sessions.
 	maxSessions = 4
@@ -158,7 +184,7 @@ func (m *ShellManager) ExecInSession(ctx context.Context, sessionID string, cmd 
 		"--",
 		cmd,
 	}, args...)
-	out, err := exec.CommandContext(ctx, "systemd-nspawn", nspawnArgs...).CombinedOutput()
+	out, err := nspawnCommand(ctx, sessionID, nspawnArgs).CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("shell: exec in session %s: %w", sessionID, err)
 	}
