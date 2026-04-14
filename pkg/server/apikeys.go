@@ -47,6 +47,7 @@ func BootstrapAdminKey(ctx context.Context, database *db.DB) error {
 		ID:          uuid.New().String(),
 		Scope:       api.KeyScopeAdmin,
 		KeyHash:     sha256Hex(raw),
+		Label:       "bootstrap",
 		Description: "bootstrap admin key (auto-generated on first start)",
 		CreatedAt:   time.Now(),
 	}
@@ -95,6 +96,31 @@ func CreateAPIKey(ctx context.Context, database *db.DB, scope api.KeyScope, desc
 	return raw, rec.ID, nil
 }
 
+// CreateAPIKeyFull generates a new key with label, created_by, and optional expiry.
+// Returns the raw key (never stored), the record ID, and the full record for the response.
+func CreateAPIKeyFull(ctx context.Context, database *db.DB, scope api.KeyScope, nodeID, label, createdBy string, expiresAt *time.Time) (rawKey string, rec db.APIKeyRecord, err error) {
+	raw, err := generateRawKey()
+	if err != nil {
+		return "", db.APIKeyRecord{}, err
+	}
+
+	rec = db.APIKeyRecord{
+		ID:        uuid.New().String(),
+		Scope:     scope,
+		NodeID:    nodeID,
+		KeyHash:   sha256Hex(raw),
+		Label:     label,
+		CreatedBy: createdBy,
+		CreatedAt: time.Now(),
+		ExpiresAt: expiresAt,
+	}
+	if err := database.CreateAPIKey(ctx, rec); err != nil {
+		return "", db.APIKeyRecord{}, fmt.Errorf("create api key: %w", err)
+	}
+
+	return raw, rec, nil
+}
+
 // CreateNodeScopedKey mints a fresh node-scoped API key bound to nodeID with a
 // 1-hour TTL. Any existing node-scoped keys for the same node are revoked first
 // (clean rotation: exactly one live token per node at any given time).
@@ -118,6 +144,7 @@ func CreateNodeScopedKey(ctx context.Context, database *db.DB, nodeID string) (r
 		Scope:       api.KeyScopeNode,
 		NodeID:      nodeID,
 		KeyHash:     sha256Hex(raw),
+		Label:       "node-deploy-token",
 		Description: "node-scoped deploy token (auto-generated at PXE serve time)",
 		CreatedAt:   time.Now(),
 		ExpiresAt:   &exp,

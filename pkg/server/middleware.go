@@ -25,6 +25,15 @@ type ctxKeyScope struct{}
 // ctxKeyNodeID is the context key used to store the node ID bound to a node-scoped key.
 type ctxKeyNodeID struct{}
 
+// ctxKeyKeyID is the context key for the api_keys.id of the authenticated key.
+// Set for Bearer-token auth; empty for session-cookie auth unless the session
+// carries a key ID (future work).
+type ctxKeyKeyID struct{}
+
+// ctxKeyKeyLabel is the context key for the human-readable label of the authenticated key.
+// Used for audit attribution (created_by on newly minted keys).
+type ctxKeyKeyLabel struct{}
+
 // scopeFromContext returns the KeyScope stored in the request context, or "".
 func scopeFromContext(ctx context.Context) api.KeyScope {
 	v, _ := ctx.Value(ctxKeyScope{}).(api.KeyScope)
@@ -35,6 +44,19 @@ func scopeFromContext(ctx context.Context) api.KeyScope {
 // Only set for requests authenticated with a node-scoped key.
 func nodeIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyNodeID{}).(string)
+	return v
+}
+
+// keyIDFromContext returns the api_keys.id of the authenticated key, or "".
+// Empty for session-cookie auth.
+func keyIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyKeyID{}).(string)
+	return v
+}
+
+// keyLabelFromContext returns the label of the authenticated key, or "".
+func keyLabelFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyKeyLabel{}).(string)
 	return v
 }
 
@@ -126,7 +148,15 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 					return
 				}
 				if errors.Is(err, db.ErrExpired) {
-					writeUnauthorized(w, "API key expired")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "api key expired", Code: "key_expired"})
+					return
+				}
+				if errors.Is(err, db.ErrRevoked) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "api key revoked", Code: "key_revoked"})
 					return
 				}
 				log.Error().Err(err).Msg("api key auth: db lookup failed")
@@ -139,6 +169,12 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 			ctx := context.WithValue(r.Context(), ctxKeyScope{}, lookupResult.Scope)
 			if lookupResult.NodeID != "" {
 				ctx = context.WithValue(ctx, ctxKeyNodeID{}, lookupResult.NodeID)
+			}
+			if lookupResult.ID != "" {
+				ctx = context.WithValue(ctx, ctxKeyKeyID{}, lookupResult.ID)
+			}
+			if lookupResult.Label != "" {
+				ctx = context.WithValue(ctx, ctxKeyKeyLabel{}, lookupResult.Label)
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
