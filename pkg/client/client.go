@@ -406,6 +406,29 @@ func (c *Client) RotateAPIKey(ctx context.Context, id string) (*CreateKeyRespons
 	return &resp, nil
 }
 
+// ─── Generic typed helpers ───────────────────────────────────────────────────
+
+// GetJSON performs a GET to path and decodes the JSON response into out.
+// Used by CLI commands that need to call endpoints not yet typed in the client.
+func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
+	return c.get(ctx, path, out)
+}
+
+// PostJSON performs a POST to path with body as JSON and decodes the response into out.
+func (c *Client) PostJSON(ctx context.Context, path string, body any, out any) error {
+	return c.post(ctx, path, body, out)
+}
+
+// DeleteJSON performs a DELETE to path. Returns nil on 204 No Content.
+func (c *Client) DeleteJSON(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, nil)
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
