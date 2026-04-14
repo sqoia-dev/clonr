@@ -735,6 +735,21 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub2-mkconfig complete")
 	}
 
+	// ── 2c. Strip save_env / saved_entry from grub.cfg ──────────────────────
+	// On BIOS RAID (md devices with diskfilter), GRUB's diskfilter driver is
+	// read-only. Any `save_env` or `saved_entry` call in grub.cfg will fail at
+	// boot with "diskfilter writes are not supported" and drop the user to a
+	// grub> shell before any OS entry is selected. Strip these lines so boot
+	// proceeds cleanly. Safe on all layouts — save_env is only used for
+	// GRUB_SAVEDEFAULT which we don't need in a clonr-managed environment.
+	grubCfgAbs := filepath.Join(mountRoot, grubCfgPath)
+	if stripErr := stripGrubSaveEnv(grubCfgAbs); stripErr != nil {
+		log.Warn().Err(stripErr).Str("grub_cfg", grubCfgPath).
+			Msg("finalize/boot: failed to strip save_env from grub.cfg (non-fatal, but BIOS RAID may drop to grub> shell)")
+	} else {
+		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: save_env/saved_entry lines stripped from grub.cfg")
+	}
+
 	// ── 3. dracut --regenerate-all ───────────────────────────────────────────
 	// --no-hostonly is critical: the capture source may be bare metal with a
 	// specific set of drivers. We need a generic initramfs that includes virtio_blk,
@@ -792,6 +807,42 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 			Msg("finalize/boot: SSH host keys removed — sshd will regenerate on first boot")
 	}
 
+	return nil
+}
+
+// stripGrubSaveEnv removes `save_env` and `saved_entry` calls from a grub.cfg
+// file. On BIOS RAID systems that use the diskfilter module the GRUB environment
+// block is read-only; any write attempt produces "diskfilter writes are not
+// supported" and drops the user to a grub> rescue shell before the OS boots.
+// Stripping these lines is safe on all layouts: save_env is only relevant for
+// GRUB_SAVEDEFAULT (remember the last-booted entry), which clonr does not use.
+func stripGrubSaveEnv(grubCfgAbs string) error {
+	data, err := os.ReadFile(grubCfgAbs)
+	if err != nil {
+		return fmt.Errorf("read grub.cfg: %w", err)
+	}
+
+	var out []string
+	stripped := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "save_env") || strings.HasPrefix(trimmed, "saved_entry") {
+			stripped++
+			continue
+		}
+		out = append(out, line)
+	}
+	if stripped == 0 {
+		// Nothing to strip — file is already clean.
+		return nil
+	}
+
+	content := strings.Join(out, "\n")
+	if err := os.WriteFile(grubCfgAbs, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write grub.cfg: %w", err)
+	}
+	logger().Info().Int("lines_stripped", stripped).Str("path", grubCfgAbs).
+		Msg("finalize/boot: stripped save_env/saved_entry lines from grub.cfg")
 	return nil
 }
 

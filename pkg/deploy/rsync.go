@@ -170,6 +170,12 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// raw disks), create arrays BEFORE partitioning so the md device can be
 	// partitioned by partitionDisk.
 	rainOnPartitions := raidMembersArePartitions(d.layout)
+	if len(d.layout.RAIDArrays) > 0 {
+		logger().Info().
+			Bool("raid_on_partitions", rainOnPartitions).
+			Int("raid_array_count", len(d.layout.RAIDArrays)).
+			Msg("RAID topology detected")
+	}
 
 	// Create RAID arrays before partitioning for RAID-on-whole-disk topology.
 	if len(d.layout.RAIDArrays) > 0 && !rainOnPartitions {
@@ -1097,9 +1103,11 @@ func (d *FilesystemDeployer) createFilesystems(ctx context.Context, disk string)
 }
 
 // mountPartitions mounts all non-swap partitions into the mountRoot hierarchy.
-// Partitions are mounted in layout order (root first, then subdirs).
+// Partitions are sorted by mountpoint depth (shortest first) so that parent
+// mounts (e.g. /) are established before child mounts (e.g. /boot). Relying
+// on layout order is not safe — RAID layouts interleave raw-disk entries with
+// md-device entries and the md entries may arrive in any order.
 func (d *FilesystemDeployer) mountPartitions(ctx context.Context, devs []string, mountRoot string) error {
-	// Sort by mountpoint depth so / is mounted before /boot, /boot before /boot/efi.
 	type mp struct {
 		dev   string
 		mount string
@@ -1113,7 +1121,25 @@ func (d *FilesystemDeployer) mountPartitions(ctx context.Context, devs []string,
 		mps = append(mps, mp{dev: devs[i], mount: p.MountPoint, fs: p.Filesystem})
 	}
 
-	// Mount in order (layout is expected to be ordered root → boot → esp).
+	// Sort by mountpoint depth: shorter paths mount first so / mounts before
+	// /boot, and /boot mounts before /boot/efi. Secondary sort by path string
+	// for determinism when depths are equal.
+	for i := 0; i < len(mps)-1; i++ {
+		for j := i + 1; j < len(mps); j++ {
+			li := strings.Count(mps[i].mount, "/")
+			lj := strings.Count(mps[j].mount, "/")
+			if lj < li || (lj == li && mps[j].mount < mps[i].mount) {
+				mps[i], mps[j] = mps[j], mps[i]
+			}
+		}
+	}
+
+	mountOrder := make([]string, len(mps))
+	for i, m := range mps {
+		mountOrder[i] = m.mount + "=" + m.dev
+	}
+	logger().Info().Strs("order", mountOrder).Msg("mountPartitions: mount order after depth sort")
+
 	for _, m := range mps {
 		target := filepath.Join(mountRoot, m.mount)
 		if err := os.MkdirAll(target, 0o755); err != nil {
