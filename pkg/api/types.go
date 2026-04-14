@@ -70,10 +70,19 @@ type NodeGroup struct {
 	ID                 string       `json:"id"`
 	Name               string       `json:"name"`
 	Description        string       `json:"description"`
+	// Role is an optional HPC role label: "compute", "login", "storage", "gpu", "admin".
+	Role               string       `json:"role,omitempty"`
 	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"` // nil = use image default
 	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
 	CreatedAt          time.Time    `json:"created_at"`
 	UpdatedAt          time.Time    `json:"updated_at"`
+}
+
+// NodeGroupWithCount embeds NodeGroup and adds a live member count from the
+// node_group_memberships table.
+type NodeGroupWithCount struct {
+	NodeGroup
+	MemberCount int `json:"member_count"`
 }
 
 // DiskLayout describes the partition schema expected on a target node.
@@ -505,6 +514,7 @@ type UpdateNodeConfigRequest struct {
 type CreateNodeGroupRequest struct {
 	Name               string       `json:"name"`
 	Description        string       `json:"description"`
+	Role               string       `json:"role,omitempty"`
 	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"`
 	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
 }
@@ -513,10 +523,48 @@ type CreateNodeGroupRequest struct {
 type UpdateNodeGroupRequest struct {
 	Name               string       `json:"name"`
 	Description        string       `json:"description"`
+	Role               string       `json:"role,omitempty"`
 	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"`
 	ClearLayoutOverride bool        `json:"clear_layout_override,omitempty"`
 	// ExtraMounts replaces the group-level extra fstab entries.
 	ExtraMounts         []FstabEntry `json:"extra_mounts,omitempty"`
+}
+
+// AddGroupMembersRequest is the body for POST /api/v1/node-groups/:id/members.
+type AddGroupMembersRequest struct {
+	NodeIDs []string `json:"node_ids"`
+}
+
+// GroupMembersResponse is returned by GET /api/v1/node-groups/:id (detail) and
+// POST /api/v1/node-groups/:id/members.
+type GroupMembersResponse struct {
+	Group   NodeGroup    `json:"group"`
+	Members []NodeConfig `json:"members"`
+}
+
+// GroupReimageRequest is the body for POST /api/v1/node-groups/:id/reimage.
+type GroupReimageRequest struct {
+	ImageID            string `json:"image_id"`
+	Concurrency        int    `json:"concurrency,omitempty"`        // default 5
+	PauseOnFailurePct  int    `json:"pause_on_failure_pct,omitempty"` // default 20
+}
+
+// GroupReimageJobStatus is the response from POST /api/v1/node-groups/:id/reimage
+// and GET /api/v1/reimages/jobs/:jobID.
+type GroupReimageJobStatus struct {
+	JobID              string    `json:"job_id"`
+	GroupID            string    `json:"group_id"`
+	ImageID            string    `json:"image_id"`
+	Status             string    `json:"status"`
+	TotalNodes         int       `json:"total_nodes"`
+	TriggeredNodes     int       `json:"triggered_nodes"`
+	SucceededNodes     int       `json:"succeeded_nodes"`
+	FailedNodes        int       `json:"failed_nodes"`
+	Concurrency        int       `json:"concurrency"`
+	PauseOnFailurePct  int       `json:"pause_on_failure_pct"`
+	ErrorMessage       string    `json:"error_message,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // AssignGroupRequest is the body for PUT /api/v1/nodes/:id/group.
@@ -528,10 +576,10 @@ type AssignGroupRequest struct {
 
 // ─── Node group response types ────────────────────────────────────────────────
 
-// ListNodeGroupsResponse wraps the node groups list.
+// ListNodeGroupsResponse wraps the node groups list with live member counts.
 type ListNodeGroupsResponse struct {
-	Groups []NodeGroup `json:"groups"`
-	Total  int         `json:"total"`
+	Groups []NodeGroupWithCount `json:"groups"`
+	Total  int                  `json:"total"`
 }
 
 // ─── Layout recommendation types ─────────────────────────────────────────────

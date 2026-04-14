@@ -202,7 +202,7 @@ func (s *Server) buildRouter() chi.Router {
 	health := &handlers.HealthHandler{Version: "dev"}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
 	nodes := &handlers.NodesHandler{DB: s.db}
-	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db}
+	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	imgFactory := &image.Factory{
 		Store:         s.db,
@@ -377,6 +377,14 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/node-groups/{id}", nodeGroups.GetNodeGroup)
 			r.Put("/node-groups/{id}", nodeGroups.UpdateNodeGroup)
 			r.Delete("/node-groups/{id}", nodeGroups.DeleteNodeGroup)
+			// Group membership management.
+			r.Post("/node-groups/{id}/members", nodeGroups.AddGroupMembers)
+			r.Delete("/node-groups/{id}/members/{node_id}", nodeGroups.RemoveGroupMember)
+			// Rolling group reimage.
+			r.Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
+			// Group reimage job status polling.
+			r.Get("/reimages/jobs/{jobID}", nodeGroups.GetGroupReimageJob)
+			r.Post("/reimages/jobs/{jobID}/resume", nodeGroups.ResumeGroupReimageJob)
 
 			// IPMI / power management — subpaths of /nodes/{id} must be
 			// registered in the same chi group so the auth middleware applies.

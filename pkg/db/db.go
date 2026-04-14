@@ -1397,6 +1397,332 @@ func scanNodeGroup(s scanner) (api.NodeGroup, error) {
 	return g, nil
 }
 
+// ─── Group membership operations (020_group_memberships) ────────────────────
+
+// AddGroupMember inserts a node_group_memberships row. Idempotent via INSERT OR IGNORE.
+// Also updates node_configs.group_id to this group (last-write wins for single-group display).
+func (db *DB) AddGroupMember(ctx context.Context, groupID, nodeID string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT OR IGNORE INTO node_group_memberships (node_id, group_id) VALUES (?, ?)`,
+		nodeID, groupID)
+	if err != nil {
+		return fmt.Errorf("db: add group member: %w", err)
+	}
+	// Update the fast-path group_id on node_configs for display / layout resolution.
+	_, _ = db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
+		groupID, time.Now().Unix(), nodeID)
+	return nil
+}
+
+// RemoveGroupMember deletes a node_group_memberships row. No-op if absent.
+func (db *DB) RemoveGroupMember(ctx context.Context, groupID, nodeID string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`DELETE FROM node_group_memberships WHERE node_id = ? AND group_id = ?`,
+		nodeID, groupID)
+	if err != nil {
+		return fmt.Errorf("db: remove group member: %w", err)
+	}
+	// Clear group_id on node_configs if this was the node's active group.
+	_, _ = db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET group_id = NULL, updated_at = ?
+		 WHERE id = ? AND group_id = ?`,
+		time.Now().Unix(), nodeID, groupID)
+	return nil
+}
+
+// ListGroupMembers returns all NodeConfigs that are members of groupID via the
+// node_group_memberships table.
+func (db *DB) ListGroupMembers(ctx context.Context, groupID string) ([]api.NodeConfig, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT `+nodeConfigCols+`
+		 FROM node_configs
+		 WHERE id IN (SELECT node_id FROM node_group_memberships WHERE group_id = ?)
+		 ORDER BY hostname ASC`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("db: list group members: %w", err)
+	}
+	defer rows.Close()
+	var cfgs []api.NodeConfig
+	for rows.Next() {
+		cfg, err := scanNodeConfig(rows)
+		if err != nil {
+			return nil, err
+		}
+		cfgs = append(cfgs, cfg)
+	}
+	return cfgs, rows.Err()
+}
+
+// ListGroupMemberships returns the group IDs for a node.
+func (db *DB) ListGroupMemberships(ctx context.Context, nodeID string) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT group_id FROM node_group_memberships WHERE node_id = ? ORDER BY group_id`, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("db: list group memberships: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListNodeGroupsWithCount returns all NodeGroups with member_count populated from
+// the node_group_memberships table.
+func (db *DB) ListNodeGroupsWithCount(ctx context.Context) ([]api.NodeGroupWithCount, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT ng.id, ng.name, ng.description, ng.role, ng.disk_layout, ng.extra_mounts,
+		       ng.created_at, ng.updated_at,
+		       COUNT(m.node_id) AS member_count
+		FROM node_groups ng
+		LEFT JOIN node_group_memberships m ON m.group_id = ng.id
+		GROUP BY ng.id
+		ORDER BY ng.name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list node groups with count: %w", err)
+	}
+	defer rows.Close()
+
+	var groups []api.NodeGroupWithCount
+	for rows.Next() {
+		var (
+			g               api.NodeGroupWithCount
+			roleNull        sql.NullString
+			diskLayoutJSON  string
+			extraMountsJSON string
+			createdAtUnix   int64
+			updatedAtUnix   int64
+		)
+		err := rows.Scan(&g.ID, &g.Name, &g.Description, &roleNull,
+			&diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix,
+			&g.MemberCount)
+		if err != nil {
+			return nil, fmt.Errorf("db: scan node group with count: %w", err)
+		}
+		g.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+		g.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
+		if roleNull.Valid {
+			g.Role = roleNull.String
+		}
+		if diskLayoutJSON != "" && diskLayoutJSON != "{}" {
+			var layout api.DiskLayout
+			if err := json.Unmarshal([]byte(diskLayoutJSON), &layout); err == nil && len(layout.Partitions) > 0 {
+				g.DiskLayoutOverride = &layout
+			}
+		}
+		if extraMountsJSON != "" && extraMountsJSON != "[]" {
+			if err := json.Unmarshal([]byte(extraMountsJSON), &g.ExtraMounts); err != nil {
+				g.ExtraMounts = nil
+			}
+		}
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+// GetNodeGroupFull returns a NodeGroup with role populated.
+func (db *DB) GetNodeGroupFull(ctx context.Context, id string) (api.NodeGroup, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at
+		FROM node_groups WHERE id = ?
+	`, id)
+	return scanNodeGroupFull(row)
+}
+
+// GetNodeGroupByNameFull returns a NodeGroup by name with role populated.
+func (db *DB) GetNodeGroupByNameFull(ctx context.Context, name string) (api.NodeGroup, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at
+		FROM node_groups WHERE name = ?
+	`, name)
+	return scanNodeGroupFull(row)
+}
+
+// UpdateNodeGroupFull replaces all mutable fields including role.
+func (db *DB) UpdateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
+	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group disk_layout: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(g.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group extra_mounts: %w", err)
+	}
+	var roleVal interface{}
+	if g.Role != "" {
+		roleVal = g.Role
+	}
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_groups
+		SET name = ?, description = ?, role = ?, disk_layout = ?, extra_mounts = ?, updated_at = ?
+		WHERE id = ?
+	`, g.Name, g.Description, roleVal, diskLayout, extraMounts, time.Now().Unix(), g.ID)
+	if err != nil {
+		return fmt.Errorf("db: update node group full: %w", err)
+	}
+	return requireOneRow(res, "node_groups", g.ID)
+}
+
+// CreateNodeGroupFull inserts a NodeGroup with role support.
+func (db *DB) CreateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
+	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group disk_layout: %w", err)
+	}
+	extraMounts, err := marshalJSONSlice(g.ExtraMounts)
+	if err != nil {
+		return fmt.Errorf("db: marshal node group extra_mounts: %w", err)
+	}
+	var roleVal interface{}
+	if g.Role != "" {
+		roleVal = g.Role
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO node_groups (id, name, description, role, disk_layout, extra_mounts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, g.ID, g.Name, g.Description, roleVal, diskLayout, extraMounts, g.CreatedAt.Unix(), g.UpdatedAt.Unix())
+	if err != nil {
+		return fmt.Errorf("db: create node group full: %w", err)
+	}
+	return nil
+}
+
+func scanNodeGroupFull(s scanner) (api.NodeGroup, error) {
+	var (
+		g               api.NodeGroup
+		roleNull        sql.NullString
+		diskLayoutJSON  string
+		extraMountsJSON string
+		createdAtUnix   int64
+		updatedAtUnix   int64
+	)
+	err := s.Scan(&g.ID, &g.Name, &g.Description, &roleNull,
+		&diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix)
+	if err == sql.ErrNoRows {
+		return api.NodeGroup{}, api.ErrNotFound
+	}
+	if err != nil {
+		return api.NodeGroup{}, fmt.Errorf("db: scan node group full: %w", err)
+	}
+	g.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+	g.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
+	if roleNull.Valid {
+		g.Role = roleNull.String
+	}
+	if diskLayoutJSON != "" && diskLayoutJSON != "{}" {
+		var layout api.DiskLayout
+		if err := json.Unmarshal([]byte(diskLayoutJSON), &layout); err == nil && len(layout.Partitions) > 0 {
+			g.DiskLayoutOverride = &layout
+		}
+	}
+	if extraMountsJSON != "" && extraMountsJSON != "[]" {
+		if err := json.Unmarshal([]byte(extraMountsJSON), &g.ExtraMounts); err != nil {
+			g.ExtraMounts = nil
+		}
+	}
+	return g, nil
+}
+
+// ─── Group reimage jobs (020_group_memberships) ──────────────────────────────
+
+// GroupReimageJob is a row in group_reimage_jobs.
+type GroupReimageJob struct {
+	ID                 string    `json:"id"`
+	GroupID            string    `json:"group_id"`
+	ImageID            string    `json:"image_id"`
+	Concurrency        int       `json:"concurrency"`
+	PauseOnFailurePct  int       `json:"pause_on_failure_pct"`
+	Status             string    `json:"status"`
+	TotalNodes         int       `json:"total_nodes"`
+	TriggeredNodes     int       `json:"triggered_nodes"`
+	SucceededNodes     int       `json:"succeeded_nodes"`
+	FailedNodes        int       `json:"failed_nodes"`
+	ErrorMessage       string    `json:"error_message,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// CreateGroupReimageJob inserts a new group reimage job.
+func (db *DB) CreateGroupReimageJob(ctx context.Context, j GroupReimageJob) error {
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO group_reimage_jobs
+			(id, group_id, image_id, concurrency, pause_on_failure_pct, status,
+			 total_nodes, triggered_nodes, succeeded_nodes, failed_nodes,
+			 error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, j.ID, j.GroupID, j.ImageID, j.Concurrency, j.PauseOnFailurePct, j.Status,
+		j.TotalNodes, j.TriggeredNodes, j.SucceededNodes, j.FailedNodes,
+		j.ErrorMessage, j.CreatedAt.Unix(), j.UpdatedAt.Unix())
+	if err != nil {
+		return fmt.Errorf("db: create group reimage job: %w", err)
+	}
+	return nil
+}
+
+// GetGroupReimageJob retrieves a single job by ID.
+func (db *DB) GetGroupReimageJob(ctx context.Context, id string) (GroupReimageJob, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, group_id, image_id, concurrency, pause_on_failure_pct, status,
+		       total_nodes, triggered_nodes, succeeded_nodes, failed_nodes,
+		       error_message, created_at, updated_at
+		FROM group_reimage_jobs WHERE id = ?
+	`, id)
+	return scanGroupReimageJob(row)
+}
+
+// UpdateGroupReimageJob replaces all mutable fields of a job record.
+func (db *DB) UpdateGroupReimageJob(ctx context.Context, j GroupReimageJob) error {
+	_, err := db.sql.ExecContext(ctx, `
+		UPDATE group_reimage_jobs
+		SET status = ?, total_nodes = ?, triggered_nodes = ?, succeeded_nodes = ?,
+		    failed_nodes = ?, error_message = ?, updated_at = ?
+		WHERE id = ?
+	`, j.Status, j.TotalNodes, j.TriggeredNodes, j.SucceededNodes, j.FailedNodes,
+		j.ErrorMessage, time.Now().Unix(), j.ID)
+	if err != nil {
+		return fmt.Errorf("db: update group reimage job: %w", err)
+	}
+	return nil
+}
+
+// ResumeGroupReimageJob transitions a paused job back to running.
+func (db *DB) ResumeGroupReimageJob(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE group_reimage_jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'paused'`,
+		time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("db: resume group reimage job: %w", err)
+	}
+	return nil
+}
+
+func scanGroupReimageJob(s scanner) (GroupReimageJob, error) {
+	var (
+		j             GroupReimageJob
+		createdAtUnix int64
+		updatedAtUnix int64
+	)
+	err := s.Scan(&j.ID, &j.GroupID, &j.ImageID, &j.Concurrency, &j.PauseOnFailurePct,
+		&j.Status, &j.TotalNodes, &j.TriggeredNodes, &j.SucceededNodes, &j.FailedNodes,
+		&j.ErrorMessage, &createdAtUnix, &updatedAtUnix)
+	if err == sql.ErrNoRows {
+		return GroupReimageJob{}, api.ErrNotFound
+	}
+	if err != nil {
+		return GroupReimageJob{}, fmt.Errorf("db: scan group reimage job: %w", err)
+	}
+	j.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+	j.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
+	return j, nil
+}
+
 // ─── Image build resumable fields ───────────────────────────────────────────
 
 // SetImageResumable marks an image as interrupted and resumable, recording the
