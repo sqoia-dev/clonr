@@ -231,6 +231,14 @@ const API = {
         create(body)        { return API.post('/node-groups', body); },
         update(id, body)    { return API.put(`/node-groups/${id}`, body); },
         del(id)             { return API.del(`/node-groups/${id}`); },
+        // Group membership management.
+        addMembers(id, nodeIds)  { return API.post(`/node-groups/${id}/members`, { node_ids: nodeIds }); },
+        removeMember(id, nodeId) { return API.del(`/node-groups/${id}/members/${encodeURIComponent(nodeId)}`); },
+        // Rolling group reimage.
+        reimage(id, body)   { return API.post(`/node-groups/${id}/reimage`, body); },
+        // Job status polling.
+        jobStatus(jobId)    { return API.get(`/reimages/jobs/${encodeURIComponent(jobId)}`); },
+        resumeJob(jobId)    { return API.post(`/reimages/jobs/${encodeURIComponent(jobId)}/resume`, {}); },
     },
     reimages: {
         // listForNode fetches reimage history for a single node.

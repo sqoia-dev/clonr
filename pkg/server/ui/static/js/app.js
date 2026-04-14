@@ -122,7 +122,9 @@ const App = {
             Pages.imageDetail(parts[2]);
         });
         Router.register('/nodes',   (h)   => {
-            const parts = h.split('/');
+            // Strip query string for path matching but keep it in window.location.hash.
+            const path = h.split('?')[0];
+            const parts = path.split('/');
             if (parts.length === 3 && parts[2] === 'groups') Pages.nodeGroups();
             else if (parts.length === 4 && parts[2] === 'groups' && parts[3]) Pages.nodeGroupDetail(parts[3]);
             else if (parts.length === 3 && parts[2]) Pages.nodeDetail(parts[2]);
@@ -2029,25 +2031,50 @@ const Pages = {
     async nodes() {
         App.render(loading('Loading nodes…'));
         try {
-            const [nodesResp, imagesResp] = await Promise.all([
+            // Parse optional ?group= query param for group filter.
+            const urlParams = new URLSearchParams(window.location.hash.includes('?') ? window.location.hash.split('?')[1] : '');
+            const groupFilter = urlParams.get('group') || '';
+
+            const [nodesResp, imagesResp, groupsResp] = await Promise.all([
                 API.nodes.list(),
                 API.images.list(),
+                API.nodeGroups.list().catch(() => ({ groups: [] })),
             ]);
             const nodes  = nodesResp.nodes  || [];
             const images = imagesResp.images || [];
+            const groups = (groupsResp && (groupsResp.groups || groupsResp.node_groups)) || [];
+
+            // Build group lookup map for the Groups column.
+            const groupMap = Object.fromEntries(groups.map(g => [g.id, g]));
+            Pages._nodesGroupMap = groupMap;
+
+            // Apply group filter if set.
+            const filteredNodes = groupFilter
+                ? nodes.filter(n => n.group_id === groupFilter)
+                : nodes;
+
+            const activeGroup = groupFilter ? groupMap[groupFilter] : null;
 
             // Cache for incremental refresh.
             App._cacheSet('nodes',  nodes);
             App._cacheSet('images', images);
             Pages._nodesImages = images;
+            Pages._nodesGroupFilter = groupFilter;
 
             const imgMap = Object.fromEntries(images.map(i => [i.id, i]));
+
+            const filterBanner = activeGroup
+                ? `<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--surface-secondary);border-radius:6px;margin-bottom:12px;font-size:13px">
+                    <span>Filtered by group: <strong>${escHtml(activeGroup.name)}</strong></span>
+                    <a href="#/nodes" style="margin-left:auto;color:var(--text-secondary);text-decoration:none;font-size:12px">Clear filter ×</a>
+                   </div>`
+                : '';
 
             App.render(`
                 <div class="page-header">
                     <div>
                         <div class="page-title">Nodes</div>
-                        <div class="page-subtitle" id="nodes-subtitle">${nodes.length} node${nodes.length !== 1 ? 's' : ''} total</div>
+                        <div class="page-subtitle" id="nodes-subtitle">${filteredNodes.length}${groupFilter ? ' (filtered)' : ''} of ${nodes.length} node${nodes.length !== 1 ? 's' : ''}</div>
                     </div>
                     <div class="flex gap-8">
                         <button class="btn btn-secondary" onclick="Router.navigate('/nodes/groups')">
@@ -2071,18 +2098,20 @@ const Pages = {
                     <div class="tab" onclick="Router.navigate('/nodes/groups')">Groups</div>
                 </div>
 
+                ${filterBanner}
+
                 ${cardWrap(`All Nodes`,
-                    nodes.length
+                    filteredNodes.length
                         ? `<div class="table-wrap"><table>
                             <thead><tr>
-                                <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Groups</th><th>Updated</th><th>Actions</th>
+                                <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Group</th><th>Updated</th><th>Actions</th>
                             </tr></thead>
                             <tbody id="nodes-tbody">
-                            ${nodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
+                            ${filteredNodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
                             </tbody>
                         </table></div>`
-                        : `<div id="nodes-empty">${emptyState('No nodes', 'Add your first node using the button above',
-                            `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`
+                        : `<div id="nodes-empty">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
+                            groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`
                 )}
             `);
 
@@ -2129,7 +2158,18 @@ const Pages = {
             <td>${nodeBadge(n)}</td>
             <td>${hwChips || '<span class="text-dim text-sm">—</span>'}</td>
             <td>
-                ${(n.groups || []).map(g => `<span class="badge badge-neutral badge-sm">${escHtml(g)}</span>`).join(' ') || '<span class="text-dim">—</span>'}
+                ${(() => {
+                    const gm = Pages._nodesGroupMap || {};
+                    if (n.group_id && gm[n.group_id]) {
+                        const grp = gm[n.group_id];
+                        return `<a href="#/nodes?group=${encodeURIComponent(n.group_id)}" style="text-decoration:none" title="Filter by this group">
+                                    <span class="badge badge-info badge-sm" style="cursor:pointer">${escHtml(grp.name)}</span>
+                                </a>`;
+                    } else if (n.group_id) {
+                        return `<span class="badge badge-neutral badge-sm text-mono" style="font-size:10px">${n.group_id.substring(0,8)}</span>`;
+                    }
+                    return '<span class="text-dim">—</span>';
+                })()}
             </td>
             <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
             <td>
@@ -4794,19 +4834,23 @@ const Pages = {
             nodes.forEach(n => { if (n.group_id) nodeCountMap[n.group_id] = (nodeCountMap[n.group_id] || 0) + 1; });
 
             const tbody = groups.map(g => {
-                const nodeCount = nodeCountMap[g.id] || 0;
+                const nodeCount = g.member_count != null ? g.member_count : (nodeCountMap[g.id] || 0);
                 const hasLayout = !!(g.disk_layout_override && g.disk_layout_override.partitions && g.disk_layout_override.partitions.length);
                 const partCount = hasLayout ? g.disk_layout_override.partitions.length : 0;
                 const mountCount = (g.extra_mounts || []).length;
+                const roleBadge = g.role
+                    ? `<span class="badge badge-neutral badge-sm" style="font-size:10px">${escHtml(g.role)}</span>`
+                    : '<span class="text-dim text-sm">—</span>';
 
                 return `<tr data-key="${escHtml(g.id)}">
                     <td style="font-weight:600">
                         <a href="#/nodes/groups/${g.id}" style="color:var(--text-primary)">${escHtml(g.name)}</a>
                     </td>
+                    <td>${roleBadge}</td>
                     <td class="text-dim text-sm">${escHtml(g.description || '—')}</td>
                     <td style="text-align:center">
                         ${nodeCount > 0
-                            ? `<span class="badge badge-info">${nodeCount}</span>`
+                            ? `<a href="#/nodes?group=${encodeURIComponent(g.id)}" style="text-decoration:none"><span class="badge badge-info" style="cursor:pointer">${nodeCount}</span></a>`
                             : `<span class="text-dim">0</span>`}
                     </td>
                     <td style="text-align:center">
@@ -4824,6 +4868,8 @@ const Pages = {
                         <div class="flex gap-6">
                             <button class="btn btn-secondary btn-sm"
                                 onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})'>Edit</button>
+                            <button class="btn btn-primary btn-sm"
+                                onclick="Pages.showGroupReimageModal('${escHtml(g.id)}', '${escHtml(g.name)}')">Reimage</button>
                             <button class="btn btn-danger btn-sm"
                                 onclick="Pages.deleteNodeGroup('${escHtml(g.id)}', '${escHtml(g.name)}')">Delete</button>
                         </div>
@@ -4835,6 +4881,7 @@ const Pages = {
                 ? `<div class="table-wrap"><table>
                     <thead><tr>
                         <th>Name</th>
+                        <th>Role</th>
                         <th>Description</th>
                         <th style="text-align:center">Nodes</th>
                         <th style="text-align:center">Disk Layout Override</th>
@@ -4876,31 +4923,41 @@ const Pages = {
         }
     },
 
-    // nodeGroupDetail shows a read-only detail page for a single group.
+    // nodeGroupDetail shows the group detail page with members and reimage action.
     async nodeGroupDetail(id) {
         App.render(loading('Loading group…'));
         try {
-            const [group, nodesResp] = await Promise.all([
+            // GET /node-groups/:id now returns { group, members } directly.
+            const [detailResp, allNodesResp] = await Promise.all([
                 API.nodeGroups.get(id),
                 API.nodes.list(),
             ]);
-            const nodes = ((nodesResp && nodesResp.nodes) || []).filter(n => n.group_id === id);
+            // Support both old format (just a NodeGroup) and new format ({group, members}).
+            const group = (detailResp && detailResp.group) ? detailResp.group : detailResp;
+            const members = (detailResp && detailResp.members) ? detailResp.members
+                : ((allNodesResp && allNodesResp.nodes) || []).filter(n => n.group_id === id);
+            const nodes = members; // alias
             const hasLayout = !!(group.disk_layout_override && group.disk_layout_override.partitions && group.disk_layout_override.partitions.length);
             const mounts = group.extra_mounts || [];
 
             const nodesHtml = nodes.length === 0
-                ? `<div class="text-dim" style="padding:12px;font-size:13px">No nodes currently assigned to this group.</div>`
+                ? `<div class="text-dim" style="padding:12px;font-size:13px">No nodes currently assigned to this group.
+                   <button class="btn btn-secondary btn-sm" style="margin-left:12px" onclick="Pages.showAddMemberModal('${escHtml(id)}')">Add Node</button></div>`
                 : `<div class="table-wrap"><table>
-                    <thead><tr><th>Hostname</th><th>MAC</th><th>Status</th><th>Updated</th></tr></thead>
+                    <thead><tr><th>Hostname</th><th>MAC</th><th>Status</th><th>Updated</th><th></th></tr></thead>
                     <tbody>
                     ${nodes.map(n => `<tr>
                         <td><a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">${escHtml(n.hostname || '(unassigned)')}</a></td>
                         <td class="text-mono text-dim text-sm">${escHtml(n.primary_mac || '—')}</td>
                         <td>${nodeBadge(n)}</td>
                         <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
+                        <td><button class="btn btn-danger btn-sm" onclick="Pages.removeGroupMember('${escHtml(id)}', '${escHtml(n.id)}', '${escHtml(n.hostname || n.primary_mac)}')">Remove</button></td>
                     </tr>`).join('')}
                     </tbody>
-                </table></div>`;
+                </table></div>
+                <div style="padding:8px 12px;border-top:1px solid var(--border)">
+                    <button class="btn btn-secondary btn-sm" onclick="Pages.showAddMemberModal('${escHtml(id)}')">+ Add Node</button>
+                </div>`;
 
             const layoutHtml = hasLayout
                 ? (() => {
@@ -4944,10 +5001,13 @@ const Pages = {
                 </div>
                 <div class="page-header">
                     <div>
-                        <div class="page-title">${escHtml(group.name)}</div>
+                        <div class="page-title">${escHtml(group.name)}${group.role ? ` <span class="badge badge-neutral" style="font-size:12px;vertical-align:middle">${escHtml(group.role)}</span>` : ''}</div>
                         ${group.description ? `<div class="page-subtitle">${escHtml(group.description)}</div>` : ''}
                     </div>
                     <div class="flex gap-8">
+                        <button class="btn btn-primary" onclick="Pages.showGroupReimageModal('${escHtml(group.id)}', '${escHtml(group.name)}')">
+                            Reimage Group
+                        </button>
                         <button class="btn btn-secondary" onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})'>Edit Group</button>
                         <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeGroup('${escHtml(group.id)}', '${escHtml(group.name)}')">Delete</button>
                     </div>
@@ -4955,6 +5015,7 @@ const Pages = {
 
                 <div class="kv-grid mb-16" style="max-width:480px;margin-bottom:20px">
                     <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value text-mono text-sm">${escHtml(group.id)}</div></div>
+                    ${group.role ? `<div class="kv-item"><div class="kv-key">Role</div><div class="kv-value">${escHtml(group.role)}</div></div>` : ''}
                     <div class="kv-item"><div class="kv-key">Nodes</div><div class="kv-value">${nodes.length}</div></div>
                     <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(group.created_at)}</div></div>
                     <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(group.updated_at)}</div></div>
@@ -5453,6 +5514,197 @@ const Pages = {
     },
 
     // ── Build from ISO modal ─────────────────────────────────────────���─────
+
+    // ── Group reimage modal ───────────────────────────────────────────────────
+
+    // showGroupReimageModal opens the Reimage Group modal with image picker,
+    // concurrency, and failure threshold settings.
+    async showGroupReimageModal(groupId, groupName) {
+        let images = [];
+        try {
+            const resp = await API.images.list('ready');
+            images = (resp && resp.images) || [];
+        } catch (_) {}
+
+        const imageOptions = images.map(img =>
+            `<option value="${escHtml(img.id)}">${escHtml(img.name)} (${escHtml(img.version || img.os || '')})</option>`
+        ).join('');
+
+        const overlay = document.createElement('div');
+        overlay.id = 'group-reimage-modal';
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:480px;width:96vw">
+                <div class="modal-header">
+                    <span class="modal-title">Reimage Group: ${escHtml(groupName)}</span>
+                    <button class="modal-close" onclick="document.getElementById('group-reimage-modal').remove()">&#215;</button>
+                </div>
+                <div class="modal-body" style="padding:20px">
+                    <div id="grm-result" style="margin-bottom:10px"></div>
+                    <div class="form-group" style="margin-bottom:14px">
+                        <label>Target Image <span style="color:var(--error)">*</span></label>
+                        <select id="grm-image" style="width:100%">
+                            ${images.length ? imageOptions : '<option value="">No ready images available</option>'}
+                        </select>
+                    </div>
+                    <div class="form-grid" style="margin-bottom:14px">
+                        <div class="form-group">
+                            <label>Concurrency</label>
+                            <input type="number" id="grm-concurrency" value="5" min="1" max="50">
+                            <div class="form-hint">Max nodes reimaged simultaneously</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Pause on failure %</label>
+                            <input type="number" id="grm-pause-pct" value="20" min="0" max="100">
+                            <div class="form-hint">Pause rollout if this % of a wave fails</div>
+                        </div>
+                    </div>
+                    <div style="background:var(--surface-secondary);border-radius:6px;padding:10px 14px;font-size:12px;color:var(--text-secondary);margin-bottom:16px">
+                        This will power-cycle all nodes in the group. Each node will PXE boot and deploy the selected image.
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('group-reimage-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" id="grm-submit" onclick="Pages._submitGroupReimage('${escHtml(groupId)}')">
+                            Start Rolling Reimage
+                        </button>
+                    </div>
+                    <div id="grm-job-status" style="display:none;margin-top:16px"></div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    async _submitGroupReimage(groupId) {
+        const imageId = document.getElementById('grm-image')?.value;
+        const concurrency = parseInt(document.getElementById('grm-concurrency')?.value || '5', 10);
+        const pausePct = parseInt(document.getElementById('grm-pause-pct')?.value || '20', 10);
+        const resultEl = document.getElementById('grm-result');
+        const submitBtn = document.getElementById('grm-submit');
+        const statusEl = document.getElementById('grm-job-status');
+
+        if (!imageId) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Please select an image.</div>`;
+            return;
+        }
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Starting...'; }
+        if (resultEl) resultEl.innerHTML = '';
+
+        try {
+            const job = await API.nodeGroups.reimage(groupId, {
+                image_id: imageId,
+                concurrency: concurrency || 5,
+                pause_on_failure_pct: pausePct >= 0 ? pausePct : 20,
+            });
+
+            if (submitBtn) submitBtn.style.display = 'none';
+            if (statusEl) {
+                statusEl.style.display = '';
+                statusEl.innerHTML = `
+                    <div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+                        <div style="font-weight:600;margin-bottom:8px">Reimage Job Started</div>
+                        <div class="kv-grid" style="font-size:12px">
+                            <div class="kv-item"><div class="kv-key">Job ID</div><div class="kv-value text-mono" style="font-size:11px">${escHtml((job.job_id || '').substring(0, 16))}...</div></div>
+                            <div class="kv-item"><div class="kv-key">Status</div><div class="kv-value" id="grm-job-status-val">${escHtml(job.status || 'running')}</div></div>
+                            <div class="kv-item"><div class="kv-key">Total Nodes</div><div class="kv-value">${job.total_nodes || 0}</div></div>
+                            <div class="kv-item"><div class="kv-key">Triggered</div><div class="kv-value" id="grm-triggered">${job.triggered_nodes || 0} / ${job.total_nodes || 0}</div></div>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="document.getElementById('group-reimage-modal').remove()">Close</button>
+                    </div>`;
+                if (job.job_id) Pages._pollGroupReimageJob(job.job_id);
+            }
+            App.toast('Rolling reimage started', 'success');
+        } catch (e) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Start Rolling Reimage'; }
+        }
+    },
+
+    async _pollGroupReimageJob(jobId) {
+        const poll = async () => {
+            try {
+                const job = await API.nodeGroups.jobStatus(jobId);
+                const statusEl = document.getElementById('grm-job-status-val');
+                const trigEl = document.getElementById('grm-triggered');
+                if (statusEl) statusEl.textContent = job.status || '—';
+                if (trigEl) trigEl.textContent = `${job.triggered_nodes || 0} / ${job.total_nodes || 0}`;
+                if (job.status === 'complete' || job.status === 'failed' || job.status === 'paused') return;
+                setTimeout(poll, 3000);
+            } catch (_) { setTimeout(poll, 5000); }
+        };
+        setTimeout(poll, 2000);
+    },
+
+    async removeGroupMember(groupId, nodeId, nodeLabel) {
+        if (!confirm(`Remove ${nodeLabel} from this group?`)) return;
+        try {
+            await API.nodeGroups.removeMember(groupId, nodeId);
+            App.toast(`${nodeLabel} removed from group`, 'success');
+            Pages.nodeGroupDetail(groupId);
+        } catch (e) {
+            App.toast(`Failed to remove member: ${e.message}`, 'error');
+        }
+    },
+
+    async showAddMemberModal(groupId) {
+        let allNodes = [], existingMemberIds = [];
+        try {
+            const [nodesResp, groupResp] = await Promise.all([
+                API.nodes.list(),
+                API.nodeGroups.get(groupId),
+            ]);
+            allNodes = (nodesResp && nodesResp.nodes) || [];
+            existingMemberIds = ((groupResp && groupResp.members) || []).map(n => n.id);
+        } catch (_) {}
+
+        const available = allNodes.filter(n => !existingMemberIds.includes(n.id));
+        const nodeOptions = available.map(n =>
+            `<option value="${escHtml(n.id)}">${escHtml(n.hostname || n.primary_mac)}</option>`
+        ).join('');
+
+        const overlay = document.createElement('div');
+        overlay.id = 'add-member-modal';
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:400px;width:96vw">
+                <div class="modal-header">
+                    <span class="modal-title">Add Node to Group</span>
+                    <button class="modal-close" onclick="document.getElementById('add-member-modal').remove()">&#215;</button>
+                </div>
+                <div class="modal-body" style="padding:20px">
+                    <div id="amm-result" style="margin-bottom:10px"></div>
+                    <div class="form-group" style="margin-bottom:16px">
+                        <label>Select Node</label>
+                        <select id="amm-node" style="width:100%">
+                            ${available.length ? nodeOptions : '<option value="">All nodes are already in this group</option>'}
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('add-member-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._submitAddMember('${escHtml(groupId)}')">Add to Group</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    async _submitAddMember(groupId) {
+        const nodeId = document.getElementById('amm-node')?.value;
+        const resultEl = document.getElementById('amm-result');
+        if (!nodeId) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Please select a node.</div>`;
+            return;
+        }
+        try {
+            await API.nodeGroups.addMembers(groupId, [nodeId]);
+            document.getElementById('add-member-modal')?.remove();
+            App.toast('Node added to group', 'success');
+            Pages.nodeGroupDetail(groupId);
+        } catch (e) {
+            if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
+        }
+    },
 
     // _isoDetectDistro parses common ISO URL patterns and returns
     // { distro, version, os, name } best-effort pre-fills.
