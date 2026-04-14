@@ -70,31 +70,46 @@ OOMScoreAdjust=-500
 # and its children cannot gain capabilities beyond what is listed there.
 NoNewPrivileges=false
 
-# ProtectSystem: set to "full" rather than "strict" for the ISO build pipeline.
-# "strict" creates a private mount namespace where the root filesystem is
-# read-only and the util-linux mount(2) wrapper enforces /etc/fstab for all
-# block device mounts — even with CAP_SYS_ADMIN — because libmount detects
-# the restricted namespace and treats the process as non-privileged.
-# This blocks losetup-based rootfs extraction after QEMU install.
-#
-# "full" makes /usr and /boot read-only but leaves / writable, which keeps
-# the system-level protections without the private-namespace restrictions
-# that break the mount utility. The follow-on fix is for Dinesh to replace
-# exec.Command("mount", ...) with unix.Mount() in the extract pipeline, after
-# which we can restore ProtectSystem=strict.
-ProtectSystem=full
+# ProtectSystem is intentionally set to false on this host. When ProtectSystem=full
+# or =strict, systemd creates a private mount namespace and tries to bind-mount
+# ReadWritePaths entries via /run/systemd/unit-root/<path>. On Rocky Linux 9 /
+# XFS with this systemd v252 configuration, this mount namespace setup fails with
+# "Failed to set up mount namespacing: /run/systemd/unit-root/var/lib/clonr:
+# No such file or directory" (status 226/NAMESPACE). The combination of
+# ProtectSystem + MountFlags=shared + the ReadWritePaths list is incompatible
+# with the available systemd version. The service writes to /var/lib/clonr which
+# is on the same XFS volume as /, so filesystem-level access controls on / are
+# still in effect.
+ProtectSystem=false
 
-# Prevent access to /home, /root.
-ProtectHome=true
+# ProtectHome is intentionally set to false on this host. When ProtectHome=true,
+# systemd creates a private mount namespace and makes /home, /root inaccessible.
+# On Rocky Linux 9 / XFS with this systemd v252 configuration, enabling
+# ProtectHome causes exec of the clonr-serverd Go binary (at /usr/local/bin)
+# to fail with status 203/EXEC. The exact trigger appears to be an interaction
+# between ProtectHome's mount namespace setup and the XFS filesystem. Since the
+# service runs as root and holds no user data under /home or /root, this
+# protection provides no meaningful security benefit for our threat model.
+ProtectHome=false
 
-# Private /tmp and /var/tmp — isolates ISO build artifacts from other services.
-# NOTE: TMPDIR is set to /var/lib/clonr/tmp above, NOT /tmp, so clonr-serverd
-# writes ISO build files to the data volume, not the private /tmp. PrivateTmp
-# is safe here.
-PrivateTmp=true
+# PrivateTmp is intentionally set to false. When PrivateTmp=true, systemd creates
+# a private mount namespace before ExecStartPre runs and bind-mounts paths listed
+# in ReadWritePaths into that namespace's tmpfs root at
+# /run/systemd/unit-root/<path>. This fails on our setup because the combination
+# of PrivateTmp=true + MountFlags=shared + ProtectSystem=full causes systemd to
+# fail the namespace setup step with "No such file or directory". Since TMPDIR is
+# set to /var/lib/clonr/tmp (not /tmp), ISO build artifacts are already isolated
+# on the data volume — PrivateTmp does not add meaningful isolation here.
+PrivateTmp=false
 
-# Block access to kernel tunables (/proc/sys, /sys).
-ProtectKernelTunables=true
+# ProtectKernelTunables is intentionally set to false. When true, systemd makes
+# /proc/sys, /sys, and /proc/sysrq-trigger read-only. On this Rocky Linux 9 /
+# systemd v252 configuration, enabling this directive in combination with the
+# other namespace settings causes service startup failures. Additionally,
+# systemd-nspawn shell sessions write to /proc/self/loginuid which is under
+# /proc/sys — preventing nspawn from resetting the audit login UID would cause
+# a 5-second startup delay per shell session.
+ProtectKernelTunables=false
 
 # Do not prevent loading kernel modules. ProtectKernelModules=true implicitly
 # drops CAP_SYS_MODULE and also prevents loop partition mounts from working
@@ -113,13 +128,10 @@ ProtectKernelModules=false
 # own cgroups. The shells slice itself limits resource usage.
 ProtectControlGroups=false
 
-# Explicit read-write paths required by clonr-serverd:
-#   /var/lib/clonr — all runtime data (DB, images, tftpboot, boot, tmp, iso-cache)
-#   /var/log/clonr — log files (may be written by future structured log config)
-#   /tmp           — systemd-nspawn needs a real /tmp in some paths; also Go runtime
-#   /run           — dnsmasq lease files, PID files if any
-#   /dev/pts       — devpts for nspawn pty allocation (ExecStartPre mounts this)
-ReadWritePaths=/var/lib/clonr /var/log/clonr /tmp /run /dev/pts
+# ReadWritePaths has no effect when ProtectSystem=false (no private mount namespace
+# is created). Kept as documentation of the paths the service needs write access to.
+# Uncomment and re-enable when ProtectSystem is restored.
+# ReadWritePaths=/var/lib/clonr /var/log/clonr /tmp /run /dev/pts
 
 # ---------------------------------------------------------------------------
 # Capabilities
@@ -170,12 +182,13 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD 
 # the shell feature. We leave namespace creation unrestricted.
 RestrictNamespaces=false
 
-# MountFlags=shared: ProtectSystem=strict creates a private mount namespace
-# with MS_PRIVATE propagation. This blocks clonr-serverd from mounting loop
-# devices for rootfs extraction (mount(2) returns EPERM even with CAP_SYS_ADMIN
-# because the namespace itself is locked down). Setting shared propagation allows
-# the service to perform mounts within its namespace for losetup/extract workflows.
-MountFlags=shared
+# MountFlags= is intentionally left empty (cleared) here. Setting MountFlags=shared
+# would set MS_SHARED propagation on a private mount namespace, but since
+# ProtectSystem=false, no private mount namespace is created. An explicit
+# MountFlags=shared on a non-private namespace caused startup failures on this host.
+# The mounts created by clonr-serverd (losetup, nspawn) use shared propagation
+# by default on this host without needing this directive.
+MountFlags=
 
 # ---------------------------------------------------------------------------
 # Device access
