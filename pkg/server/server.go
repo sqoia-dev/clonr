@@ -272,6 +272,13 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/deploy-complete", nodes.DeployComplete)
 		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/deploy-failed", nodes.DeployFailed)
 
+		// Self-read: allow a node-scoped key to read its own node record.
+		// Used by the deploy agent's state verification loop after deploy-complete.
+		// The chi router matches the most specific (longest) path first, so the
+		// admin-only GET /nodes/{id} below still applies for admin keys; this route
+		// is only reached by node-scoped keys (requireNodeOwnership allows both).
+		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/self", nodes.GetNode)
+
 		// Image fetch routes accessible by node-scoped keys (deploy agent reads its assigned image).
 		// requireImageAccess handles both admin and node scopes; node keys may only access the
 		// image currently assigned to their bound node. Must be outside the admin-only group.

@@ -79,10 +79,21 @@ func (c *Client) ListNodes(ctx context.Context) ([]api.NodeConfig, error) {
 	return resp.Nodes, nil
 }
 
-// GetNode retrieves a single NodeConfig by ID.
+// GetNode retrieves a single NodeConfig by ID. Requires admin scope.
 func (c *Client) GetNode(ctx context.Context, id string) (*api.NodeConfig, error) {
 	var cfg api.NodeConfig
 	if err := c.get(ctx, "/api/v1/nodes/"+id, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// GetSelfNode retrieves the NodeConfig for the calling node using the
+// /nodes/{id}/self endpoint, which is accessible to node-scoped keys.
+// Used by the deploy agent's state verification loop after deploy-complete.
+func (c *Client) GetSelfNode(ctx context.Context, id string) (*api.NodeConfig, error) {
+	var cfg api.NodeConfig
+	if err := c.get(ctx, "/api/v1/nodes/"+id+"/self", &cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

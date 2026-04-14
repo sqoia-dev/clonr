@@ -997,7 +997,9 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	const maxVerifyAttempts = 5
 	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
 		verifyCtx, verifyCancel := context.WithTimeout(completeBaseCtx, 10*time.Second)
-		updated, err := c.GetNode(verifyCtx, nodeCfg.ID)
+		// Use GetSelfNode (GET /nodes/{id}/self) which is accessible to
+		// node-scoped deploy tokens. GetNode (GET /nodes/{id}) requires admin scope.
+		updated, err := c.GetSelfNode(verifyCtx, nodeCfg.ID)
 		verifyCancel()
 
 		if err != nil {
