@@ -128,8 +128,23 @@ ReadWritePaths=/var/lib/clonr /var/log/clonr /tmp /run /dev/pts
 # CAP_SYS_ADMIN         — required by systemd-nspawn for mount namespace creation
 #                         and by qemu-kvm for /dev/kvm access; also required for
 #                         mount(2) syscall to work without fstab constraints
+# CAP_SYS_CHROOT        — required by systemd-nspawn to call chroot(2) after moving
+#                         the root directory; without this nspawn fails with
+#                         "Failed to move root directory: Operation not permitted"
+#                         (the error message is misleading — the actual failing syscall
+#                         is chroot(".")  which follows the successful MS_MOVE mount).
+#                         Confirmed via strace: mount(..., MS_MOVE) = 0, then
+#                         chroot(".") = -1 EPERM.
 # CAP_MKNOD             — required by systemd-nspawn to create device nodes inside
 #                         the container namespace during shell sessions
+# CAP_SETPCAP           — required by systemd-nspawn to drop its own capabilities
+#                         inside the container after establishing the new root;
+#                         without this nspawn fails with "Dropping capabilities failed"
+#                         immediately after chroot succeeds.
+# CAP_AUDIT_WRITE       — allows nspawn to reset the audit login UID for the container
+#                         session; without it nspawn prints a warning and sleeps 5s
+#                         before continuing, causing a noticeable delay before the
+#                         shell prompt appears. Not strictly required but improves UX.
 # CAP_DAC_OVERRIDE      — util-linux libmount checks whether the bounding set is
 #                         restricted to determine if the caller is "fully privileged".
 #                         Without a sufficiently broad bounding set, mount enforces
@@ -144,8 +159,8 @@ ReadWritePaths=/var/lib/clonr /var/log/clonr /tmp /run /dev/pts
 # CAP_FOWNER            — see CAP_DAC_OVERRIDE note above
 # CAP_CHOWN             — required by rsync to preserve ownership during rootfs copy
 # CAP_SETUID / CAP_SETGID — required by rsync to restore uid/gid of files
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_SETPCAP CAP_AUDIT_WRITE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_SETPCAP CAP_AUDIT_WRITE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
 
 # ---------------------------------------------------------------------------
 # Namespace policy
