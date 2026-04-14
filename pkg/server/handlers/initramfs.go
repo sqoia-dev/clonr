@@ -259,6 +259,11 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 		// Default: look for clonr-static alongside the running binary.
 		exe, _ := os.Executable()
 		clonrBin = filepath.Join(filepath.Dir(exe), "clonr-static")
+	} else if !filepath.IsAbs(clonrBin) {
+		// Relative path: resolve relative to the running binary's directory so
+		// the path is stable regardless of WorkingDirectory in the systemd unit.
+		exe, _ := os.Executable()
+		clonrBin = filepath.Join(filepath.Dir(exe), clonrBin)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

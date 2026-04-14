@@ -20,6 +20,7 @@ type ServerConfig struct {
 	SessionSecure   bool          `json:"session_secure"`   // CLONR_SESSION_SECURE=1: set Secure flag on session cookie (requires TLS)
 	LogLevel        string        `json:"log_level"`        // debug, info, warn, error — default "info"
 	LogRetention    time.Duration `json:"log_retention"`    // from CLONR_LOG_RETENTION; default 14d
+	ClonrBinPath    string        `json:"clonr_bin_path"`   // CLONR_BIN_PATH: abs path to clonr CLI binary baked into initramfs; default /usr/local/bin/clonr
 	PXE             PXEConfig     `json:"pxe"`
 }
 
@@ -67,6 +68,7 @@ func LoadServerConfig() ServerConfig {
 		SessionSecure: os.Getenv("CLONR_SESSION_SECURE") == "1",
 		LogLevel:      envOrDefault("CLONR_LOG_LEVEL", "info"),
 		LogRetention:  parseLogRetention(),
+		ClonrBinPath:  envOrDefault("CLONR_BIN_PATH", "/usr/local/bin/clonr"),
 		PXE:           LoadPXEConfig(),
 	}
 }

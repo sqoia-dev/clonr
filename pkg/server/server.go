@@ -227,9 +227,9 @@ func (s *Server) buildRouter() chi.Router {
 	}
 	initramfsH := &handlers.InitramfsHandler{
 		DB:            s.db,
-		ScriptPath:    "scripts/build-initramfs.sh",
+		ScriptPath:    "scripts/build-initramfs.sh", // ignored at runtime — script is embedded
 		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clonr.img",
-		ClonrBinPath:  "bin/clonr-static",
+		ClonrBinPath:  s.cfg.ClonrBinPath, // abs path to clonr CLI binary; defaults to /usr/local/bin/clonr
 	}
 	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
 	s.logsHandler = logs
