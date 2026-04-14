@@ -851,6 +851,19 @@ type ReimageRequest struct {
 	RequestedBy  string        `json:"requested_by"`
 	DryRun       bool          `json:"dry_run,omitempty"`
 	CreatedAt    time.Time     `json:"created_at"`
+	// Terminal-state detail — populated on deploy-failed; nil on success or in-flight.
+	ExitCode     *int          `json:"exit_code,omitempty"`
+	ExitName     string        `json:"exit_name,omitempty"`
+	Phase        string        `json:"phase,omitempty"`
+}
+
+// DeployFailedPayload is the JSON body for POST /api/v1/nodes/:id/deploy-failed.
+// The deploy agent sends this so the server can capture classified failure detail.
+type DeployFailedPayload struct {
+	ExitCode int    `json:"exit_code"`
+	ExitName string `json:"exit_name"`
+	Phase    string `json:"phase"`
+	Message  string `json:"message"`
 }
 
 // CreateReimageRequest is the body for POST /api/v1/nodes/:id/reimage.

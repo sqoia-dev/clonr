@@ -651,7 +651,8 @@ func (db *DB) CreateReimageRequest(ctx context.Context, req api.ReimageRequest) 
 func (db *DB) GetReimageRequest(ctx context.Context, id string) (api.ReimageRequest, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
-		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at,
+		       exit_code, exit_name, phase
 		FROM reimage_requests WHERE id = ?
 	`, id)
 	return scanReimageRequest(row)
@@ -667,13 +668,15 @@ func (db *DB) ListReimageRequests(ctx context.Context, nodeID string) ([]api.Rei
 	if nodeID != "" {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
-			       started_at, completed_at, error_message, requested_by, dry_run, created_at
+			       started_at, completed_at, error_message, requested_by, dry_run, created_at,
+			       exit_code, exit_name, phase
 			FROM reimage_requests WHERE node_id = ? ORDER BY created_at DESC
 		`, nodeID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx, `
 			SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
-			       started_at, completed_at, error_message, requested_by, dry_run, created_at
+			       started_at, completed_at, error_message, requested_by, dry_run, created_at,
+			       exit_code, exit_name, phase
 			FROM reimage_requests ORDER BY created_at DESC
 		`)
 	}
@@ -689,7 +692,8 @@ func (db *DB) ListReimageRequests(ctx context.Context, nodeID string) ([]api.Rei
 func (db *DB) ListPendingScheduledRequests(ctx context.Context, before time.Time) ([]api.ReimageRequest, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
-		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at,
+		       exit_code, exit_name, phase
 		FROM reimage_requests
 		WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= ?
 		ORDER BY scheduled_at ASC
@@ -723,12 +727,29 @@ func (db *DB) UpdateReimageRequestStatus(ctx context.Context, id string, status 
 	return requireOneRow(res, "reimage_requests", id)
 }
 
+// UpdateReimageRequestFailed transitions a reimage request to failed status and
+// captures the structured failure detail from the deploy agent's exit code payload.
+func (db *DB) UpdateReimageRequestFailed(ctx context.Context, id string, errMsg string, exitCode int, exitName, phase string) error {
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE reimage_requests
+		SET status = 'failed', error_message = ?, completed_at = ?,
+		    exit_code = ?, exit_name = ?, phase = ?
+		WHERE id = ?
+	`, errMsg, now, exitCode, exitName, phase, id)
+	if err != nil {
+		return fmt.Errorf("db: update reimage failed: %w", err)
+	}
+	return requireOneRow(res, "reimage_requests", id)
+}
+
 // GetActiveReimageForNode returns the first non-terminal reimage request for
 // nodeID, or (nil, nil) if none exists.
 func (db *DB) GetActiveReimageForNode(ctx context.Context, nodeID string) (*api.ReimageRequest, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, node_id, image_id, status, scheduled_at, triggered_at,
-		       started_at, completed_at, error_message, requested_by, dry_run, created_at
+		       started_at, completed_at, error_message, requested_by, dry_run, created_at,
+		       exit_code, exit_name, phase
 		FROM reimage_requests
 		WHERE node_id = ?
 		  AND status NOT IN ('complete', 'failed', 'canceled')
@@ -791,11 +812,15 @@ func scanReimageRequest(s scanner) (api.ReimageRequest, error) {
 		completedAt   any
 		dryRunInt     int
 		createdAtUnix int64
+		exitCodeNull  sql.NullInt64
+		exitNameNull  sql.NullString
+		phaseNull     sql.NullString
 	)
 	err := s.Scan(
 		&req.ID, &req.NodeID, &req.ImageID, &status,
 		&scheduledAt, &triggeredAt, &startedAt, &completedAt,
 		&req.ErrorMessage, &req.RequestedBy, &dryRunInt, &createdAtUnix,
+		&exitCodeNull, &exitNameNull, &phaseNull,
 	)
 	if err == sql.ErrNoRows {
 		return api.ReimageRequest{}, api.ErrNotFound
@@ -806,6 +831,17 @@ func scanReimageRequest(s scanner) (api.ReimageRequest, error) {
 	req.Status = api.ReimageStatus(status)
 	req.DryRun = dryRunInt != 0
 	req.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+
+	if exitCodeNull.Valid {
+		v := int(exitCodeNull.Int64)
+		req.ExitCode = &v
+	}
+	if exitNameNull.Valid {
+		req.ExitName = exitNameNull.String
+	}
+	if phaseNull.Valid {
+		req.Phase = phaseNull.String
+	}
 
 	var tsErr error
 	if req.ScheduledAt, tsErr = scanNullableTimestamp(scheduledAt); tsErr != nil {
