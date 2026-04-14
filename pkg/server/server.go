@@ -396,6 +396,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/reimage/{id}", reimageH.Get)
 			r.Delete("/reimage/{id}", reimageH.Cancel)
 			r.Post("/reimage/{id}/retry", reimageH.Retry)
+			r.Get("/reimages", reimageH.List)
 
 			// Logs — stream must be registered before plain /logs.
 			r.Get("/logs/stream", logs.StreamLogs)

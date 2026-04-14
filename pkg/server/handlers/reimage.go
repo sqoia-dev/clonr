@@ -7,6 +7,7 @@
 //	GET    /reimage/{id}            — get a single reimage request by ID
 //	DELETE /reimage/{id}            — cancel a pending scheduled reimage
 //	POST   /reimage/{id}/retry      — retry a failed reimage
+//	GET    /reimages                — list all reimage records (admin, filterable)
 package handlers
 
 import (
@@ -22,6 +23,7 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/db"
 	"github.com/sqoia-dev/clonr/pkg/reimage"
 )
+
 
 // ReimageHandler handles all /api/v1/nodes/{id}/reimage and /api/v1/reimage routes.
 type ReimageHandler struct {
@@ -289,4 +291,51 @@ func (h *ReimageHandler) Retry(w http.ResponseWriter, r *http.Request) {
 		final = newReq
 	}
 	writeJSON(w, http.StatusOK, final)
+}
+
+// ─── GET /api/v1/reimages ─────────────────────────────────────────────────────
+
+// List handles GET /api/v1/reimages (admin-scoped).
+// Returns all reimage records with optional filters:
+//
+//	?node_id=<id>    — filter by node
+//	?status=<s>      — filter by status (pending, triggered, in_progress, complete, failed, canceled)
+//	?since=<RFC3339> — only records created at or after this time
+//
+// Results are newest-first, capped at 500 rows.
+func (h *ReimageHandler) List(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.URL.Query().Get("node_id")
+	statusFilter := r.URL.Query().Get("status")
+	sinceStr := r.URL.Query().Get("since")
+
+	// Fetch all records for the given node (or all nodes).
+	reqs, err := h.DB.ListReimageRequests(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Msg("reimages list")
+		writeError(w, err)
+		return
+	}
+
+	// Apply in-process filters (small table; avoids SQL parameter explosion).
+	filtered := reqs[:0]
+	var sinceTime time.Time
+	if sinceStr != "" {
+		if t, parseErr := time.Parse(time.RFC3339, sinceStr); parseErr == nil {
+			sinceTime = t
+		}
+	}
+	for _, req := range reqs {
+		if statusFilter != "" && string(req.Status) != statusFilter {
+			continue
+		}
+		if !sinceTime.IsZero() && req.CreatedAt.Before(sinceTime) {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+
+	if filtered == nil {
+		filtered = []api.ReimageRequest{}
+	}
+	writeJSON(w, http.StatusOK, api.ListReimagesResponse{Requests: filtered, Total: len(filtered)})
 }

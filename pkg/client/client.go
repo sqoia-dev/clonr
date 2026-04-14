@@ -261,8 +261,9 @@ func (c *Client) ReportDeployCompleteWithRetry(ctx context.Context, nodeID strin
 // ReportDeployFailed calls POST /api/v1/nodes/:id/deploy-failed.
 // Called by the clonr CLI after a deployment failure. The server sets
 // last_deploy_failed_at, transitioning the node to NodeStateFailed.
-func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string) error {
-	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-failed", nil, nil)
+// The payload carries classified exit code detail for the reimage record.
+func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string, payload api.DeployFailedPayload) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-failed", payload, nil)
 }
 
 // Health checks the server's health endpoint.

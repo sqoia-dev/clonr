@@ -360,6 +360,7 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 // Called by the clonr CLI after a successful deployment finalize.
 // Sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
 // node to NodeStateDeployed. Subsequent PXE boots will return "exit" (disk boot).
+// Also transitions any active reimage record to succeeded.
 func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -375,6 +376,18 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Transition the active reimage record (if any) to complete.
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), id)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", id).Msg("deploy-complete: could not look up active reimage (non-fatal)")
+	} else if active != nil {
+		if dbErr := h.DB.UpdateReimageRequestStatus(r.Context(), active.ID, api.ReimageStatusComplete, ""); dbErr != nil {
+			log.Warn().Err(dbErr).Str("reimage_id", active.ID).Msg("deploy-complete: could not update reimage record (non-fatal)")
+		} else {
+			log.Info().Str("reimage_id", active.ID).Str("node_id", id).Msg("deploy-complete: reimage record transitioned to complete")
+		}
+	}
+
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -383,8 +396,17 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 // Called by the clonr CLI after a deployment failure.
 // Sets last_deploy_failed_at, transitioning the node to NodeStateFailed.
 // Does not clear reimage_pending -- admin decides whether to retry or cancel.
+// Accepts an optional DeployFailedPayload body to capture exit code / phase detail.
 func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	// Parse optional structured payload — tolerate missing/empty body.
+	var payload api.DeployFailedPayload
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			log.Warn().Err(err).Str("node_id", id).Msg("deploy-failed: could not parse payload (ignored)")
+		}
+	}
 
 	// Confirm node exists before updating.
 	if _, err := h.DB.GetNodeConfig(r.Context(), id); err != nil {
@@ -398,7 +420,34 @@ func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Warn().Str("node_id", id).Msg("deploy-failed: node marked failed")
+	// Transition the active reimage record (if any) to failed with exit detail.
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), id)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", id).Msg("deploy-failed: could not look up active reimage (non-fatal)")
+	} else if active != nil {
+		msg := payload.Message
+		if msg == "" {
+			msg = "deploy agent reported failure"
+		}
+		if dbErr := h.DB.UpdateReimageRequestFailed(r.Context(), active.ID, msg, payload.ExitCode, payload.ExitName, payload.Phase); dbErr != nil {
+			log.Warn().Err(dbErr).Str("reimage_id", active.ID).Msg("deploy-failed: could not update reimage record (non-fatal)")
+		} else {
+			log.Info().
+				Str("reimage_id", active.ID).
+				Str("node_id", id).
+				Int("exit_code", payload.ExitCode).
+				Str("exit_name", payload.ExitName).
+				Str("phase", payload.Phase).
+				Msg("deploy-failed: reimage record transitioned to failed")
+		}
+	}
+
+	log.Warn().
+		Str("node_id", id).
+		Int("exit_code", payload.ExitCode).
+		Str("exit_name", payload.ExitName).
+		Str("phase", payload.Phase).
+		Msg("deploy-failed: node marked failed")
 	w.WriteHeader(http.StatusNoContent)
 }
 
