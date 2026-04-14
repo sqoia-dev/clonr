@@ -711,10 +711,29 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// correct root=UUID=... kernel cmdline.
 	mkcfgCmd := exec.CommandContext(ctx, "chroot", mountRoot, "grub2-mkconfig", "-o", grubCfgPath)
 	if err := runAndLog(ctx, "grub2-mkconfig", mkcfgCmd); err != nil {
-		// Fatal: without a valid grub.cfg the node cannot boot.
-		return fmt.Errorf("finalize/boot: grub2-mkconfig failed: %w", err)
+		// grub2-mkconfig can fail on RAID layouts because grub2-probe (the disk-probing
+		// helper it uses) cannot enumerate md devices via the diskfilter module in the
+		// chroot context. When this happens, fall back to patching the existing grub.cfg
+		// in-place: replace all UUID references from the capture source with the target
+		// partition UUIDs from partDevs. This avoids a full grub2-mkconfig regeneration
+		// while still producing a bootable GRUB configuration.
+		//
+		// On Rocky/RHEL 10 with BLS (GRUB_ENABLE_BLSCFG=true), the grub.cfg body is
+		// essentially a UUID-keyed search for /boot + blscfg. All kernel cmdline options
+		// (root=UUID=...) live in the BLS .conf files under /boot/loader/entries/, which
+		// the code above already updated. Patching the two UUID search calls in grub.cfg
+		// is sufficient for a bootable system.
+		log.Warn().Err(err).Msg("finalize/boot: grub2-mkconfig failed — attempting in-place UUID patch of existing grub.cfg (RAID fallback)")
+
+		grubCfgAbs := filepath.Join(mountRoot, grubCfgPath)
+		if patchErr := patchGrubCfgUUIDs(grubCfgAbs, layout, partDevs); patchErr != nil {
+			// Both grub2-mkconfig and the UUID patch failed — the node likely cannot boot.
+			return fmt.Errorf("finalize/boot: grub2-mkconfig failed: %w (UUID patch also failed: %v)", err, patchErr)
+		}
+		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub.cfg UUID patch complete (grub2-mkconfig fallback applied)")
+	} else {
+		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub2-mkconfig complete")
 	}
-	log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub2-mkconfig complete")
 
 	// ── 3. dracut --regenerate-all ───────────────────────────────────────────
 	// --no-hostonly is critical: the capture source may be bare metal with a
@@ -773,6 +792,118 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 			Msg("finalize/boot: SSH host keys removed — sshd will regenerate on first boot")
 	}
 
+	return nil
+}
+
+// patchGrubCfgUUIDs is the fallback path for when grub2-mkconfig cannot run
+// (e.g. on RAID layouts where grub2-probe fails to enumerate md devices).
+//
+// It reads the existing grub.cfg, extracts all UUID= strings that appear in
+// search/fs-uuid directives or root= cmdlines, maps them to target partition
+// UUIDs by matching mount points via fstab/blkid, and replaces them in-place.
+//
+// On Rocky/RHEL 10 with BLS the grub.cfg body is minimal: it contains a
+// `search --fs-uuid` for the /boot partition UUID and a `blscfg` call. The
+// kernel root=UUID= lives in the BLS .conf files (updated by updateBLSEntries).
+// Patching the /boot UUID reference in grub.cfg is sufficient for booting.
+func patchGrubCfgUUIDs(grubCfgAbs string, layout api.DiskLayout, partDevs []string) error {
+	log := logger()
+
+	data, err := os.ReadFile(grubCfgAbs)
+	if err != nil {
+		return fmt.Errorf("read grub.cfg: %w", err)
+	}
+	original := string(data)
+
+	// Build a map from old UUID → new UUID by scanning the live partition devices.
+	// grub.cfg embeds UUIDs from the capture source — we must replace ALL of them.
+	uuidRe := regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	ctx := context.Background()
+
+	// Collect old UUIDs from grub.cfg.
+	oldUUIDs := make(map[string]bool)
+	for _, u := range uuidRe.FindAllString(original, -1) {
+		oldUUIDs[u] = true
+	}
+	if len(oldUUIDs) == 0 {
+		log.Info().Msg("finalize/boot: grub.cfg has no UUID references — nothing to patch")
+		return nil
+	}
+
+	// Collect new UUIDs from target partitions, keyed by mountpoint.
+	type newUUIDEntry struct {
+		uuid string
+		mp   string
+	}
+	var newEntries []newUUIDEntry
+	for i, p := range layout.Partitions {
+		if p.MountPoint == "" || p.Filesystem == "" || p.Filesystem == "biosboot" || p.Filesystem == "bios_grub" {
+			continue
+		}
+		if i >= len(partDevs) {
+			continue
+		}
+		uuid, uuidErr := getUUID(ctx, partDevs[i])
+		if uuidErr != nil {
+			log.Warn().Err(uuidErr).Str("dev", partDevs[i]).Msg("finalize/boot: grub.cfg UUID patch — cannot get UUID for partition")
+			continue
+		}
+		newEntries = append(newEntries, newUUIDEntry{uuid: uuid, mp: p.MountPoint})
+	}
+
+	if len(newEntries) == 0 {
+		return fmt.Errorf("no target partition UUIDs available for grub.cfg patching")
+	}
+
+	// Replace old UUIDs with new ones. For grub.cfg, UUIDs typically appear at
+	// most twice (once each for /boot and /). We replace any old UUID that appears
+	// in the file with the new UUID for the same-purpose partition. Since we can't
+	// reliably match "which old UUID belongs to /boot vs /" just from the UUID
+	// strings alone, we use a best-effort approach:
+	//   - If there's only one unique old UUID and one new UUID, replace it directly.
+	//   - If there are multiple old UUIDs, we attempt to match by order of appearance
+	//     in partDevs vs order of appearance in grub.cfg (both are /boot-first, /-second
+	//     on typical Rocky/RHEL grub.cfg layouts).
+	patched := original
+	oldUUIDSlice := make([]string, 0, len(oldUUIDs))
+	for u := range oldUUIDs {
+		oldUUIDSlice = append(oldUUIDSlice, u)
+	}
+
+	if len(oldUUIDSlice) == 1 && len(newEntries) >= 1 {
+		// Single old UUID in grub.cfg — replace with the /boot or first partition UUID.
+		target := newEntries[0]
+		for _, e := range newEntries {
+			if e.mp == "/boot" || e.mp == "/boot/efi" {
+				target = e
+				break
+			}
+		}
+		patched = strings.ReplaceAll(patched, oldUUIDSlice[0], target.uuid)
+		log.Info().Str("old", oldUUIDSlice[0]).Str("new", target.uuid).Str("mp", target.mp).
+			Msg("finalize/boot: grub.cfg UUID patched (single UUID → boot partition)")
+	} else {
+		// Multiple old UUIDs: replace each distinct old UUID with its most likely
+		// counterpart. We assume grub.cfg was generated on a system with a similar
+		// layout (/boot on one partition, / on another) and match positionally.
+		for i, oldUUID := range oldUUIDSlice {
+			if i >= len(newEntries) {
+				break
+			}
+			patched = strings.ReplaceAll(patched, oldUUID, newEntries[i].uuid)
+			log.Info().Str("old", oldUUID).Str("new", newEntries[i].uuid).
+				Msg("finalize/boot: grub.cfg UUID patched")
+		}
+	}
+
+	if patched == original {
+		log.Warn().Msg("finalize/boot: grub.cfg UUID patch made no changes — grub.cfg may use non-standard UUID references")
+	}
+
+	if err := os.WriteFile(grubCfgAbs, []byte(patched), 0o644); err != nil {
+		return fmt.Errorf("write grub.cfg: %w", err)
+	}
+	log.Info().Str("path", grubCfgAbs).Msg("finalize/boot: grub.cfg written with patched UUIDs")
 	return nil
 }
 

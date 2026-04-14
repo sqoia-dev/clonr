@@ -272,50 +272,171 @@ func (b *recommendBuilder) singleDisk(disk hardware.Disk, isUEFI, skipSwap bool)
 }
 
 // twoIdenticalDisks generates a RAID1 layout across two matched disks.
+//
+// Topology chosen by boot firmware:
+//
+//   UEFI: RAID-on-whole-disk — the md device is partitioned directly.
+//         ESP and /boot land on md0p1/md0p2. grub2 does not need to write to
+//         the md device for UEFI (efibootmgr handles that via the EFI variable
+//         namespace), so diskfilter's write limitation is not an issue.
+//
+//   BIOS: md-on-partitions — each raw member disk is partitioned identically.
+//         A biosboot partition (GPT type ef02, 1 MiB) is placed on EACH raw disk
+//         so that grub2-install can write its core.img to the BIOS boot partition
+//         on both sda and sdb. The data partitions (/boot, swap, /) are mirrored
+//         via separate md arrays (md0=/boot, md1=swap, md2=/).
+//
+//         Background: GRUB's diskfilter module is read-only — grub2-install on an
+//         md device fails with "diskfilter writes are not supported". Each physical
+//         disk therefore needs its own biosboot partition so grub2-install can run
+//         directly on /dev/sda and /dev/sdb, writing core.img to the GPT biosboot
+//         region of each disk independently.
 func (b *recommendBuilder) twoIdenticalDisks(d0, d1 hardware.Disk, isUEFI, skipSwap bool) (Recommendation, error) {
 	b.reason(fmt.Sprintf("RAID1 members: %s (%s) and %s (%s)",
 		d0.Name, fmtGB(int64(d0.Size)), d1.Name, fmtGB(int64(d1.Size))))
 
 	swapSize := b.swapSize(int64(d0.Size), skipSwap)
 
-	// The md0 array spans both disks.
-	raid := api.RAIDSpec{
-		Name:    "md0",
-		Level:   "raid1",
-		Members: []string{d0.Name, d1.Name},
-	}
+	var layout api.DiskLayout
 
-	var partitions []api.PartitionSpec
+	if isUEFI {
+		// ── UEFI: RAID-on-whole-disk ─────────────────────────────────────────
+		// The md0 array spans both disks. ESP, /boot, swap, and / are partitions
+		// on the md device. grub2 uses efibootmgr for boot configuration so
+		// diskfilter writes are not required.
+		b.reason("UEFI + RAID1: using RAID-on-whole-disk topology (all partitions on md device)")
 
-	// Boot partitions land on the md device.
-	bootParts := b.bootPartitions(isUEFI)
-	for i := range bootParts {
-		bootParts[i].Device = "md0"
-	}
-	partitions = append(partitions, bootParts...)
+		raid := api.RAIDSpec{
+			Name:    "md0",
+			Level:   "raid1",
+			Members: []string{d0.Name, d1.Name},
+		}
 
-	if swapSize > 0 {
+		var partitions []api.PartitionSpec
+		bootParts := b.bootPartitions(isUEFI)
+		for i := range bootParts {
+			bootParts[i].Device = "md0"
+		}
+		partitions = append(partitions, bootParts...)
+
+		if swapSize > 0 {
+			partitions = append(partitions, api.PartitionSpec{
+				Device:     "md0",
+				Label:      "swap",
+				SizeBytes:  swapSize,
+				Filesystem: "swap",
+				MountPoint: "swap",
+			})
+		}
 		partitions = append(partitions, api.PartitionSpec{
 			Device:     "md0",
-			Label:      "swap",
-			SizeBytes:  swapSize,
-			Filesystem: "swap",
-			MountPoint: "swap",
+			Label:      "root",
+			SizeBytes:  0,
+			Filesystem: "xfs",
+			MountPoint: "/",
 		})
-	}
 
-	partitions = append(partitions, api.PartitionSpec{
-		Device:     "md0",
-		Label:      "root",
-		SizeBytes:  0, // fill remaining RAID space
-		Filesystem: "xfs",
-		MountPoint: "/",
-	})
+		layout = api.DiskLayout{
+			RAIDArrays: []api.RAIDSpec{raid},
+			Partitions: partitions,
+			Bootloader: bootloaderFor(isUEFI),
+		}
+	} else {
+		// ── BIOS: md-on-partitions ────────────────────────────────────────────
+		// Each physical disk is partitioned identically:
+		//   p1 — biosboot (1 MiB, GPT type ef02): no Device → lands on sda/sdb
+		//   p2 — /boot slice (raw): no Device → sda2/sdb2; mirrored via md0
+		//   p3 — swap slice (raw): no Device → sda3/sdb3; mirrored via md1
+		//   p4 — / slice (raw): no Device → sda4/sdb4; mirrored via md2
+		//
+		// No Device field is set on any partition: partitionDisk will partition
+		// each raw disk directly. The RAID arrays are assembled from the resulting
+		// partition slices after the partition phase completes.
+		//
+		// grub2-install targets /dev/sda and /dev/sdb directly (their biosboot
+		// partitions are addressable by GRUB without md involvement).
+		b.reason("BIOS + RAID1: using md-on-partitions topology (biosboot on each raw disk, data partitions mirrored via md)")
 
-	layout := api.DiskLayout{
-		RAIDArrays: []api.RAIDSpec{raid},
-		Partitions: partitions,
-		Bootloader: bootloaderFor(isUEFI),
+		diskSize := int64(d0.Size)
+		bootSize := int64(bootSmall)
+		if diskSize >= smallDiskThreshold {
+			bootSize = int64(bootLarge)
+		}
+
+		// Each raw disk gets: biosboot | /boot-slice | swap-slice | /-slice
+		// No Device field — they land on the raw disks, not on any md device.
+		partitions := []api.PartitionSpec{
+			{
+				Label:      "biosboot",
+				SizeBytes:  biosbootSize,
+				Filesystem: "biosboot",
+				MountPoint: "",
+				Flags:      []string{"bios_grub"},
+				// No Device: one biosboot per physical disk (sda1, sdb1)
+			},
+			{
+				Label:      "boot",
+				SizeBytes:  bootSize,
+				Filesystem: "xfs",
+				MountPoint: "/boot",
+				Device:     "md0", // assembled from sda2+sdb2
+			},
+		}
+		if swapSize > 0 {
+			partitions = append(partitions, api.PartitionSpec{
+				Label:      "swap",
+				SizeBytes:  swapSize,
+				Filesystem: "swap",
+				MountPoint: "swap",
+				Device:     "md1", // assembled from sda3+sdb3
+			})
+		}
+		partitions = append(partitions, api.PartitionSpec{
+			Label:      "root",
+			SizeBytes:  0,
+			Filesystem: "xfs",
+			MountPoint: "/",
+			Device:     "md2", // assembled from sda4+sdb4 (or sda3+sdb3 if no swap)
+		})
+
+		// Determine which partition numbers become RAID members.
+		// biosboot is p1 on each disk; /boot slice is p2; swap (if any) is p3; / is p4 (or p3).
+		bootPartNum := 2
+		var raidArrays []api.RAIDSpec
+		raidArrays = append(raidArrays, api.RAIDSpec{
+			Name:  "md0",
+			Level: "raid1",
+			Members: []string{
+				fmt.Sprintf("%s%d", d0.Name, bootPartNum),
+				fmt.Sprintf("%s%d", d1.Name, bootPartNum),
+			},
+		})
+		nextPart := 3
+		if swapSize > 0 {
+			raidArrays = append(raidArrays, api.RAIDSpec{
+				Name:  "md1",
+				Level: "raid1",
+				Members: []string{
+					fmt.Sprintf("%s%d", d0.Name, nextPart),
+					fmt.Sprintf("%s%d", d1.Name, nextPart),
+				},
+			})
+			nextPart++
+		}
+		raidArrays = append(raidArrays, api.RAIDSpec{
+			Name:  fmt.Sprintf("md%d", len(raidArrays)),
+			Level: "raid1",
+			Members: []string{
+				fmt.Sprintf("%s%d", d0.Name, nextPart),
+				fmt.Sprintf("%s%d", d1.Name, nextPart),
+			},
+		})
+
+		layout = api.DiskLayout{
+			RAIDArrays: raidArrays,
+			Partitions: partitions,
+			Bootloader: bootloaderFor(isUEFI),
+		}
 	}
 
 	b.warn("RAID1 layout requires mdadm to be present in the deployed image's initramfs. " +

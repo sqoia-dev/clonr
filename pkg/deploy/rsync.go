@@ -411,9 +411,38 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		log := logger()
 		bootDir := filepath.Join(mountRoot, "boot")
 
+		// Determine whether this is a RAID-on-whole-disk layout (all non-biosboot
+		// partitions live on md devices). grubInstallTargets() returns the raw member
+		// disks in all RAID topologies because GRUB's diskfilter driver is read-only
+		// and cannot write through md virtual devices. For RAID-on-whole-disk, the raw
+		// member disks have no standalone partition table, so --force is required to
+		// skip GRUB's "no filesystem found" safety check. We also bake mdraid1x and
+		// diskfilter into core.img so GRUB can find /boot on the md array at runtime.
+		raidOnWholeDisk := false
+		for _, p := range d.layout.Partitions {
+			if p.Device == "" {
+				continue
+			}
+			isBIOSBoot := false
+			for _, flag := range p.Flags {
+				if flag == "bios_grub" || flag == "biosboot" {
+					isBIOSBoot = true
+					break
+				}
+			}
+			if !isBIOSBoot {
+				base := strings.TrimPrefix(p.Device, "/dev/")
+				if strings.HasPrefix(base, "md") {
+					raidOnWholeDisk = true
+					break
+				}
+			}
+		}
+
 		// Collect all raw disks that need a bootloader.
 		grubTargets := grubInstallTargets(d.targetDisk, d.layout)
-		log.Info().Strs("disks", grubTargets).Msg("finalize: installing GRUB bootloader on all RAID member disks (BIOS/GPT)")
+		log.Info().Strs("disks", grubTargets).Bool("raid_on_whole_disk", raidOnWholeDisk).
+			Msg("finalize: installing GRUB bootloader on all RAID member disks (BIOS/GPT)")
 
 		for _, grubDisk := range grubTargets {
 			log.Info().Str("disk", grubDisk).Str("bootDir", bootDir).
@@ -422,8 +451,22 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 				"--target=i386-pc",
 				"--boot-directory=" + bootDir,
 				"--recheck",
-				grubDisk,
 			}
+			if raidOnWholeDisk {
+				// The biosboot partition lives on the md device (md0p1), not on the
+				// raw member disk. grub2-install on the raw disk won't find a BIOS
+				// Boot Partition through normal probing.
+				// --force: bypass "no BIOS boot partition found" safety check so GRUB
+				//   writes MBR + embeds core.img to the raw disk's first sectors.
+				// --modules: bake mdraid1x and diskfilter into core.img so GRUB can
+				//   locate /boot on the md array at runtime before loading its own
+				//   module files from any partition.
+				grubArgs = append(grubArgs,
+					"--force",
+					"--modules=mdraid1x diskfilter",
+				)
+			}
+			grubArgs = append(grubArgs, grubDisk)
 			if err := runAndLog(ctx, "grub2-install", exec.CommandContext(ctx, "grub2-install", grubArgs...)); err != nil {
 				// Non-fatal: log prominently. The node may still boot if the image
 				// already had a working bootloader or if another member disk succeeded.
@@ -490,49 +533,27 @@ func partitionDevices(defaultDisk string, layout api.DiskLayout) []string {
 }
 
 // grubInstallTargets returns the ordered, de-duped list of disk devices that
-// grub2-install must target. For single-disk layouts this is just [defaultDisk].
+// grub2-install must target for i386-pc (BIOS) installs. For single-disk
+// layouts this is just [defaultDisk].
 //
-// For RAID-on-whole-disk layouts (where all PartitionSpec.Device values point to
-// md arrays rather than raw disks), grub2-install must target the md device itself
-// (e.g. /dev/md0). In this topology the raw member disks have NO partition table
-// — only the md device is partitioned — so running grub2-install on sda/sdb would
-// fail with "unable to identify a filesystem". GRUB's diskfilter/mdraid1x modules
-// handle writing the MBR to each physical member disk when the md device is used.
+// BIOS RAID rule (both RAID-on-whole-disk and md-on-partitions):
+// grub2-install must ALWAYS target the raw member disks, never the md virtual
+// device. GRUB's diskfilter driver is read-only -- "diskfilter writes are not
+// supported" -- so grub2-install /dev/md0 always fails. Each raw member disk
+// has its own biosboot partition created during partitioning; GRUB writes
+// core.img to each member independently so both disks are independently
+// bootable, matching RAID1's redundancy guarantee.
 //
-// For md-on-partitions layouts (where partitions exist on the raw disks and the md
-// array is formed from those partitions), the raw member disks are targeted so each
-// physical disk gets its own biosboot+MBR for independent bootability.
+// UEFI RAID: this function is only called from the hasBIOSGrub block; the
+// UEFI path uses efibootmgr and does not go through this function.
 func grubInstallTargets(defaultDisk string, layout api.DiskLayout) []string {
 	if len(layout.RAIDArrays) == 0 {
 		return []string{defaultDisk}
 	}
 
-	// Build a set of md array names referenced by at least one non-biosboot partition.
-	// If ANY non-biosboot partition lives on an md device, we are in RAID-on-whole-disk
-	// topology and grub2-install must target the md device(s), not the raw members.
-	mdDevicesWithPartitions := make(map[string]bool)
-	for _, p := range layout.Partitions {
-		if p.Device == "" {
-			continue
-		}
-		// Skip pure biosboot partitions — they don't have a real filesystem and
-		// their device placement doesn't determine the topology.
-		isBIOSBoot := false
-		for _, flag := range p.Flags {
-			if flag == "bios_grub" || flag == "biosboot" {
-				isBIOSBoot = true
-				break
-			}
-		}
-		if isBIOSBoot {
-			continue
-		}
-		base := strings.TrimPrefix(p.Device, "/dev/")
-		if strings.HasPrefix(base, "md") {
-			mdDevicesWithPartitions[base] = true
-		}
-	}
-
+	// For any RAID topology (RAID-on-whole-disk or md-on-partitions), target the
+	// raw member disks. GRUB cannot write through the md virtual device regardless
+	// of topology -- the diskfilter driver is strictly read-only at install time.
 	seen := make(map[string]bool)
 	var targets []string
 	add := func(dev string) {
@@ -542,34 +563,23 @@ func grubInstallTargets(defaultDisk string, layout api.DiskLayout) []string {
 		}
 	}
 
-	if len(mdDevicesWithPartitions) > 0 {
-		// RAID-on-whole-disk: target the md device(s) directly. GRUB's diskfilter
-		// module will write the core image to the biosboot partition on the md device
-		// and stamp the MBR on each physical member automatically.
-		for mdName := range mdDevicesWithPartitions {
-			add("/dev/" + mdName)
-		}
-	} else {
-		// md-on-partitions: target each raw member disk so every physical disk has
-		// its own bootloader for independent boot after a member failure.
-		for _, raid := range layout.RAIDArrays {
-			for _, member := range raid.Members {
-				// Skip size-based selectors — concrete names only.
-				if strings.HasPrefix(member, "smallest-") {
-					continue
-				}
-				var dev string
-				if strings.HasPrefix(member, "/dev/") {
-					dev = member
-				} else {
-					dev = "/dev/" + member
-				}
-				add(dev)
+	for _, raid := range layout.RAIDArrays {
+		for _, member := range raid.Members {
+			// Skip size-based selectors -- concrete device names only.
+			if strings.HasPrefix(member, "smallest-") {
+				continue
 			}
+			var dev string
+			if strings.HasPrefix(member, "/dev/") {
+				dev = member
+			} else {
+				dev = "/dev/" + member
+			}
+			add(dev)
 		}
 	}
 
-	// If no concrete targets found (all selectors, no md devices), fall back.
+	// If no concrete targets found (all selectors), fall back to defaultDisk.
 	if len(targets) == 0 {
 		return []string{defaultDisk}
 	}

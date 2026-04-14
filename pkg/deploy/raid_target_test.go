@@ -179,12 +179,10 @@ func TestPartitionDevices(t *testing.T) {
 
 // TestGrubInstallTargets verifies grubInstallTargets topology detection.
 //
-// The key distinction is RAID-on-whole-disk vs md-on-partitions:
-//   - RAID-on-whole-disk: all PartitionSpec.Device values point to md arrays
-//     → grub2-install must target the md device (e.g. /dev/md0) because
-//       the raw member disks have no partition table of their own
-//   - md-on-partitions: raw disks have biosboot partitions; md arrays are formed
-//     from those partition slices → grub2-install targets the raw member disks
+// BIOS RAID rule: grub2-install must ALWAYS target raw member disks, never the
+// md virtual device. GRUB's diskfilter driver is read-only ("diskfilter writes
+// are not supported"), so grub2-install /dev/md0 fails regardless of topology.
+// This applies to both RAID-on-whole-disk and md-on-partitions layouts.
 func TestGrubInstallTargets(t *testing.T) {
 	t.Run("no RAID — returns defaultDisk only", func(t *testing.T) {
 		layout := api.DiskLayout{}
@@ -194,9 +192,11 @@ func TestGrubInstallTargets(t *testing.T) {
 		}
 	})
 
-	t.Run("RAID-on-whole-disk: all partitions on md0 — returns /dev/md0", func(t *testing.T) {
-		// twoIdenticalDisks() topology: all 4 partitions have Device="md0".
-		// grub2-install must target /dev/md0 (the md device has the biosboot partition).
+	t.Run("RAID-on-whole-disk: all partitions on md0 — returns raw member disks", func(t *testing.T) {
+		// VM206 topology: all 4 partitions have Device="md0". grub2-install must
+		// target the raw member disks (/dev/sda, /dev/sdb), not /dev/md0.
+		// GRUB's diskfilter driver is read-only; targeting md0 fails with
+		// "diskfilter writes are not supported".
 		layout := api.DiskLayout{
 			RAIDArrays: []api.RAIDSpec{
 				{Name: "md0", Level: "raid1", Members: []string{"sda", "sdb"}},
@@ -209,12 +209,20 @@ func TestGrubInstallTargets(t *testing.T) {
 			},
 		}
 		got := grubInstallTargets("/dev/sda", layout)
-		if len(got) != 1 || got[0] != "/dev/md0" {
-			t.Errorf("got %v, want [/dev/md0] for RAID-on-whole-disk topology", got)
+		want := map[string]bool{"/dev/sda": true, "/dev/sdb": true}
+		if len(got) != 2 {
+			t.Fatalf("got %v, want raw member disks [/dev/sda /dev/sdb]", got)
+		}
+		for _, d := range got {
+			if !want[d] {
+				t.Errorf("unexpected target %q in grub targets %v", d, got)
+			}
 		}
 	})
 
-	t.Run("RAID-on-whole-disk: two md arrays — returns both md devices", func(t *testing.T) {
+	t.Run("RAID-on-whole-disk: two md arrays — returns all raw member disks", func(t *testing.T) {
+		// Two RAID arrays: all member disks must receive a grub2-install, not the
+		// md virtual devices.
 		layout := api.DiskLayout{
 			RAIDArrays: []api.RAIDSpec{
 				{Name: "md0", Level: "raid1", Members: []string{"sda", "sdb"}},
@@ -226,9 +234,9 @@ func TestGrubInstallTargets(t *testing.T) {
 			},
 		}
 		got := grubInstallTargets("/dev/sda", layout)
-		want := map[string]bool{"/dev/md0": true, "/dev/md1": true}
-		if len(got) != 2 {
-			t.Fatalf("got %v, want 2 md device entries", got)
+		want := map[string]bool{"/dev/sda": true, "/dev/sdb": true, "/dev/sdc": true, "/dev/sdd": true}
+		if len(got) != 4 {
+			t.Fatalf("got %v, want all 4 raw member disks", got)
 		}
 		for _, d := range got {
 			if !want[d] {
