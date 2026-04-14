@@ -163,8 +163,16 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		opts.Reporter.StartPhase("partitioning", int64(len(d.layout.Partitions)))
 	}
 
-	// Create RAID arrays before partitioning, if any are specified.
-	if len(d.layout.RAIDArrays) > 0 {
+	// Determine RAID topology: if any RAID array has members that look like
+	// partition names (e.g. "sda2", "nvme0n1p3") rather than whole disks
+	// ("sda", "sdb"), the arrays must be created AFTER partitioning — the
+	// partition devices don't exist yet. For RAID-on-whole-disk (members are
+	// raw disks), create arrays BEFORE partitioning so the md device can be
+	// partitioned by partitionDisk.
+	rainOnPartitions := raidMembersArePartitions(d.layout)
+
+	// Create RAID arrays before partitioning for RAID-on-whole-disk topology.
+	if len(d.layout.RAIDArrays) > 0 && !rainOnPartitions {
 		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays")
 		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
 			doRollback("RAID array creation failed")
@@ -187,6 +195,19 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	logger().Info().Str("disk", disk).Msg("partitioning complete")
 	if opts.Reporter != nil {
 		opts.Reporter.EndPhase("")
+	}
+
+	// Create RAID arrays after partitioning for md-on-partitions topology.
+	// The partition devices (sda2, sdb2, etc.) now exist on the raw disks.
+	if len(d.layout.RAIDArrays) > 0 && rainOnPartitions {
+		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays (md-on-partitions: after partitioning)")
+		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
+			doRollback("RAID array creation failed")
+			if opts.Reporter != nil {
+				opts.Reporter.EndPhase(err.Error())
+			}
+			return fmt.Errorf("deploy: create raid arrays: %w", err)
+		}
 	}
 
 	// Emit progress: formatting phase.
@@ -525,6 +546,45 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	}
 
 	return nil
+}
+
+// raidMembersArePartitions returns true when at least one RAID array has members
+// that refer to partition devices (e.g. "sda2", "nvme0n1p3") rather than whole
+// disks ("sda", "sdb"). This determines deploy ordering:
+//   - false (whole-disk members): create RAID arrays BEFORE partitioning so the
+//     md virtual device can be partitioned by partitionDisk.
+//   - true (partition members): partition raw disks FIRST so the partition devices
+//     exist, then create RAID arrays from those partition slices.
+func raidMembersArePartitions(layout api.DiskLayout) bool {
+	for _, raid := range layout.RAIDArrays {
+		for _, member := range raid.Members {
+			// A partition member has trailing digits after a non-digit character.
+			// Examples: "sda2", "sdb3", "nvme0n1p2".
+			// Whole-disk members: "sda", "sdb", "nvme0n1".
+			// Size selectors: "smallest-2" -- not a partition.
+			if strings.HasPrefix(member, "smallest-") {
+				continue
+			}
+			// Strip /dev/ prefix if present.
+			base := strings.TrimPrefix(member, "/dev/")
+			// Check if the name ends in a digit AND contains a non-digit before it.
+			// This distinguishes "sda2" (partition) from "sda" (disk) or "md0" (md device).
+			if len(base) > 0 && base[len(base)-1] >= '0' && base[len(base)-1] <= '9' {
+				// Ensure there's a non-digit somewhere in the name (ruling out pure numeric names).
+				hasNonDigit := false
+				for _, c := range base {
+					if c < '0' || c > '9' {
+						hasNonDigit = true
+						break
+					}
+				}
+				if hasNonDigit {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // partitionDevices reconstructs the partition device path slice for a given layout,
@@ -868,9 +928,10 @@ func (d *FilesystemDeployer) createFilesystems(ctx context.Context, disk string)
 		case "swap":
 			mkfsBin = "mkswap"
 			mkfsArgs = []string{dev}
-		case "", "biosboot", "bios_grub":
-			// No filesystem — raw partition for BIOS boot (GPT BIOS boot partition)
-			// or an explicitly unformatted partition. sgdisk already set the type GUID.
+		case "", "raw", "biosboot", "bios_grub":
+			// No filesystem — raw partition for BIOS boot (GPT BIOS boot partition),
+			// an explicitly unformatted partition, or a RAID member slice that will be
+			// assembled into an md array. sgdisk already set the type GUID.
 			log.Info().Int("partition", i+1).Str("filesystem", p.Filesystem).
 				Msg("skipping mkfs for BIOS boot / raw partition")
 			continue
