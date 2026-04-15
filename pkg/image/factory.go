@@ -1773,24 +1773,45 @@ func (f *Factory) resumeFinalize(ctx context.Context, imageID, imageRoot, rootfs
 
 // ─── Metadata sidecar helpers ─────────────────────────────────────────────────
 
-// extractKernelVersion returns the first kernel version string found by
+// extractKernelVersion returns the best kernel version string found by
 // globbing /boot/vmlinuz-* inside rootfsPath. Returns "" when none is found.
+//
+// "Best" means: prefer non-rescue kernels over rescue kernels. Within each
+// category, sort lexicographically descending so the newest version wins.
+// Rocky/RHEL rescue kernels have version strings starting with "0-rescue-".
 func extractKernelVersion(rootfsPath string) string {
 	bootDir := filepath.Join(rootfsPath, "boot")
 	entries, err := os.ReadDir(bootDir)
 	if err != nil {
 		return ""
 	}
+	var regular, rescue []string
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, "vmlinuz-") {
-			kver := strings.TrimPrefix(name, "vmlinuz-")
-			if kver != "" {
-				return kver
-			}
+		if !strings.HasPrefix(name, "vmlinuz-") {
+			continue
+		}
+		kver := strings.TrimPrefix(name, "vmlinuz-")
+		if kver == "" {
+			continue
+		}
+		if strings.HasPrefix(kver, "0-rescue-") {
+			rescue = append(rescue, kver)
+		} else {
+			regular = append(regular, kver)
 		}
 	}
-	return ""
+	// Prefer the latest regular kernel; fall back to rescue if nothing else.
+	candidates := regular
+	if len(candidates) == 0 {
+		candidates = rescue
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	// Sort descending so the lexicographically largest (latest) version is first.
+	sort.Sort(sort.Reverse(sort.StringSlice(candidates)))
+	return candidates[0]
 }
 
 // extractOSRelease parses /etc/os-release from the rootfs and returns
