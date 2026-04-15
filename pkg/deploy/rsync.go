@@ -30,11 +30,28 @@ type FilesystemDeployer struct {
 	// partitions holds state set by Preflight for use during Deploy.
 	layout     api.DiskLayout
 	targetDisk string
+
+	// NodeToken is the node-scoped Bearer token written to /etc/clonr/node-token
+	// inside the deployed rootfs during Finalize. ADR-0008.
+	// Leave empty to skip phone-home injection (e.g. in tests or non-auto mode).
+	NodeToken string
+
+	// VerifyBootURL is the full URL for the verify-boot endpoint, e.g.
+	// "http://clonr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
+	// Written to /etc/clonr/verify-boot-url inside the deployed rootfs. ADR-0008.
+	VerifyBootURL string
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
 // Returns "" if Preflight has not been called yet.
 func (d *FilesystemDeployer) ResolvedDisk() string { return d.targetDisk }
+
+// SetPhoneHome implements PhoneHomeInjector. Call before Finalize to enable
+// post-reboot verification injection (ADR-0008).
+func (d *FilesystemDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
+	d.NodeToken = nodeToken
+	d.VerifyBootURL = verifyBootURL
+}
 
 // Preflight validates disk size and resolves the target disk.
 func (d *FilesystemDeployer) Preflight(ctx context.Context, layout api.DiskLayout, hw hardware.SystemInfo) error {
@@ -726,6 +743,14 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// Non-fatal: a bad shared-storage config must not prevent the node from
 		// booting. The operator can correct and redeploy.
 		logger().Warn().Err(err).Msg("WARNING: finalize: extra mounts failed (non-fatal)")
+	}
+
+	// ── Phone-home injection (ADR-0008) ──────────────────────────────────────
+	// Write the systemd oneshot unit and its dependencies into the deployed rootfs
+	// so the deployed OS phones home on first boot to verify the bootloader+kernel
+	// are functional. Fatal on failure: a deploy without phone-home is false-green.
+	if err := injectPhoneHome(mountRoot, d.NodeToken, d.VerifyBootURL); err != nil {
+		return fmt.Errorf("deploy: finalize: phone-home injection: %w", err)
 	}
 
 	return nil
