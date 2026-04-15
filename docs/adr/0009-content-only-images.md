@@ -4,8 +4,7 @@
 **Status:** Accepted
 **Amends:** ADR-0003 (image format and distribution model), ADR-0004 (persistence schema — images table extended)
 **Breaks:** All images created under the patch-based model (rocky10-seabios-blkext, rocky101). No back-compat. Rebuild required.
-
-> **NOTE — Pending reconciliation:** Gilfoyle's `admin-image-customization-requirements.md` was not yet available when this ADR was finalized. Section 5 (Admin Customization Surface) captures Richard's best-guess enumeration. Once Gilfoyle's doc is published, the ADR author must diff it against §5, extend any missing categories, and amend this ADR if any category requires a model change. The shell-overlay and secret-injection decisions are the most likely candidates for revision.
+**Amended:** 2026-04-13 — Gilfoyle's `admin-image-customization-requirements.md` (commit `034b7d9`) surfaced three gaps in the original draft: fstab ownership split (§5A), DKMS build pipeline (§5B), and secrets envelope encryption (§5C). Those sections replace the original hand-waving in §5.5 and the open note that previously appeared here.
 
 ---
 
@@ -77,9 +76,17 @@ An image is a rootfs tarball (`rootfs.tar.zst`) plus a metadata sidecar (`image.
   "distro": "rocky",
   "distro_version": "10.0",
   "kernel_version": "5.14.0-570.22.1.el10_0.x86_64",
+  "kernel_pinned": true,
   "firmware_hint": "bios|uefi|both",
   "default_kernel_cmdline": "console=ttyS0,115200n8 crashkernel=1G-4G:192M,4G-64G:256M,64G-:512M",
   "required_kernel_modules": ["dm_mirror", "dm_raid", "md_mod"],
+  "required_secrets": [
+    { "name": "munge.key", "path": "/etc/munge/munge.key", "owner": "munge", "mode": "0400" },
+    { "name": "root.authorized_keys", "path": "/root/.ssh/authorized_keys", "owner": "root", "mode": "0600" }
+  ],
+  "dkms_modules": [
+    { "name": "nvidia", "expected_ko": "extra/nvidia.ko" }
+  ],
   "content_sha256": "<hex>",
   "tarball_size_bytes": 1234567890,
   "package_manifest": [
@@ -164,7 +171,7 @@ blkid -s UUID -o value <boot_dev>    # → BOOT_UUID (if /boot is separate)
 blkid -s UUID -o value <esp_dev>     # → ESP_UUID (if UEFI)
 ```
 
-Write `/mnt/target/etc/fstab` from the layout spec using these UUIDs. The fstab generation is deterministic and testable without a real disk — pass a mock blkid map in tests.
+Write `/mnt/target/etc/fstab.d/00-clonr-os.fstab` from the layout spec using these UUIDs. Then assemble `/mnt/target/etc/fstab` by concatenating `00-clonr-os.fstab` with any `/etc/fstab.d/[10-89]-*.fstab` files that were extracted from the image tarball, in lexicographic order. The deploy engine MUST NOT overwrite any file matching `/etc/fstab.d/9*-*.fstab` or any `/etc/systemd/system/*.mount` unit — those paths are owned by the image overlay (see §5A for the full ownership contract). Fstab generation is deterministic and testable without a real disk — pass a mock blkid map in tests.
 
 #### 3d. Generate machine-id and BLS entries
 
@@ -253,7 +260,7 @@ The finalize phase continues to write:
 
 - `/mnt/target/etc/clonr/node-token` (mode 0600) — node-scoped API key for post-boot verification (ADR-0008 §3)
 - `/mnt/target/etc/systemd/system/clonr-verify-boot.service` — oneshot phone-home unit (ADR-0008 §3)
-- Per-node secret overlays if configured (see §5.5)
+- Per-node secret overlays for all `required_secrets` declared in `image.json` (see §5C for the full delivery model)
 
 ### 4. Shell Session: Overlay Model
 
@@ -356,6 +363,112 @@ At finalize time, `clonr-static` runs `chroot /mnt/target systemctl enable/disab
 Each image or node record may carry a list of ordered shell scripts that run inside a chroot at finalize time, after all declarative customizations are applied. Scripts run as root. They receive environment variables: `CLONR_NODE_ID`, `CLONR_IMAGE_ID`, `CLONR_TARGET_ROOT`, `CLONR_FIRMWARE_MODE`.
 
 Scripts are the escape hatch for anything the declarative model cannot express. They are audited (logged, content-hashed in the deploy event record). A failed script aborts the deploy and reports the script's stderr in the deploy failure event.
+
+### 5A. Fstab Ownership Split
+
+**Problem.** The original §3c wrote `/mnt/target/etc/fstab` from scratch using OS-disk UUIDs. Gilfoyle's §7 identified the gap: every HPC node image carries NFS, Lustre, GPFS, and BeeGFS mount entries that clonr's deploy logic does not know about. Overwriting the entire fstab silently drops those entries. The failure is invisible at boot if any network mounts carry the `nofail` option — the node boots, looks healthy, and users discover `/home` or `/scratch` is missing when they run their first job.
+
+**Contract.**
+
+| Owner | Paths | Rule |
+|---|---|---|
+| Deploy engine (clonr) | `/etc/fstab.d/00-clonr-os.fstab` | Written at deploy time; contains only OS-disk entries (root, boot, swap) keyed by deploy-time UUIDs. On distros that do not support `fstab.d` drop-ins natively, deploy writes `/etc/fstab` as a file containing ONLY OS-disk mounts and nothing else. |
+| Image overlay (Gilfoyle/admin) | `/etc/fstab.d/[10-89]-*.fstab` and `/etc/systemd/system/*.mount` | Network filesystem mounts. Placed in the rootfs by the image overlay at build time. Deploy engine extracts these from the tarball and leaves them untouched. |
+| RESERVED — deploy engine MUST NOT write | `/etc/fstab.d/9[0-9]-*.fstab` and `/etc/fstab.d/9*-*.fstab` | Namespace reserved for future cluster-level orchestration. Touching these at deploy time is a bug. |
+| RESERVED — deploy engine MUST NOT write | `/etc/systemd/system/*.mount` | All `.mount` units come from the image overlay. Deploy engine never creates or modifies them. |
+
+**Rationale.** Sites have tens of NFS/Lustre mounts per node. A single missing mount entry with `nofail` is invisible until users report wrong filesystem state, by which point hundreds of jobs may have written to the wrong path. The only safe contract is strict namespace partitioning: deploy engine owns exactly one file (`00-clonr-os.fstab`) and is constitutionally forbidden from touching anything else in the fstab namespace.
+
+**Distro compatibility.** Rocky 8/9/10 and RHEL 8/9 do not natively assemble `/etc/fstab.d/` into `/etc/fstab` at runtime. For these distros, the deploy engine writes a single `/etc/fstab` consisting of: (1) the OS-disk block it generates and (2) the content of every `/etc/fstab.d/[10-89]-*.fstab` file found in the image overlay, concatenated in lexicographic order. The image's `/etc/fstab.d/` directory is a clonr convention, not a distro mechanism. The deploy engine is the assembler. This assembly must happen after tarball extraction and before bootloader installation.
+
+---
+
+### 5B. DKMS and Out-of-Tree Kernel Modules
+
+**Problem.** The original ADR treated the image as "install packages and you're done." GPU/Infiniband/Lustre clusters run DKMS modules (NVIDIA, MLNX_OFED, Lustre-client) that compile `.ko` files at package-install time against a specific kernel-devel tree. If DKMS does not run at image-build time inside the chroot, the `.ko` files are absent from `/lib/modules/<kver>/extra/` and the sealed image is non-functional on first deploy.
+
+**Build flow.**
+
+1. The image-build pipeline installs the pinned kernel and `kernel-devel` packages as the first package-install step. Kernel version is locked immediately via `dnf versionlock add kernel-<version>` (requires `dnf-plugin-versionlock`). The `exclude=kernel*` line is written to `/etc/dnf/dnf.conf` inside the chroot to prevent any future update from pulling a new kernel.
+
+2. DKMS packages (e.g., `nvidia-dkms`, `kmod-mlnx-ofa_kernel`, `lustre-client-dkms`) are installed. They register with DKMS but do not automatically build inside a plain `chroot` because `/proc`, `/sys`, and `/dev` are not mounted.
+
+3. DKMS build runs inside a `systemd-nspawn` container with full bind mounts:
+
+   ```bash
+   systemd-nspawn \
+     --directory=/mnt/image-rootfs \
+     --bind=/proc \
+     --bind=/sys \
+     --bind=/dev \
+     dkms autoinstall -k <pinned-kernel-version>
+   ```
+
+   This step runs after all packages are installed and after any `post_install_scripts` that register DKMS modules. It runs before the image tarball is sealed.
+
+4. **Post-build verification gate.** The image-build pipeline checks that every `.ko` file declared in `image.json:dkms_modules[].expected_ko` exists under `/lib/modules/<kver>/extra/` before marking the image `ready`. A missing `.ko` fails the build with a structured error — the image is set to `build_failed` state and is not made available for deployment. This gate is non-negotiable: a GPU image that passes build validation with no GPU modules is worse than a build failure because it deploys silently broken nodes.
+
+5. The sealed tarball contains the built `.ko` files. Deploy-time does NOT re-run DKMS. The `dracut --regenerate-all` step in §3e picks up the modules from `/lib/modules/<kver>/` as they exist in the extracted tarball.
+
+**Metadata.** `image.json` carries:
+
+```json
+"kernel_version": "5.14.0-570.22.1.el10_0.x86_64",
+"kernel_pinned": true,
+"dkms_modules": [
+  { "name": "nvidia", "expected_ko": "extra/nvidia.ko" },
+  { "name": "mlnx-ofa_kernel", "expected_ko": "extra/mlx5_core.ko" }
+]
+```
+
+`kernel_pinned: true` is a signal to any future update tooling that the kernel on this image must not be changed without a full image rebuild. It is also displayed in the UI image detail page as a badge.
+
+**Why sealed `.ko` files, not deploy-time rebuild.** Compute nodes in production HPC environments typically have no internet access and no compiler toolchain installed. Re-running DKMS at deploy time would require shipping `gcc`, `make`, and `kernel-devel` to every target node — hundreds of MB of build toolchain that does not belong on a production compute node. The image-build host is the right place for compilers. The deployed node is not.
+
+---
+
+### 5C. Secret Delivery
+
+**Problem.** The original §5.5 said "per-node secret injection, delivered over the secure token channel" without specifying the storage architecture. Gilfoyle's §12 required the actual model: encryption at rest, per-cluster (not per-node) scoping for shared secrets like `munge.key`, and a declarative `required_secrets` field in `image.json` so the image can express what it needs without the admin having to configure injection separately per node.
+
+**Storage architecture — envelope encryption (v1.0).**
+
+The clonr server stores all secrets encrypted at rest using envelope encryption, following the pattern established in ADR-0002 for BMC credentials:
+
+- A **master key** lives outside the database in `/etc/clonr/secret-master.key` (mode 0400, owned by the `clonr-serverd` OS user). This file is never committed to git and never included in backups that leave the server. It is the operator's responsibility to protect and back up this file independently.
+- Each secret value is encrypted with a per-secret **data encryption key (DEK)** using AES-256-GCM. The DEK is wrapped (encrypted) by the master key and stored alongside the ciphertext in the database. This is the standard envelope encryption pattern: `DB stores {wrapped_dek, ciphertext}`; decryption requires the master key from the filesystem.
+- The database schema: `secrets(id, name, cluster_id, wrapped_dek BLOB, ciphertext BLOB, created_at, updated_at)`. No plaintext secret value ever touches the DB.
+
+**Scoping.** Secrets are scoped to a cluster, not to individual nodes. `munge.key`, root `authorized_keys`, Kerberos keytab, and SSSD bind password are cluster-wide — the same value delivered to every node in the cluster. Per-node secrets (TLS certificates with FQDN subjects) are deferred to v1.1.
+
+**Image declaration.** The image declares which secrets it requires via `image.json:required_secrets`:
+
+```json
+"required_secrets": [
+  { "name": "munge.key",            "path": "/etc/munge/munge.key",          "owner": "munge", "mode": "0400" },
+  { "name": "root.authorized_keys", "path": "/root/.ssh/authorized_keys",    "owner": "root",  "mode": "0600" },
+  { "name": "krb5.keytab",          "path": "/etc/krb5.keytab",              "owner": "root",  "mode": "0600" }
+]
+```
+
+The `name` field is the key into the `secrets` table scoped to the node's cluster. The admin registers the secret value once per cluster via the clonr UI or CLI (`clonr secret set munge.key --cluster <id> --file /etc/munge/munge.key`). Clonr stores it encrypted. Every node in the cluster that deploys an image declaring `munge.key` in `required_secrets` receives the same decrypted value at finalize time.
+
+**Delivery at finalize time.** After tarball extraction and before unmount, `clonr-static` calls the server's authenticated secrets API using the node-scoped token established in §3g:
+
+```
+GET /api/v1/secrets/<name>?node=<node_id>
+Authorization: Bearer <node-token>
+```
+
+The server verifies the node token, looks up the image's `required_secrets`, decrypts the DEK with the master key, decrypts the secret value, and returns it in the response body over TLS. `clonr-static` writes the value to the declared path inside the chroot with the declared mode and owner, then immediately frees the value from memory. The secret is never written to disk outside the target rootfs path.
+
+If a required secret is declared in `image.json` but has no registered value for the node's cluster, the finalize phase fails with a structured error identifying the missing secret name. This is a hard failure — a node deployed without `munge.key` cannot run Slurm jobs, and a silent deploy that skips the secret is worse than a failed deploy.
+
+**What the `content_sha256` covers.** The tarball hash covers only image content, not injected secrets. Secrets are per-cluster ephemera from the image's perspective; they are not part of the sealed image and do not affect the image's integrity hash.
+
+**Master key rotation.** Out of scope for v1.0. The architecture does not preclude it: rotation requires re-wrapping all stored DEKs under a new master key, which is a standard envelope encryption operation. The `wrapped_dek` column exists precisely to make this possible without re-encrypting all secret values. A rotation procedure and CLI command are planned for v1.1.
+
+---
 
 ### 6. Migration Plan
 
