@@ -45,8 +45,20 @@ type BootHandler struct {
 // iPXE expands ${mac} before fetching, so this handler receives the actual
 // MAC address. It resolves the node state and returns one of:
 //
-//   - NodeStateDeployed: "#!ipxe\nexit\n" -- hands control back to BIOS/UEFI,
-//     which falls through to local disk (the next boot order entry).
+//   - NodeStateDeployed, NodeStateDeployedVerified: sanboot from local disk --
+//     the node is confirmed healthy; boot from disk unconditionally.
+//
+//   - NodeStateDeployedPreboot: sanboot from local disk -- deploy-complete was
+//     received from initramfs but the OS has not yet phoned home via
+//     POST /verify-boot. We MUST disk-boot here so clonr-verify-boot.service
+//     can run and advance state to deployed_verified. Re-deploying in this
+//     state would cause an infinite deploy loop. If DeployVerifyTimeoutAt is
+//     set (scanner stamped a deadline miss) we still disk-boot and log a
+//     warning; the operator must manually reimage if the OS is broken.
+//
+//   - NodeStateDeployVerifyTimeout: sanboot from local disk with a warning --
+//     the background scanner determined the OS never phoned home in time.
+//     Operator intervention (manual reimage) may be required.
 //
 //   - All other states (Registered, Configured, ReimagePending, Failed, or
 //     unknown MAC): the full clonr initramfs boot script, which causes the
@@ -79,8 +91,62 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 				Str("state", string(state)).
 				Msg("boot: PXE routing decision")
 
-			if state == api.NodeStateDeployed {
-				// Node is healthy and deployed -- tell iPXE to exit and boot from disk.
+			switch state {
+			case api.NodeStateDeployed, api.NodeStateDeployedVerified:
+				// Terminal success states -- node is confirmed healthy. Boot from disk.
+				log.Info().Str("mac", mac).Str("hostname", nodeCfg.Hostname).Str("state", string(state)).Msg("boot: disk-boot (verified deployed)")
+				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
+				if genErr != nil {
+					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
+					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(script)
+				return
+
+			case api.NodeStateDeployedPreboot:
+				// ADR-0008: deploy-complete callback received from initramfs, but the OS
+				// has not yet phoned home via POST /verify-boot. Boot from disk so the
+				// deployed OS gets a chance to run clonr-verify-boot.service and phone
+				// home. Do NOT fall through to re-deploy -- that would cause an infinite
+				// loop: re-deploy -> deployed_preboot -> PXE boot -> re-deploy...
+				//
+				// If DeployVerifyTimeoutAt is set the background scanner already
+				// determined that the OS never phoned home within the deadline. We still
+				// disk-boot (giving the OS one more try) and log a warning. The operator
+				// must intervene (mark the node failed / trigger a reimage) if the OS
+				// genuinely cannot boot. Auto-re-deploy in this state is never safe.
+				if nodeCfg.DeployVerifyTimeoutAt != nil {
+					log.Warn().
+						Str("mac", mac).
+						Str("hostname", nodeCfg.Hostname).
+						Time("deploy_verify_timeout_at", *nodeCfg.DeployVerifyTimeoutAt).
+						Msg("boot: PXE from deployed_preboot node past verify-deadline -- still disk-booting; manual intervention may be required")
+				} else {
+					log.Info().Str("mac", mac).Str("hostname", nodeCfg.Hostname).Msg("boot: disk-boot (deployed_preboot, awaiting verify-boot phone-home)")
+				}
+				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
+				if genErr != nil {
+					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
+					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(script)
+				return
+
+			case api.NodeStateDeployVerifyTimeout:
+				// Background scanner stamped a timeout: OS never phoned home within the
+				// deadline after deploy_completed_preboot_at. Boot from disk and log a
+				// prominent warning. Operator must manually re-image if the OS is broken.
+				log.Warn().
+					Str("mac", mac).
+					Str("hostname", nodeCfg.Hostname).
+					Time("deploy_verify_timeout_at", *nodeCfg.DeployVerifyTimeoutAt).
+					Msg("boot: PXE from deploy_verify_timeout node -- disk-booting; OS failed to phone home; manual reimage may be required")
 				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
