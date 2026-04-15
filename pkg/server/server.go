@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -507,7 +508,7 @@ func serveSetPasswordPage(staticFS fs.FS) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeContent(w, r, "set-password.html", stat.ModTime(), f.(io.ReadSeeker))
+		serveHTMLFile(w, r, f, "set-password.html", stat.ModTime())
 	}
 }
 
@@ -526,7 +527,7 @@ func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeContent(w, r, "login.html", stat.ModTime(), f.(io.ReadSeeker))
+		serveHTMLFile(w, r, f, "login.html", stat.ModTime())
 	}
 }
 
@@ -569,7 +570,13 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 	loginWithPasswordFn := func(username, password string) (userID, role string, mustChange bool, err error) {
 		user, err := s.db.GetUserByUsername(context.Background(), username)
 		if err != nil {
-			return "", "", false, fmt.Errorf("invalid")
+			// ErrUserNotFound → "invalid" (generic, prevents user enumeration).
+			// Any other error is a real DB failure — surface it so the handler
+			// can return 500 rather than masking infrastructure failures as 401.
+			if errors.Is(err, db.ErrUserNotFound) {
+				return "", "", false, fmt.Errorf("invalid")
+			}
+			return "", "", false, fmt.Errorf("db: %w", err)
 		}
 		if user.IsDisabled() {
 			return "", "", false, fmt.Errorf("disabled")
@@ -606,14 +613,19 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 			return "", "", time.Time{}, false, "", false
 		}
 		reissued := ""
+		actuallyReissued := false
 		if result.needsReissue {
 			slid := slideSessionPayload(result.payload)
 			if t, serr := signSessionToken(s.sessionSecret, slid); serr == nil {
 				reissued = t
 				result.payload = slid
+				actuallyReissued = true
 			}
+			// If sign failed, skip re-issue silently — the existing valid token
+			// continues to work. Do NOT return needsReissue=true with an empty
+			// newToken, which would cause HandleMe to overwrite the cookie with "".
 		}
-		return result.payload.Sub, result.payload.Role, time.Unix(result.payload.EXP, 0), result.needsReissue, reissued, true
+		return result.payload.Sub, result.payload.Role, time.Unix(result.payload.EXP, 0), actuallyReissued, reissued, true
 	}
 
 	setPasswordFn := func(userID, currentPassword, newPassword string) (string, time.Time, error) {
@@ -717,8 +729,25 @@ func serveIndex(staticFS fs.FS) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeContent(w, r, "index.html", stat.ModTime(), f.(io.ReadSeeker))
+		serveHTMLFile(w, r, f, "index.html", stat.ModTime())
 	}
+}
+
+// serveHTMLFile serves an fs.File via http.ServeContent, safely handling
+// non-seekable files (e.g. os.DirFS in tests). embed.FS files satisfy
+// io.ReadSeeker directly; for other FS implementations the file is read
+// into a bytes.Reader so that http.ServeContent can seek for Range requests.
+func serveHTMLFile(w http.ResponseWriter, r *http.Request, f fs.File, name string, modTime time.Time) {
+	if rs, ok := f.(io.ReadSeeker); ok {
+		http.ServeContent(w, r, name, modTime, rs)
+		return
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, "failed to read "+name, http.StatusInternalServerError)
+		return
+	}
+	http.ServeContent(w, r, name, modTime, bytes.NewReader(data))
 }
 
 // Handler returns the underlying http.Handler for use in tests.

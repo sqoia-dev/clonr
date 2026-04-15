@@ -93,17 +93,26 @@ func (h *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) handlePasswordLogin(w http.ResponseWriter, r *http.Request, username, password string) {
 	userID, role, mustChange, err := h.LoginWithPassword(username, password)
 	if err != nil {
-		// Return a generic message regardless of reason to prevent user enumeration.
-		code := "unauthorized"
-		msg := "Invalid username or password"
-		if err.Error() == "disabled" {
-			msg = "Account disabled, contact admin"
-			code = "account_disabled"
+		switch err.Error() {
+		case "invalid":
+			// Wrong username or password — generic message prevents user enumeration.
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "Invalid username or password",
+				"code":  "unauthorized",
+			})
+		case "disabled":
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "Account disabled, contact admin",
+				"code":  "account_disabled",
+			})
+		default:
+			// Real DB or infrastructure error — do not mask as 401.
+			log.Error().Err(err).Msg("auth: login db error")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "internal server error",
+				"code":  "internal_error",
+			})
 		}
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": msg,
-			"code":  code,
-		})
 		return
 	}
 
