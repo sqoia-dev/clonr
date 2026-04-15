@@ -1,7 +1,95 @@
 # clonr Validation and Testing Strategy
 
 **Date:** 2026-04-13
+**Last updated:** 2026-04-13 (Sprint 2 post-mortem: serial console gate, boot matrix, ADR-0008 alignment)
 **Scope:** Defines what "works, testable, validated" means for clonr, and how we get there before v1.0 ships.
+
+---
+
+## Serial Console Verification — Mandatory Gate
+
+### Why This Exists
+
+Sprint 2 produced four nodes (VM206, VM207, VM201, VM202) that telemetry declared "success" while their actual state ranged from broken bootloader to empty `/boot` partition to missing NVRAM entries. The `deploy-complete` callback fires from inside the PXE initramfs — it proves `clonr-static` ran clean, not that the deployed OS boots. Hours of debugging were required before anyone attached a serial console.
+
+**Standing rule, effective immediately:** For every deploy-path test — automated or manual, VM or physical — the pass criterion requires a verbatim login prompt captured from the serial console. Telemetry alone (deploy event `status=success`, `deploy_completed_preboot_at` set, SSH responding) is a necessary but not sufficient condition. It does not replace serial console confirmation.
+
+This rule applies to:
+- Every cell in the test matrix below
+- Every E2E golden path run (Proxmox lab)
+- Every pre-release gate run
+- Every nightly failure-mode run that exercises the deploy path
+
+### Serial Console Capture Standard
+
+A valid serial console capture is a text artifact (log file or CI artifact) containing a contiguous block that includes:
+
+1. BIOS/UEFI POST output (or at minimum the final POST line before bootloader)
+2. GRUB/systemd-boot menu or direct boot line
+3. Kernel boot messages (`Booting Linux...` or equivalent)
+4. At least one systemd unit starting (`Starting ...`)
+5. The login prompt: `<hostname> login:` or equivalent (getty output)
+
+The artifact must be timestamped and associated with the specific deploy cycle (node ID + deploy timestamp). It is stored as a CI artifact on every E2E run. A run that produces no serial capture, or a capture that does not reach step 5, is a FAIL regardless of telemetry state.
+
+For Proxmox lab VMs: serial console output is captured via `qm terminal <vmid>` piped to a log file, or via the Proxmox SPICE/VNC console log export. Gilfoyle owns the tooling for automated capture and artifact upload.
+
+---
+
+## Boot Matrix
+
+### Matrix Definition
+
+Every deploy-path must be validated across the full combination of firmware type, storage topology, and disk size. The matrix is:
+
+| | Single disk | RAID1 (2-disk) | RAID5 (3-disk) | RAID10 (4-disk) |
+|---|---|---|---|---|
+| **BIOS** | Cell 1 | Cell 2 | Cell 3 | Cell 4 |
+| **UEFI** | Cell 5 | Cell 6 | Cell 7 | Cell 8 |
+
+Each cell is further subdivided by disk size tier:
+
+- **Small:** < 100 GB (typical NVMe SSD in lab VMs, 32 GB virtual disk)
+- **Medium:** 100 GB – 2 TB (typical enterprise SATA/SAS, 500 GB virtual disk)
+- **Large:** > 2 TB (GPT required, 4 TB virtual disk; tests 2 TB boundary behavior in partition layout)
+
+Full matrix: 8 topology cells × 3 size tiers = 24 cells.
+
+For v1.0, the minimum bar is coverage of all 8 topology cells at the medium size tier (16 cells), plus the small and large tiers for the two most common paths (UEFI single-disk, BIOS single-disk) = 20 cells minimum. The remaining 4 large-disk RAID cells are Sprint 2+.
+
+### Current Lab Coverage (VMs 201–207)
+
+| Cell | Description | Lab VM | Status | Notes |
+|------|-------------|--------|--------|-------|
+| BIOS / single-disk / small | BIOS boot, 1× 32 GB virt disk | VM203 | Partial | BIOS boot confirmed, serial capture not yet automated |
+| BIOS / single-disk / medium | BIOS boot, 1× 500 GB virt disk | VM204 | Not started | VM exists, no image tested |
+| BIOS / RAID1 / small | BIOS boot, 2× 32 GB | VM205 | Not started | Need to add second virt disk |
+| BIOS / RAID1 / medium | BIOS boot, 2× 500 GB | — | Needs new VM | Not provisioned |
+| BIOS / RAID5 / medium | BIOS boot, 3× 500 GB | — | Needs new VM | Not provisioned |
+| BIOS / RAID10 / medium | BIOS boot, 4× 500 GB | — | Needs new VM | Not provisioned |
+| UEFI / single-disk / small | UEFI boot, 1× 32 GB | VM201 | Broken (Sprint 2) | EFI partition / NVRAM issues; Dinesh fixing |
+| UEFI / single-disk / medium | UEFI boot, 1× 500 GB | VM202 | Broken (Sprint 2) | Same root cause as VM201 |
+| UEFI / RAID1 / small | UEFI boot, 2× 32 GB | VM206 | Broken (Sprint 2) | False-green in Sprint 2 |
+| UEFI / RAID1 / medium | UEFI boot, 2× 500 GB | VM207 | Broken (Sprint 2) | False-green in Sprint 2 |
+| UEFI / RAID5 / medium | UEFI boot, 3× 500 GB | — | Needs new VM | Not provisioned |
+| UEFI / RAID10 / medium | UEFI boot, 4× 500 GB | — | Needs new VM | Not provisioned |
+| BIOS / single-disk / large | BIOS boot, 1× 4 TB | — | Needs new VM | GPT boundary test |
+| UEFI / single-disk / large | UEFI boot, 1× 4 TB | — | Needs new VM | GPT boundary test |
+| BIOS / RAID1 / large | BIOS boot, 2× 4 TB | — | Sprint 2+ | Deferred |
+| UEFI / RAID1 / large | UEFI boot, 2× 4 TB | — | Sprint 2+ | Deferred |
+
+**Covered by current lab (VMs 201–207):** 10 of the 24 cells are reachable with existing VMs (though several are currently in "Broken" state pending Dinesh's UEFI fixes). 6 cells need new VMs provisioned on the Proxmox host. 4 large-disk RAID cells are deferred.
+
+**Physical hardware requirement:** At least 2 cells (BIOS/single-disk/medium and UEFI/single-disk/medium) must be validated on physical hardware before v1.0 — not just on QEMU VMs. QEMU's virtio block device does not faithfully reproduce real NVMe/SATA timing, BIOS POST sequences, or EFI NVRAM behavior. Gilfoyle to provision one physical node (lab server or repurposed workstation) for this purpose.
+
+### Cell Pass Criterion
+
+A matrix cell is GREEN when:
+1. A full deploy completes with `deploy_verified_booted_at` set (ADR-0008 two-phase model).
+2. A serial console capture artifact exists showing a login prompt (per the serial console standard above).
+3. The test has been run 3 consecutive times without failure (pre-release) or once (nightly/push-to-main).
+
+A cell is RED if any of the three conditions above are not met. A cell that passes on telemetry alone, without serial console capture, is YELLOW — it is not counted toward the pre-release gate.
 
 ---
 
@@ -105,9 +193,10 @@ The Proxmox lab (documented in `docs/test-lab-design.md`) is the ground truth. E
 2. clonr-serverd is running on VMID 200 with a pre-built Rocky 9 image.
 3. test-node-01 PXE boots, registers via MAC lookup, receives deploy action.
 4. clonr CLI (initramfs) deploys the Rocky 9 image.
-5. Assertions: deploy event posted to server with `status=success`; node reboots into deployed OS; SSH responds on management IP; /etc/hostname matches NodeConfig; chrony is synchronized; node_exporter is reachable on :9100.
-6. Trigger a second deploy (different image version) via the rolling deploy API.
-7. Assertions: SLURM drain event fired (if slurmctld is running in the lab); second deploy completes; node reboots into second image; SLURM resume fired.
+5. Assertions (phase 1 — pre-boot): deploy event posted to server with `status=success`; `deploy_completed_preboot_at` is set on the node record.
+6. Assertions (phase 2 — boot verification, per ADR-0008): node reboots into deployed OS; `clonr-verify-boot.service` fires and server sets `deploy_verified_booted_at` within `CLONR_VERIFY_TIMEOUT`; node state transitions to `deployed_verified`. Serial console capture artifact uploaded showing login prompt. SSH responds on management IP; /etc/hostname matches NodeConfig; chrony is synchronized; node_exporter is reachable on :9100.
+7. Trigger a second deploy (different image version) via the rolling deploy API.
+8. Assertions: SLURM drain event fired (if slurmctld is running in the lab); second deploy completes both phases; node reboots into second image with `deployed_verified` state; SLURM resume fired.
 
 This test is the release gate for v1.0. It must pass 3 consecutive runs without failure before the release tag is cut.
 
@@ -135,17 +224,21 @@ Using all three test-node VMs plus QEMU VMs spawned on the Proxmox host, simulat
 - All of the above
 - Integration tests: `go test ./test/integration/... -tags integration` (requires root, runs in a privileged CI runner)
 - E2E golden path against Proxmox lab (Gilfoyle owns the runner and lab state)
+- Serial console capture for each E2E deploy uploaded as CI artifact; run marked FAIL if capture is absent or does not reach login prompt
 
 **Nightly:**
 - All integration tests
-- E2E golden path
+- E2E golden path (with serial console capture artifacts)
 - E2E failure-mode tests
+- Boot matrix sweep: run the golden path deploy against every GREEN or YELLOW cell in the boot matrix table above; update cell status in a nightly report artifact
 - 24-hour server stability soak: run clonr-serverd with simulated load (repeated MAC lookups, blob downloads, deploy events) for 24 hours; assert zero panics, memory usage stable within 10% over the run
 
 **Pre-release (before cutting a tag):**
 - All nightly tests, 3 consecutive passing runs of E2E golden path
+- Boot matrix: all covered cells (per the table above) must be GREEN — i.e., `deployed_verified` state confirmed AND serial console capture showing login prompt. YELLOW cells (telemetry-only) are not accepted as green at pre-release.
 - Concurrent load test: aggregate throughput gate
 - Manual checklist walk-through of every MVP checklist item in ROADMAP.md, signed off by Gilfoyle
+- ADR-0008 gate: every deploy in the pre-release run must set `deploy_verified_booted_at` within `CLONR_VERIFY_TIMEOUT`; any node left in `deployed_preboot` or `deploy_verify_timeout` at run end is a blocking failure
 
 ---
 
@@ -159,13 +252,16 @@ The following must all be green before `git tag v1.0.0` is pushed. No exceptions
 | Integration: auth scope | node-scoped key gets 403 on admin endpoints in automated test |
 | Integration: encryption | No plaintext BMC credentials in SQLite after migration (grep-verifiable) |
 | Integration: disk selection | Preflight selects correct disk on multi-disk test node, rejects wrong-type disk |
-| E2E: golden path | 3 consecutive passing runs on Proxmox lab |
+| E2E: golden path | 3 consecutive passing runs on Proxmox lab; each run produces serial console capture with login prompt as CI artifact |
+| E2E: two-phase verification (ADR-0008) | Every deploy in the 3 golden path runs sets both `deploy_completed_preboot_at` and `deploy_verified_booted_at`; no node ends in `deployed_preboot` or `deploy_verify_timeout` |
+| E2E: serial console gate | Verbatim login prompt present in serial console capture for every deploy-path test in the pre-release run. Telemetry alone does not satisfy this gate. |
+| Boot matrix coverage | All covered cells (see boot matrix table) are GREEN: `deployed_verified` + serial console capture with login prompt. YELLOW cells are a blocking failure. |
 | E2E: deploy success rate | >= 99% across a 50-node simulated deploy run (50 VMs or 50 sequential runs on available test nodes) |
 | E2E: failure recovery | Failed deploy resets IPMI boot device to PXE in all 3 failure-mode scenarios |
 | Load test: throughput | Aggregate blob throughput >= 200 MB/s with 20 concurrent clients |
 | Stability soak | Zero panics over 24 hours of simulated load |
 | Scheduler hook | SLURM drain/resume fires correctly (lab slurmctld, not a mock) |
-| First-boot config | chrony.conf, autofs maps, sssd.conf, NetworkManager keyfiles all present and correct on deployed nodes (verified via SSH) |
+| First-boot config | chrony.conf, autofs maps, sssd.conf, NetworkManager keyfiles all present and correct on deployed nodes (verified via SSH after `deployed_verified` state is set) |
 | node_exporter | Running on :9100 on all deployed test nodes |
 | Checklist sign-off | Every item in the ROADMAP.md MVP checklist marked YES by Gilfoyle |
 
