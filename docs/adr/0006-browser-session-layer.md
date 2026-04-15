@@ -3,6 +3,7 @@
 **Date:** 2026-04-13
 **Status:** Accepted
 **Amends:** ADR-0001 (additive — no regression to API key primitive)
+**Last Verified:** 2026-04-13 — applies to clonr main @ f34323e
 
 ---
 

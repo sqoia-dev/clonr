@@ -1,5 +1,7 @@
 # clonr Test Lab Design
 
+**Last Verified:** 2026-04-12 — applies to clonr main @ 21f82f1
+
 ## Overview
 
 This document specifies the complete Proxmox-based test lab for clonr — a node cloning and

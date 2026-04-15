@@ -2,6 +2,7 @@
 
 **Date:** 2026-04-13
 **Last updated:** 2026-04-13 (Sprint 2 post-mortem: serial console gate, boot matrix, ADR-0008 alignment)
+**Last Verified:** 2026-04-15 — applies to clonr main @ e439b0a
 **Scope:** Defines what "works, testable, validated" means for clonr, and how we get there before v1.0 ships.
 
 ---

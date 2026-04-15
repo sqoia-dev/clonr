@@ -2,6 +2,7 @@
 
 **Date:** 2026-04-13
 **Status:** Accepted
+**Last Verified:** 2026-04-13 — applies to clonr main @ fbccab9
 
 ---
 

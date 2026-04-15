@@ -1,5 +1,7 @@
 # clonr Deploy Agent Exit Codes
 
+**Last Verified:** 2026-04-14 — applies to clonr main @ ebb84b0
+
 The clonr deploy agent (`clonr deploy --auto`) exits with a classified code so
 operators and monitoring systems can triage failures without reading logs.
 

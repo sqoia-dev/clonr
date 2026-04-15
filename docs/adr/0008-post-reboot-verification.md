@@ -3,6 +3,7 @@
 **Date:** 2026-04-13
 **Status:** Accepted
 **Amends:** ADR-0001 (node-scoped token reuse), ADR-0004 (persistence schema extended)
+**Last Verified:** 2026-04-15 — applies to clonr main @ 6038544
 
 ---
 

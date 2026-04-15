@@ -1,5 +1,7 @@
 # clonr-server Deploy Procedure
 
+**Last Verified:** 2026-04-13 — applies to clonr main @ 92644c9
+
 Covers: SSH hardening rollout, binary update, auth key bootstrap.
 
 ---

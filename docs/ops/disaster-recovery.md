@@ -1,5 +1,7 @@
 # Disaster Recovery — clonr
 
+**Last Verified:** 2026-04-13 — applies to clonr main @ 4d1f66f
+
 ## Scope
 
 This document covers recovery of the clonr provisioning server from unexpected process death, power loss, or operator error. It does not cover storage hardware failure (covered under backup-restore.md) or network fabric loss (out of scope for v0.x).

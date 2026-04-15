@@ -1,5 +1,7 @@
 # Backup and Restore — clonr
 
+**Last Verified:** 2026-04-13 — applies to clonr main @ cf7e367
+
 ## What gets backed up
 
 | Asset | Method | Frequency | Retention |

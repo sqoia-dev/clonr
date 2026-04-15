@@ -2,6 +2,8 @@
 
 **Document status:** Living technical vision. Decisions marked [LOCKED] reflect architectural commitments already encoded in the codebase and API contract. Scope boundaries are defined in ADR-0005 and are not negotiable without a new ADR.
 
+**Last Verified:** 2026-04-13 — applies to clonr main @ a189a07
+
 **Scope:** See ADR-0005. clonr owns provisioning-time operations — from bare metal to a running, cluster-joined node. Day-2 operations (scheduler tuning, user lifecycle management, patch management on running nodes) belong in your configuration management toolchain.
 
 ---

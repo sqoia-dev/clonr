@@ -1,5 +1,7 @@
 # clonr UI Design: Persona Spec for Turn-Key HPC
 
+**Last Verified:** 2026-04-13 — applies to clonr main @ 9b56b4f
+
 **Sprint 2 design input — UI experience, not API design.**
 Written against the baseline in `pkg/server/ui/static/js/app.js` and `pkg/server/ui/static/index.html`.
 Richard's ADRs and roadmap are out of scope here. This doc owns the UX layer only.

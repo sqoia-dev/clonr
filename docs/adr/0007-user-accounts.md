@@ -3,6 +3,7 @@
 **Date:** 2026-04-13
 **Status:** Accepted
 **Amends:** ADR-0001 (additive — no regression to API key primitive), ADR-0006 (session payload extended, login endpoint extended)
+**Last Verified:** 2026-04-14 — applies to clonr main @ 722c8f3
 
 ---
 
