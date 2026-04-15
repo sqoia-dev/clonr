@@ -53,17 +53,27 @@ else
     log "WARNING: /root/.ssh/id_ed25519.pub not found — localhost SSH for build-initramfs may fail"
 fi
 
-# Ensure the autodeploy script is executable in-place (it runs from /opt/clonr/scripts/)
-chmod +x "${REPO_DIR}/scripts/autodeploy/clonr-autodeploy.sh"
-log "Made clonr-autodeploy.sh executable"
+# ---------------------------------------------------------------------------
+# Install the autodeploy script to /usr/local/sbin/ — OUTSIDE the repo.
+# This is critical: the systemd unit runs from /usr/local/sbin/clonr-autodeploy.sh,
+# NOT from the repo path. If we ran from /opt/clonr/scripts/autodeploy/..., a
+# git reset --hard to a commit before this script existed would delete the file
+# and make every subsequent timer invocation fail with status=203/EXEC.
+#
+# The /usr/local/sbin copy is the stable entry point. The repo copy is the
+# source of truth for development. To update the installed copy after script
+# changes, re-run this install.sh.
+# ---------------------------------------------------------------------------
+SCRIPT_SRC="${REPO_DIR}/scripts/autodeploy/clonr-autodeploy.sh"
+SCRIPT_DEST="/usr/local/sbin/clonr-autodeploy.sh"
+cp "${SCRIPT_SRC}" "${SCRIPT_DEST}"
+chmod +x "${SCRIPT_DEST}"
+log "Installed clonr-autodeploy.sh → ${SCRIPT_DEST}"
 
-# If the repo is not at /opt/clonr, symlink or warn
+# If the repo is not at /opt/clonr, warn — the script hardcodes /opt/clonr as REPO_DIR
 if [[ "${REPO_DIR}" != "/opt/clonr" ]]; then
-    if [[ -d "/opt/clonr" ]]; then
-        log "WARNING: repo is at ${REPO_DIR} but /opt/clonr already exists"
-        log "         The autodeploy script expects the repo at /opt/clonr."
-        log "         Update REPO_DIR in clonr-autodeploy.sh if you use a different path."
-    fi
+    log "WARNING: repo is at ${REPO_DIR} but clonr-autodeploy.sh expects /opt/clonr"
+    log "         Edit REPO_DIR in ${SCRIPT_DEST} if you use a different path."
 fi
 
 # Install systemd units

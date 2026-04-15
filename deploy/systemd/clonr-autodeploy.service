@@ -13,8 +13,15 @@ After=clonr-serverd.service
 
 [Service]
 Type=oneshot
-# Script lives in the repo itself — keeps the deploy logic version-controlled
-ExecStart=/opt/clonr/scripts/autodeploy/clonr-autodeploy.sh
+# Script is installed to /usr/local/sbin/ (NOT the repo path) so it survives
+# git reset --hard operations. The install.sh copies it there. When the script
+# updates itself (via git pull), the new version takes effect on the next cycle
+# because install.sh is re-run as part of any manual upgrade path.
+#
+# NOTE: The script in /opt/clonr/ is the source of truth, but the installed
+# copy at /usr/local/sbin/clonr-autodeploy.sh is what runs. If the script
+# logic changes, re-run scripts/autodeploy/install.sh to update the installed copy.
+ExecStart=/usr/local/sbin/clonr-autodeploy.sh
 # Run as root: needs to write to /usr/local/bin, restart clonr-serverd,
 # and write to /var/lib/clonr (owned by clonr user but root can write)
 User=root
