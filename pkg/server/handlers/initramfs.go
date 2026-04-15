@@ -332,6 +332,11 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 	}
 
 	scanner := bufio.NewScanner(stdout)
+	// Increase buffer limits to handle long output lines from build scripts.
+	// Default is 64KB which can cause scanner to stop early on verbose output,
+	// leaving the pipe unread and deadlocking cmd.Wait().
+	scanner.Buffer(make([]byte, 1<<20), 16<<20) // 1MB initial, 16MB max
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		select {
@@ -340,7 +345,21 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 		}
 	}
 
-	return cmd.Wait()
+	// Drain any remaining bytes after scanner stops (e.g. on token-size error)
+	// so the pipe buffer never blocks the child process before cmd.Wait().
+	if scanErr := scanner.Err(); scanErr != nil {
+		log.Warn().Err(scanErr).Msg("runScript: scanner stopped early — draining pipe")
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		return waitErr
+	}
+	if scanner.Err() != nil {
+		return fmt.Errorf("runScript: output scanner: %w", scanner.Err())
+	}
+	return nil
 }
 
 // inspectStagingFile computes sha256, size, and detects kernel version from the staging file.

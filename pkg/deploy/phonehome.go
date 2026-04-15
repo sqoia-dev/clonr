@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -23,8 +22,8 @@ var verifyBootScript []byte
 //  3. Writes /etc/clonr/verify-boot-url (0644) with verifyBootURL.
 //  4. Writes /etc/systemd/system/clonr-verify-boot.service from the embedded unit.
 //  5. Writes /usr/local/bin/clonr-verify-boot from the embedded shell script (0755).
-//  6. Runs `systemctl --root=<mountRoot> enable clonr-verify-boot.service` to create
-//     the WantedBy=multi-user.target symlink inside the chroot without starting it.
+//  6. Creates the WantedBy=multi-user.target symlink directly inside the chroot
+//     (equivalent to `systemctl --root enable`, but without requiring systemctl).
 //
 // Returns a fatal error on any write or enable failure — the caller must treat this
 // as a hard error and surface ExitFinalize so the deploy is not falsely reported as
@@ -77,14 +76,20 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 		return fmt.Errorf("phonehome: write clonr-verify-boot script: %w", err)
 	}
 
-	// ── 6. Enable the unit via systemctl --root ──────────────────────────────
-	// `systemctl --root=<mountRoot> enable` creates the WantedBy symlink inside
-	// the chroot. It does NOT start the unit — safe to run outside a live system.
-	// This avoids the need to chroot + systemctl which requires a full bind-mount
-	// of /proc, /sys, /dev that we want to skip at this point.
-	enableCmd := exec.Command("systemctl", "--root="+mountRoot, "enable", "clonr-verify-boot.service")
-	if out, err := enableCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("phonehome: systemctl enable clonr-verify-boot.service: %w\n%s", err, string(out))
+	// ── 6. Enable the unit via direct symlink ────────────────────────────────
+	// `systemctl --root enable` is not available in the initramfs environment
+	// (systemctl is not staged in build-initramfs.sh). We replicate the exact
+	// action systemctl would take: create the WantedBy symlink directly.
+	// The unit declares WantedBy=multi-user.target, so the symlink target is
+	// ../clonr-verify-boot.service (relative to the wants directory).
+	wantsDir := filepath.Join(mountRoot, "etc", "systemd", "system", "multi-user.target.wants")
+	if err := os.MkdirAll(wantsDir, 0o755); err != nil {
+		return fmt.Errorf("phonehome: mkdir multi-user.target.wants: %w", err)
+	}
+	linkPath := filepath.Join(wantsDir, "clonr-verify-boot.service")
+	_ = os.Remove(linkPath) // idempotent — remove stale link if present
+	if err := os.Symlink("../clonr-verify-boot.service", linkPath); err != nil {
+		return fmt.Errorf("phonehome: create WantedBy symlink: %w", err)
 	}
 
 	log.Info().

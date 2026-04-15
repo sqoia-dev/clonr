@@ -37,27 +37,19 @@ func TestInjectPhoneHome_NoOp(t *testing.T) {
 
 // TestInjectPhoneHome_Writes verifies that injectPhoneHome writes all expected
 // files with correct permissions and content when given valid inputs.
-// It uses a fake rootfs tree and a stub systemctl that exits 0.
+// It uses a fake rootfs tree. The WantedBy symlink is now created directly via
+// os.Symlink — no systemctl dependency.
 func TestInjectPhoneHome_Writes(t *testing.T) {
-	// systemctl --root=... enable ... must succeed; on the CI host systemctl is
-	// available but may fail with "Failed to connect to bus" in a rootless container.
-	// We pre-create the WantedBy directory so systemctl --root can write the symlink
-	// without needing a running D-Bus or init system.
 	rootfs := t.TempDir()
 
 	token := "clonr-node-tok-abc123"
 	verifyURL := "http://clonr-server:8080/api/v1/nodes/node-id-xyz/verify-boot"
 
-	// Pre-create the directory that systemctl --root expects so the enable call
-	// either succeeds or creates the symlink itself.
-	multiUserWantsDir := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
-	if err := os.MkdirAll(multiUserWantsDir, 0o755); err != nil {
-		t.Fatalf("pre-create multi-user.target.wants: %v", err)
-	}
-
 	if err := injectPhoneHome(rootfs, token, verifyURL); err != nil {
 		t.Fatalf("injectPhoneHome: %v", err)
 	}
+
+	multiUserWantsDir := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
 
 	// ── Assert /etc/clonr/node-token ─────────────────────────────────────────
 	tokenPath := filepath.Join(rootfs, "etc", "clonr", "node-token")
@@ -139,13 +131,22 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		}
 	}
 
-	// ── Assert multi-user.target.wants symlink ────────────────────────────────
+	// ── Assert multi-user.target.wants symlink ───────────────────────────────
+	// injectPhoneHome creates the symlink directly via os.Symlink — no systemctl.
 	symlinkPath := filepath.Join(multiUserWantsDir, "clonr-verify-boot.service")
-	if _, err := os.Lstat(symlinkPath); err != nil {
-		// systemctl --root may not be available in all CI environments.
-		// Log the absence but do not fail the test — the unit file and script
-		// presence already validates the injection logic.
-		t.Logf("WARN: WantedBy symlink not created (systemctl --root may be unavailable in this environment): %v", err)
+	symlinkInfo, err := os.Lstat(symlinkPath)
+	if err != nil {
+		t.Fatalf("WantedBy symlink not created: %v", err)
+	}
+	if symlinkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected symlink at %s, got mode %v", symlinkPath, symlinkInfo.Mode())
+	}
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatalf("readlink %s: %v", symlinkPath, err)
+	}
+	if target != "../clonr-verify-boot.service" {
+		t.Errorf("symlink target = %q, want %q", target, "../clonr-verify-boot.service")
 	}
 }
 

@@ -30,13 +30,11 @@ if [ -f /etc/os-release ]; then
 fi
 
 # Escape special chars in OS_RELEASE for JSON embedding.
-# Use printf %s to avoid double-expansion; jq is not guaranteed present,
-# so we do minimal escaping: backslash, double-quote, and control chars.
+# Order matters: backslash first, then double-quote, then newlines.
+# Single awk pass handles all three without the tr+sed backslash round-trip
+# that previously destroyed the quote escaping.
 OS_RELEASE_ESCAPED=$(printf '%s' "$OS_RELEASE" \
-    | sed 's/\\/\\\\/g' \
-    | sed 's/"/\\"/g' \
-    | tr '\n' '\\' \
-    | sed 's/\\/\\n/g')
+    | awk '{gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0}')
 
 PAYLOAD=$(printf '{"hostname":"%s","kernel_version":"%s","uptime_seconds":%s,"systemctl_state":"%s","os_release":"%s"}' \
     "$HOSTNAME" "$KERNEL" "$UPTIME_SEC" "$SYSTEMCTL_STATE" "$OS_RELEASE_ESCAPED")
