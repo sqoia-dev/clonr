@@ -18,6 +18,7 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/bcrypt"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/config"
 	"github.com/sqoia-dev/clonr/pkg/db"
@@ -242,6 +243,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Handler instances.
 	apiKeysH := s.buildAPIKeysHandler()
+	usersH := s.buildUsersHandler()
 
 	health := &handlers.HealthHandler{Version: "dev"}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
@@ -304,6 +306,8 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/", serveIndex(staticFS))
 	// /login — dedicated login page (served from same static FS as the main UI).
 	r.Get("/login", serveLoginPage(staticFS))
+	// /set-password — forced first-login password change page.
+	r.Get("/set-password", serveSetPasswordPage(staticFS))
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// All /api/v1 routes: resolve the API key scope from the Bearer token
@@ -315,6 +319,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/auth/login", authH.HandleLogin)
 		r.Post("/auth/logout", authH.HandleLogout)
 		r.Get("/auth/me", authH.HandleMe)
+		// set-password requires a valid session (even during forced-change flow).
+		r.Post("/auth/set-password", authH.HandleSetPassword)
 
 		// Fully public — no key required (PXE-booted nodes before any key is issued).
 		r.Get("/boot/ipxe", boot.ServeIPXEScript)
@@ -364,6 +370,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/admin/api-keys", apiKeysH.HandleCreate)
 			r.Delete("/admin/api-keys/{id}", apiKeysH.HandleRevoke)
 			r.Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
+
+			// User management (ADR-0007) — admin role only.
+			r.Get("/admin/users", usersH.HandleList)
+			r.Post("/admin/users", usersH.HandleCreate)
+			r.Put("/admin/users/{id}", usersH.HandleUpdate)
+			r.Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
+			r.Delete("/admin/users/{id}", usersH.HandleDelete)
 
 			// Health
 			r.Get("/health", health.ServeHTTP)
@@ -478,6 +491,26 @@ func (s *Server) buildRouter() chi.Router {
 	return r
 }
 
+// serveSetPasswordPage serves set-password.html from the embedded static FS.
+func serveSetPasswordPage(staticFS fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open("set-password.html")
+		if err != nil {
+			// Fall back to login page if not yet present.
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			http.Error(w, "set-password page not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		http.ServeContent(w, r, "set-password.html", stat.ModTime(), f.(io.ReadSeeker))
+	}
+}
+
 // serveLoginPage serves login.html from the embedded static FS.
 func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -503,8 +536,8 @@ func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
 func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 	const cookieName = "clonr_session"
 
-	loginFn := func(rawKey string) (keyPrefix string, scope string, ok bool) {
-		// Strip typed prefix before hashing, same as apiKeyAuth middleware.
+	// Legacy API-key login (deprecated — removed in v1.1).
+	loginWithKeyFn := func(rawKey string) (keyPrefix string, scope string, ok bool) {
 		hashInput := rawKey
 		for _, pfx := range []string{"clonr-admin-", "clonr-node-"} {
 			if strings.HasPrefix(rawKey, pfx) {
@@ -522,20 +555,35 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 			log.Error().Err(err).Msg("auth handler: db lookup failed")
 			return "", "", false
 		}
-		// Login only allows admin-scope keys.
 		if lookupResult.Scope != api.KeyScopeAdmin {
 			return "", "", false
 		}
-		sc := lookupResult.Scope
 		kid := hashInput
 		if len(kid) > 8 {
 			kid = kid[:8]
 		}
-		return kid, string(sc), true
+		return kid, string(lookupResult.Scope), true
 	}
 
-	signFn := func(keyPrefix string) (string, time.Time, error) {
-		p := newSessionPayload(keyPrefix)
+	// Primary username+password login (ADR-0007).
+	loginWithPasswordFn := func(username, password string) (userID, role string, mustChange bool, err error) {
+		user, err := s.db.GetUserByUsername(context.Background(), username)
+		if err != nil {
+			return "", "", false, fmt.Errorf("invalid")
+		}
+		if user.IsDisabled() {
+			return "", "", false, fmt.Errorf("disabled")
+		}
+		if berr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); berr != nil {
+			return "", "", false, fmt.Errorf("invalid")
+		}
+		// Update last_login_at asynchronously — never block the login response.
+		go func() { _ = s.db.SetLastLogin(context.Background(), user.ID) }()
+		return user.ID, string(user.Role), user.MustChangePassword, nil
+	}
+
+	signForUserFn := func(userID, role string) (string, time.Time, error) {
+		p := newSessionPayload(userID, role)
 		token, err := signSessionToken(s.sessionSecret, p)
 		if err != nil {
 			return "", time.Time{}, err
@@ -543,10 +591,19 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		return token, time.Unix(p.EXP, 0), nil
 	}
 
-	validateFn := func(token string) (scope string, exp time.Time, needsReissue bool, newToken string, ok bool) {
+	signForKeyFn := func(keyPrefix string) (string, time.Time, error) {
+		p := newSessionPayloadForKey(keyPrefix)
+		token, err := signSessionToken(s.sessionSecret, p)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		return token, time.Unix(p.EXP, 0), nil
+	}
+
+	validateFn := func(token string) (sub, role string, exp time.Time, needsReissue bool, newToken string, ok bool) {
 		result, err := validateSessionToken(s.sessionSecret, token)
 		if err != nil {
-			return "", time.Time{}, false, "", false
+			return "", "", time.Time{}, false, "", false
 		}
 		reissued := ""
 		if result.needsReissue {
@@ -556,15 +613,56 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 				result.payload = slid
 			}
 		}
-		return result.payload.Scope, time.Unix(result.payload.EXP, 0), result.needsReissue, reissued, true
+		return result.payload.Sub, result.payload.Role, time.Unix(result.payload.EXP, 0), result.needsReissue, reissued, true
+	}
+
+	setPasswordFn := func(userID, currentPassword, newPassword string) (string, time.Time, error) {
+		user, err := s.db.GetUser(context.Background(), userID)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("user_not_found")
+		}
+		if berr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); berr != nil {
+			return "", time.Time{}, fmt.Errorf("wrong_password")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("hash: %w", err)
+		}
+		if err := s.db.SetUserPassword(context.Background(), userID, string(hash), true); err != nil {
+			return "", time.Time{}, err
+		}
+		// Issue a fresh session token with the same role.
+		p := newSessionPayload(user.ID, string(user.Role))
+		token, err := signSessionToken(s.sessionSecret, p)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		return token, time.Unix(p.EXP, 0), nil
 	}
 
 	return &handlers.AuthHandler{
-		Login:      loginFn,
-		Sign:       signFn,
-		Validate:   validateFn,
-		CookieName: cookieName,
-		Secure:     s.cfg.SessionSecure,
+		LoginWithKey:      loginWithKeyFn,
+		LoginWithPassword: loginWithPasswordFn,
+		SignForUser:       signForUserFn,
+		SignForKey:        signForKeyFn,
+		Validate:          validateFn,
+		SetPassword:       setPasswordFn,
+		CookieName:        cookieName,
+		Secure:            s.cfg.SessionSecure,
+	}
+}
+
+// buildUsersHandler constructs the UsersHandler with a bcrypt helper closure.
+func (s *Server) buildUsersHandler() *handlers.UsersHandler {
+	return &handlers.UsersHandler{
+		DB: s.db,
+		HashPassword: func(plaintext string) (string, error) {
+			h, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+			if err != nil {
+				return "", err
+			}
+			return string(h), nil
+		},
 	}
 }
 
