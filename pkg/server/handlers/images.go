@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/image"
 )
 
 // defaultBlobMaxConcurrent is the default maximum number of simultaneous blob
@@ -777,6 +778,59 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		log.Info().Str("image_id", img.ID).Str("tar_sha256", checksum).
 			Msg("blob stream: tar checksum computed and cached (sidecar written)")
 	}
+}
+
+// GetImageMetadata handles GET /api/v1/images/:id/metadata
+//
+// Returns the ImageMetadata sidecar for the given image. The sidecar is read
+// from the on-disk JSON file at ImageDir/<id>/metadata.json. If the DB column
+// is populated it is used as a fast-path; the sidecar file is the fallback.
+// Returns 404 if neither the image record nor the sidecar file exist.
+func (h *ImagesHandler) GetImageMetadata(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctx := r.Context()
+
+	// Confirm the image record exists.
+	if _, err := h.DB.GetBaseImage(ctx, id); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Fast path: DB column populated by the build pipeline.
+	rawJSON, err := h.DB.GetImageMetadataJSON(ctx, id)
+	if err != nil {
+		log.Warn().Err(err).Str("image_id", id).Msg("get image metadata: db lookup failed, falling back to sidecar")
+	}
+
+	if rawJSON == "" {
+		// Fall back to the sidecar file on disk.
+		meta, readErr := image.ReadMetadata(h.ImageDir, id)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				writeJSON(w, http.StatusNotFound, api.ErrorResponse{
+					Error: "metadata sidecar not yet available for this image; it is written after the first successful build",
+					Code:  "metadata_not_found",
+				})
+				return
+			}
+			log.Error().Err(readErr).Str("image_id", id).Msg("get image metadata: read sidecar")
+			writeError(w, readErr)
+			return
+		}
+		// Lazily back-fill the DB column so future reads hit the fast path.
+		if encoded, marshalErr := json.Marshal(meta); marshalErr == nil {
+			if dbErr := h.DB.SetImageMetadataJSON(ctx, id, string(encoded)); dbErr != nil {
+				log.Warn().Err(dbErr).Str("image_id", id).Msg("get image metadata: lazy db backfill failed")
+			}
+		}
+		writeJSON(w, http.StatusOK, meta)
+		return
+	}
+
+	// Serve the DB-cached JSON directly — avoid an unnecessary unmarshal/re-marshal.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(rawJSON))
 }
 
 // countWriter wraps an http.ResponseWriter and counts bytes written.

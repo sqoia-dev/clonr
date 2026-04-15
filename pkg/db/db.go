@@ -1938,6 +1938,38 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+// ─── Image metadata operations ───────────────────────────────────────────────
+
+// SetImageMetadataJSON persists the JSON-encoded image metadata sidecar into
+// the base_images.metadata_json column for imageID.  The column was added by
+// migration 021_image_metadata.sql.
+func (db *DB) SetImageMetadataJSON(ctx context.Context, imageID, metadataJSON string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE base_images SET metadata_json = ? WHERE id = ?`,
+		metadataJSON, imageID,
+	)
+	if err != nil {
+		return fmt.Errorf("db: set metadata_json for %s: %w", imageID, err)
+	}
+	return nil
+}
+
+// GetImageMetadataJSON returns the raw metadata_json TEXT for imageID, or ""
+// if the column is NULL (not yet populated).
+func (db *DB) GetImageMetadataJSON(ctx context.Context, imageID string) (string, error) {
+	var raw sql.NullString
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT metadata_json FROM base_images WHERE id = ?`, imageID,
+	).Scan(&raw)
+	if err != nil {
+		return "", fmt.Errorf("db: get metadata_json for %s: %w", imageID, err)
+	}
+	if !raw.Valid {
+		return "", nil
+	}
+	return raw.String, nil
+}
+
 // requireOneRow returns ErrNotFound if no rows were affected.
 func requireOneRow(res sql.Result, table, id string) error {
 	n, err := res.RowsAffected()

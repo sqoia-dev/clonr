@@ -327,6 +327,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
 			r.Put("/images/{id}/disklayout", images.PutDiskLayout)
 			r.Post("/images/{id}/blob", images.UploadBlob)
+			r.Get("/images/{id}/metadata", images.GetImageMetadata)
 
 			// Factory
 			r.Get("/image-roles", factory.ListImageRoles)
