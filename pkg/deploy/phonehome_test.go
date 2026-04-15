@@ -49,6 +49,37 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		t.Fatalf("injectPhoneHome: %v", err)
 	}
 
+	// ── Idempotency: second call must succeed without EEXIST ─────────────────
+	// Simulates a retry or re-deploy attempt where the symlink already exists
+	// with the correct target. The new Lstat-based logic must treat this as a
+	// no-op (skip symlink creation) rather than failing with EEXIST.
+	if err := injectPhoneHome(rootfs, token, verifyURL); err != nil {
+		t.Fatalf("injectPhoneHome (second call, idempotency): %v", err)
+	}
+
+	// ── Stale symlink: wrong target replaced ─────────────────────────────────
+	// Simulates a stale symlink from a broken previous deploy pointing to a
+	// different target. The new code must remove it and create the correct one.
+	wantsDirForStale := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
+	staleLinkPath := filepath.Join(wantsDirForStale, "clonr-verify-boot.service")
+	if err := os.Remove(staleLinkPath); err != nil {
+		t.Fatalf("setup stale symlink: remove existing: %v", err)
+	}
+	if err := os.Symlink("../wrong-target.service", staleLinkPath); err != nil {
+		t.Fatalf("setup stale symlink: create: %v", err)
+	}
+	if err := injectPhoneHome(rootfs, token, verifyURL); err != nil {
+		t.Fatalf("injectPhoneHome (stale symlink replacement): %v", err)
+	}
+	// Confirm the symlink was corrected.
+	correctedTarget, err := os.Readlink(staleLinkPath)
+	if err != nil {
+		t.Fatalf("readlink after stale replacement: %v", err)
+	}
+	if correctedTarget != "../clonr-verify-boot.service" {
+		t.Errorf("after stale replacement: symlink target = %q, want %q", correctedTarget, "../clonr-verify-boot.service")
+	}
+
 	multiUserWantsDir := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
 
 	// ── Assert /etc/clonr/node-token ─────────────────────────────────────────

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
@@ -283,4 +284,87 @@ func findMembersForArray(mdstat, mdName string) []string {
 		return members
 	}
 	return nil
+}
+
+// waitForRAIDSync polls /proc/mdstat until all md arrays have finished their
+// initial resync (or recovery). This is called before applyBootConfig on RAID
+// layouts to ensure a clean array state before heavy I/O from dracut.
+//
+// A newly created RAID1 array starts an initial sync immediately after creation.
+// While the filesystem is writable during resync, concurrent heavy sequential
+// I/O (e.g. dracut writing a large initramfs) on virtual disks can trigger
+// transient I/O errors during resync, leaving the array degraded before first boot.
+// Waiting for the resync removes this race condition.
+//
+// The function times out after the context deadline or after a hard 10-minute
+// wall limit, whichever comes first. A resync in progress is logged every 30s so
+// the operator can follow progress. A timeout is non-fatal: deploy continues.
+func waitForRAIDSync(ctx context.Context) {
+	log := logger()
+	const maxWait = 10 * time.Minute
+	const pollInterval = 5 * time.Second
+	const logInterval = 30 * time.Second
+
+	deadline := time.Now().Add(maxWait)
+	lastLog := time.Now()
+
+	log.Info().Msg("finalize/raid: waiting for RAID array initial resync to complete before applyBootConfig")
+
+	for {
+		// Check context cancellation.
+		select {
+		case <-ctx.Done():
+			log.Warn().Msg("finalize/raid: context cancelled while waiting for RAID resync — proceeding anyway")
+			return
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			log.Warn().Dur("waited", maxWait).
+				Msg("finalize/raid: RAID resync wait timed out — proceeding (array may still be syncing)")
+			return
+		}
+
+		raw, err := os.ReadFile("/proc/mdstat")
+		if err != nil {
+			log.Warn().Err(err).Msg("finalize/raid: could not read /proc/mdstat — skipping resync wait")
+			return
+		}
+
+		// /proc/mdstat lines look like:
+		//   md1 : active raid1 sdb2[1] sda2[0]
+		//         123456 blocks [2/2] [UU]
+		//         [=======>.........]  resync = 42.5% (52428/123456) finish=1.2min speed=12345K/sec
+		//
+		// A resync/check/recovery in progress is indicated by a line starting with
+		// spaces that contains "resync", "recovery", or "check" followed by a percentage.
+		resyncing := false
+		for _, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "resync") ||
+				strings.HasPrefix(trimmed, "recovery") ||
+				strings.HasPrefix(trimmed, "check") {
+				resyncing = true
+				if time.Since(lastLog) >= logInterval {
+					log.Info().Str("mdstat_line", trimmed).
+						Msg("finalize/raid: RAID resync in progress — waiting")
+					lastLog = time.Now()
+				}
+				break
+			}
+		}
+
+		if !resyncing {
+			log.Info().Msg("finalize/raid: all RAID arrays synced — proceeding with applyBootConfig")
+			return
+		}
+
+		// Poll again after interval.
+		select {
+		case <-ctx.Done():
+			log.Warn().Msg("finalize/raid: context cancelled while waiting for RAID resync — proceeding anyway")
+			return
+		case <-time.After(pollInterval):
+		}
+	}
 }

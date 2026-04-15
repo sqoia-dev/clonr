@@ -2,7 +2,9 @@ package deploy
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -87,10 +89,28 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 		return fmt.Errorf("phonehome: mkdir multi-user.target.wants: %w", err)
 	}
 	linkPath := filepath.Join(wantsDir, "clonr-verify-boot.service")
-	_ = os.Remove(linkPath) // idempotent — remove stale link if present
-	if err := os.Symlink("../clonr-verify-boot.service", linkPath); err != nil {
+	const wantTarget = "../clonr-verify-boot.service"
+
+	// Idempotent: if a symlink already exists with the correct target, nothing
+	// to do. If the path exists as anything else (stale symlink with wrong
+	// target, regular file from a previous broken deploy), remove it.
+	if existing, lstatErr := os.Lstat(linkPath); lstatErr == nil {
+		if existing.Mode()&os.ModeSymlink != 0 {
+			// It's a symlink — check the target.
+			if target, rErr := os.Readlink(linkPath); rErr == nil && target == wantTarget {
+				// Already correct — skip symlink creation.
+				goto symlinkDone
+			}
+		}
+		// Exists but wrong type or wrong target — remove it.
+		if rmErr := os.Remove(linkPath); rmErr != nil {
+			return fmt.Errorf("phonehome: remove stale wants entry %s: %w", linkPath, rmErr)
+		}
+	}
+	if err := os.Symlink(wantTarget, linkPath); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("phonehome: create WantedBy symlink: %w", err)
 	}
+symlinkDone:
 
 	log.Info().
 		Str("mountRoot", mountRoot).

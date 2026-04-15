@@ -705,6 +705,18 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 			Msg("finalize: UEFI NVRAM boot entry created/repaired — EFI bootloader install complete")
 	}
 
+	// If the layout includes RAID arrays, wait for the initial resync to complete
+	// before running applyBootConfig. A newly created RAID1 array begins an
+	// initial sync immediately after creation. While the filesystem is fully
+	// read/write during resync, heavy sequential I/O from dracut (writing a 100+MB
+	// initramfs) running concurrently with the resync can cause transient I/O errors
+	// on virtual disks, potentially leaving the array in a degraded state before
+	// the first real boot. Waiting for resync guarantees a clean array state before
+	// we write boot-critical files.
+	if len(d.layout.RAIDArrays) > 0 {
+		waitForRAIDSync(ctx)
+	}
+
 	// If the layout includes RAID arrays, write /etc/mdadm.conf BEFORE running
 	// applyBootConfig so that the single dracut invocation in applyBootConfig
 	// picks up the conf and bakes it into the initramfs. GenerateMdadmConf no
