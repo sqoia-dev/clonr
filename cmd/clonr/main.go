@@ -595,6 +595,12 @@ PXE-booted nodes running from initramfs.`,
 			fmt.Fprintln(os.Stderr, "[6/6] Applying node configuration...")
 			deployLog.Info().Str("component", "chroot").Msg("applying node configuration")
 			progressReporter.StartPhase("finalizing", 0)
+			// Wire phone-home injection (ADR-0008): set node token and verify-boot URL
+			// on the deployer before Finalize so it writes them into the deployed rootfs.
+			if phi, ok := deployer.(deploy.PhoneHomeInjector); ok && nodeCfg != nil {
+				verifyBootURL := cfg.ServerURL + "/api/v1/nodes/" + nodeCfg.ID + "/verify-boot"
+				phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
+			}
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
 				deployLog.Error().Str("component", "chroot").Err(err).Msg("finalize failed")
 				progressReporter.EndPhase(err.Error())
@@ -971,6 +977,12 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("applying node configuration (hostname, network, SSH keys)")
 	reporter.StartPhase("finalizing", 0)
+	// Wire phone-home injection (ADR-0008): set node token and verify-boot URL
+	// on the deployer before Finalize so it writes them into the deployed rootfs.
+	if phi, ok := deployer.(deploy.PhoneHomeInjector); ok {
+		verifyBootURL := cfg.ServerURL + "/api/v1/nodes/" + nodeCfg.ID + "/verify-boot"
+		phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
+	}
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
 		deployLog.Error().Err(err).Msg("finalize failed")
 		reporter.EndPhase(err.Error())

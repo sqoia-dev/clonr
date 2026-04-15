@@ -27,11 +27,28 @@ type BlockDeployer struct {
 	// layout and targetDisk are resolved by Preflight.
 	layout     api.DiskLayout
 	targetDisk string
+
+	// NodeToken is the node-scoped Bearer token written to /etc/clonr/node-token
+	// inside the deployed rootfs during Finalize. ADR-0008.
+	// Leave empty to skip phone-home injection (e.g. in tests or non-auto mode).
+	NodeToken string
+
+	// VerifyBootURL is the full URL for the verify-boot endpoint, e.g.
+	// "http://clonr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
+	// Written to /etc/clonr/verify-boot-url inside the deployed rootfs. ADR-0008.
+	VerifyBootURL string
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
 // Returns "" if Preflight has not been called yet.
 func (d *BlockDeployer) ResolvedDisk() string { return d.targetDisk }
+
+// SetPhoneHome implements PhoneHomeInjector. Call before Finalize to enable
+// post-reboot verification injection (ADR-0008).
+func (d *BlockDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
+	d.NodeToken = nodeToken
+	d.VerifyBootURL = verifyBootURL
+}
 
 // Preflight validates that a suitable target disk exists and resolves its path.
 func (d *BlockDeployer) Preflight(ctx context.Context, layout api.DiskLayout, hw hardware.SystemInfo) error {
@@ -303,7 +320,16 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		_ = exec.Command("umount", mountRoot).Run()
 	}()
 
-	return applyNodeConfig(ctx, cfg, mountRoot)
+	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
+		return err
+	}
+
+	// ── Phone-home injection (ADR-0008) ──────────────────────────────────────
+	if err := injectPhoneHome(mountRoot, d.NodeToken, d.VerifyBootURL); err != nil {
+		return fmt.Errorf("deploy/block: finalize: phone-home injection: %w", err)
+	}
+
+	return nil
 }
 
 // verifyBlockSpotCheck does a basic integrity check on the deployed block image
