@@ -843,7 +843,33 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		}
 	}
 
-	// ── 5. Rebuild initramfs via dracut ─────────────────────────────────────
+	// ── 5. Bind-mount virtual filesystems and rebuild initramfs via dracut ───
+	// dracut's module-setup.sh scripts inspect /proc/cpuinfo, /sys/module/*,
+	// and /dev/fd to detect hardware and build the correct initramfs.
+	// Without these bind-mounts, dracut warns "/proc/ is not mounted" and may
+	// omit critical modules (XFS, virtio_scsi, etc.) from the initramfs.
+	type bindMount struct{ src, dst string }
+	dracutBinds := []bindMount{
+		{"/proc", filepath.Join(mountRoot, "proc")},
+		{"/sys", filepath.Join(mountRoot, "sys")},
+		{"/dev", filepath.Join(mountRoot, "dev")},
+		{"/dev/pts", filepath.Join(mountRoot, "dev", "pts")},
+	}
+	var mountedPaths []string
+	for _, b := range dracutBinds {
+		if out, mountErr := exec.CommandContext(ctx, "mount", "--bind", b.src, b.dst).CombinedOutput(); mountErr != nil {
+			log.Warn().Err(mountErr).Str("src", b.src).Str("dst", b.dst).
+				Str("output", string(out)).Msg("finalize/boot: bind-mount failed — dracut may omit hardware modules (non-fatal)")
+		} else {
+			mountedPaths = append(mountedPaths, b.dst)
+		}
+	}
+	defer func() {
+		for i := len(mountedPaths) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", mountedPaths[i]).Run()
+		}
+	}()
+
 	// --no-hostonly: build a generic initramfs (hardware-agnostic, not tailored
 	// to the deploy host's physical devices). Required because we are running in
 	// a PXE initramfs environment with different hardware than the target node.
@@ -1148,9 +1174,19 @@ func writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID string, layout api.Di
 		cfg.WriteString("insmod mdraid1x\n")
 	}
 	fmt.Fprintf(&cfg, "search --no-floppy --fs-uuid --set=root %s\n\n", bootUUID)
+
+	// Kernel path relative to GRUB root:
+	// - When /boot is a separate partition (bootUUID != rootUUID), GRUB's root IS
+	//   the /boot partition, so kernel is at /vmlinuz-<kver> (not /boot/vmlinuz-).
+	// - When /boot is on the root partition (bootUUID == rootUUID), GRUB's root IS
+	//   the root partition, so kernel is at /boot/vmlinuz-<kver>.
+	kernelPrefix := "/boot"
+	if bootUUID != rootUUID {
+		kernelPrefix = ""
+	}
 	fmt.Fprintf(&cfg, "menuentry \"Rocky Linux (%s)\" {\n", kver)
-	fmt.Fprintf(&cfg, "  linux /boot/vmlinuz-%s %s\n", kver, cmdline)
-	fmt.Fprintf(&cfg, "  initrd /boot/initramfs-%s.img\n", kver)
+	fmt.Fprintf(&cfg, "  linux %s/vmlinuz-%s %s\n", kernelPrefix, kver, cmdline)
+	fmt.Fprintf(&cfg, "  initrd %s/initramfs-%s.img\n", kernelPrefix, kver)
 	cfg.WriteString("}\n")
 
 	grubCfgPath := filepath.Join(mountRoot, "boot", "grub2", "grub.cfg")
