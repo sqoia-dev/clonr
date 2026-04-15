@@ -769,7 +769,11 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		// isn't installed in the capture image). Without those rules, rd.auto's
 		// udev-based incremental assembly path doesn't fire. The explicit
 		// rd.md.uuid= path in mdraid_start bypasses the udev rules entirely.
-		var blsExtraArgs []string
+		// Always ensure serial console is in the kernel cmdline so that
+		// nodes with no VGA output (e.g. single-disk VMs using ttyS0) produce
+		// visible output during boot. The argument is idempotent — updateBLSEntries
+		// skips any arg already present on the options line.
+		blsExtraArgs := []string{"console=ttyS0,115200"}
 		if len(layout.RAIDArrays) > 0 {
 			blsExtraArgs = append(blsExtraArgs, "rd.auto")
 			for _, spec := range layout.RAIDArrays {
