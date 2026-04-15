@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,27 +39,27 @@ type ImagesHandler struct {
 	// It is optional — when nil, the active-deploy guard is skipped.
 	Progress ProgressStoreIface
 	// blobSem is the semaphore controlling max concurrent blob streams.
-	// Initialised lazily on first use via blobSemaphore().
-	blobSem chan struct{}
+	// Initialised once on first use via blobSemaphoreOnce; always access via blobSemaphore().
+	blobSem     chan struct{}
+	blobSemOnce sync.Once
 	// activeBlobStreams tracks the current count for metrics/logging.
 	activeBlobStreams atomic.Int64
 }
 
 // blobSemaphore returns the blob concurrency semaphore, reading
 // CLONR_BLOB_MAX_CONCURRENT from the environment on first call.
-// The channel capacity is the configured limit; acquiring a slot is a
-// non-blocking send (if full → 503); releasing is a receive.
+// Initialization is protected by sync.Once to prevent data races when
+// multiple concurrent requests hit DownloadBlob simultaneously.
 func (h *ImagesHandler) blobSemaphore() chan struct{} {
-	if h.blobSem != nil {
-		return h.blobSem
-	}
-	cap := defaultBlobMaxConcurrent
-	if v := os.Getenv("CLONR_BLOB_MAX_CONCURRENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cap = n
+	h.blobSemOnce.Do(func() {
+		cap := defaultBlobMaxConcurrent
+		if v := os.Getenv("CLONR_BLOB_MAX_CONCURRENT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cap = n
+			}
 		}
-	}
-	h.blobSem = make(chan struct{}, cap)
+		h.blobSem = make(chan struct{}, cap)
+	})
 	return h.blobSem
 }
 
@@ -308,6 +309,8 @@ func (h *ImagesHandler) PutDiskLayout(w http.ResponseWriter, r *http.Request) {
 
 // UploadBlob handles POST /api/v1/images/:id/blob
 // Streams the request body to disk and finalizes the image record.
+// The SHA256 is always computed server-side from the bytes as they stream in;
+// if the client supplied X-Checksum-SHA256, we compare and reject on mismatch.
 func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -336,21 +339,37 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	n, err := io.Copy(f, r.Body)
+	// Compute SHA256 server-side as we write, using TeeReader.
+	// This ensures the stored checksum reflects the actual bytes written, not
+	// a value supplied (and potentially incorrect or malicious) from the client.
+	hasher := sha256.New()
+	n, err := io.Copy(f, io.TeeReader(r.Body, hasher))
 	if err != nil {
 		log.Error().Err(err).Msg("write blob")
 		_ = os.Remove(blobPath)
 		writeError(w, err)
 		return
 	}
+	serverChecksum := hex.EncodeToString(hasher.Sum(nil))
 
-	checksum := r.Header.Get("X-Checksum-SHA256")
+	// If the client provided a checksum header, verify it matches what we computed.
+	if clientChecksum := r.Header.Get("X-Checksum-SHA256"); clientChecksum != "" {
+		if clientChecksum != serverChecksum {
+			_ = os.Remove(blobPath)
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("checksum mismatch: client sent %s, server computed %s", clientChecksum, serverChecksum),
+				"code":  "checksum_mismatch",
+			})
+			return
+		}
+	}
 
 	if err := h.DB.SetBlobPath(r.Context(), id, blobPath); err != nil {
 		writeError(w, err)
 		return
 	}
-	if err := h.DB.FinalizeBaseImage(r.Context(), id, n, checksum); err != nil {
+	// Always persist the server-computed checksum, never the client-supplied one.
+	if err := h.DB.FinalizeBaseImage(r.Context(), id, n, serverChecksum); err != nil {
 		writeError(w, err)
 		return
 	}
