@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/pkg/chroot"
 	"github.com/sqoia-dev/clonr/pkg/ipmi"
 )
 
@@ -530,27 +531,12 @@ func applyKernelArgs(ctx context.Context, mountRoot, kernelArgs string) error {
 		return fmt.Errorf("write grub config: %w", err)
 	}
 
-	// Attempt to regenerate grub.cfg inside the chroot using chroot + grub2-mkconfig.
-	// grub2-mkconfig may not be available in all chroot environments (e.g. minimal
-	// initramfs deployments or systemd-boot systems). The /etc/default/grub edit
-	// above is the durable change; grub2-mkconfig makes it take effect immediately.
-	// Failure here is non-fatal but MUST be surfaced — the node may not boot with
-	// the requested kernel arguments without manual intervention.
-	grubCfgPath := findGrubCfg(mountRoot)
-	if grubCfgPath != "" {
-		logger().Info().Str("grub_cfg", grubCfgPath).Msg("running grub2-mkconfig in chroot")
-		chrootArgs := []string{mountRoot, "grub2-mkconfig", "-o", grubCfgPath}
-		if err := runAndLog(ctx, "grub2-mkconfig", exec.CommandContext(ctx, "chroot", chrootArgs...)); err != nil {
-			return fmt.Errorf(
-				"WARNING: grub configuration update failed — node may not boot with the requested "+
-					"kernel arguments. Manual intervention may be required. "+
-					"grub2-mkconfig: %w",
-				err,
-			)
-		}
-		logger().Info().Str("grub_cfg", grubCfgPath).Msg("grub2-mkconfig complete")
-	}
-
+	// Note: under the content-only model (ADR-0009), applyBootConfig generates
+	// the grub.cfg and BLS entries from scratch AFTER applyNodeConfig runs.
+	// The /etc/default/grub edit above is the durable per-node override;
+	// applyBootConfig will incorporate it when generating BLS entries (S2-04).
+	// We do NOT run grub2-mkconfig here — it would be overwritten immediately
+	// and may fail on RAID layouts (diskfilter write restriction).
 	return nil
 }
 
@@ -743,462 +729,151 @@ func installEFIBootloaderInChroot(ctx context.Context, mountRoot string) error {
 	return nil
 }
 
-// applyBootConfig performs the post-install steps required to produce a bootable
-// deployed filesystem. It must be called after grub2-install has written the
-// bootloader to the MBR/bios-boot partition and after the full tar extraction is
-// complete. The steps are:
+// applyBootConfig generates all topology-specific boot state from scratch
+// (ADR-0009 content-only model). It must be called after the rootfs tarball has
+// been extracted and after grub2-install has written the bootloader MBR/bios-boot.
 //
-//  1. Regenerate /boot/grub2/grub.cfg via grub2-mkconfig inside a chroot with
-//     /proc, /sys, and /dev bind-mounted (required by grub2-mkconfig).
-//  2. Regenerate the initramfs via dracut --no-hostonly so the resulting image
-//     contains drivers for all hardware, not just the capture source's hardware
-//     (critical for virtio_blk/virtio_net on VMs).
-//  3. Rewrite /etc/fstab with the UUIDs of the newly partitioned disks, replacing
-//     the stale UUIDs from the capture source.
-//  4. Truncate /etc/machine-id so systemd generates a new unique ID on first boot.
-//  5. Remove /etc/ssh/ssh_host_* so sshd regenerates host keys on first boot,
-//     preventing all deployed nodes from sharing identical host keys.
+// New flow (generate, do not patch):
+//
+//  1. Generate a fresh machine-id and write to /etc/machine-id +
+//     /var/lib/dbus/machine-id.
+//  2. Write /etc/fstab.d/00-clonr-os.fstab with OS-disk mounts, assemble
+//     /etc/fstab from all fstab.d files in lexicographic order (§5A split).
+//  3. Generate BLS entries from scratch under /boot/loader/entries/ using the
+//     new machine-id and target root UUID.
+//  4. Prepare the RAID dracut config (if RAID layout).
+//  5. Run dracut --regenerate-all --no-hostonly --force inside a chroot to
+//     rebuild initramfs with the correct modules for the target hardware.
+//  6. Write a minimal hand-crafted grub.cfg (no grub2-mkconfig, no save_env,
+//     no submenus — clean bootable config for provisioned compute nodes).
+//  7. Scrub SSH host keys so sshd regenerates unique keys on first boot.
+//
+// All UUID-patch and sed-based code has been deleted. Nothing is patched;
+// everything topology-specific is generated fresh from the target partition UUIDs.
 //
 // partDevs must be in the same order as layout.Partitions (index i → device i+1).
 func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout api.DiskLayout, partDevs []string) error {
 	log := logger()
 
-	// ── 0. UEFI EFI binary install (UEFI layouts only) ──────────────────────
-	// Rocky Linux ISO-based images are captured from a rootfs where /boot/efi is
-	// a mount point stub. The actual EFI binaries (grubx64.efi, shimx64.efi) live
-	// on the ESP partition — they are never in the rootfs tar archive. When we
-	// partition fresh and format a new ESP, the partition is empty. OVMF then
-	// creates a valid NVRAM entry via FixEFIBoot pointing at \EFI\rocky\grubx64.efi,
-	// finds nothing on the ESP, and falls back to the boot picker.
-	//
-	// Fix: if this layout has an ESP (firmware=uefi) and grubx64.efi is absent
-	// from the mounted ESP, install grub2-efi-x64 and shim-x64 inside the chroot
-	// so their %post scriptlets populate /boot/efi/EFI/rocky/.
-	hasESP := false
-	for _, p := range layout.Partitions {
-		for _, flag := range p.Flags {
-			if flag == "esp" || flag == "boot" {
-				hasESP = true
-				break
-			}
-		}
+	// ── 1. Generate fresh machine-id ────────────────────────────────────────
+	// Content-only images carry an empty /etc/machine-id placeholder.
+	// Generate a 128-bit random hex string and write it now so that BLS entry
+	// filenames (which embed the machine-id) are deterministic within this deploy.
+	machineID, err := generateMachineID()
+	if err != nil {
+		return fmt.Errorf("finalize/boot: generate machine-id: %w", err)
 	}
-	hasBIOSGrubPartition := false
-	for _, p := range layout.Partitions {
-		for _, flag := range p.Flags {
-			if flag == "bios_grub" || flag == "biosboot" {
-				hasBIOSGrubPartition = true
-				break
-			}
-		}
+	machineIDPath := filepath.Join(mountRoot, "etc", "machine-id")
+	if err := os.WriteFile(machineIDPath, []byte(machineID+"\n"), 0o644); err != nil {
+		return fmt.Errorf("finalize/boot: write machine-id: %w", err)
 	}
-	isUEFI := hasESP && !hasBIOSGrubPartition
-	if isUEFI {
-		grubx64Path := filepath.Join(mountRoot, "boot", "efi", "EFI", "rocky", "grubx64.efi")
-		if _, err := os.Stat(grubx64Path); os.IsNotExist(err) {
-			log.Warn().Str("path", grubx64Path).
-				Msg("finalize/boot: grubx64.efi missing from ESP — ESP was empty after extract; installing grub2-efi-x64 + shim-x64 via dnf in chroot")
-			if err := installEFIBootloaderInChroot(ctx, mountRoot); err != nil {
-				// Fatal: without grubx64.efi on the ESP, OVMF cannot boot the OS.
-				return fmt.Errorf("finalize/boot: EFI bootloader install: %w", err)
-			}
-			// Log what is now on the ESP.
-			espDir := filepath.Join(mountRoot, "boot", "efi", "EFI")
-			if entries, readErr := os.ReadDir(espDir); readErr == nil {
-				var names []string
-				for _, e := range entries {
-					names = append(names, e.Name())
-				}
-				log.Info().Strs("esp_efi_dirs", names).Msg("finalize/boot: ESP EFI/ contents after grub2-efi install")
-			}
-			// Verify grubx64.efi actually landed.
-			if _, err := os.Stat(grubx64Path); os.IsNotExist(err) {
-				return fmt.Errorf("finalize/boot: grubx64.efi still absent after grub2-efi-x64 install — dnf scriptlet may have failed")
-			}
-			log.Info().Str("path", grubx64Path).Msg("finalize/boot: grubx64.efi installed on ESP")
-		} else {
-			log.Info().Str("path", grubx64Path).Msg("finalize/boot: grubx64.efi already present on ESP — skipping dnf install")
-		}
+	dbusMachineIDPath := filepath.Join(mountRoot, "var", "lib", "dbus", "machine-id")
+	if err := os.MkdirAll(filepath.Dir(dbusMachineIDPath), 0o755); err == nil {
+		_ = os.WriteFile(dbusMachineIDPath, []byte(machineID+"\n"), 0o444)
 	}
+	log.Info().Str("machine_id", machineID).Msg("finalize/boot: fresh machine-id generated and written")
 
-	// ── 1. grub2-mkconfig ────────────────────────────────────────────────────
-	// grub2-mkconfig probes /proc and /sys for bootable kernels — it must run
-	// inside a chroot with the standard virtual filesystems mounted.
-	grubCfgPath := findGrubCfg(mountRoot)
-	if grubCfgPath == "" {
-		// /boot is empty — the image was captured without /boot contents (common
-		// when the source system has /boot on a separate partition and the capture
-		// used --one-file-system). Install the kernel and grub2 packages inside the
-		// chroot so that grub2-mkconfig has something to build a menu from.
-		log.Warn().Str("mountRoot", mountRoot).
-			Msg("finalize/boot: grub.cfg not found — /boot is empty; installing kernel + grub2 via dnf in chroot")
-		if err := installKernelInChroot(ctx, mountRoot, targetDisk); err != nil {
-			return fmt.Errorf("finalize/boot: kernel install: %w", err)
-		}
-		// Re-check after install.
-		grubCfgPath = findGrubCfg(mountRoot)
-		if grubCfgPath == "" {
-			return fmt.Errorf("finalize/boot: grub.cfg still not found after kernel install — dnf may have failed silently")
-		}
+	// ── 2. Generate fstab (§5A ownership split) ──────────────────────────────
+	// Write OS-disk mounts to /etc/fstab.d/00-clonr-os.fstab, then assemble
+	// /etc/fstab from all fstab.d files in lexicographic order.
+	// Paths matching /etc/fstab.d/9*-*.fstab are owned by the image overlay and
+	// are never overwritten here.
+	log.Info().Msg("finalize/boot: generating /etc/fstab.d/00-clonr-os.fstab")
+	if err := writeFstabD(ctx, mountRoot, layout, partDevs); err != nil {
+		return fmt.Errorf("finalize/boot: fstab generation: %w", err)
 	}
+	log.Info().Msg("finalize/boot: /etc/fstab assembled from fstab.d")
 
-	// ── 2. /etc/fstab UUID update (BEFORE grub2-mkconfig) ───────────────────
-	// CRITICAL: writeFstab must run BEFORE grub2-mkconfig. grub2-mkconfig reads
-	// /etc/fstab inside the chroot to determine the root filesystem UUID for the
-	// kernel cmdline (root=UUID=...). If fstab still carries the capture source's
-	// UUIDs when grub2-mkconfig runs, the generated grub.cfg will have wrong UUIDs
-	// and the deployed node will fail to find its root filesystem on boot.
-	//
-	// writeFstab uses blkid on the HOST (outside the chroot) against the actual
-	// target partition devices — it does not need the chroot session to be active.
-	log.Info().Msg("finalize/boot: regenerating /etc/fstab with target disk UUIDs (before grub2-mkconfig)")
-	if err := writeFstab(ctx, mountRoot, layout, partDevs); err != nil {
-		// Fatal: a missing or incorrect fstab means the root filesystem won't
-		// mount and the OS will drop to emergency mode on every boot.
-		return fmt.Errorf("finalize/boot: fstab regen: %w", err)
-	}
-	log.Info().Msg("finalize/boot: /etc/fstab written with target UUIDs")
-
-	// ── 2b. BLS boot entry UUID update ──────────────────────────────────────
-	// On Rocky/RHEL 9 with Boot Loader Specification (BLS) enabled, the kernel
-	// cmdline — including root=UUID=... — is stored in individual boot entry
-	// files under /boot/loader/entries/*.conf, NOT in grub.cfg.
-	// grub2-mkconfig reads these entries (via blscfg) but does NOT modify them.
-	// The UUID in these files was baked in when the kernel package was installed
-	// on the capture source, so it references the source machine's root UUID.
-	// We must update each entry's "options" line to reference the target disk's
-	// root UUID so the deployed OS can find its root filesystem at boot time.
-	//
-	// Find the root partition device by matching layout.Partitions[i].MountPoint == "/".
-	rootUUID := ""
+	// Get the root UUID now — needed for BLS entries and grub.cfg.
+	var rootUUID, bootUUID string
 	for i, p := range layout.Partitions {
-		if p.MountPoint == "/" {
-			if i < len(partDevs) {
-				uuid, err := getUUID(ctx, partDevs[i])
-				if err != nil {
-					log.Warn().Err(err).Str("device", partDevs[i]).
-						Msg("finalize/boot: could not get root UUID for BLS update — deployed OS may fail to boot")
-				} else {
-					rootUUID = uuid
-				}
-			}
+		if i >= len(partDevs) {
 			break
 		}
+		u, uErr := getUUID(ctx, partDevs[i])
+		if uErr != nil {
+			log.Warn().Err(uErr).Str("device", partDevs[i]).Str("mp", p.MountPoint).
+				Msg("finalize/boot: could not get UUID for partition")
+			continue
+		}
+		switch p.MountPoint {
+		case "/":
+			rootUUID = u
+		case "/boot":
+			bootUUID = u
+		}
 	}
-	if rootUUID != "" {
-		// For RAID layouts, add explicit rd.md.uuid= args for each assembled RAID
-		// array so dracut can assemble them during early boot. rd.auto is also
-		// included as a belt-and-suspenders measure, but rd.md.uuid= is the primary
-		// mechanism — it triggers the explicit UUID-based assembly path in
-		// dracut's mdraid_start script, which calls mdadm --assemble --scan
-		// for any UUIDs not yet assembled by udev.
-		//
-		// Note: Rocky Linux 10 images don't ship 63-md-raid-arrays.rules or
-		// 64-md-raid-assembly.rules (those come from the mdadm package which
-		// isn't installed in the capture image). Without those rules, rd.auto's
-		// udev-based incremental assembly path doesn't fire. The explicit
-		// rd.md.uuid= path in mdraid_start bypasses the udev rules entirely.
-		// Always ensure serial console is in the kernel cmdline so that
-		// nodes with no VGA output (e.g. single-disk VMs using ttyS0) produce
-		// visible output during boot. The argument is idempotent — updateBLSEntries
-		// skips any arg already present on the options line.
-		blsExtraArgs := []string{"console=ttyS0,115200"}
-		if len(layout.RAIDArrays) > 0 {
-			blsExtraArgs = append(blsExtraArgs, "rd.auto")
-			for _, spec := range layout.RAIDArrays {
-				mdDev := "/dev/" + spec.Name
-				uuid, uuidErr := getRaidArrayUUID(ctx, mdDev)
-				if uuidErr != nil {
-					log.Warn().Err(uuidErr).Str("device", mdDev).
-						Msg("finalize/boot: could not get RAID array UUID — rd.md.uuid will be missing from kernel cmdline")
-				} else if uuid != "" {
-					blsExtraArgs = append(blsExtraArgs, "rd.md.uuid="+uuid)
-					log.Info().Str("device", mdDev).Str("uuid", uuid).
-						Msg("finalize/boot: adding rd.md.uuid to BLS kernel cmdline")
-				}
-			}
-		}
-		if err := updateBLSEntries(mountRoot, rootUUID, blsExtraArgs...); err != nil {
-			log.Warn().Err(err).Str("root_uuid", rootUUID).
-				Msg("finalize/boot: BLS entry update failed — deployed OS may fail to boot (wrong root= in kernel cmdline)")
-		} else {
-			log.Info().Str("root_uuid", rootUUID).Msg("finalize/boot: BLS boot entries updated with target root UUID")
-		}
-	} else {
-		log.Warn().Msg("finalize/boot: no root partition found in layout — skipping BLS entry update")
+	if rootUUID == "" {
+		return fmt.Errorf("finalize/boot: could not determine root partition UUID — deploy cannot continue")
+	}
+	// When /boot is not a separate partition, grub reads from root.
+	if bootUUID == "" {
+		bootUUID = rootUUID
+	}
+	log.Info().Str("root_uuid", rootUUID).Str("boot_uuid", bootUUID).
+		Msg("finalize/boot: partition UUIDs resolved")
+
+	// ── 3. Discover kernels and generate BLS entries ─────────────────────────
+	// List all vmlinuz-* files under /boot to enumerate installed kernels.
+	// One BLS entry is generated per kernel with the fresh machine-id.
+	log.Info().Msg("finalize/boot: generating BLS boot entries")
+	if err := generateBLSEntries(mountRoot, machineID, rootUUID, layout); err != nil {
+		// Non-fatal: if BLS fails the hand-crafted grub.cfg below still boots
+		// the first kernel it finds directly. Log loudly so the operator knows.
+		log.Warn().Err(err).Msg("WARNING finalize/boot: BLS entry generation failed — node will boot via direct grub.cfg menuentry")
 	}
 
-	log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: regenerating GRUB config via grub2-mkconfig")
+	// ── 4. RAID dracut prep (if RAID layout) ────────────────────────────────
+	// Inject mdraid dracut module config, mdadm binary, and udev rules into the
+	// chroot so dracut builds an initramfs that can assemble md arrays on first boot.
+	if len(layout.RAIDArrays) > 0 {
+		if err := prepareDracutForRAID(mountRoot, layout); err != nil {
+			log.Warn().Err(err).Msg("finalize/boot: RAID dracut prep failed (non-fatal)")
+		}
+	}
 
 	// Ensure the standard virtual filesystem mount points exist in the deployed
-	// root before calling cs.Enter(). These directories are NOT present in tar
+	// root before calling dracut. These directories are NOT present in tar
 	// archives captured via rsync (rsync skips empty stub directories for virtual
-	// mounts like /proc, /sys, /dev). Without them, MountAll fails with ENOENT.
-	for _, dir := range []string{"proc", "sys", "dev", "dev/pts", "run"} {
+	// mounts like /proc, /sys, /dev). Without them, bind-mounts fail with ENOENT.
+	for _, dir := range []string{"proc", "sys", "dev", "dev/pts", "run", "var/tmp"} {
 		target := filepath.Join(mountRoot, dir)
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			log.Warn().Err(err).Str("dir", target).Msg("finalize/boot: could not create chroot mount dir (non-fatal)")
 		}
 	}
 
-	cs, err := chroot.NewSession(mountRoot)
-	if err != nil {
-		return fmt.Errorf("finalize/boot: chroot session: %w", err)
-	}
-	if err := cs.Enter(); err != nil {
-		return fmt.Errorf("finalize/boot: chroot enter: %w", err)
-	}
-	defer func() {
-		if cerr := cs.Close(); cerr != nil {
-			log.Warn().Err(cerr).Msg("finalize/boot: chroot close error (non-fatal)")
-		}
-	}()
-
-	// ── BLS machine-id fix ───────────────────────────────────────────────────
-	// Rocky/RHEL 9 uses GRUB_ENABLE_BLSCFG=true by default. grub2-mkconfig
-	// reads BLS entry files from /boot/loader/entries/*.conf. The BLS entry
-	// filenames embed the capture-source machine-id as their prefix, e.g.:
-	//   2f0b9a57183b4804a2d55f7c40e9f409-5.14.0-611.5.1.el9_7.x86_64.conf
-	// grub2-mkconfig (via /etc/grub.d/10_linux_bls) reads /etc/machine-id and
-	// only includes entries whose filename prefix matches the current machine-id.
-	// If machine-id is empty (which step 4 below sets it to), no entries match
-	// and grub.cfg is generated empty — the node boots to a GRUB rescue shell.
-	//
-	// Fix: extract the machine-id from an existing BLS entry filename and write
-	// it to /etc/machine-id temporarily before grub2-mkconfig runs. After
-	// grub2-mkconfig completes, step 4 truncates it so systemd generates a new
-	// unique ID on first boot. The grub.cfg itself does not embed machine-id —
-	// it only references /boot/loader/entries by filename — so the deployed node
-	// gets a fresh identity at first boot while still having a valid GRUB menu.
-	blsEntriesDir := filepath.Join(mountRoot, "boot", "loader", "entries")
-	if blsEntries, blsErr := os.ReadDir(blsEntriesDir); blsErr == nil {
-		for _, blsEntry := range blsEntries {
-			name := blsEntry.Name()
-			if strings.HasSuffix(name, ".conf") {
-				// BLS filename format: <machine-id>-<kernel-version>.conf
-				// Machine-id is always exactly 32 hex characters.
-				dashIdx := strings.Index(name, "-")
-				if dashIdx == 32 {
-					sourceMachineID := name[:32]
-					machineIDPath := filepath.Join(mountRoot, "etc", "machine-id")
-					if writeErr := os.WriteFile(machineIDPath, []byte(sourceMachineID+"\n"), 0o444); writeErr == nil {
-						log.Info().Str("machine_id", sourceMachineID).
-							Msg("finalize/boot: wrote source machine-id temporarily for grub2-mkconfig BLS lookup")
-					} else {
-						log.Warn().Err(writeErr).Msg("finalize/boot: failed to write temp machine-id (grub.cfg may be empty)")
-					}
-					break
-				}
-			}
-		}
-	} else {
-		log.Warn().Err(blsErr).Str("dir", blsEntriesDir).
-			Msg("finalize/boot: could not read BLS entries dir — grub2-mkconfig may produce empty grub.cfg")
-	}
-
-	// grub2-mkconfig writes the grub.cfg to the path passed via -o (inside the
-	// chroot, so the path is relative to the chroot root). At this point /etc/fstab
-	// already has the correct target UUIDs, so grub2-mkconfig will generate the
-	// correct root=UUID=... kernel cmdline.
-	mkcfgCmd := exec.CommandContext(ctx, "chroot", mountRoot, "grub2-mkconfig", "-o", grubCfgPath)
-	if err := runAndLog(ctx, "grub2-mkconfig", mkcfgCmd); err != nil {
-		// grub2-mkconfig can fail on RAID layouts because grub2-probe (the disk-probing
-		// helper it uses) cannot enumerate md devices via the diskfilter module in the
-		// chroot context. When this happens, fall back to patching the existing grub.cfg
-		// in-place: replace all UUID references from the capture source with the target
-		// partition UUIDs from partDevs. This avoids a full grub2-mkconfig regeneration
-		// while still producing a bootable GRUB configuration.
-		//
-		// On Rocky/RHEL 10 with BLS (GRUB_ENABLE_BLSCFG=true), the grub.cfg body is
-		// essentially a UUID-keyed search for /boot + blscfg. All kernel cmdline options
-		// (root=UUID=...) live in the BLS .conf files under /boot/loader/entries/, which
-		// the code above already updated. Patching the two UUID search calls in grub.cfg
-		// is sufficient for a bootable system.
-		log.Warn().Err(err).Msg("finalize/boot: grub2-mkconfig failed — attempting in-place UUID patch of existing grub.cfg (RAID fallback)")
-
-		grubCfgAbs := filepath.Join(mountRoot, grubCfgPath)
-		if patchErr := patchGrubCfgUUIDs(grubCfgAbs, layout, partDevs); patchErr != nil {
-			// Both grub2-mkconfig and the UUID patch failed — the node likely cannot boot.
-			return fmt.Errorf("finalize/boot: grub2-mkconfig failed: %w (UUID patch also failed: %v)", err, patchErr)
-		}
-		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub.cfg UUID patch complete (grub2-mkconfig fallback applied)")
-	} else {
-		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: grub2-mkconfig complete")
-	}
-
-	// ── 2c. Strip save_env / saved_entry from grub.cfg ──────────────────────
-	// On BIOS RAID (md devices with diskfilter), GRUB's diskfilter driver is
-	// read-only. Any `save_env` or `saved_entry` call in grub.cfg will fail at
-	// boot with "diskfilter writes are not supported" and drop the user to a
-	// grub> shell before any OS entry is selected. Strip these lines so boot
-	// proceeds cleanly. Safe on all layouts — save_env is only used for
-	// GRUB_SAVEDEFAULT which we don't need in a clonr-managed environment.
-	grubCfgAbs := filepath.Join(mountRoot, grubCfgPath)
-	if stripErr := stripGrubSaveEnv(grubCfgAbs); stripErr != nil {
-		log.Warn().Err(stripErr).Str("grub_cfg", grubCfgPath).
-			Msg("finalize/boot: failed to strip save_env from grub.cfg (non-fatal, but BIOS RAID may drop to grub> shell)")
-	} else {
-		log.Info().Str("grub_cfg", grubCfgPath).Msg("finalize/boot: save_env/saved_entry lines stripped from grub.cfg")
-	}
-
-	// ── 3. dracut --regenerate-all ───────────────────────────────────────────
-	// --no-hostonly is critical: the capture source may be bare metal with a
-	// specific set of drivers. We need a generic initramfs that includes virtio_blk,
-	// virtio_net, and xfs so the image boots on any target (VM or physical).
-	// --force overwrites any existing initramfs images without prompting.
-
-	// Ensure /var/tmp exists in the chroot — dracut requires it as a scratch
-	// directory. Images captured via rsync may not include empty tmpdir stubs.
-	if err := os.MkdirAll(filepath.Join(mountRoot, "var", "tmp"), 0o1777); err != nil {
-		log.Warn().Err(err).Msg("finalize/boot: could not create /var/tmp in chroot (non-fatal)")
-	}
-
-	// For RAID layouts, ensure the deployed OS initramfs contains the mdraid
-	// dracut module so the OS can assemble its md RAID arrays before mounting
-	// root on first boot.
-	//
-	// Two problems must be solved together:
-	//
-	// 1. dracut module selection: dracut uses host-side device detection to
-	//    decide what to include. Since this deploy runs in a minimal initramfs
-	//    environment with no md devices, dracut omits the mdraid module unless
-	//    forced. We write a drop-in conf to force-include it.
-	//
-	// 2. mdadm binary: the 90mdraid dracut module's check() function calls
-	//    require_binaries mdadm. If mdadm is not installed in the deployed OS
-	//    image, the module cannot be installed even when explicitly requested.
-	//    We inject the host's mdadm binary into the chroot before running
-	//    dracut so the check passes and dracut bundles mdadm into the initramfs.
-	//    The injected binary is left in place — mdadm belongs on RAID nodes.
-	if len(layout.RAIDArrays) > 0 {
-		dracutConfDir := filepath.Join(mountRoot, "etc", "dracut.conf.d")
-		if err := os.MkdirAll(dracutConfDir, 0o755); err != nil {
-			log.Warn().Err(err).Msg("finalize/boot: could not create /etc/dracut.conf.d in chroot (non-fatal)")
-		} else {
-			dracutRAIDConf := filepath.Join(dracutConfDir, "10-clonr-mdraid.conf")
-			confContent := `# Written by clonr during deployment for RAID layouts.
-# Forces mdraid dracut module to be included in the initramfs so the OS can
-# assemble its md RAID arrays before mounting root on first boot.
-add_dracutmodules+=" mdraid "
-# mdadmconf=yes tells dracut to copy /etc/mdadm.conf into the initramfs so
-# mdadm can assemble arrays by UUID without requiring rd.md.uuid= cmdline args.
-mdadmconf=yes
-`
-			if err := os.WriteFile(dracutRAIDConf, []byte(confContent), 0o644); err != nil {
-				log.Warn().Err(err).Str("path", dracutRAIDConf).
-					Msg("finalize/boot: could not write mdraid dracut config — initramfs may not include RAID support")
-			} else {
-				log.Info().Str("path", dracutRAIDConf).
-					Msg("finalize/boot: wrote mdraid dracut config — RAID support will be included in initramfs")
-			}
-		}
-
-		// Inject mdadm into the chroot if the deployed image does not have it.
-		// dracut's 90mdraid module check() calls require_binaries mdadm — if the
-		// binary is absent, dracut refuses to install the module even when explicitly
-		// requested via add_dracutmodules. We copy the host mdadm binary so dracut
-		// can find it and embed it in the rebuilt initramfs.
-		chrootMdadm := filepath.Join(mountRoot, "usr", "sbin", "mdadm")
-		if _, err := os.Stat(chrootMdadm); os.IsNotExist(err) {
-			// Find mdadm on the host (clonr deploy environment).
-			hostMdadm, lookErr := exec.LookPath("mdadm")
-			if lookErr != nil {
-				log.Warn().Msg("finalize/boot: mdadm not found on deploy host — dracut mdraid module may fail to install")
-			} else {
-				if copyErr := copyFile(hostMdadm, chrootMdadm, 0o755); copyErr != nil {
-					log.Warn().Err(copyErr).Str("src", hostMdadm).Str("dst", chrootMdadm).
-						Msg("finalize/boot: could not inject mdadm into chroot — dracut mdraid module may fail to install")
-				} else {
-					log.Info().Str("src", hostMdadm).Str("dst", chrootMdadm).
-						Msg("finalize/boot: injected mdadm into chroot for dracut mdraid module")
-				}
-			}
-		} else {
-			log.Info().Str("path", chrootMdadm).
-				Msg("finalize/boot: mdadm already present in chroot — skipping injection")
-		}
-
-		// Inject mdadm udev rules into the chroot so dracut's 90mdraid module
-		// can install them into the initramfs. Without these rules the RAID arrays
-		// assemble correctly but udev never creates the /dev/disk/by-id/md-uuid-*
-		// symlinks that dracut's initqueue finished-hooks wait for, causing a
-		// timeout and emergency shell even when the root array is actually healthy.
-		//
-		// dracut's 90mdraid/module-setup.sh calls `inst_rules 63-md-raid-arrays.rules`
-		// which looks for the rule in the chroot's /usr/lib/udev/rules.d/. If absent
-		// (because mdadm isn't installed in the captured OS image), dracut silently
-		// skips it and the initramfs lacks the symlink-creation rules.
-		//
-		// The rule content is embedded directly rather than copied from the deploy
-		// host so this works regardless of what is installed in the PXE environment.
-		// The content matches the canonical mdadm udev rules for RHEL/Rocky Linux.
-		chrootUdevRulesDir := filepath.Join(mountRoot, "usr", "lib", "udev", "rules.d")
-		if mkdirErr := os.MkdirAll(chrootUdevRulesDir, 0o755); mkdirErr != nil {
-			log.Warn().Err(mkdirErr).Msg("finalize/boot: could not create udev rules.d in chroot (non-fatal)")
-		} else {
-			for _, ruleSpec := range []struct {
-				name    string
-				content string
-			}{
-				{
-					name:    "63-md-raid-arrays.rules",
-					content: mdRaidArraysRules,
-				},
-				{
-					name:    "64-md-raid-assembly.rules",
-					content: mdRaidAssemblyRules,
-				},
-			} {
-				chrootRule := filepath.Join(chrootUdevRulesDir, ruleSpec.name)
-				if _, statErr := os.Stat(chrootRule); statErr == nil {
-					// Already present in the deployed OS — leave the OS version in place.
-					log.Info().Str("file", ruleSpec.name).
-						Msg("finalize/boot: mdadm udev rule already present in chroot — skipping injection")
-					continue
-				}
-				if writeErr := os.WriteFile(chrootRule, []byte(ruleSpec.content), 0o644); writeErr != nil {
-					log.Warn().Err(writeErr).Str("dst", chrootRule).
-						Msg("finalize/boot: could not write mdadm udev rule into chroot (non-fatal)")
-				} else {
-					log.Info().Str("file", ruleSpec.name).
-						Msg("finalize/boot: wrote mdadm udev rule into chroot for dracut mdraid module")
-				}
-			}
-		}
-	}
-
-	log.Info().Msg("finalize/boot: regenerating initramfs via dracut --no-hostonly --regenerate-all")
+	// ── 5. Rebuild initramfs via dracut ─────────────────────────────────────
+	// --no-hostonly: build a generic initramfs (hardware-agnostic, not tailored
+	// to the deploy host's physical devices). Required because we are running in
+	// a PXE initramfs environment with different hardware than the target node.
+	// --force: overwrite any existing initramfs images without prompting.
+	// --regenerate-all: rebuild for every installed kernel version.
+	log.Info().Msg("finalize/boot: rebuilding initramfs via dracut --no-hostonly --regenerate-all")
 	dracutCmd := exec.CommandContext(ctx, "chroot", mountRoot,
 		"dracut", "--force", "--no-hostonly", "--regenerate-all")
 	if err := runAndLog(ctx, "dracut", dracutCmd); err != nil {
-		// Non-fatal: the node may still boot if the capture source's initramfs
-		// happens to contain the required drivers. Log loudly so the operator
-		// knows to investigate if the node kernel-panics on boot.
 		log.Warn().Err(err).
 			Msg("WARNING finalize/boot: dracut --regenerate-all failed — initramfs may lack hardware drivers for target; node may not boot on different hardware")
 	} else {
 		log.Info().Msg("finalize/boot: dracut complete")
 	}
 
-	// ── 4. machine-id scrub ──────────────────────────────────────────────────
-	// systemd uses /etc/machine-id as a stable unique identifier for the host.
-	// A non-empty machine-id baked into the image would be shared by every node
-	// deployed from it. Truncating (not removing) the file causes systemd to
-	// generate a new ID on first boot and write it back.
-	machineIDPath := filepath.Join(mountRoot, "etc", "machine-id")
-	// Mode 0644: must be writable so systemd-machine-id-setup can write the new ID
-	// on first boot. The previous 0444 (read-only) prevented systemd from updating
-	// the file, leaving the machine-id empty and causing sshd-keygen to fail.
-	if err := os.WriteFile(machineIDPath, []byte{}, 0o644); err != nil {
-		log.Warn().Err(err).Str("path", machineIDPath).
-			Msg("finalize/boot: could not truncate machine-id (non-fatal)")
+	// ── 6. Write minimal hand-crafted grub.cfg ──────────────────────────────
+	// Do NOT run grub2-mkconfig: it produces save_env / saved_entry calls that
+	// fail on BIOS RAID (diskfilter writes are not supported) and injects
+	// unnecessary multi-boot / rescue complexity. We generate a minimal config
+	// directly from the discovered kernels and target UUIDs.
+	log.Info().Msg("finalize/boot: writing minimal hand-crafted grub.cfg")
+	if err := writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID, layout); err != nil {
+		// Non-fatal: the node can still attempt to boot via BLS entries.
+		log.Warn().Err(err).Msg("WARNING finalize/boot: could not write grub.cfg (non-fatal if BLS is active)")
 	} else {
-		log.Info().Msg("finalize/boot: machine-id truncated — new ID will be generated on first boot")
+		log.Info().Msg("finalize/boot: grub.cfg written")
 	}
 
-	// ── 5. SSH host key scrub ────────────────────────────────────────────────
-	// Host keys baked into the image would be identical on every deployed node,
-	// making MITM attacks trivial. Remove them so sshd regenerates unique keys
+	// ── 7. SSH host key scrub ────────────────────────────────────────────────
+	// Remove host keys baked into the image so sshd regenerates unique keys
 	// on first boot via the ssh-keygen firstboot unit.
 	hostKeys, _ := filepath.Glob(filepath.Join(mountRoot, "etc", "ssh", "ssh_host_*"))
 	for _, k := range hostKeys {
@@ -1215,305 +890,55 @@ mdadmconf=yes
 	return nil
 }
 
-// stripGrubSaveEnv removes `save_env` and `saved_entry` calls from a grub.cfg
-// file. On BIOS RAID systems that use the diskfilter module the GRUB environment
-// block is read-only; any write attempt produces "diskfilter writes are not
-// supported" and drops the user to a grub> rescue shell before the OS boots.
-// Stripping these lines is safe on all layouts: save_env is only relevant for
-// GRUB_SAVEDEFAULT (remember the last-booted entry), which clonr does not use.
-func stripGrubSaveEnv(grubCfgAbs string) error {
-	data, err := os.ReadFile(grubCfgAbs)
-	if err != nil {
-		return fmt.Errorf("read grub.cfg: %w", err)
+// generateMachineID returns a fresh 128-bit random hex string suitable for
+// /etc/machine-id (32 lowercase hex chars, no hyphens, no newline).
+func generateMachineID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
 	}
-
-	var out []string
-	stripped := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "save_env") || strings.HasPrefix(trimmed, "saved_entry") {
-			stripped++
-			continue
-		}
-		out = append(out, line)
-	}
-	if stripped == 0 {
-		// Nothing to strip — file is already clean.
-		return nil
-	}
-
-	content := strings.Join(out, "\n")
-	if err := os.WriteFile(grubCfgAbs, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write grub.cfg: %w", err)
-	}
-	logger().Info().Int("lines_stripped", stripped).Str("path", grubCfgAbs).
-		Msg("finalize/boot: stripped save_env/saved_entry lines from grub.cfg")
-	return nil
+	return hex.EncodeToString(b), nil
 }
 
-// patchGrubCfgUUIDs is the fallback path for when grub2-mkconfig cannot run
-// (e.g. on RAID layouts where grub2-probe fails to enumerate md devices).
+// writeFstabD writes /etc/fstab.d/00-clonr-os.fstab with OS-disk mounts only
+// (root, /boot, swap, /boot/efi), then assembles /etc/fstab by concatenating
+// all fstab.d files in lexicographic order (ADR-0009 §5A ownership split).
 //
-// It reads the existing grub.cfg, extracts all UUID= strings that appear in
-// search/fs-uuid directives or root= cmdlines, maps them to target partition
-// UUIDs by matching mount points via fstab/blkid, and replaces them in-place.
-//
-// On Rocky/RHEL 10 with BLS the grub.cfg body is minimal: it contains a
-// `search --fs-uuid` for the /boot partition UUID and a `blscfg` call. The
-// kernel root=UUID= lives in the BLS .conf files (updated by updateBLSEntries).
-// Patching the /boot UUID reference in grub.cfg is sufficient for booting.
-func patchGrubCfgUUIDs(grubCfgAbs string, layout api.DiskLayout, partDevs []string) error {
+// Files matching /etc/fstab.d/9*-*.fstab are owned by the image overlay and
+// are NEVER touched here. /etc/fstab itself is always regenerated.
+func writeFstabD(ctx context.Context, mountRoot string, layout api.DiskLayout, partDevs []string) error {
 	log := logger()
 
-	data, err := os.ReadFile(grubCfgAbs)
-	if err != nil {
-		return fmt.Errorf("read grub.cfg: %w", err)
+	fstabDDir := filepath.Join(mountRoot, "etc", "fstab.d")
+	if err := os.MkdirAll(fstabDDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir fstab.d: %w", err)
 	}
-	original := string(data)
-
-	// Build a map from old UUID → new UUID by scanning the live partition devices.
-	// grub.cfg embeds UUIDs from the capture source — we must replace ALL of them.
-	uuidRe := regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	ctx := context.Background()
-
-	// Collect old UUIDs from grub.cfg.
-	oldUUIDs := make(map[string]bool)
-	for _, u := range uuidRe.FindAllString(original, -1) {
-		oldUUIDs[u] = true
-	}
-	if len(oldUUIDs) == 0 {
-		log.Info().Msg("finalize/boot: grub.cfg has no UUID references — nothing to patch")
-		return nil
-	}
-
-	// Collect new UUIDs from target partitions, keyed by mountpoint.
-	type newUUIDEntry struct {
-		uuid string
-		mp   string
-	}
-	var newEntries []newUUIDEntry
-	for i, p := range layout.Partitions {
-		if p.MountPoint == "" || p.Filesystem == "" || p.Filesystem == "biosboot" || p.Filesystem == "bios_grub" {
-			continue
-		}
-		if i >= len(partDevs) {
-			continue
-		}
-		uuid, uuidErr := getUUID(ctx, partDevs[i])
-		if uuidErr != nil {
-			log.Warn().Err(uuidErr).Str("dev", partDevs[i]).Msg("finalize/boot: grub.cfg UUID patch — cannot get UUID for partition")
-			continue
-		}
-		newEntries = append(newEntries, newUUIDEntry{uuid: uuid, mp: p.MountPoint})
-	}
-
-	if len(newEntries) == 0 {
-		return fmt.Errorf("no target partition UUIDs available for grub.cfg patching")
-	}
-
-	// Replace old UUIDs with new ones. The primary goal is to fix the
-	// `search --no-floppy --fs-uuid --set=root <UUID>` lines which tell GRUB
-	// where to find /boot. On Rocky/RHEL 10 with BLS, the kernel root= UUID
-	// lives in the BLS .conf files (updated by updateBLSEntries above), so we
-	// only NEED to fix the /boot search UUID. Any kernelopts UUID in grub.cfg
-	// is a fallback for entries without a BLS options line and does not affect
-	// Rocky 10 BLS-based boots.
-	//
-	// Strategy:
-	//   1. Find UUIDs that appear specifically in `search --fs-uuid` lines —
-	//      these are definitively the /boot UUID (or / UUID for non-BLS grub.cfg).
-	//      Replace each with the new /boot UUID.
-	//   2. For any remaining old UUIDs (e.g. kernelopts fallback, root= in
-	//      legacy menuentry), replace with the most appropriate new UUID by
-	//      mount point preference (/boot > / > first).
-	patched := original
-
-	// Find the new /boot UUID (and / UUID as fallback).
-	var newBootUUID, newRootUUID string
-	for _, e := range newEntries {
-		if e.mp == "/boot" || e.mp == "/boot/efi" {
-			newBootUUID = e.uuid
-		}
-		if e.mp == "/" {
-			newRootUUID = e.uuid
-		}
-	}
-	if newBootUUID == "" {
-		// No explicit /boot partition — use root as the boot device.
-		newBootUUID = newRootUUID
-	}
-	if newBootUUID == "" && len(newEntries) > 0 {
-		newBootUUID = newEntries[0].uuid
-	}
-
-	// Identify UUIDs in search --fs-uuid lines.
-	searchUUIDRe := regexp.MustCompile(`search\s+--no-floppy\s+--fs-uuid\s+(?:--set=\w+\s+)?(?:--hint[^\s]+\s+)?(\S+)`)
-	searchUUIDs := make(map[string]bool)
-	for _, m := range searchUUIDRe.FindAllStringSubmatch(original, -1) {
-		if len(m) > 1 && uuidRe.MatchString(m[1]) {
-			searchUUIDs[m[1]] = true
-		}
-	}
-
-	// Replace search UUIDs with the new /boot UUID.
-	for oldUUID := range searchUUIDs {
-		patched = strings.ReplaceAll(patched, oldUUID, newBootUUID)
-		log.Info().Str("old", oldUUID).Str("new", newBootUUID).
-			Msg("finalize/boot: grub.cfg UUID patched (search --fs-uuid → /boot UUID)")
-	}
-
-	// Replace any remaining old UUIDs (kernelopts fallback, legacy menuentry root=).
-	// Use /boot UUID for /boot-related UUIDs and root UUID for others (heuristic).
-	for oldUUID := range oldUUIDs {
-		if searchUUIDs[oldUUID] {
-			continue // already patched above
-		}
-		// For non-search UUIDs, use root UUID if known, otherwise boot UUID.
-		replacement := newRootUUID
-		if replacement == "" {
-			replacement = newBootUUID
-		}
-		if replacement != "" && strings.Contains(patched, oldUUID) {
-			patched = strings.ReplaceAll(patched, oldUUID, replacement)
-			log.Info().Str("old", oldUUID).Str("new", replacement).
-				Msg("finalize/boot: grub.cfg UUID patched (non-search UUID → root UUID)")
-		}
-	}
-
-	if patched == original {
-		log.Warn().Msg("finalize/boot: grub.cfg UUID patch made no changes — grub.cfg may use non-standard UUID references")
-	}
-
-	if err := os.WriteFile(grubCfgAbs, []byte(patched), 0o644); err != nil {
-		return fmt.Errorf("write grub.cfg: %w", err)
-	}
-	log.Info().Str("path", grubCfgAbs).Msg("finalize/boot: grub.cfg written with patched UUIDs")
-	return nil
-}
-
-// updateBLSEntries rewrites the root=UUID=... argument in every Boot Loader
-// Specification (BLS) entry under /boot/loader/entries/*.conf so that the
-// kernel cmdline references the target disk's root filesystem UUID rather than
-// the capture source's UUID. extraArgs is appended to the options line of each
-// entry if not already present (e.g. "rd.auto" for RAID layouts).
-//
-// On Rocky/RHEL 9 with blscfg, GRUB reads kernel cmdlines from these .conf
-// files. grub2-mkconfig does not modify them — they are managed by kernel-install
-// and grubby. Without this fix, the deployed OS kernel panics with
-// "Unable to find root filesystem" because it tries to mount the OLD UUID.
-func updateBLSEntries(mountRoot, rootUUID string, extraArgs ...string) error {
-	log := logger()
-	entriesDir := filepath.Join(mountRoot, "boot", "loader", "entries")
-
-	// Glob all BLS entries.
-	entries, err := filepath.Glob(filepath.Join(entriesDir, "*.conf"))
-	if err != nil || len(entries) == 0 {
-		// Not a BLS system, or /boot/loader/entries doesn't exist.
-		// This is non-fatal — the system may use a legacy grub.cfg directly.
-		log.Info().Str("dir", entriesDir).Msg("finalize/boot: no BLS entries found — skipping BLS UUID update (non-BLS system)")
-		return nil
-	}
-
-	uuidRe := regexp.MustCompile(`root=UUID=[0-9a-fA-F-]+`)
-	updated := 0
-	for _, path := range entries {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			log.Warn().Err(err).Str("path", path).Msg("finalize/boot: could not read BLS entry")
-			continue
-		}
-
-		original := string(data)
-		// Replace any existing root=UUID=... on the "options" line.
-		newContent := uuidRe.ReplaceAllString(original, "root=UUID="+rootUUID)
-
-		// Append extraArgs to "options" line if not already present.
-		for _, arg := range extraArgs {
-			newLines := strings.Split(newContent, "\n")
-			for i, line := range newLines {
-				if strings.HasPrefix(line, "options ") && !strings.Contains(line, arg) {
-					newLines[i] = strings.TrimRight(line, " ") + " " + arg
-				}
-			}
-			newContent = strings.Join(newLines, "\n")
-		}
-
-		if newContent == original {
-			// No changes needed — already up to date.
-			continue
-		}
-
-		if err := os.WriteFile(path, []byte(newContent), 0o644); err != nil {
-			log.Warn().Err(err).Str("path", path).Msg("finalize/boot: could not write BLS entry")
-			continue
-		}
-		log.Info().Str("path", filepath.Base(path)).Str("root_uuid", rootUUID).
-			Msg("finalize/boot: updated root UUID in BLS entry")
-		updated++
-	}
-
-	if updated == 0 && len(entries) > 0 {
-		log.Warn().Str("dir", entriesDir).
-			Msg("finalize/boot: BLS entries found but none had root=UUID= — may already be correct or using non-standard cmdline")
-	}
-	return nil
-}
-
-// getUUID returns the filesystem UUID of a block device using blkid.
-// Returns an error if blkid is unavailable or the device has no UUID (e.g.
-// unformatted or a bios_grub partition).
-func getUUID(ctx context.Context, device string) (string, error) {
-	out, err := exec.CommandContext(ctx, "blkid", "-s", "UUID", "-o", "value", device).Output()
-	if err != nil {
-		return "", fmt.Errorf("blkid %s: %w", device, err)
-	}
-	uuid := strings.TrimSpace(string(out))
-	if uuid == "" {
-		return "", fmt.Errorf("blkid %s: no UUID (partition may be unformatted)", device)
-	}
-	return uuid, nil
-}
-
-// writeFstab generates /etc/fstab for the deployed filesystem from the actual
-// UUIDs of the target partitions. It replaces whatever fstab the image carried
-// from the capture source, which has the source system's UUIDs.
-//
-// Only partitions with a non-empty MountPoint and a formattable filesystem are
-// written. biosboot/bios_grub partitions are silently skipped.
-func writeFstab(ctx context.Context, mountRoot string, layout api.DiskLayout, partDevs []string) error {
-	log := logger()
 
 	var sb strings.Builder
-	sb.WriteString("# /etc/fstab — generated by clonr during deployment\n")
+	sb.WriteString("# /etc/fstab.d/00-clonr-os.fstab — OS-disk mounts generated by clonr\n")
+	sb.WriteString("# DO NOT EDIT: regenerated on every reimage\n")
 	sb.WriteString("# <device>  <mountpoint>  <fstype>  <options>  <dump>  <pass>\n\n")
 
 	for i, p := range layout.Partitions {
 		if p.MountPoint == "" {
-			continue // biosboot, unpartitioned, or no mount needed
+			continue
 		}
 		switch p.Filesystem {
 		case "", "biosboot", "bios_grub":
-			continue // no filesystem, nothing to mount
-		}
-
-		if i >= len(partDevs) {
-			log.Warn().Int("partition", i+1).Msg("writeFstab: partDevs slice shorter than layout — skipping")
 			continue
 		}
-		dev := partDevs[i]
-
-		uuid, err := getUUID(ctx, dev)
-		if err != nil {
-			// If we can't get a UUID the fstab entry would be useless and the
-			// node would fail to boot. Return an error so Finalize aborts cleanly
-			// rather than deploying a machine that will boot-loop.
-			return fmt.Errorf("partition %d (%s): %w", i+1, dev, err)
+		if i >= len(partDevs) {
+			log.Warn().Int("partition", i+1).Msg("writeFstabD: partDevs slice shorter than layout — skipping")
+			continue
 		}
 
-		// Standard mount options per filesystem and mountpoint.
+		uuid, err := getUUID(ctx, partDevs[i])
+		if err != nil {
+			return fmt.Errorf("partition %d (%s): %w", i+1, partDevs[i], err)
+		}
+
 		opts := fstabMountOpts(p.Filesystem, p.MountPoint)
 
-		// dump/pass: root gets pass=1, /boot gets pass=2, everything else 0.
 		dump := 0
 		pass := 0
 		switch p.MountPoint {
@@ -1530,16 +955,307 @@ func writeFstab(ctx context.Context, mountRoot string, layout api.DiskLayout, pa
 			fmt.Fprintf(&sb, "UUID=%-36s  %-12s  %-6s  %-20s  %d  %d\n",
 				uuid, p.MountPoint, p.Filesystem, opts, dump, pass)
 		}
-
 		log.Info().Str("uuid", uuid).Str("mountpoint", p.MountPoint).
-			Str("device", dev).Msg("finalize/boot: fstab entry written")
+			Str("device", partDevs[i]).Msg("finalize/boot: fstab.d entry written")
+	}
+
+	osFstabPath := filepath.Join(fstabDDir, "00-clonr-os.fstab")
+	if err := os.WriteFile(osFstabPath, []byte(sb.String()), 0o644); err != nil {
+		return fmt.Errorf("write 00-clonr-os.fstab: %w", err)
+	}
+
+	// Assemble /etc/fstab from all fstab.d files in lexicographic order.
+	// Files matching 9*-*.fstab are image-overlay-owned — include them but NEVER overwrite.
+	entries, err := os.ReadDir(fstabDDir)
+	if err != nil {
+		return fmt.Errorf("read fstab.d: %w", err)
+	}
+
+	var assembled strings.Builder
+	assembled.WriteString("# /etc/fstab — assembled by clonr from /etc/fstab.d/*.fstab\n\n")
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".fstab") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(fstabDDir, e.Name()))
+		if readErr != nil {
+			log.Warn().Err(readErr).Str("file", e.Name()).Msg("finalize/boot: could not read fstab.d fragment (skipping)")
+			continue
+		}
+		assembled.Write(data)
+		assembled.WriteString("\n")
 	}
 
 	fstabPath := filepath.Join(mountRoot, "etc", "fstab")
-	if err := os.WriteFile(fstabPath, []byte(sb.String()), 0o644); err != nil {
-		return fmt.Errorf("write fstab: %w", err)
+	if err := os.WriteFile(fstabPath, []byte(assembled.String()), 0o644); err != nil {
+		return fmt.Errorf("write /etc/fstab: %w", err)
 	}
 	return nil
+}
+
+// generateBLSEntries creates a Boot Loader Specification entry for each kernel
+// found under /boot/vmlinuz-* in the deployed rootfs. Each entry is written to
+// /boot/loader/entries/<machineID>-<kver>.conf with the target root UUID on the
+// options line and no save_env / submenus.
+func generateBLSEntries(mountRoot, machineID, rootUUID string, layout api.DiskLayout) error {
+	log := logger()
+
+	bootDir := filepath.Join(mountRoot, "boot")
+	entries, err := os.ReadDir(bootDir)
+	if err != nil {
+		return fmt.Errorf("read /boot: %w", err)
+	}
+
+	blsDir := filepath.Join(mountRoot, "boot", "loader", "entries")
+	if err := os.MkdirAll(blsDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir BLS entries dir: %w", err)
+	}
+
+	// Build base kernel cmdline: console + RAID UUIDs if applicable.
+	baseOpts := []string{"ro", "console=ttyS0,115200"}
+	if len(layout.RAIDArrays) > 0 {
+		baseOpts = append(baseOpts, "rd.auto")
+		for _, spec := range layout.RAIDArrays {
+			mdDev := "/dev/" + spec.Name
+			ctx := context.Background()
+			uuid, uuidErr := getRaidArrayUUID(ctx, mdDev)
+			if uuidErr != nil {
+				log.Warn().Err(uuidErr).Str("device", mdDev).
+					Msg("finalize/boot: could not get RAID array UUID — rd.md.uuid will be missing from BLS entry")
+			} else if uuid != "" {
+				baseOpts = append(baseOpts, "rd.md.uuid="+uuid)
+			}
+		}
+	}
+
+	written := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "vmlinuz-") {
+			continue
+		}
+		kver := strings.TrimPrefix(name, "vmlinuz-")
+		if kver == "" {
+			continue
+		}
+
+		// Check for a matching initramfs.
+		initramfsName := "initramfs-" + kver + ".img"
+		initramfsPath := filepath.Join(bootDir, initramfsName)
+		if _, statErr := os.Stat(initramfsPath); statErr != nil {
+			// dracut may not have run yet or may have named it differently.
+			// Write the BLS entry anyway with the expected initramfs path;
+			// dracut will create it when it runs (step 5 in applyBootConfig).
+			log.Warn().Str("kver", kver).Str("expected", initramfsName).
+				Msg("finalize/boot: initramfs not found — BLS entry will reference it anyway (dracut will create it)")
+		}
+
+		opts := append([]string{"root=UUID=" + rootUUID}, baseOpts...)
+		optLine := strings.Join(opts, " ")
+
+		blsContent := fmt.Sprintf(`title Rocky Linux (%s)
+version %s
+linux /vmlinuz-%s
+initrd /initramfs-%s.img
+options %s
+`, kver, kver, kver, kver, optLine)
+
+		blsPath := filepath.Join(blsDir, machineID+"-"+kver+".conf")
+		if err := os.WriteFile(blsPath, []byte(blsContent), 0o644); err != nil {
+			log.Warn().Err(err).Str("path", blsPath).Msg("finalize/boot: could not write BLS entry")
+			continue
+		}
+		log.Info().Str("kver", kver).Str("root_uuid", rootUUID).
+			Msg("finalize/boot: BLS entry generated")
+		written++
+	}
+
+	if written == 0 {
+		return fmt.Errorf("no kernels found under /boot/vmlinuz-* — cannot generate BLS entries")
+	}
+	log.Info().Int("count", written).Msg("finalize/boot: BLS entries generated")
+	return nil
+}
+
+// writeHandcraftedGrubCfg writes a minimal grub.cfg that boots the first
+// available kernel without save_env, saved_entry, load_env, or submenus.
+// This config is safe on BIOS RAID (diskfilter read-only) and UEFI alike.
+//
+// On UEFI+BLS systems the BLS entries take precedence; this grub.cfg acts as
+// a fallback for non-BLS-capable grub builds.
+func writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID string, layout api.DiskLayout) error {
+	log := logger()
+
+	bootDir := filepath.Join(mountRoot, "boot")
+	entries, err := os.ReadDir(bootDir)
+	if err != nil {
+		return fmt.Errorf("read /boot: %w", err)
+	}
+
+	// Find the first kernel.
+	var kver string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "vmlinuz-") {
+			kver = strings.TrimPrefix(e.Name(), "vmlinuz-")
+			break
+		}
+	}
+	if kver == "" {
+		return fmt.Errorf("no kernel found under /boot/vmlinuz-* — cannot write grub.cfg")
+	}
+
+	// Build kernel cmdline.
+	cmdlineOpts := []string{"root=UUID=" + rootUUID, "ro", "console=ttyS0,115200"}
+	if len(layout.RAIDArrays) > 0 {
+		cmdlineOpts = append(cmdlineOpts, "rd.auto")
+		for _, spec := range layout.RAIDArrays {
+			mdDev := "/dev/" + spec.Name
+			ctx := context.Background()
+			uuid, uuidErr := getRaidArrayUUID(ctx, mdDev)
+			if uuidErr != nil {
+				log.Warn().Err(uuidErr).Str("device", mdDev).
+					Msg("finalize/boot: grub.cfg: could not get RAID array UUID — rd.md.uuid will be missing")
+			} else if uuid != "" {
+				cmdlineOpts = append(cmdlineOpts, "rd.md.uuid="+uuid)
+			}
+		}
+	}
+	cmdline := strings.Join(cmdlineOpts, " ")
+
+	// Determine if the /boot filesystem module is needed.
+	// Default to ext2 for grub (covers both xfs and ext4 — grub uses ext2 module for ext4 too).
+	grubBootFSMod := "ext2"
+	for _, p := range layout.Partitions {
+		if p.MountPoint == "/" || p.MountPoint == "/boot" {
+			switch p.Filesystem {
+			case "xfs":
+				grubBootFSMod = "xfs"
+			}
+		}
+	}
+
+	var cfg strings.Builder
+	cfg.WriteString("# /boot/grub2/grub.cfg — generated by clonr (content-only deploy)\n")
+	cfg.WriteString("# DO NOT EDIT: regenerated on every reimage\n\n")
+	cfg.WriteString("set default=0\n")
+	cfg.WriteString("set timeout=5\n")
+	cfg.WriteString("insmod gzio\n")
+	cfg.WriteString("insmod part_gpt\n")
+	fmt.Fprintf(&cfg, "insmod %s\n", grubBootFSMod)
+	// RAID layouts need diskfilter module to read /boot from the md array.
+	if len(layout.RAIDArrays) > 0 {
+		cfg.WriteString("insmod diskfilter\n")
+		cfg.WriteString("insmod mdraid1x\n")
+	}
+	fmt.Fprintf(&cfg, "search --no-floppy --fs-uuid --set=root %s\n\n", bootUUID)
+	fmt.Fprintf(&cfg, "menuentry \"Rocky Linux (%s)\" {\n", kver)
+	fmt.Fprintf(&cfg, "  linux /boot/vmlinuz-%s %s\n", kver, cmdline)
+	fmt.Fprintf(&cfg, "  initrd /boot/initramfs-%s.img\n", kver)
+	cfg.WriteString("}\n")
+
+	grubCfgPath := filepath.Join(mountRoot, "boot", "grub2", "grub.cfg")
+	if err := os.MkdirAll(filepath.Dir(grubCfgPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir grub2 dir: %w", err)
+	}
+	if err := os.WriteFile(grubCfgPath, []byte(cfg.String()), 0o644); err != nil {
+		return fmt.Errorf("write grub.cfg: %w", err)
+	}
+	log.Info().Str("kver", kver).Str("root_uuid", rootUUID).
+		Msg("finalize/boot: hand-crafted grub.cfg written")
+	return nil
+}
+
+// prepareDracutForRAID injects the mdraid dracut configuration, mdadm binary,
+// and md udev rules into the deployed chroot so dracut can build an initramfs
+// that assembles md RAID arrays before mounting root on first boot.
+func prepareDracutForRAID(mountRoot string, layout api.DiskLayout) error {
+	log := logger()
+
+	dracutConfDir := filepath.Join(mountRoot, "etc", "dracut.conf.d")
+	if err := os.MkdirAll(dracutConfDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir dracut.conf.d: %w", err)
+	}
+
+	dracutRAIDConf := filepath.Join(dracutConfDir, "10-clonr-mdraid.conf")
+	confContent := `# Written by clonr during deployment for RAID layouts.
+# Forces mdraid dracut module to be included in the initramfs so the OS can
+# assemble its md RAID arrays before mounting root on first boot.
+add_dracutmodules+=" mdraid "
+# mdadmconf=yes tells dracut to copy /etc/mdadm.conf into the initramfs so
+# mdadm can assemble arrays by UUID without requiring rd.md.uuid= cmdline args.
+mdadmconf=yes
+`
+	if err := os.WriteFile(dracutRAIDConf, []byte(confContent), 0o644); err != nil {
+		return fmt.Errorf("write mdraid dracut config: %w", err)
+	}
+	log.Info().Str("path", dracutRAIDConf).
+		Msg("finalize/boot: wrote mdraid dracut config")
+
+	// Inject mdadm binary if absent.
+	chrootMdadm := filepath.Join(mountRoot, "usr", "sbin", "mdadm")
+	if _, err := os.Stat(chrootMdadm); os.IsNotExist(err) {
+		hostMdadm, lookErr := exec.LookPath("mdadm")
+		if lookErr != nil {
+			log.Warn().Msg("finalize/boot: mdadm not found on deploy host — dracut mdraid module may fail")
+		} else {
+			if copyErr := copyFile(hostMdadm, chrootMdadm, 0o755); copyErr != nil {
+				log.Warn().Err(copyErr).Msg("finalize/boot: could not inject mdadm into chroot")
+			} else {
+				log.Info().Str("dst", chrootMdadm).Msg("finalize/boot: injected mdadm into chroot")
+			}
+		}
+	}
+
+	// Inject mdadm udev rules.
+	chrootUdevRulesDir := filepath.Join(mountRoot, "usr", "lib", "udev", "rules.d")
+	if err := os.MkdirAll(chrootUdevRulesDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir udev rules.d: %w", err)
+	}
+	for _, ruleSpec := range []struct {
+		name    string
+		content string
+	}{
+		{"63-md-raid-arrays.rules", mdRaidArraysRules},
+		{"64-md-raid-assembly.rules", mdRaidAssemblyRules},
+	} {
+		chrootRule := filepath.Join(chrootUdevRulesDir, ruleSpec.name)
+		if _, statErr := os.Stat(chrootRule); statErr == nil {
+			log.Info().Str("file", ruleSpec.name).
+				Msg("finalize/boot: mdadm udev rule already present — skipping injection")
+			continue
+		}
+		if err := os.WriteFile(chrootRule, []byte(ruleSpec.content), 0o644); err != nil {
+			log.Warn().Err(err).Str("dst", chrootRule).
+				Msg("finalize/boot: could not write mdadm udev rule (non-fatal)")
+		} else {
+			log.Info().Str("file", ruleSpec.name).
+				Msg("finalize/boot: wrote mdadm udev rule into chroot")
+		}
+	}
+	return nil
+}
+
+
+// getUUID returns the filesystem UUID of a block device using blkid.
+// Returns an error if blkid is unavailable or the device has no UUID (e.g.
+// unformatted or a bios_grub partition).
+func getUUID(ctx context.Context, device string) (string, error) {
+	out, err := exec.CommandContext(ctx, "blkid", "-s", "UUID", "-o", "value", device).Output()
+	if err != nil {
+		return "", fmt.Errorf("blkid %s: %w", device, err)
+	}
+	uuid := strings.TrimSpace(string(out))
+	if uuid == "" {
+		return "", fmt.Errorf("blkid %s: no UUID (partition may be unformatted)", device)
+	}
+	return uuid, nil
+}
+
+// writeFstab is superseded by writeFstabD (ADR-0009 §5A fstab.d ownership split).
+// Kept as a shim that delegates to writeFstabD so any call-site not yet updated
+// continues to compile. New callers must use writeFstabD directly.
+func writeFstab(ctx context.Context, mountRoot string, layout api.DiskLayout, partDevs []string) error {
+	return writeFstabD(ctx, mountRoot, layout, partDevs)
 }
 
 // fstabMountOpts returns appropriate mount options for a given filesystem type

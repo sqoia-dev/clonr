@@ -1552,6 +1552,11 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		return
 	}
 
+	// ── Write image metadata sidecar (ADR-0009 content-only schema) ─────────
+	// Written AFTER FinalizeBaseImage so the sidecar content_sha256 is always
+	// consistent with the sealed rootfs state stored in the DB. Non-fatal.
+	f.writeImageMetadataSidecar(ctx, imageID, req.Name, time.Now().UTC(), rootfsPath, string(distro), checksum, size, "iso")
+
 	// ── Persist build manifest ────────────────────────────────────────────
 	_ = writeBuildManifest(imageRoot, imageID, string(distro), req.RoleIDs, size, checksum, result.ElapsedTime)
 
@@ -1764,6 +1769,136 @@ func (f *Factory) resumeFinalize(ctx context.Context, imageID, imageRoot, rootfs
 	f.Logger.Info().
 		Str("image_id", imageID).Int64("size_bytes", size).Str("checksum", checksum).
 		Msg("factory: resume finalize complete — image is ready")
+}
+
+// ─── Metadata sidecar helpers ─────────────────────────────────────────────────
+
+// extractKernelVersion returns the first kernel version string found by
+// globbing /boot/vmlinuz-* inside rootfsPath. Returns "" when none is found.
+func extractKernelVersion(rootfsPath string) string {
+	bootDir := filepath.Join(rootfsPath, "boot")
+	entries, err := os.ReadDir(bootDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "vmlinuz-") {
+			kver := strings.TrimPrefix(name, "vmlinuz-")
+			if kver != "" {
+				return kver
+			}
+		}
+	}
+	return ""
+}
+
+// extractOSRelease parses /etc/os-release from the rootfs and returns
+// (distro, version) where distro is lowercased ID (e.g. "rocky") and
+// version is VERSION_ID (e.g. "10.0"). Returns ("", "") on parse failure.
+func extractOSRelease(rootfsPath string) (distro, version string) {
+	data, err := os.ReadFile(filepath.Join(rootfsPath, "etc", "os-release"))
+	if err != nil {
+		return "", ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ID=") {
+			distro = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID="), `"`))
+		}
+		if strings.HasPrefix(line, "VERSION_ID=") {
+			version = strings.Trim(strings.TrimPrefix(line, "VERSION_ID="), `"`)
+		}
+	}
+	return distro, version
+}
+
+// capturePackageManifest shells out to rpm -qa inside the rootfs to get the
+// full installed package NVR list. Returns nil (not an error) when rpm is absent
+// (non-RPM distros) or when the rootfs is not yet populated with a package DB.
+func capturePackageManifest(rootfsPath string) []string {
+	// rpm --root allows querying an offline rootfs without chrooting.
+	out, err := exec.Command("rpm",
+		"--root", rootfsPath,
+		"-qa",
+		"--queryformat", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n",
+	).Output()
+	if err != nil {
+		return nil // non-RPM distro or rpm not installed in the deployed rootfs
+	}
+	var pkgs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			pkgs = append(pkgs, line)
+		}
+	}
+	sort.Strings(pkgs)
+	return pkgs
+}
+
+// writeImageMetadataSidecar builds an ImageMetadata struct from a freshly
+// extracted rootfs and writes it to the image directory. The checksum and size
+// are the values already computed by checksumDir over the rootfs tree.
+//
+// The sidecar is written AFTER checksumDir so content_sha256 is always
+// consistent with the sealed rootfs state.
+func (f *Factory) writeImageMetadataSidecar(
+	ctx context.Context,
+	imageID string,
+	imageName string,
+	createdAt time.Time,
+	rootfsPath string,
+	distroName string,
+	checksum string,
+	sizeBytes int64,
+	buildMethod string,
+) {
+	kver := extractKernelVersion(rootfsPath)
+	if kver == "" {
+		f.Logger.Warn().Str("image_id", imageID).
+			Msg("factory: could not detect kernel version from /boot/vmlinuz-* (sidecar kernel_version will be empty)")
+	}
+
+	osDistro, osVersion := extractOSRelease(rootfsPath)
+	if osDistro == "" {
+		osDistro = distroName // fall back to the factory-detected distro name
+	}
+
+	pkgs := capturePackageManifest(rootfsPath)
+	if pkgs == nil {
+		f.Logger.Debug().Str("image_id", imageID).
+			Msg("factory: rpm package manifest not captured (non-RPM or rpm unavailable)")
+	}
+
+	meta := ImageMetadata{
+		ID:               imageID,
+		Name:             imageName,
+		Distro:           osDistro,
+		DistroVersion:    osVersion,
+		KernelVersion:    kver,
+		KernelPinned:     false,
+		Architecture:     "x86_64",
+		FirmwareSupport:  []string{"bios", "uefi"},
+		ContentSHA256:    checksum,
+		ContentSizeBytes: sizeBytes,
+		CreatedAt:        createdAt,
+		BuildMethod:      buildMethod,
+		PackageManifest:  pkgs,
+	}
+
+	if _, err := StoreMetadata(ctx, f.ImageDir, imageID, meta); err != nil {
+		f.Logger.Warn().Err(err).Str("image_id", imageID).
+			Msg("factory: failed to write image metadata sidecar (non-fatal — image is still usable)")
+		return
+	}
+	f.Logger.Info().
+		Str("image_id", imageID).
+		Str("kernel_version", kver).
+		Str("distro", osDistro).
+		Str("distro_version", osVersion).
+		Int("packages", len(pkgs)).
+		Msg("factory: image metadata sidecar written")
 }
 
 // resumeFromDownload re-runs the full ISO download + install pipeline.
