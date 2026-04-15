@@ -991,19 +991,40 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 	reporter.EndPhase("")
 
-	// ── EFI boot setup (UEFI images only) ────────────────────────────────────
-	// For BIOS images, there are no NVRAM EFI variables — efibootmgr is not
-	// applicable and calling it would produce a misleading warning. The PXE
-	// boot routing for BIOS nodes is controlled by DHCP/TFTP + iPXE exit alone.
-	if img.Firmware == "bios" {
-		deployLog.Info().Str("firmware", "bios").
-			Msg("EFI boot setup: skipping — BIOS image has no EFI NVRAM")
+	// ── EFI boot setup (UEFI layouts only) ──────────────────────────────────
+	// Skip efibootmgr entirely if the effective disk layout has no ESP partition.
+	// This handles two cases:
+	//   1. BIOS images (img.Firmware == "bios"): no ESP in the image's default layout.
+	//   2. UEFI-capable image deployed with a BIOS disk layout override (e.g. a
+	//      node that has a DiskLayoutOverride with a biosboot partition instead of
+	//      an ESP). In this case img.Firmware may be "uefi" but the node is being
+	//      deployed as BIOS — the UEFI firmware check alone is insufficient.
+	//
+	// The authoritative signal is whether the effective layout has an ESP-flagged
+	// partition. If none, the deploy target has no EFI partition and efibootmgr
+	// cannot write NVRAM entries (SeaBIOS VMs have no EFI vars at all; calling
+	// efibootmgr produces "EFI variables are not supported on this system").
+	layoutHasESP := false
+	effectiveESPPartNum := 1
+	for i, p := range effectiveLayout.Partitions {
+		for _, flag := range p.Flags {
+			if flag == "esp" || flag == "boot" {
+				layoutHasESP = true
+				effectiveESPPartNum = i + 1
+				break
+			}
+		}
+		if layoutHasESP {
+			break
+		}
+	}
+	if !layoutHasESP {
+		deployLog.Info().
+			Str("firmware", string(img.Firmware)).
+			Str("layout_source", layoutSource).
+			Msg("EFI boot setup: skipping — effective layout has no ESP partition (BIOS deploy or BIOS layout override)")
 	} else {
 		// Step 1: Create the OS NVRAM boot entry pointing at grubx64.efi on the ESP.
-		//
-		// This step was previously missing in auto-deploy mode. Without it, OVMF/EDK2
-		// has no OS boot entry in NVRAM and falls through to network boot on every
-		// restart, making the deployment loop infinitely.
 		//
 		// FixEFIBoot calls `efibootmgr --create` which writes directly to
 		// /sys/firmware/efi/efivars on the running (UEFI-booted) initramfs host.
@@ -1017,17 +1038,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		if targetDisk == "" {
 			targetDisk = "/dev/sda" // safe fallback: single-disk nodes
 		}
-		// Find the ESP partition number from the layout (1-indexed).
-		// Default to 1 — ESP is almost always the first partition on UEFI layouts.
-		espPartNum := 1
-		for i, p := range effectiveLayout.Partitions {
-			for _, flag := range p.Flags {
-				if flag == "esp" || flag == "boot" {
-					espPartNum = i + 1
-					break
-				}
-			}
-		}
+		espPartNum := effectiveESPPartNum
 		label := img.Name
 		deployLog.Info().
 			Str("disk", targetDisk).
