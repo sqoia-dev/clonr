@@ -1,0 +1,33 @@
+[Unit]
+Description=clonr auto-deploy: sync /opt/clonr to origin/main and rebuild
+# WARNING: This unit stomps local uncommitted changes on this host.
+# If you need to test uncommitted work, stop the timer first:
+#   systemctl stop clonr-autodeploy.timer
+# Resume with:
+#   systemctl start clonr-autodeploy.timer
+Documentation=https://github.com/sqoia-dev/clonr/blob/main/scripts/autodeploy/
+After=network-online.target
+Wants=network-online.target
+# Prevent concurrent runs if a previous build is still running
+After=clonr-serverd.service
+
+[Service]
+Type=oneshot
+# Script lives in the repo itself — keeps the deploy logic version-controlled
+ExecStart=/opt/clonr/scripts/autodeploy/clonr-autodeploy.sh
+# Run as root: needs to write to /usr/local/bin, restart clonr-serverd,
+# and write to /var/lib/clonr (owned by clonr user but root can write)
+User=root
+
+# Output goes to journal — tail with:
+#   journalctl -u clonr-autodeploy.service -f
+StandardOutput=journal
+StandardError=journal
+
+# Allow a generous timeout for builds on this lab box (initramfs build
+# includes cpio/gzip which can take 30-60s on slow storage)
+TimeoutStartSec=10min
+
+# Do not restart on failure — the timer will fire again in 2 minutes.
+# Exit non-zero is used to signal "retry next cycle" intentionally.
+Restart=no
