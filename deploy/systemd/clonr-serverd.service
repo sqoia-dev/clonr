@@ -26,6 +26,7 @@ Environment=CLONR_PXE_INTERFACE=eth1
 Environment=CLONR_PXE_RANGE=10.99.0.100-10.99.0.200
 Environment=CLONR_PXE_SERVER_IP=10.99.0.1
 Environment=TMPDIR=/var/lib/clonr/tmp
+Environment=CLONR_SECRET_MASTER_KEY_PATH=/etc/clonr/secret-master.key
 
 # ---------------------------------------------------------------------------
 # Restart policy
