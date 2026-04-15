@@ -462,29 +462,28 @@ func (h *InitramfsHandler) DeleteInitramfsHistory(w http.ResponseWriter, r *http
 
 	ctx := r.Context()
 
-	// Fetch the target entry's sha256 from history.
-	history, err := h.DB.ListInitramfsBuilds(ctx, 20)
+	// Guard: fetch the target record's sha256 directly by ID — do not rely on
+	// a windowed history scan, which could miss the live record if more than N
+	// entries have been inserted since it was last built.
+	targetSHA, err := h.DB.GetInitramfsBuildSHA256(ctx, id)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	// Compare against the cached live sha256 — no synchronous file read required.
-	// liveSHA256 is set at startup and updated after every successful rebuild.
+	// Compare against the authoritative in-memory live sha256.
+	// liveSHA256 is set at startup and updated after every successful rebuild,
+	// so it is always current without a synchronous 27 MB file read.
 	h.mu.Lock()
 	liveSHA256 := h.liveSHA256
 	h.mu.Unlock()
 
-	if liveSHA256 != "" {
-		for _, rec := range history {
-			if rec.ID == id && rec.SHA256 == liveSHA256 {
-				writeJSON(w, http.StatusConflict, api.ErrorResponse{
-					Error: "cannot delete the live initramfs entry — its sha256 matches the file currently on disk",
-					Code:  "live_entry_cannot_delete",
-				})
-				return
-			}
-		}
+	if liveSHA256 != "" && targetSHA == liveSHA256 {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "cannot delete the live initramfs entry — its sha256 matches the file currently on disk",
+			Code:  "live_entry_cannot_delete",
+		})
+		return
 	}
 
 	if err := h.DB.DeleteInitramfsBuild(ctx, id); err != nil {

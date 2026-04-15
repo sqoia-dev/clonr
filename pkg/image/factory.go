@@ -1260,10 +1260,13 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		os_ = string(distro)
 	}
 
-	// Normalize and default the firmware field.
-	firmware := api.ImageFirmware(req.Firmware)
-	if firmware != api.FirmwareBIOS && firmware != api.FirmwareUEFI {
-		firmware = api.FirmwareUEFI
+	// Validate firmware field — only "bios" and "uefi" (case-insensitive) are accepted.
+	// Silently defaulting to uefi on unknown values would hide typos; fail fast instead.
+	firmware := api.ImageFirmware(strings.ToLower(string(req.Firmware)))
+	if req.Firmware == "" {
+		firmware = api.FirmwareUEFI // safe default when omitted
+	} else if firmware != api.FirmwareBIOS && firmware != api.FirmwareUEFI {
+		return nil, fmt.Errorf("factory: unknown firmware %q -- accepted values are bios and uefi", req.Firmware)
 	}
 
 	// Build the placeholder disk layout that matches the requested firmware.

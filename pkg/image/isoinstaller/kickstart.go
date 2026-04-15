@@ -230,8 +230,10 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 	}
 
 	firmware := opts.Firmware
-	if firmware == "" || (firmware != "bios" && firmware != "uefi") {
-		firmware = "uefi"
+	if firmware == "" {
+		firmware = "uefi" // safe default when not specified
+	} else if firmware != "bios" && firmware != "uefi" {
+		return nil, fmt.Errorf("isoinstaller: unknown firmware %q -- accepted values are bios and uefi", firmware)
 	}
 
 	d := ksTemplateData{

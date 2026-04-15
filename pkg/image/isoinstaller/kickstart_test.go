@@ -91,22 +91,17 @@ func TestGenerateKickstart_Firmware_Empty(t *testing.T) {
 }
 
 // TestGenerateKickstart_Firmware_Invalid verifies that an invalid firmware value
-// is silently normalized to uefi (safe default, not an error).
+// returns an error rather than silently falling back to uefi (fix: issue #7).
 func TestGenerateKickstart_Firmware_Invalid(t *testing.T) {
 	opts := BuildOptions{
 		Firmware: "legacy", // not a recognized value
 	}
-	cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
-	if err != nil {
-		t.Fatalf("generateKickstart error: %v", err)
+	_, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+	if err == nil {
+		t.Fatal("expected error for unknown firmware value, got nil")
 	}
-
-	ks := cfg.KickstartContent
-	if strings.Contains(ks, "biosboot") {
-		t.Errorf("invalid firmware value should default to uefi (no biosboot), got kickstart:\n%s", ks)
-	}
-	if !strings.Contains(ks, "vfat") {
-		t.Errorf("invalid firmware value should default to uefi (vfat ESP), got kickstart:\n%s", ks)
+	if !strings.Contains(err.Error(), "unknown firmware") {
+		t.Errorf("error should mention unknown firmware, got: %v", err)
 	}
 }
 

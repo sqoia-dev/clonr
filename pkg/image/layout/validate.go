@@ -140,6 +140,14 @@ func Validate(layout api.DiskLayout, targetDisk hardware.Disk) ValidationResult 
 		errs = append(errs, "layout must include a partition with mountpoint '/' (root)")
 	}
 
+	// biosboot and ESP are mutually exclusive: biosboot is for BIOS/GPT deployments,
+	// ESP is for UEFI. A layout with both indicates a mixed/malformed configuration
+	// that would cause both BIOS and UEFI bootloader install paths to run at deploy
+	// time, corrupting the installation. Fail here so finalize can trust its input.
+	if hasBIOSGrub && hasESP {
+		errs = append(errs, "layout has both a biosboot (BIOS/GPT) and an ESP (UEFI) partition — these are mutually exclusive; use biosboot for BIOS deployments or ESP for UEFI, not both")
+	}
+
 	// Boot mode consistency checks.
 	isUEFI := isUEFIBootloader(layout.Bootloader)
 	if isUEFI {

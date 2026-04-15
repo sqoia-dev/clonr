@@ -2003,6 +2003,19 @@ func (db *DB) DeleteInitramfsBuild(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetInitramfsBuildSHA256 returns the sha256 field for a single build record.
+// Returns ("", sql.ErrNoRows) when no record with that ID exists.
+func (db *DB) GetInitramfsBuildSHA256(ctx context.Context, id string) (string, error) {
+	var sha string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT sha256 FROM initramfs_builds WHERE id = ?`, id,
+	).Scan(&sha)
+	if err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
 // LatestSuccessfulInitramfsBuildID returns the ID of the most recent build with
 // outcome = 'success'. Returns ("", sql.ErrNoRows) when none exists.
 func (db *DB) LatestSuccessfulInitramfsBuildID(ctx context.Context) (string, error) {
