@@ -271,23 +271,25 @@ func requireRole(minimum string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Bearer token with admin scope always passes regardless of minimum.
+			// Session cookie path: if a user role is set, enforce it strictly.
+			// The scope for operators is mapped to KeyScopeAdmin for requireScope compat,
+			// but requireRole must use the real role, not the mapped scope.
+			if role := userRoleFromContext(r.Context()); role != "" {
+				if roleRank[role] < roleRank[minimum] {
+					writeForbidden(w, "insufficient role: requires "+minimum+" or higher")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Bearer token path: admin-scoped API keys always pass.
 			if scope == api.KeyScopeAdmin {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// Session cookie path: check the user role from context.
-			role := userRoleFromContext(r.Context())
-			if role == "" {
-				writeForbidden(w, "insufficient permissions")
-				return
-			}
-			if roleRank[role] < roleRank[minimum] {
-				writeForbidden(w, "insufficient role: requires "+minimum+" or higher")
-				return
-			}
-			next.ServeHTTP(w, r)
+			writeForbidden(w, "insufficient permissions")
 		})
 	}
 }
