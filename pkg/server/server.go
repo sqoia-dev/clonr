@@ -371,12 +371,12 @@ func (s *Server) buildRouter() chi.Router {
 			r.Delete("/admin/api-keys/{id}", apiKeysH.HandleRevoke)
 			r.Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
 
-			// User management (ADR-0007) — admin role only.
-			r.Get("/admin/users", usersH.HandleList)
-			r.Post("/admin/users", usersH.HandleCreate)
-			r.Put("/admin/users/{id}", usersH.HandleUpdate)
-			r.Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
-			r.Delete("/admin/users/{id}", usersH.HandleDelete)
+			// User management (ADR-0007) — admin role only (operator cannot manage users).
+			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleList)
+			r.With(requireRole("admin")).Post("/admin/users", usersH.HandleCreate)
+			r.With(requireRole("admin")).Put("/admin/users/{id}", usersH.HandleUpdate)
+			r.With(requireRole("admin")).Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
+			r.With(requireRole("admin")).Delete("/admin/users/{id}", usersH.HandleDelete)
 
 			// Health
 			r.Get("/health", health.ServeHTTP)
