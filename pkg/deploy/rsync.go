@@ -598,9 +598,9 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	//   2. If grubx64.efi is absent, install grub2-efi-x64 + shim-x64 via dnf
 	//      inside the chroot (the RPM %post scriptlet copies grubx64.efi to the
 	//      mounted ESP under /boot/efi/EFI/rocky/).
-	//   3. Run grub2-install --target=x86_64-efi to write the EFI binary and
-	//      GRUB module set. --removable also writes the fallback path
-	//      \EFI\BOOT\BOOTX64.EFI which OVMF uses when NVRAM entries are absent.
+	//   3. Run grub2-install --target=x86_64-efi INSIDE THE CHROOT so module
+	//      versions match the deployed OS. --removable also writes the fallback
+	//      path \EFI\BOOT\BOOTX64.EFI which OVMF uses when NVRAM entries are absent.
 	//   4. Verify grubx64.efi is present post-install (fatal if missing).
 	//   5. Create/repair the NVRAM boot entry via efibootmgr.
 	//
@@ -629,7 +629,6 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	if hasESP {
 		log := logger()
 		efiDir := filepath.Join(mountRoot, "boot", "efi")
-		bootDir := filepath.Join(mountRoot, "boot")
 		grubx64Path := filepath.Join(efiDir, "EFI", "rocky", "grubx64.efi")
 
 		log.Info().Str("disk", d.targetDisk).Int("esp_part", espPartNum).
@@ -658,27 +657,26 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 				Msg("finalize: grubx64.efi already present on ESP — skipping dnf install")
 		}
 
-		// Step 3: run grub2-install --target=x86_64-efi.
-		// --removable writes \EFI\BOOT\BOOTX64.EFI (OVMF fallback path).
-		// --boot-directory points at <mountRoot>/boot so GRUB finds grub.cfg.
-		// --efi-directory points at the mounted ESP.
-		grubEFIArgs := []string{
-			"--target=x86_64-efi",
-			"--efi-directory=" + efiDir,
-			"--boot-directory=" + bootDir,
-			"--bootloader-id=rocky",
-			"--removable",
-			"--recheck",
-		}
-		log.Info().Str("disk", d.targetDisk).Strs("args", grubEFIArgs).
-			Msg("finalize: running grub2-install --target=x86_64-efi")
-		if err := runAndLog(ctx, "grub2-install-efi", exec.CommandContext(ctx, "grub2-install", grubEFIArgs...)); err != nil {
+		// Step 3: run grub2-install --target=x86_64-efi inside the deployed chroot.
+		// Running inside the chroot is essential: grub2-install reads GRUB modules
+		// from /usr/lib/grub/x86_64-efi/ inside the chroot (the deployed OS's own
+		// modules) rather than from the deploy initramfs. A module version mismatch
+		// between the grubx64.efi binary and the module set causes GRUB to crash at
+		// boot with "symbol not found", which appears as a flicker/black screen at
+		// the OVMF picker when the user selects the disk.
+		//
+		// --removable writes EFI/BOOT/BOOTX64.EFI (the OVMF fallback path used when
+		// NVRAM entries are absent — critical for VMs whose pflash vars are reset on reimage).
+		// --no-nvram skips grub2-install's own NVRAM write; FixEFIBoot (step 5) handles
+		// NVRAM via efibootmgr so we have full control over label and loader path.
+		log.Info().Str("disk", d.targetDisk).Msg("finalize: running grub2-install --target=x86_64-efi inside chroot")
+		if err := runGrub2InstallEFIInChroot(ctx, mountRoot); err != nil {
 			return &BootloaderError{
 				Targets: []string{d.targetDisk},
-				Cause:   fmt.Errorf("UEFI: grub2-install --target=x86_64-efi: %w", err),
+				Cause:   fmt.Errorf("UEFI: grub2-install --target=x86_64-efi in chroot: %w", err),
 			}
 		}
-		log.Info().Msg("finalize: grub2-install --target=x86_64-efi succeeded")
+		log.Info().Msg("finalize: grub2-install --target=x86_64-efi (chroot) succeeded")
 
 		// Step 4: verify grubx64.efi exists post-install. grub2-install can exit 0
 		// but silently skip writing the binary in some edge cases (missing modules,

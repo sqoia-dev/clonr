@@ -729,6 +729,81 @@ func installEFIBootloaderInChroot(ctx context.Context, mountRoot string) error {
 	return nil
 }
 
+// runGrub2InstallEFIInChroot runs `grub2-install --target=x86_64-efi` inside the
+// deployed chroot. Running inside the chroot is critical for UEFI installs:
+//
+//   - grub2-install reads GRUB modules from /usr/lib/grub/x86_64-efi/ in the
+//     chroot, not from the deploy initramfs. This guarantees module version
+//     consistency with the deployed OS's grub2 package. A mismatch causes GRUB
+//     to crash at boot with "symbol not found" or "invalid magic number", which
+//     manifests as a flash/flicker at the OVMF boot picker and immediate return
+//     to firmware.
+//   - grub2-install writes modules to /boot/grub2/x86_64-efi/ inside the chroot
+//     (= <mountRoot>/boot/grub2/x86_64-efi/ on the host). These must match the
+//     grubx64.efi binary — same build, same version.
+//
+// Flags:
+//   - --target=x86_64-efi : EFI install (does NOT need a disk argument, unlike i386-pc)
+//   - --efi-directory=/boot/efi : path to the mounted ESP (chroot-relative)
+//   - --boot-directory=/boot : path to /boot partition (chroot-relative)
+//   - --bootloader-id=rocky : writes to EFI/rocky/ subdir on the ESP
+//   - --removable : ALSO writes EFI/BOOT/BOOTX64.EFI (OVMF fallback when NVRAM
+//     entries are absent — critical for VMs whose pflash vars are reset on reimage)
+//   - --no-nvram : do NOT write NVRAM entries; FixEFIBoot handles NVRAM separately
+//     via efibootmgr --create, which gives us control over the loader path and label
+//
+// The function sets up the bind mounts that grub2-install requires (/proc for
+// device detection, /sys for efivars read, /dev for block device access).
+func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
+	log := logger()
+
+	// Bind-mount virtual filesystems required by grub2-install inside the chroot.
+	// /proc: grub2-install reads /proc/devices and /proc/mounts for device detection.
+	// /sys:  grub2-install checks /sys/firmware/efi for EFI subsystem presence.
+	// /dev:  grub2-install opens block devices directly (e.g. /dev/sda, /dev/nvme0n1).
+	// /dev/pts: some versions of grub2-install open a pts for console I/O.
+	type bindMount struct{ src, dst string }
+	binds := []bindMount{
+		{"/proc", filepath.Join(mountRoot, "proc")},
+		{"/sys", filepath.Join(mountRoot, "sys")},
+		{"/dev", filepath.Join(mountRoot, "dev")},
+		{"/dev/pts", filepath.Join(mountRoot, "dev", "pts")},
+	}
+	for _, b := range binds {
+		if err := os.MkdirAll(b.dst, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", b.dst, err)
+		}
+		if out, err := exec.CommandContext(ctx, "mount", "--bind", b.src, b.dst).CombinedOutput(); err != nil {
+			return fmt.Errorf("bind-mount %s → %s: %w\n%s", b.src, b.dst, err, string(out))
+		}
+	}
+	defer func() {
+		for i := len(binds) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", binds[i].dst).Run()
+		}
+	}()
+
+	// Inside the chroot, /boot/efi is the ESP (already mounted by mountPartitions)
+	// and /boot is the boot partition. Paths are chroot-relative.
+	args := []string{
+		mountRoot,
+		"grub2-install",
+		"--target=x86_64-efi",
+		"--efi-directory=/boot/efi",
+		"--boot-directory=/boot",
+		"--bootloader-id=rocky",
+		"--removable",
+		"--no-nvram",
+		"--recheck",
+	}
+	log.Info().Strs("chroot_args", args[1:]).Msg("finalize/boot: running grub2-install --target=x86_64-efi inside chroot")
+	if err := runAndLog(ctx, "grub2-install-efi-chroot", exec.CommandContext(ctx, "chroot", args...)); err != nil {
+		return fmt.Errorf("chroot grub2-install --target=x86_64-efi: %w", err)
+	}
+	log.Info().Msg("finalize/boot: grub2-install --target=x86_64-efi inside chroot succeeded")
+	return nil
+}
+
 // applyBootConfig generates all topology-specific boot state from scratch
 // (ADR-0009 content-only model). It must be called after the rootfs tarball has
 // been extracted and after grub2-install has written the bootloader MBR/bios-boot.
