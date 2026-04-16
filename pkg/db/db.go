@@ -491,6 +491,17 @@ func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfi
 	return scanNodeConfig(row)
 }
 
+// HostnameExists reports whether any node_config row with the given hostname exists.
+func (db *DB) HostnameExists(ctx context.Context, hostname string) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM node_configs WHERE hostname = ?`, hostname).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("db: hostname exists: %w", err)
+	}
+	return count > 0, nil
+}
+
 // ListNodeConfigs returns all NodeConfigs. If baseImageID is non-empty, filters by it.
 func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error) {
 	var rows *sql.Rows

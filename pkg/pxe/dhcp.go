@@ -22,6 +22,12 @@ type leaseEntry struct {
 	ExpiresAt time.Time
 }
 
+// NOTE: DHCP leases are stored in memory only and are lost on server restart.
+// This is an intentional tradeoff: clonr targets isolated provisioning networks
+// where nodes PXE-boot on demand. A node that re-appears after a restart will
+// simply acquire a new lease from the pool. Persistent lease storage (e.g.
+// a SQLite file) is not implemented and is not required for this use case.
+
 // DHCPServer is a lightweight DHCP server that only responds to PXE clients.
 type DHCPServer struct {
 	iface      string
@@ -74,6 +80,7 @@ func (d *DHCPServer) Start(ctx context.Context) error {
 	}
 	d.server = srv
 
+	log.Warn().Msg("DHCP leases are ephemeral — all lease state will be lost on server restart")
 	log.Info().Str("interface", d.iface).Str("server_ip", d.serverIP.String()).
 		Str("range", fmt.Sprintf("%s-%s", d.rangeStart, d.rangeEnd)).
 		Msg("DHCP server listening")
@@ -151,6 +158,18 @@ func (d *DHCPServer) handleDiscover(conn net.PacketConn, peer net.Addr, req *dhc
 }
 
 func (d *DHCPServer) handleRequest(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4, isIPXE bool) {
+	// If the Request carries a ServerIdentifier option that names a different
+	// DHCP server, silently ignore it. This prevents duplicate ACKs in
+	// environments where multiple DHCP servers are present on the same segment.
+	if sid := req.ServerIdentifier(); sid != nil && !sid.Equal(d.serverIP) {
+		log.Debug().
+			Str("mac", req.ClientHWAddr.String()).
+			Str("requested_server", sid.String()).
+			Str("our_server", d.serverIP.String()).
+			Msg("DHCP REQUEST for different server — ignoring")
+		return
+	}
+
 	ip := d.acquireOrAssignIP(req.ClientHWAddr.String())
 	if ip == nil {
 		log.Warn().Str("mac", req.ClientHWAddr.String()).Msg("DHCP pool exhausted on request")
@@ -283,6 +302,9 @@ func parseIPRange(r string) (net.IP, net.IP, error) {
 	end := net.ParseIP(strings.TrimSpace(parts[1])).To4()
 	if start == nil || end == nil {
 		return nil, nil, fmt.Errorf("invalid IP addresses in range %q", r)
+	}
+	if ipGreaterThan(start, end) {
+		return nil, nil, fmt.Errorf("DHCP range start (%s) must be less than or equal to end (%s)", start, end)
 	}
 	return start, end, nil
 }
