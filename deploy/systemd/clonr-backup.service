@@ -6,7 +6,7 @@ After=local-fs.target
 Type=oneshot
 # Run as root — same as clonr-serverd, required to read WAL-locked DB
 User=root
-ExecStart=/opt/clonr/scripts/clonr-backup.sh
+ExecStart=/opt/clonr/scripts/ops/clonr-backup.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=clonr-backup

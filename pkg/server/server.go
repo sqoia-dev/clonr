@@ -212,6 +212,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Global middleware stack.
 	r.Use(panicRecovery)
+	r.Use(corsMiddleware) // CORS before logging so preflight OPTIONS are handled cleanly
 	r.Use(requestLogger)
 	r.Use(chimiddleware.StripSlashes)
 	r.Use(apiVersionHeader) // sets API-Version: v1 on all /api/v1/* responses

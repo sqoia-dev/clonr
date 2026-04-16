@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -403,6 +404,58 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: msg, Code: "forbidden"})
+}
+
+// corsMiddleware returns a middleware that adds CORS headers to all responses.
+//
+// Allowed origins are determined as follows:
+//  1. The request Origin header is always echoed back when it matches an allowed origin.
+//  2. CLONR_CORS_ORIGINS is a comma-separated list of additional allowed origins
+//     (e.g. "https://admin.example.com,https://dashboard.example.com").
+//  3. When CLONR_CORS_ORIGINS is unset, only same-origin requests (no Origin header)
+//     and requests from the same scheme+host as the server are permitted.
+//
+// Preflight OPTIONS requests are handled and short-circuited with 204 No Content.
+// Credentials are allowed so that session cookies work across origins when configured.
+func corsMiddleware(next http.Handler) http.Handler {
+	// Parse the allowed-origins list once at middleware construction time.
+	allowedOrigins := map[string]struct{}{}
+	if raw := os.Getenv("CLONR_CORS_ORIGINS"); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowedOrigins[o] = struct{}{}
+			}
+		}
+	}
+
+	isAllowed := func(origin string) bool {
+		if origin == "" {
+			return true // same-origin request
+		}
+		_, ok := allowedOrigins[origin]
+		return ok
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if isAllowed(origin) && origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			// Vary: Origin tells caches that the response differs by origin.
+			w.Header().Add("Vary", "Origin")
+		}
+
+		// Short-circuit preflight requests — no need to hit the handler.
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // apiVersionHeader returns a middleware that sets API-Version: v1 on all responses

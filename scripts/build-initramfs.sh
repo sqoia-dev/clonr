@@ -683,6 +683,11 @@ chmod 755 "$WORKDIR/usr/share/udhcpc/default.script"
 # All other variables (${LOG}, ${CLONR_TOKEN}, etc.) are runtime variables
 # resolved inside the initramfs — they are intentionally left as-is.
 CLONR_STATIC_BIN="$CLONR_BIN"
+# WARNING: Default uses plain HTTP on the provisioning network.
+# For environments where provisioning network is not fully trusted,
+# configure TLS on clonr-serverd and set:
+#   CLONR_SERVER="https://10.99.0.1:8443"
+# The initramfs curl will need the CA cert embedded — see docs/tls-provisioning.md
 # Substitute runtime variables into init script
 sed -e "s|\${CLONR_SERVER}|${CLONR_SERVER:-http://10.99.0.1:8080}|g" \
     -e "s|\${CLONR_STATIC_BIN}|${CLONR_STATIC_BIN}|g" \
