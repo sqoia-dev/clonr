@@ -186,8 +186,8 @@ func TestSetPassword_HappyPath(t *testing.T) {
 		t.Fatalf("login failed: %d", resp.StatusCode)
 	}
 
-	// Change password.
-	pwBody := strings.NewReader(`{"current_password":"clonr","new_password":"newpassword1"}`)
+	// Change password. Must meet complexity: uppercase + lowercase + digit.
+	pwBody := strings.NewReader(`{"current_password":"clonr","new_password":"Newpassword1"}`)
 	pwReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/set-password", pwBody)
 	pwReq.Header.Set("Content-Type", "application/json")
 	pwResp, err := client.Do(pwReq)
@@ -214,7 +214,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	// Logout then log back in with the new password.
 	client.Post(ts.URL+"/api/v1/auth/logout", "application/json", nil)
 
-	newLoginBody := strings.NewReader(`{"username":"clonr","password":"newpassword1"}`)
+	newLoginBody := strings.NewReader(`{"username":"clonr","password":"Newpassword1"}`)
 	newReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", newLoginBody)
 	newReq.Header.Set("Content-Type", "application/json")
 	newResp, _ := client.Do(newReq)
