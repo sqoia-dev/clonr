@@ -16,6 +16,7 @@ ExecStart=/usr/local/bin/clonr-serverd --pxe
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
+# Bind to provisioning interface only in production: CLONR_LISTEN_ADDR=10.99.0.1:8080
 Environment=CLONR_LISTEN_ADDR=0.0.0.0:8080
 Environment=CLONR_IMAGE_DIR=/var/lib/clonr/images
 Environment=CLONR_DB_PATH=/var/lib/clonr/db/clonr.db
@@ -27,14 +28,14 @@ Environment=CLONR_PXE_RANGE=10.99.0.100-10.99.0.200
 Environment=CLONR_PXE_SERVER_IP=10.99.0.1
 Environment=TMPDIR=/var/lib/clonr/tmp
 Environment=CLONR_SECRET_MASTER_KEY_PATH=/etc/clonr/secret-master.key
-# CLONR_SESSION_SECRET must be set to a stable hex-encoded random value.
-# Generate with: openssl rand -hex 64 > /etc/clonr/session.secret
-# Then set here: Environment=CLONR_SESSION_SECRET=<value from /etc/clonr/session.secret>
-# Without this, an ephemeral secret is generated at boot and every restart
-# invalidates all active browser sessions. The actual secret is NOT stored in
-# this repo — it lives in /etc/clonr/session.secret (mode 0400, root:root) on
-# the host, with a backup in sqoia-dev-secrets/clonr/session.secret.backup.
-Environment=CLONR_SESSION_SECRET=REPLACE_WITH_VALUE_FROM_ETC_CLONR_SESSION_SECRET
+# Create /etc/clonr/secrets.env with CLONR_SESSION_SECRET=<value>
+# Generate with: openssl rand -hex 64 > /etc/clonr/secrets.env
+#   then prepend: sed -i '1s/^/CLONR_SESSION_SECRET=/' /etc/clonr/secrets.env
+# Mode: chmod 0400 /etc/clonr/secrets.env && chown root:root /etc/clonr/secrets.env
+# Without CLONR_SESSION_SECRET, an ephemeral secret is generated at boot and every
+# restart invalidates all active browser sessions.
+# The '-' prefix means systemd will not fail if the file does not exist yet.
+EnvironmentFile=-/etc/clonr/secrets.env
 
 # ---------------------------------------------------------------------------
 # Restart policy

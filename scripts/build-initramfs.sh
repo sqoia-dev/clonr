@@ -24,9 +24,12 @@ OUTPUT="${2:-initramfs-clonr.img}"
 
 # clonr-server SSH credentials — used to pull kernel modules.
 # The initramfs kernel version must match the modules being loaded.
+# SECURITY: SSH key-based auth is strongly preferred over password auth.
+#   Set up key auth: ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<host>
+#   Then invoke this script without CLONR_SERVER_PASS set.
 CLONR_SERVER_HOST="${CLONR_SERVER_HOST:-192.168.1.151}"
-CLONR_SERVER_USER="${CLONR_SERVER_USER:-clonr}"
-CLONR_SERVER_PASS="${CLONR_SERVER_PASS:-clonr}"
+CLONR_SERVER_USER="${CLONR_SERVER_USER:?ERROR: CLONR_SERVER_USER must be set}"
+CLONR_SERVER_PASS="${CLONR_SERVER_PASS:?ERROR: CLONR_SERVER_PASS must be set}"
 
 # Verify the binary exists and is executable.
 if [[ ! -f "$CLONR_BIN" ]]; then
@@ -83,9 +86,17 @@ echo "  [+] Installed clonr binary as /usr/bin/clonr ($(du -h "$CLONR_BIN" | cut
 # Prefer a musl static build from busybox.net (most complete applet set).
 # Fall back to the system busybox if the download fails.
 BUSYBOX_URL="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"
+# SHA-256 of busybox 1.35.0-x86_64-linux-musl from busybox.net.
+# Verify with: sha256sum busybox
+# Re-pin by running: curl -sL "$BUSYBOX_URL" | sha256sum
+BUSYBOX_SHA256="6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348"
 if curl -sL --max-time 30 -o "$WORKDIR/bin/busybox" "$BUSYBOX_URL"; then
+    echo "$BUSYBOX_SHA256  $WORKDIR/bin/busybox" | sha256sum -c - || {
+        echo "ERROR: busybox checksum mismatch — binary may be tampered or URL changed" >&2
+        exit 1
+    }
     chmod 755 "$WORKDIR/bin/busybox"
-    echo "  [+] Downloaded busybox 1.35.0 musl from busybox.net"
+    echo "  [+] Downloaded busybox 1.35.0 musl from busybox.net (checksum verified)"
 elif command -v busybox &>/dev/null && file "$(command -v busybox)" | grep -q "statically linked"; then
     cp "$(command -v busybox)" "$WORKDIR/bin/busybox"
     chmod 755 "$WORKDIR/bin/busybox"
@@ -127,7 +138,7 @@ fetch_lsblk_from_server() {
     fi
 
     # Copy the binary.
-    if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+    if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
         "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:/usr/bin/lsblk" \
         "$LSBLK_DEST" 2>/dev/null; then
         echo "      failed to scp lsblk from ${CLONR_SERVER_HOST}" >&2
@@ -144,7 +155,7 @@ fetch_lsblk_from_server() {
 
     # Dynamically linked — copy required shared libraries from the server.
     echo "      lsblk is dynamically linked — fetching required libs..."
-    NEEDED_LIBS=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+    NEEDED_LIBS=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
         "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "ldd /usr/bin/lsblk 2>/dev/null" | \
         grep -oP '/[^ ]+\.so[^ ]*' | sort -u 2>/dev/null || true)
 
@@ -156,7 +167,7 @@ fetch_lsblk_from_server() {
     for lib in $NEEDED_LIBS; do
         lib_dir="$WORKDIR$(dirname "$lib")"
         mkdir -p "$lib_dir"
-        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${lib}" \
             "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
             echo "      WARNING: could not fetch lib $lib" >&2
@@ -164,12 +175,12 @@ fetch_lsblk_from_server() {
 
     # Set up /lib64/ld-linux-x86-64.so.2 symlink if needed (glibc dynamic linker).
     if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
-        LINKER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+        LINKER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
             "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
         if [[ -n "$LINKER" ]]; then
             mkdir -p "$WORKDIR/lib64"
-            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
                 "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${LINKER}" \
                 "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
         fi
@@ -244,7 +255,7 @@ else
         local remote_path="$1"
         # First-order libs
         local first_order
-        first_order=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+        first_order=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
             "ldd ${remote_path} 2>/dev/null" 2>/dev/null | \
             grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
@@ -253,7 +264,7 @@ else
         local all_libs="$first_order"
         for lib in $first_order; do
             local transitive
-            transitive=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            transitive=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
                 "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
                 "ldd ${lib} 2>/dev/null" 2>/dev/null | \
                 grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
@@ -274,7 +285,7 @@ ${transitive}"
 
         # Copy the binary.
         mkdir -p "$dest_dir"
-        if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+        if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${remote_path}" \
             "${dest_dir}/${bin_name}" 2>/dev/null; then
             echo "      WARNING: could not fetch ${remote_path}" >&2
@@ -304,10 +315,10 @@ ${transitive}"
             # We need the soname symlink too so the dynamic linker finds it by
             # the name embedded in the binary's NEEDED entries.
             local real_lib
-            real_lib=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            real_lib=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
                 "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
                 "readlink -f ${lib} 2>/dev/null || echo ${lib}" 2>/dev/null || echo "$lib")
-            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
                 "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${real_lib}" \
                 "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
                 echo "      WARNING: could not fetch lib ${lib}" >&2
@@ -316,12 +327,12 @@ ${transitive}"
         # Ensure the dynamic linker itself is present under /lib64/
         if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
             local linker
-            linker=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            linker=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
                 "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
                 "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
             if [[ -n "$linker" ]]; then
                 mkdir -p "$WORKDIR/lib64"
-                sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+                sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
                     "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${linker}" \
                     "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
             fi
@@ -337,7 +348,7 @@ ${transitive}"
         local bin_name="$1"
         local dest_dir="${2:-$WORKDIR/usr/sbin}"
         local remote_path
-        remote_path=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+        remote_path=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
             "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" 2>/dev/null || echo "")
         if [[ -z "$remote_path" ]]; then
@@ -429,7 +440,7 @@ ${transitive}"
         # Parent dir inside initramfs (e.g. $WORKDIR/usr/lib for /usr/lib/grub)
         local_parent="$WORKDIR$(dirname "$grub_dir")"
         mkdir -p "$local_parent"
-        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no -r \
+        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new -r \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${grub_dir}" \
             "${local_parent}/" 2>/dev/null; then
             echo "      fetched ${grub_dir} ($(du -sh "${local_parent}/$(basename "$grub_dir")" 2>/dev/null | cut -f1))"
@@ -475,7 +486,7 @@ echo "  [+] Installed busybox and symlinks"
 echo "  [+] Fetching kernel modules from clonr-server ${CLONR_SERVER_HOST}..."
 
 # Discover the kernel version from the server.
-KVER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+KVER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=accept-new \
     "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "uname -r" 2>/dev/null)
 
 if [[ -z "$KVER" ]]; then
@@ -554,7 +565,7 @@ else
         LOCAL_KO="${LOCAL_KO_XZ%.xz}"
         mkdir -p "$(dirname "$LOCAL_KO_XZ")"
 
-        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
             "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${REMOTE_PATH}" \
             "$LOCAL_KO_XZ" 2>/dev/null; then
             # Decompress in place: failover.ko.xz → failover.ko
