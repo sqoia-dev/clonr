@@ -47,6 +47,7 @@ type Server struct {
 	router              chi.Router
 	http                *http.Server
 	logsHandler         *handlers.LogsHandler
+	imgFactory          *image.Factory
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -125,6 +126,11 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// client disconnects (r.Context() cancellations) do not abort in-flight
 	// SQLite log-batch transactions and silently drop deploy logs.
 	s.logsHandler.ServerCtx = ctx
+	// Wire shutdown context into the image factory so async build goroutines
+	// are cancelled on graceful shutdown and the semaphore respects context.
+	if s.imgFactory != nil {
+		s.imgFactory.SetContext(ctx)
+	}
 	go s.reimageOrchestrator.Scheduler(ctx)
 	go s.runLogPurger(ctx)
 	// ADR-0008: Post-reboot verification timeout scanner.
@@ -251,12 +257,19 @@ func (s *Server) buildRouter() chi.Router {
 	nodes := &handlers.NodesHandler{DB: s.db}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
-	imgFactory := &image.Factory{
-		Store:         s.db,
-		ImageDir:      s.cfg.ImageDir,
-		Logger:        log.Logger,
-		BuildProgress: buildProgressAdapter{store: s.buildProgress},
+	// Use NewFactory so the build semaphore is initialised (capacity from
+	// CLONR_MAX_CONCURRENT_BUILDS, default 4). Context is wired later via
+	// SetContext in StartBackgroundWorkers once the server-lifetime ctx exists.
+	if s.imgFactory == nil {
+		s.imgFactory = image.NewFactory(
+			s.db,
+			s.cfg.ImageDir,
+			log.Logger,
+			buildProgressAdapter{store: s.buildProgress},
+			"",
+		)
 	}
+	imgFactory := s.imgFactory
 	factory := &handlers.FactoryHandler{
 		DB:       s.db,
 		ImageDir: s.cfg.ImageDir,

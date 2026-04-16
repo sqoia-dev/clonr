@@ -2,8 +2,10 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
@@ -12,6 +14,9 @@ import (
 type LogBroker struct {
 	mu          sync.RWMutex
 	subscribers map[string]*logSubscriber
+	// dropped counts entries silently discarded due to full subscriber buffers.
+	// Incremented atomically; read via Dropped().
+	dropped uint64
 }
 
 type logSubscriber struct {
@@ -49,8 +54,15 @@ func (b *LogBroker) Subscribe(filter api.LogFilter) (id string, ch <-chan api.Lo
 	return id, sub.ch, cancel
 }
 
+// Dropped returns the total number of log entries dropped due to full
+// subscriber buffers since the broker was created.
+func (b *LogBroker) Dropped() uint64 {
+	return atomic.LoadUint64(&b.dropped)
+}
+
 // Publish fans out entries to all subscribers whose filter matches.
 // It never blocks — entries are dropped for a subscriber whose buffer is full.
+// Drops are counted; a warning is logged every 100th drop to avoid log spam.
 func (b *LogBroker) Publish(entries []api.LogEntry) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -64,6 +76,13 @@ func (b *LogBroker) Publish(entries []api.LogEntry) {
 			select {
 			case sub.ch <- entry:
 			default:
+				n := atomic.AddUint64(&b.dropped, 1)
+				// Log a warning every 100th drop to surface persistent slowness
+				// without flooding the log when a subscriber falls far behind.
+				if n%100 == 0 {
+					log.Warn().Uint64("total_dropped", n).
+						Msg("logbroker: subscriber buffer full — entries dropped (logged every 100th drop)")
+				}
 			}
 		}
 	}

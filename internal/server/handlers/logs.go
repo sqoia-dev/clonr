@@ -6,12 +6,46 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/internal/db"
 )
+
+// nodeRateLimiter enforces a per-node request rate limit using a token-bucket
+// approximation: track the last request time and reject if the interval is
+// shorter than minInterval.
+type nodeRateLimiter struct {
+	mu          sync.Mutex
+	last        map[string]time.Time // key: node MAC/ID → time of last accepted request
+	minInterval time.Duration        // minimum gap between accepted requests per node
+}
+
+func newNodeRateLimiter(maxPerSecond int) *nodeRateLimiter {
+	interval := time.Second
+	if maxPerSecond > 0 {
+		interval = time.Second / time.Duration(maxPerSecond)
+	}
+	return &nodeRateLimiter{
+		last:        make(map[string]time.Time),
+		minInterval: interval,
+	}
+}
+
+// Allow returns true when the node identified by key is within the rate limit.
+// Uses a sliding-window approximation: one token per minInterval.
+func (r *nodeRateLimiter) Allow(key string) bool {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.last[key]; ok && now.Sub(last) < r.minInterval {
+		return false
+	}
+	r.last[key] = now
+	return true
+}
 
 // LogBroker is the interface the handler needs from the broker — keeps the
 // handler package free of a concrete import cycle.
@@ -28,6 +62,19 @@ type LogsHandler struct {
 	// client disconnect (r.Context() cancellation) does not abort an in-flight
 	// SQLite transaction and silently drop a log batch.
 	ServerCtx  context.Context
+
+	// ingestLimiter enforces a per-node rate limit on POST /api/v1/logs.
+	// Lazily initialized on first use (100 req/s default).
+	ingestLimiter     *nodeRateLimiter
+	ingestLimiterOnce sync.Once
+}
+
+// getIngestLimiter returns the singleton rate limiter, initializing it once.
+func (h *LogsHandler) getIngestLimiter() *nodeRateLimiter {
+	h.ingestLimiterOnce.Do(func() {
+		h.ingestLimiter = newNodeRateLimiter(100) // 100 req/s per node
+	})
+	return h.ingestLimiter
 }
 
 // IngestLogs handles POST /api/v1/logs
@@ -75,6 +122,14 @@ func (h *LogsHandler) IngestLogs(w http.ResponseWriter, r *http.Request) {
 		if e.Timestamp.IsZero() {
 			entries[i].Timestamp = time.Now().UTC()
 		}
+	}
+
+	// Per-node rate limiting: reject if more than 100 req/s from the same node.
+	// Keyed on the first entry's NodeMAC (validated above, always non-empty).
+	limiter := h.getIngestLimiter()
+	if !limiter.Allow(entries[0].NodeMAC) {
+		http.Error(w, "rate limit exceeded: max 100 requests/second per node", http.StatusTooManyRequests)
+		return
 	}
 
 	// Use the server-lifetime context (not r.Context()) for the DB write so
