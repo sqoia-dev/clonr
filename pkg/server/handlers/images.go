@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -129,7 +130,51 @@ func (h *ImagesHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+
+	// Lazy-detect architecture when the DB column is blank (images that were
+	// created before arch detection was implemented). Same pattern as the
+	// initramfs kernel-version lazy-extract.
+	if img.Arch == "" {
+		ctx := r.Context()
+		arch, detectErr := h.detectArch(ctx, img)
+		if detectErr == nil && arch != "" {
+			img.Arch = arch
+			// Back-fill in the DB so subsequent requests skip detection.
+			if dbErr := h.DB.UpdateBaseImageArch(ctx, id, arch); dbErr != nil {
+				log.Debug().Err(dbErr).Str("image_id", id).
+					Msg("image: failed to back-fill arch in db (non-fatal)")
+			}
+		} else if detectErr != nil {
+			log.Debug().Err(detectErr).Str("image_id", id).
+				Msg("image: lazy arch detection failed (non-fatal)")
+		}
+	}
+
 	writeJSON(w, http.StatusOK, img)
+}
+
+// detectArch attempts to determine the CPU architecture of img by reading the
+// ELF header of a well-known binary from the image's rootfs.
+//
+// For "filesystem" format images the rootfs is an extracted directory at
+// <ImageDir>/<id>/rootfs/. For all other formats (block images and legacy
+// uploaded blobs) it is a gzip-compressed tar archive at the blob_path
+// recorded in the DB.
+func (h *ImagesHandler) detectArch(ctx context.Context, img api.BaseImage) (string, error) {
+	if img.Format == api.ImageFormatFilesystem {
+		rootfsDir := filepath.Join(h.ImageDir, img.ID, "rootfs")
+		return image.DetectArchFromRootfsDir(rootfsDir)
+	}
+
+	// For blob-based images, retrieve the path from the DB.
+	blobPath, err := h.DB.GetBlobPath(ctx, img.ID)
+	if err != nil {
+		return "", fmt.Errorf("image: get blob path for arch detect: %w", err)
+	}
+	if blobPath == "" {
+		return "", fmt.Errorf("image: blob path empty, cannot detect arch")
+	}
+	return image.DetectArchFromTarball(blobPath)
 }
 
 // ArchiveImage handles DELETE /api/v1/images/:id (legacy — kept for back-compat).

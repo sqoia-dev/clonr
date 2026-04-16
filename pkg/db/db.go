@@ -263,6 +263,18 @@ func (db *DB) FinalizeBaseImage(ctx context.Context, id string, sizeBytes int64,
 	return requireOneRow(res, "base_images", id)
 }
 
+// UpdateBaseImageArch sets the arch column for an image. Called by the lazy
+// architecture detection path in GetImage when the column was blank at read time.
+func (db *DB) UpdateBaseImageArch(ctx context.Context, id, arch string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE base_images SET arch = ? WHERE id = ?`, arch, id,
+	)
+	if err != nil {
+		return fmt.Errorf("db: update base image arch: %w", err)
+	}
+	return requireOneRow(res, "base_images", id)
+}
+
 // ArchiveBaseImage sets status=archived.
 func (db *DB) ArchiveBaseImage(ctx context.Context, id string) error {
 	res, err := db.sql.ExecContext(ctx, `
