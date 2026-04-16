@@ -512,13 +512,17 @@ func writeNMKeyfile(nmDir string, iface api.InterfaceConfig) error {
 
 // parseIPCIDR splits "192.168.1.10/24" into ("192.168.1.10", "24").
 // Returns ("", "") if the input is empty or malformed.
+// When a bare IP is provided without a CIDR prefix, a warning is logged and
+// /24 is used as the default — callers should always supply an explicit prefix.
 func parseIPCIDR(cidr string) (ip, prefix string) {
 	parts := strings.SplitN(cidr, "/", 2)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	}
 	if len(parts) == 1 && parts[0] != "" {
-		return parts[0], "24" // default /24 if no prefix given
+		logger().Warn().Str("ip", parts[0]).
+			Msg("IP address has no CIDR prefix, defaulting to /24")
+		return parts[0], "24"
 	}
 	return "", ""
 }
@@ -540,7 +544,10 @@ func writeSSHKeys(mountRoot string, keys []string) error {
 }
 
 // applyKernelArgs appends extra kernel args to the GRUB default config.
-// It looks for GRUB_CMDLINE_LINUX in /etc/default/grub and appends args.
+// It patches GRUB_CMDLINE_LINUX and GRUB_CMDLINE_LINUX_DEFAULT when present.
+// If both exist, both are patched. If neither exists, GRUB_CMDLINE_LINUX is
+// appended so the args take effect regardless of which variable grub2-mkconfig
+// uses on the target distro.
 func applyKernelArgs(ctx context.Context, mountRoot, kernelArgs string) error {
 	grubDefault := filepath.Join(mountRoot, "etc", "default", "grub")
 	raw, err := os.ReadFile(grubDefault)
@@ -552,20 +559,26 @@ func applyKernelArgs(ctx context.Context, mountRoot, kernelArgs string) error {
 	}
 
 	content := string(raw)
-	updated := false
+	updatedLinux := false
+	updatedDefault := false
 	var newLines []string
 	for _, line := range strings.Split(content, "\n") {
-		if strings.HasPrefix(line, "GRUB_CMDLINE_LINUX=") {
+		switch {
+		case strings.HasPrefix(line, "GRUB_CMDLINE_LINUX="):
 			// Strip trailing quote, append args, re-add quote.
 			trimmed := strings.TrimSuffix(strings.TrimSpace(line), `"`)
 			line = trimmed + " " + kernelArgs + `"`
-			updated = true
+			updatedLinux = true
+		case strings.HasPrefix(line, "GRUB_CMDLINE_LINUX_DEFAULT="):
+			trimmed := strings.TrimSuffix(strings.TrimSpace(line), `"`)
+			line = trimmed + " " + kernelArgs + `"`
+			updatedDefault = true
 		}
 		newLines = append(newLines, line)
 	}
 
-	if !updated {
-		// Key not present — append it.
+	if !updatedLinux && !updatedDefault {
+		// Neither key present — append GRUB_CMDLINE_LINUX as the canonical fallback.
 		newLines = append(newLines, fmt.Sprintf(`GRUB_CMDLINE_LINUX="%s"`, kernelArgs))
 	}
 

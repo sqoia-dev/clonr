@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
@@ -27,6 +28,15 @@ var ErrExpired = fmt.Errorf("api key expired")
 // DB wraps sql.DB with typed clonr operations.
 type DB struct {
 	sql *sql.DB
+
+	// lastUsedMu protects lastUsedBatch. Keys are key_hash values; values are
+	// the timestamp of the most recent use. The background flusher drains the
+	// map every 30 seconds and writes all pending updates in a single transaction.
+	lastUsedMu    sync.Mutex
+	lastUsedBatch map[string]int64 // key_hash → unix timestamp
+
+	// lastUsedDone signals the background flusher to stop.
+	lastUsedDone chan struct{}
 }
 
 // Open opens (or creates) the SQLite database at path and applies all pending migrations.
@@ -46,17 +56,68 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("db: ping %s: %w", dbPath, err)
 	}
 
-	db := &DB{sql: sqlDB}
+	db := &DB{
+		sql:           sqlDB,
+		lastUsedBatch: make(map[string]int64),
+		lastUsedDone:  make(chan struct{}),
+	}
 	if err := db.migrate(); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("db: migrate: %w", err)
 	}
+	go db.lastUsedFlusher()
 	return db, nil
 }
 
-// Close closes the underlying database connection.
+// Close stops the background flusher, flushes any pending last_used_at updates,
+// and closes the underlying database connection.
 func (db *DB) Close() error {
+	close(db.lastUsedDone)
+	db.flushLastUsed()
 	return db.sql.Close()
+}
+
+// lastUsedFlusher runs in a background goroutine and flushes the lastUsedBatch
+// map every 30 seconds via a single transaction.
+func (db *DB) lastUsedFlusher() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			db.flushLastUsed()
+		case <-db.lastUsedDone:
+			return
+		}
+	}
+}
+
+// flushLastUsed drains lastUsedBatch and writes all pending last_used_at updates
+// in a single transaction. No-op when the batch is empty.
+func (db *DB) flushLastUsed() {
+	db.lastUsedMu.Lock()
+	if len(db.lastUsedBatch) == 0 {
+		db.lastUsedMu.Unlock()
+		return
+	}
+	batch := db.lastUsedBatch
+	db.lastUsedBatch = make(map[string]int64)
+	db.lastUsedMu.Unlock()
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return
+	}
+	stmt, err := tx.Prepare(`UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?`)
+	if err != nil {
+		_ = tx.Rollback()
+		return
+	}
+	defer stmt.Close()
+	for keyHash, ts := range batch {
+		_, _ = stmt.Exec(ts, keyHash)
+	}
+	_ = tx.Commit()
 }
 
 // SQL returns the underlying *sql.DB for advanced queries not covered by typed methods.

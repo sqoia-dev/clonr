@@ -1419,7 +1419,7 @@ func newIPMIPXECmd() *cobra.Command {
 			c := ipmiClientFromFlags(flagHost, flagUser, flagPass)
 
 			fmt.Fprintf(os.Stderr, "Setting next boot to PXE on %s...\n", flagHost)
-			if err := c.SetBootPXE(ctx); err != nil {
+			if err := c.SetBootDevWithOpts(ctx, ipmi.BootDevPXE, ipmi.BootOpts{Persistent: true}); err != nil {
 				return fmt.Errorf("set boot pxe: %w", err)
 			}
 

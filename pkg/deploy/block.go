@@ -324,6 +324,11 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		return err
 	}
 
+	// ── Post-write integrity spot-check ──────────────────────────────────────
+	if err := verifyBlockSpotCheck(mountRoot); err != nil {
+		return fmt.Errorf("deploy/block: finalize: integrity check: %w", err)
+	}
+
 	// ── Phone-home injection (ADR-0008) ──────────────────────────────────────
 	if err := injectPhoneHome(mountRoot, d.NodeToken, d.VerifyBootURL); err != nil {
 		return fmt.Errorf("deploy/block: finalize: phone-home injection: %w", err)

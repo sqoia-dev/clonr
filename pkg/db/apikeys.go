@@ -98,13 +98,10 @@ func (db *DB) LookupAPIKey(ctx context.Context, keyHash string) (APIKeyLookupRes
 		return APIKeyLookupResult{}, ErrExpired
 	}
 
-	// Touch last_used_at asynchronously — don't let a write failure block the request.
-	go func() {
-		_, _ = db.sql.Exec(
-			`UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?`,
-			time.Now().Unix(), keyHash,
-		)
-	}()
+	// Batch last_used_at update — the background flusher writes it every 30s.
+	db.lastUsedMu.Lock()
+	db.lastUsedBatch[keyHash] = time.Now().Unix()
+	db.lastUsedMu.Unlock()
 
 	result := APIKeyLookupResult{
 		ID:    id,

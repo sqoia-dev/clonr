@@ -165,14 +165,16 @@ func (p *legacyIPMIAdapter) PowerOff(ctx context.Context) error   { return p.cli
 func (p *legacyIPMIAdapter) PowerCycle(ctx context.Context) error { return p.client.PowerCycle(ctx) }
 func (p *legacyIPMIAdapter) Reset(ctx context.Context) error      { return p.client.PowerReset(ctx) }
 func (p *legacyIPMIAdapter) SetNextBoot(ctx context.Context, dev power.BootDevice) error {
+	var bootDev ipmi.BootDevice
 	switch dev {
 	case power.BootPXE:
-		return p.client.SetBootPXE(ctx)
+		bootDev = ipmi.BootDevPXE
 	case power.BootDisk:
-		return p.client.SetBootDisk(ctx)
+		bootDev = ipmi.BootDevDisk
 	default:
 		return fmt.Errorf("ipmi: unsupported boot device %q", dev)
 	}
+	return p.client.SetBootDevWithOpts(ctx, bootDev, ipmi.BootOpts{Persistent: true})
 }
 func (p *legacyIPMIAdapter) SetPersistentBootOrder(_ context.Context, _ []power.BootDevice) error {
 	return power.ErrNotSupported

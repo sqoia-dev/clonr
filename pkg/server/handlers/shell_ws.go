@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,14 +80,24 @@ func invalidateImageSidecar(imageDir, imageID string) {
 	}
 }
 
-// wsUpgrader allows all origins for the embedded UI (same-origin in prod,
-// localhost in dev). In a future release this should be locked to the server's
-// own origin.
+// wsUpgrader validates that browser WebSocket connections originate from the
+// same host as the server. Non-browser clients (no Origin header) are allowed
+// through unconditionally so CLI tools and deploy agents are unaffected.
 var wsUpgrader = websocket.Upgrader{
 	HandshakeTimeout: 10 * time.Second,
-	CheckOrigin:      func(r *http.Request) bool { return true },
-	ReadBufferSize:   4096,
-	WriteBufferSize:  4096,
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // non-browser client (CLI, curl, agent)
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
+	},
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
 }
 
 // wsMsg is the JSON envelope used by the browser xterm WebSocket protocol.
