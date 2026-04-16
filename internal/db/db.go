@@ -92,6 +92,11 @@ func (db *DB) lastUsedFlusher() {
 	}
 }
 
+// FlushLastUsed is an exported wrapper around flushLastUsed for use in tests
+// that need to synchronously flush pending last_used_at updates without waiting
+// for the 30-second background ticker.
+func (db *DB) FlushLastUsed() { db.flushLastUsed() }
+
 // flushLastUsed drains lastUsedBatch and writes all pending last_used_at updates
 // in a single transaction. No-op when the batch is empty.
 func (db *DB) flushLastUsed() {

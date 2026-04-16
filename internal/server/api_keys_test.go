@@ -359,8 +359,9 @@ func TestAPIKeys_LastUsedAt(t *testing.T) {
 	// Initial request — last_used_at may be nil.
 	_ = adminDo(t, client, ts, http.MethodGet, "/api/v1/admin/api-keys", "", token)
 
-	// The async goroutine should update last_used_at. Give it a short window.
-	time.Sleep(50 * time.Millisecond)
+	// Force-flush pending last_used_at updates synchronously instead of waiting
+	// for the 30-second background ticker.
+	database.FlushLastUsed()
 
 	keys, err := database.ListAPIKeys(context.Background())
 	if err != nil {
