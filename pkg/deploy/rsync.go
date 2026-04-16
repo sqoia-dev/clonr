@@ -640,22 +640,27 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 			return fmt.Errorf("deploy: finalize: UEFI ESP mount point %s not accessible: %w", efiDir, err)
 		}
 
-		// Step 2: if grubx64.efi is absent on the ESP, install the EFI packages
-		// via dnf inside the chroot. The RPM %post scriptlets write the binary to
-		// the mounted ESP at /boot/efi/EFI/rocky/grubx64.efi.
+		// Step 2: verify grubx64.efi is present on the ESP. Per ADR-0009
+		// (content-only images) all boot dependencies must be baked into the
+		// image at build time. The deploy initramfs has no DNS (resolv.conf
+		// points at systemd-resolved stub 127.0.0.53 which is unreachable from
+		// the node), so dnf install is not a viable fallback — it hangs for
+		// ~4 minutes then fails, causing a deploy exit 1.
+		//
+		// If grubx64.efi is absent the image was built without grub2-efi-x64 /
+		// shim-x64. The fix is to rebuild the image with UEFI packages; see the
+		// kickstart %packages section. Fail fast with a clear message rather than
+		// silently attempting a network operation that cannot succeed.
 		if _, err := os.Stat(grubx64Path); os.IsNotExist(err) {
-			log.Info().Str("path", grubx64Path).
-				Msg("finalize: grubx64.efi absent on ESP — installing grub2-efi-x64 + shim-x64 via chroot dnf")
-			if err := installEFIBootloaderInChroot(ctx, mountRoot); err != nil {
-				return &BootloaderError{
-					Targets: []string{d.targetDisk},
-					Cause:   fmt.Errorf("UEFI: installEFIBootloaderInChroot: %w", err),
-				}
+			return &BootloaderError{
+				Targets: []string{d.targetDisk},
+				Cause: fmt.Errorf("UEFI: %s is missing from the deployed image — "+
+					"rebuild the image with grub2-efi-x64, grub2-efi-x64-modules, and shim-x64 "+
+					"in the kickstart %%packages section (ADR-0009: content-only images must ship all boot dependencies)", grubx64Path),
 			}
-		} else {
-			log.Info().Str("path", grubx64Path).
-				Msg("finalize: grubx64.efi already present on ESP — skipping dnf install")
 		}
+		log.Info().Str("path", grubx64Path).
+			Msg("finalize: grubx64.efi present on ESP — proceeding with grub2-install")
 
 		// Step 3: run grub2-install --target=x86_64-efi inside the deployed chroot.
 		// Running inside the chroot is essential: grub2-install reads GRUB modules

@@ -658,77 +658,6 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 	return nil
 }
 
-// installEFIBootloaderInChroot installs grub2-efi-x64 and shim-x64 inside the
-// deployed chroot via dnf. This is required for UEFI images built from ISO where
-// the tar archive only contains empty /boot/efi/EFI/rocky/ stub directories —
-// the actual EFI binaries (grubx64.efi, shimx64.efi) live on the ESP partition
-// of the source system and are never included in the rootfs capture.
-//
-// After this function returns, /boot/efi/EFI/rocky/grubx64.efi will be present
-// on the mounted ESP so that FixEFIBoot's NVRAM entry can point to a real binary.
-func installEFIBootloaderInChroot(ctx context.Context, mountRoot string) error {
-	log := logger()
-
-	// Bind-mount virtual filesystems required by dnf/rpm scriptlets.
-	type bindMount struct{ src, dst string }
-	binds := []bindMount{
-		{"/proc", filepath.Join(mountRoot, "proc")},
-		{"/sys", filepath.Join(mountRoot, "sys")},
-		{"/dev", filepath.Join(mountRoot, "dev")},
-		{"/dev/pts", filepath.Join(mountRoot, "dev", "pts")},
-	}
-	for _, b := range binds {
-		if err := os.MkdirAll(b.dst, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", b.dst, err)
-		}
-		if out, err := exec.CommandContext(ctx, "mount", "--bind", b.src, b.dst).CombinedOutput(); err != nil {
-			return fmt.Errorf("bind-mount %s → %s: %w\n%s", b.src, b.dst, err, string(out))
-		}
-	}
-	defer func() {
-		for i := len(binds) - 1; i >= 0; i-- {
-			_ = exec.Command("umount", "-l", binds[i].dst).Run()
-		}
-	}()
-
-	// Copy /etc/resolv.conf so dnf can reach package mirrors.
-	resolvDst := filepath.Join(mountRoot, "etc", "resolv.conf")
-	if data, err := os.ReadFile("/etc/resolv.conf"); err == nil {
-		_ = os.WriteFile(resolvDst, data, 0o644)
-	}
-
-	// Ensure /tmp is writable — required by dnf for its download cache.
-	if err := os.MkdirAll(filepath.Join(mountRoot, "tmp"), 0o1777); err != nil {
-		log.Warn().Err(err).Msg("finalize/boot: could not create /tmp in chroot (non-fatal)")
-	}
-
-	// Ensure the ESP mount point directory exists.
-	espDir := filepath.Join(mountRoot, "boot", "efi")
-	if err := os.MkdirAll(espDir, 0o700); err != nil {
-		log.Warn().Err(err).Str("path", espDir).Msg("finalize/boot: could not create /boot/efi in chroot (non-fatal)")
-	}
-
-	// Install grub2-efi-x64 and shim-x64. Their %post scriptlets run grub2-install
-	// or copy the EFI binary to /boot/efi/EFI/rocky/grubx64.efi. We also install
-	// grub2-efi-x64-modules so grub2-mkconfig can reference them.
-	// Only baseos and appstream are enabled — no external mirrors needed.
-	packages := []string{"grub2-efi-x64", "shim-x64", "grub2-efi-x64-modules"}
-	log.Info().Strs("packages", packages).Msg("finalize/boot: installing EFI bootloader packages via chroot dnf")
-	chrootDnfArgs := append([]string{
-		mountRoot, "dnf", "-y",
-		"--setopt=install_weak_deps=False",
-		"--disablerepo=*",
-		"--enablerepo=baseos",
-		"--enablerepo=appstream",
-		"install",
-	}, packages...)
-	if err := runAndLog(ctx, "chroot-dnf-efi-install", exec.CommandContext(ctx, "chroot", chrootDnfArgs...)); err != nil {
-		return fmt.Errorf("chroot dnf install grub2-efi-x64 shim-x64: %w", err)
-	}
-	log.Info().Msg("finalize/boot: EFI bootloader packages installed")
-	return nil
-}
-
 // runGrub2InstallEFIInChroot runs `grub2-install --target=x86_64-efi` inside the
 // deployed chroot. Running inside the chroot is critical for UEFI installs:
 //
@@ -819,9 +748,12 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 //  4. Prepare the RAID dracut config (if RAID layout).
 //  5. Run dracut --regenerate-all --no-hostonly --force inside a chroot to
 //     rebuild initramfs with the correct modules for the target hardware.
-//  6. Write a minimal hand-crafted grub.cfg (no grub2-mkconfig, no save_env,
+//  6. Run kernel-install add for each production kernel so a BLS entry exists
+//     even when Anaconda's %post did not call kernel-install during image build.
+//  7. Pin GRUB saved_entry to the production kernel (prevents rescue-first boot).
+//  8. Write a minimal hand-crafted grub.cfg (no grub2-mkconfig, no save_env,
 //     no submenus — clean bootable config for provisioned compute nodes).
-//  7. Scrub SSH host keys so sshd regenerates unique keys on first boot.
+//  9. Scrub SSH host keys so sshd regenerates unique keys on first boot.
 //
 // All UUID-patch and sed-based code has been deleted. Nothing is patched;
 // everything topology-specific is generated fresh from the target partition UUIDs.
@@ -960,7 +892,51 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Msg("finalize/boot: dracut complete")
 	}
 
-	// ── 6. Pin GRUB default to the production kernel ────────────────────────
+	// ── 6. Run kernel-install to generate production kernel BLS entries ────────
+	// Rocky 10 minimal ISO installs don't always call `kernel-install add` during
+	// Anaconda %post, so the production kernel BLS entry may be absent from the
+	// captured rootfs (only the rescue entry — written by a different mechanism —
+	// is present). Without a production kernel BLS entry GRUB only sees the rescue
+	// initramfs, which lacks mdraid assembly modules and hangs at "Probing EDD".
+	//
+	// We run `kernel-install add <kver> /lib/modules/<kver>/vmlinuz` inside the
+	// chroot for every production kernel found under /boot/vmlinuz-* (rescue
+	// kernels have no matching /lib/modules/<kver>/ tree and are skipped). This is
+	// safe to run after dracut because dracut already regenerated the initramfs;
+	// kernel-install only writes the BLS entry file, it does not rebuild initramfs.
+	//
+	// Non-fatal: if kernel-install fails we fall through to generateBLSEntries
+	// (step 3 already ran) and the hand-crafted grub.cfg (step 7), either of
+	// which is sufficient to boot the node.
+	if kiEntries, kiErr := os.ReadDir(filepath.Join(mountRoot, "boot")); kiErr == nil {
+		for _, kiEntry := range kiEntries {
+			kiName := kiEntry.Name()
+			if !strings.HasPrefix(kiName, "vmlinuz-") {
+				continue
+			}
+			kver := strings.TrimPrefix(kiName, "vmlinuz-")
+			if kver == "" {
+				continue
+			}
+			// Only call kernel-install for kernels that have a modules directory —
+			// the rescue kernel (vmlinuz-0-rescue-*) has no /lib/modules/<kver>/ tree.
+			modulesDir := filepath.Join(mountRoot, "lib", "modules", kver)
+			if _, statErr := os.Stat(modulesDir); statErr != nil {
+				log.Info().Str("kver", kver).Msg("finalize/boot: kernel-install: no modules dir, skipping (rescue kernel)")
+				continue
+			}
+			vmlinuzInChroot := "/lib/modules/" + kver + "/vmlinuz"
+			kiCmd := exec.CommandContext(ctx, "chroot", mountRoot, "kernel-install", "add", kver, vmlinuzInChroot)
+			if kiErr2 := runAndLog(ctx, "kernel-install-add", kiCmd); kiErr2 != nil {
+				log.Warn().Err(kiErr2).Str("kver", kver).
+					Msg("finalize/boot: kernel-install add failed (non-fatal — BLS entry from step 3 is still present)")
+			} else {
+				log.Info().Str("kver", kver).Msg("finalize/boot: kernel-install add: BLS entry generated")
+			}
+		}
+	}
+
+	// ── 7. Pin GRUB default to the production kernel ────────────────────────
 	// dracut --regenerate-all writes a rescue BLS entry whose filename starts
 	// with "0-rescue-", which sorts lexicographically before production kernel
 	// entries. On BIOS RAID1 (VM206) Rocky's GRUB2 has BLS support compiled in
@@ -980,7 +956,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Str("saved_entry", savedEntry).Msg("finalize/boot: GRUB saved_entry pinned to production kernel")
 	}
 
-	// ── 7. Write minimal hand-crafted grub.cfg ──────────────────────────────
+	// ── 8. Write minimal hand-crafted grub.cfg ──────────────────────────────
 	// Do NOT run grub2-mkconfig: it produces save_env / saved_entry calls that
 	// fail on BIOS RAID (diskfilter writes are not supported) and injects
 	// unnecessary multi-boot / rescue complexity. We generate a minimal config
@@ -993,7 +969,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Msg("finalize/boot: grub.cfg written")
 	}
 
-	// ── 8. SSH host key scrub ────────────────────────────────────────────────
+	// ── 9. SSH host key scrub ────────────────────────────────────────────────
 	// Remove host keys baked into the image so sshd regenerates unique keys
 	// on first boot via the ssh-keygen firstboot unit.
 	hostKeys, _ := filepath.Glob(filepath.Join(mountRoot, "etc", "ssh", "ssh_host_*"))

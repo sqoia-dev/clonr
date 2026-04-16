@@ -118,3 +118,40 @@ func TestGenerateKickstart_CustomKickstart(t *testing.T) {
 		t.Errorf("expected custom kickstart to pass through unchanged, got:\n%s", cfg.KickstartContent)
 	}
 }
+
+// TestGenerateKickstart_BootPackages verifies that both BIOS and UEFI boot
+// packages are always present in the %packages section, regardless of the
+// firmware mode. This implements ADR-0009 (content-only images): a single image
+// must work for both firmware modes without runtime package installation at
+// deploy time (deploy initramfs has no DNS).
+func TestGenerateKickstart_BootPackages(t *testing.T) {
+	required := []string{
+		"grub2-pc",
+		"grub2-pc-modules",
+		"grub2-efi-x64",
+		"grub2-efi-x64-modules",
+		"shim-x64",
+		"efibootmgr",
+	}
+
+	for _, fw := range []string{"bios", "uefi", ""} {
+		fw := fw
+		label := fw
+		if label == "" {
+			label = "(empty/default)"
+		}
+		t.Run("firmware="+label, func(t *testing.T) {
+			opts := BuildOptions{Firmware: fw}
+			cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+			if err != nil {
+				t.Fatalf("generateKickstart error: %v", err)
+			}
+			ks := cfg.KickstartContent
+			for _, pkg := range required {
+				if !strings.Contains(ks, pkg) {
+					t.Errorf("firmware=%s: expected package %q in %%packages, got kickstart:\n%s", fw, pkg, ks)
+				}
+			}
+		})
+	}
+}

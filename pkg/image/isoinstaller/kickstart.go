@@ -170,6 +170,15 @@ part /         --fstype=xfs     --size=1    --grow      --ondisk={{.TargetDisk}}
 %packages --ignoremissing
 @^minimal-environment
 openssh-server
+# Boot packages — both firmware modes so a single image works for BIOS and UEFI.
+# Content-only images (ADR-0009) must ship with all boot dependencies; runtime
+# package installation at deploy time is forbidden (no DNS in deploy initramfs).
+grub2-pc
+grub2-pc-modules
+grub2-efi-x64
+grub2-efi-x64-modules
+shim-x64
+efibootmgr
 {{- range .Packages}}
 {{.}}
 {{- end}}
