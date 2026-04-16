@@ -16,14 +16,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/pkg/chroot"
+	"github.com/sqoia-dev/clonr/internal/chroot"
 	"github.com/sqoia-dev/clonr/pkg/client"
-	"github.com/sqoia-dev/clonr/pkg/config"
-	"github.com/sqoia-dev/clonr/pkg/deploy"
-	"github.com/sqoia-dev/clonr/pkg/hardware"
-	"github.com/sqoia-dev/clonr/pkg/ipmi"
-	"github.com/sqoia-dev/clonr/pkg/power"
-	poweripm "github.com/sqoia-dev/clonr/pkg/power/ipmi"
+	"github.com/sqoia-dev/clonr/internal/config"
+	"github.com/sqoia-dev/clonr/internal/deploy"
+	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clonr/internal/ipmi"
+	"github.com/sqoia-dev/clonr/internal/power"
+	poweripm "github.com/sqoia-dev/clonr/internal/power/ipmi"
 )
 
 // ANSI colour codes used by the log viewer.
@@ -1419,7 +1419,7 @@ func newIPMIPXECmd() *cobra.Command {
 			c := ipmiClientFromFlags(flagHost, flagUser, flagPass)
 
 			fmt.Fprintf(os.Stderr, "Setting next boot to PXE on %s...\n", flagHost)
-			if err := c.SetBootPXE(ctx); err != nil {
+			if err := c.SetBootDevWithOpts(ctx, ipmi.BootDevPXE, ipmi.BootOpts{Persistent: true}); err != nil {
 				return fmt.Errorf("set boot pxe: %w", err)
 			}
 

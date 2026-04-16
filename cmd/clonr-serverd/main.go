@@ -13,11 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/pkg/config"
-	"github.com/sqoia-dev/clonr/pkg/db"
-	"github.com/sqoia-dev/clonr/pkg/image/isoinstaller"
-	"github.com/sqoia-dev/clonr/pkg/pxe"
-	"github.com/sqoia-dev/clonr/pkg/server"
+	"github.com/sqoia-dev/clonr/internal/config"
+	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
+	"github.com/sqoia-dev/clonr/internal/pxe"
+	"github.com/sqoia-dev/clonr/internal/server"
 )
 
 var version = "dev"
