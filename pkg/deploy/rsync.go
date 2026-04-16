@@ -30,6 +30,7 @@ type FilesystemDeployer struct {
 	// partitions holds state set by Preflight for use during Deploy.
 	layout     api.DiskLayout
 	targetDisk string
+	hw         hardware.SystemInfo
 
 	// NodeToken is the node-scoped Bearer token written to /etc/clonr/node-token
 	// inside the deployed rootfs during Finalize. ADR-0008.
@@ -74,6 +75,7 @@ func (d *FilesystemDeployer) Preflight(ctx context.Context, layout api.DiskLayou
 
 	d.layout = layout
 	d.targetDisk = target
+	d.hw = hw
 	return nil
 }
 
@@ -201,7 +203,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// Create RAID arrays before partitioning for RAID-on-whole-disk topology.
 	if len(d.layout.RAIDArrays) > 0 && !rainOnPartitions {
 		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays")
-		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
+		if err := CreateRAIDArrays(ctx, d.layout, d.hw); err != nil {
 			doRollback("RAID array creation failed")
 			if opts.Reporter != nil {
 				opts.Reporter.EndPhase(err.Error())
@@ -228,7 +230,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// The partition devices (sda2, sdb2, etc.) now exist on the raw disks.
 	if len(d.layout.RAIDArrays) > 0 && rainOnPartitions {
 		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays (md-on-partitions: after partitioning)")
-		if err := CreateRAIDArrays(ctx, d.layout, hardware.SystemInfo{}); err != nil {
+		if err := CreateRAIDArrays(ctx, d.layout, d.hw); err != nil {
 			doRollback("RAID array creation failed")
 			if opts.Reporter != nil {
 				opts.Reporter.EndPhase(err.Error())

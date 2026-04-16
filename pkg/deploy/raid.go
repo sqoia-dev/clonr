@@ -45,6 +45,12 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 		return fmt.Errorf("resolve members: %w", err)
 	}
 
+	// Validate spare count before computing --raid-devices to prevent passing
+	// zero or negative values to mdadm, which would cause mdadm corruption.
+	if spec.Spare >= len(members) {
+		return fmt.Errorf("RAID array %s: spare count (%d) must be less than member count (%d)", spec.Name, spec.Spare, len(members))
+	}
+
 	devPath := "/dev/" + spec.Name
 
 	// Stop any existing array on this device first (idempotent).
