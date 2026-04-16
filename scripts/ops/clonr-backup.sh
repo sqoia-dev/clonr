@@ -25,6 +25,12 @@ ISO_BACKUP_DIR="${CLONR_ISO_BACKUP_DIR:-/var/lib/clonr/iso-cache-backup}"
 IMAGES_DIR="${CLONR_IMAGE_DIR:-/var/lib/clonr/images}"
 IMAGES_INVENTORY_DIR="${BACKUP_DIR}/images-inventory"
 
+# CLONR_BACKUP_REMOTE — when set, rsync the local backup directory to a remote
+# host after the local backup completes. Format: user@host:/path/to/backups
+# Example: CLONR_BACKUP_REMOTE=backup@10.0.0.5:/backups/clonr
+# When unset, backups remain on the same volume as the data — see warning below.
+CLONR_BACKUP_REMOTE="${CLONR_BACKUP_REMOTE:-}"
+
 DB_RETAIN_DAYS=14
 ISO_RETAIN_DAYS=30
 
@@ -102,6 +108,19 @@ if [[ -d "${IMAGES_DIR}" ]]; then
     find "${IMAGES_INVENTORY_DIR}" -name 'images-inventory-*.txt' -mtime "+${ISO_RETAIN_DAYS}" -delete
 else
     log "WARNING: Images dir ${IMAGES_DIR} not found — skipping inventory"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Off-site rsync (optional)
+#    Set CLONR_BACKUP_REMOTE=user@host:/path to push backups off this volume.
+#    Requires passwordless SSH (key-based auth) from root to the remote host.
+# ---------------------------------------------------------------------------
+if [[ -n "${CLONR_BACKUP_REMOTE}" ]]; then
+    log "Rsyncing backup directory to remote: ${CLONR_BACKUP_REMOTE}"
+    rsync --archive --delete --quiet "${BACKUP_DIR}/" "${CLONR_BACKUP_REMOTE}/"
+    log "Remote rsync complete: ${CLONR_BACKUP_REMOTE}"
+else
+    log "WARNING: Backups are stored on the same volume as data. Set CLONR_BACKUP_REMOTE for off-site backup."
 fi
 
 # ---------------------------------------------------------------------------

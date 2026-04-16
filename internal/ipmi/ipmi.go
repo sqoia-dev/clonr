@@ -117,31 +117,62 @@ type Client struct {
 }
 
 // args builds the ipmitool argument list, prepending remote flags when c.Host is set.
-// The BMC password is passed via the IPMITOOL_PASSWORD environment variable and
-// the -E flag rather than -P, so it never appears in the process argument list
-// (which is visible to other processes via /proc/<pid>/cmdline on Linux).
-func (c *Client) args(sub ...string) []string {
+// The BMC password is passed via a temporary password file and the -f flag rather
+// than via environment variable or -P, so it never appears in /proc/<pid>/environ
+// or /proc/<pid>/cmdline on Linux.
+func (c *Client) args(passFile string, sub ...string) []string {
 	if c.Host == "" {
 		return sub
 	}
-	// -E tells ipmitool to read the password from $IPMITOOL_PASSWORD.
-	remote := []string{"-I", "lanplus", "-H", c.Host, "-U", c.Username, "-E"}
+	// -f <file> tells ipmitool to read the password from a file.
+	remote := []string{"-I", "lanplus", "-H", c.Host, "-U", c.Username, "-f", passFile}
 	return append(remote, sub...)
 }
 
-// run executes ipmitool with the given subcommand arguments and returns stdout.
-// When c.Password is set, it is injected into the child process environment as
-// IPMITOOL_PASSWORD; the variable is not inherited from the parent process env
-// in a way that exposes it — it is appended to the environment slice only for
-// this invocation.
-func (c *Client) run(ctx context.Context, sub ...string) (string, error) {
-	args := c.args(sub...)
-	cmd := exec.CommandContext(ctx, "ipmitool", args...)
-	if c.Host != "" && c.Password != "" {
-		// Inherit the parent environment (PATH, HOME, etc.) so ipmitool can
-		// locate its binaries, then override the password variable.
-		cmd.Env = append(os.Environ(), "IPMITOOL_PASSWORD="+c.Password)
+// writePasswordFile writes the BMC password to a temporary file with mode 0600
+// and returns the file path. The caller is responsible for removing the file
+// (typically via defer os.Remove).
+func (c *Client) writePasswordFile() (string, error) {
+	tmp, err := os.CreateTemp("", "ipmi-pass-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp password file: %w", err)
 	}
+	// Restrict to owner-read/write only so the password is not accessible to
+	// other users on the system between creation and removal.
+	if err := tmp.Chmod(0600); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("chmod temp password file: %w", err)
+	}
+	if _, err := tmp.WriteString(c.Password); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("write temp password file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("close temp password file: %w", err)
+	}
+	return tmp.Name(), nil
+}
+
+// run executes ipmitool with the given subcommand arguments and returns stdout.
+// When c.Password is set, it is written to a temporary file with mode 0600 and
+// passed to ipmitool via the -f flag. The file is removed immediately after the
+// command completes. This prevents the password from appearing in /proc/<pid>/environ
+// (env-var approach) or /proc/<pid>/cmdline (the -P flag approach).
+func (c *Client) run(ctx context.Context, sub ...string) (string, error) {
+	// passFile is only populated for remote operations with a password set.
+	passFile := ""
+	if c.Host != "" && c.Password != "" {
+		var err error
+		passFile, err = c.writePasswordFile()
+		if err != nil {
+			return "", err
+		}
+		defer os.Remove(passFile)
+	}
+
+	args := c.args(passFile, sub...)
+	cmd := exec.CommandContext(ctx, "ipmitool", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		var stderr string
@@ -557,11 +588,18 @@ func QuirksFor(vendor BMCVendor) VendorQuirks {
 // the SOL session is terminated (Ctrl+] or BMC disconnect). It inherits the
 // current process's stdin/stdout/stderr so the caller's terminal is used.
 func (c *Client) SOLActivate(ctx context.Context) error {
-	args := c.args("sol", "activate")
-	cmd := exec.CommandContext(ctx, "ipmitool", args...)
+	passFile := ""
 	if c.Host != "" && c.Password != "" {
-		cmd.Env = append(os.Environ(), "IPMITOOL_PASSWORD="+c.Password)
+		var err error
+		passFile, err = c.writePasswordFile()
+		if err != nil {
+			return err
+		}
+		defer os.Remove(passFile)
 	}
+
+	args := c.args(passFile, "sol", "activate")
+	cmd := exec.CommandContext(ctx, "ipmitool", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
