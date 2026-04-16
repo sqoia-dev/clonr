@@ -320,8 +320,8 @@ func waitForRAIDSync(ctx context.Context) {
 		}
 
 		if time.Now().After(deadline) {
-			log.Warn().Dur("waited", maxWait).
-				Msg("finalize/raid: RAID resync wait timed out — proceeding (array may still be syncing)")
+			log.Error().Dur("waited", maxWait).
+				Msg("RAID array still resyncing after timeout; deploy continuing but node may have degraded boot reliability")
 			return
 		}
 

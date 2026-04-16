@@ -562,9 +562,9 @@ func (c *Client) SOLActivate(ctx context.Context) error {
 	if c.Host != "" && c.Password != "" {
 		cmd.Env = append(os.Environ(), "IPMITOOL_PASSWORD="+c.Password)
 	}
-	cmd.Stdin = nil  // SOL manages its own TTY
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 

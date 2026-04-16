@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 
+	gossh "golang.org/x/crypto/ssh"
+
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/ipmi"
 )
@@ -524,19 +526,45 @@ func parseIPCIDR(cidr string) (ip, prefix string) {
 }
 
 // writeSSHKeys writes authorized_keys for root.
+// Each key is validated with golang.org/x/crypto/ssh before writing;
+// invalid keys are skipped with a warning log so one malformed entry
+// does not silently block legitimate access.
 func writeSSHKeys(mountRoot string, keys []string) error {
+	log := logger()
 	sshDir := filepath.Join(mountRoot, "root", ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir .ssh: %w", err)
 	}
 
+	var validKeys []string
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		if _, _, _, _, err := gossh.ParseAuthorizedKey([]byte(trimmed)); err != nil {
+			log.Warn().Str("key_prefix", truncateKey(trimmed)).
+				Err(err).Msg("finalize: skipping invalid SSH public key")
+			continue
+		}
+		validKeys = append(validKeys, trimmed)
+	}
+
 	authKeysPath := filepath.Join(sshDir, "authorized_keys")
-	content := strings.Join(keys, "\n")
-	if !strings.HasSuffix(content, "\n") {
+	content := strings.Join(validKeys, "\n")
+	if len(validKeys) > 0 && !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
 
 	return os.WriteFile(authKeysPath, []byte(content), 0o600)
+}
+
+// truncateKey returns the first 40 characters of a key string for log messages.
+func truncateKey(key string) string {
+	if len(key) <= 40 {
+		return key
+	}
+	return key[:40] + "..."
 }
 
 // applyKernelArgs appends extra kernel args to the GRUB default config.

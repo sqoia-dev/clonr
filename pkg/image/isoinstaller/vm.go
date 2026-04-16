@@ -261,7 +261,10 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 
 	// ── Build QEMU command ─────────────────────────────────────────────────
 	callPhase("launching_vm")
-	qemuArgs := buildQEMUArgs(opts, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath, kbf)
+	qemuArgs, err := buildQEMUArgs(opts, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath, kbf)
+	if err != nil {
+		return nil, fmt.Errorf("isoinstaller: build QEMU args: %w", err)
+	}
 	log.Info().
 		Strs("args", qemuArgs).
 		Msg("isoinstaller: launching QEMU")
@@ -652,7 +655,7 @@ func findFile(candidates []string) string {
 //   - "uefi" (default): OVMF code+vars are passed via -drive if=pflash.
 //   - "bios": SeaBIOS is used via -bios flag (or omitted — SeaBIOS is the
 //     QEMU default). No pflash drives are added.
-func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string, kbf *KernelBootFiles) []string {
+func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, qmpSocketPath string, kbf *KernelBootFiles) ([]string, error) {
 	args := []string{
 		// Machine and acceleration.
 		// q35 is the modern PCIe chipset — no deprecation warnings, works with
@@ -685,20 +688,19 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 		// UEFI: find and attach OVMF pflash images.
 		ovmfCode := findFile(ovmfCodePaths)
 		ovmfVars := findFile(ovmfVarsPaths)
-		if ovmfCode != "" && ovmfVars != "" {
-			// Copy VARS to a writable temp file so QEMU can update NVRAM state.
-			varsCopy := filepath.Join(filepath.Dir(rawDiskPath), "ovmf-vars.fd")
-			if data, err := os.ReadFile(ovmfVars); err == nil {
-				_ = os.WriteFile(varsCopy, data, 0o600)
-				args = append(args,
-					"-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", ovmfCode),
-					"-drive", fmt.Sprintf("if=pflash,format=raw,file=%s", varsCopy),
-				)
-			}
+		if ovmfCode == "" || ovmfVars == "" {
+			return nil, fmt.Errorf("UEFI firmware requested but OVMF pflash files not found at %s; install edk2-ovmf or use firmware=bios",
+				strings.Join(ovmfCodePaths, ", "))
 		}
-		// If OVMF files are not found, QEMU falls back to SeaBIOS silently.
-		// The install will still work — the kickstart's EFI partition directives
-		// may cause Anaconda warnings but the install completes.
+		// Copy VARS to a writable temp file so QEMU can update NVRAM state.
+		varsCopy := filepath.Join(filepath.Dir(rawDiskPath), "ovmf-vars.fd")
+		if data, err := os.ReadFile(ovmfVars); err == nil {
+			_ = os.WriteFile(varsCopy, data, 0o600)
+			args = append(args,
+				"-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", ovmfCode),
+				"-drive", fmt.Sprintf("if=pflash,format=raw,file=%s", varsCopy),
+			)
+		}
 	} else {
 		// BIOS: use SeaBIOS. Pass -bios if the file exists; otherwise QEMU uses
 		// its built-in SeaBIOS (which is the true default for -machine pc).
@@ -762,7 +764,7 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 		"-no-reboot",
 	)
 
-	return args
+	return args, nil
 }
 
 // writeSeedISO creates a seed ISO containing the automated-install config files.

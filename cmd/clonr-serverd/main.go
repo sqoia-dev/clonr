@@ -253,7 +253,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if imgs, auditErr := database.ListBaseImages(ctx, ""); auditErr == nil {
 		for _, img := range imgs {
 			if warn := imageFirmwareLayoutMismatch(img); warn != "" {
-				log.Warn().
+				log.Error().
 					Str("image_id", img.ID).
 					Str("image_name", img.Name).
 					Str("firmware", string(img.Firmware)).
