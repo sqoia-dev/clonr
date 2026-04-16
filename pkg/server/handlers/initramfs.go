@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
+	"github.com/sqoia-dev/clonr/pkg/initramfs"
 )
 
 //go:embed scripts/build-initramfs.sh
@@ -72,8 +75,15 @@ type InitramfsBuildInfo struct {
 
 // GetInitramfs handles GET /api/v1/system/initramfs.
 // Returns current sha256, size, build_time, kernel version, and last 5 history rows.
+//
+// Kernel version is resolved lazily: if the most recent DB record matching the
+// on-disk sha256 has an empty kernel_version (e.g. written by the autodeploy
+// timer rather than the server-side rebuild API), the handler extracts the
+// version directly from the file, caches it in the DB, and returns it. This
+// makes the UI self-healing regardless of how the file arrived.
 func (h *InitramfsHandler) GetInitramfs(w http.ResponseWriter, r *http.Request) {
 	info := InitramfsBuildInfo{}
+	ctx := r.Context()
 
 	// Read current file stats.
 	if stat, err := os.Stat(h.InitramfsPath); err == nil {
@@ -88,8 +98,43 @@ func (h *InitramfsHandler) GetInitramfs(w http.ResponseWriter, r *http.Request) 
 		h.mu.Unlock()
 	}
 
+	// Resolve kernel version from the DB record whose sha256 matches the live
+	// file.  If the record's kernel_version is empty (autodeploy timer path),
+	// extract it from the file on disk and write it back to the DB.
+	if info.SHA256 != "" {
+		buildID, kver, err := h.DB.GetLatestSuccessfulBuildBySHA256(ctx, info.SHA256)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// No DB record for the current file — try extracting directly.
+			kver, err = initramfs.ExtractKernelVersion(h.InitramfsPath)
+			if err != nil {
+				log.Debug().Err(err).Msg("initramfs: lazy kernel version extract failed (no db record)")
+			} else {
+				info.KernelVersion = kver
+			}
+		case err != nil:
+			log.Debug().Err(err).Msg("initramfs: db lookup for kernel version failed")
+		case kver == "":
+			// Record exists but kernel_version was not captured at build time.
+			kver, err = initramfs.ExtractKernelVersion(h.InitramfsPath)
+			if err != nil {
+				log.Debug().Err(err).Msg("initramfs: lazy kernel version extract failed")
+			} else {
+				info.KernelVersion = kver
+				// Back-fill the DB so subsequent requests skip the shell-out.
+				dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if dbErr := h.DB.UpdateInitramfsBuildKernelVersion(dbCtx, buildID, kver); dbErr != nil {
+					log.Debug().Err(dbErr).Str("build_id", buildID).Msg("initramfs: failed to back-fill kernel_version in db")
+				}
+			}
+		default:
+			info.KernelVersion = kver
+		}
+	}
+
 	// Load history.
-	history, err := h.DB.ListInitramfsBuilds(r.Context(), 5)
+	history, err := h.DB.ListInitramfsBuilds(ctx, 5)
 	if err != nil {
 		log.Warn().Err(err).Msg("initramfs: list history")
 	}

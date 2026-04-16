@@ -2016,6 +2016,35 @@ func (db *DB) GetInitramfsBuildSHA256(ctx context.Context, id string) (string, e
 	return sha, nil
 }
 
+// UpdateInitramfsBuildKernelVersion sets the kernel_version field for a
+// build record identified by id. Used by the lazy-extract path in the
+// GetInitramfs handler to back-fill the version detected from the on-disk
+// image when the field was not populated at build time (e.g. autodeploy timer).
+func (db *DB) UpdateInitramfsBuildKernelVersion(ctx context.Context, id, kernelVersion string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE initramfs_builds SET kernel_version = ? WHERE id = ?`,
+		kernelVersion, id,
+	)
+	return err
+}
+
+// GetLatestSuccessfulBuildBySHA256 returns the ID and kernel_version of the
+// most recent successful build whose sha256 matches the given value.
+// Returns ("", "", sql.ErrNoRows) when no match is found.
+func (db *DB) GetLatestSuccessfulBuildBySHA256(ctx context.Context, sha256 string) (id, kernelVersion string, err error) {
+	err = db.sql.QueryRowContext(ctx, `
+		SELECT id, kernel_version
+		FROM initramfs_builds
+		WHERE sha256 = ? AND outcome = 'success'
+		ORDER BY started_at DESC
+		LIMIT 1
+	`, sha256).Scan(&id, &kernelVersion)
+	if err != nil {
+		return "", "", err
+	}
+	return id, kernelVersion, nil
+}
+
 // LatestSuccessfulInitramfsBuildID returns the ID of the most recent build with
 // outcome = 'success'. Returns ("", sql.ErrNoRows) when none exists.
 func (db *DB) LatestSuccessfulInitramfsBuildID(ctx context.Context) (string, error) {
