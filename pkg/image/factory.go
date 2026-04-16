@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,9 @@ func (noopBuildHandle) AddStderrLine(_ string)      {}
 func (noopBuildHandle) Fail(_ string)               {}
 func (noopBuildHandle) Complete()                   {}
 
+// defaultMaxConcurrentBuilds is used when CLONR_MAX_CONCURRENT_BUILDS is unset.
+const defaultMaxConcurrentBuilds = 4
+
 // Factory turns raw inputs into finalized BaseImages stored under ImageDir.
 type Factory struct {
 	Store         *db.DB
@@ -85,6 +89,65 @@ type Factory struct {
 	// ISOCacheDir is the directory where downloaded ISOs are cached keyed by
 	// sha256(url). Defaults to /var/lib/clonr/iso-cache if empty.
 	ISOCacheDir string
+
+	// buildSem limits the number of concurrent async builds (pull, importISO,
+	// capture, buildFromISO). Capacity is set from CLONR_MAX_CONCURRENT_BUILDS
+	// (default 4). Initialized by NewFactory or SetContext.
+	buildSem chan struct{}
+	// ctx is the server-lifetime context. Async methods return early when it is
+	// cancelled (e.g. on graceful shutdown). Set via SetContext.
+	ctx context.Context
+}
+
+// NewFactory constructs a Factory with a bounded build semaphore.
+// Capacity is read from CLONR_MAX_CONCURRENT_BUILDS (default 4).
+func NewFactory(store *db.DB, imageDir string, logger zerolog.Logger, progress BuildProgressReporter, isoCacheDir string) *Factory {
+	cap_ := defaultMaxConcurrentBuilds
+	if v := os.Getenv("CLONR_MAX_CONCURRENT_BUILDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cap_ = n
+		}
+	}
+	return &Factory{
+		Store:         store,
+		ImageDir:      imageDir,
+		Logger:        logger,
+		BuildProgress: progress,
+		ISOCacheDir:   isoCacheDir,
+		buildSem:      make(chan struct{}, cap_),
+		ctx:           context.Background(),
+	}
+}
+
+// SetContext wires the server-lifetime context into the Factory so that async
+// build goroutines can be cancelled on shutdown.  Call this from
+// Server.StartBackgroundWorkers before accepting traffic.
+func (f *Factory) SetContext(ctx context.Context) {
+	f.ctx = ctx
+}
+
+// acquireSem tries to acquire a slot on the build semaphore.  Returns false
+// when the factory context is cancelled before a slot becomes available.
+func (f *Factory) acquireSem() bool {
+	sem := f.buildSem
+	if sem == nil {
+		// Factory was constructed via struct literal without NewFactory — no
+		// concurrency limit, but still respect context cancellation.
+		return true
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-f.ctx.Done():
+		return false
+	}
+}
+
+// releaseSem releases one slot back to the build semaphore.
+func (f *Factory) releaseSem() {
+	if f.buildSem != nil {
+		<-f.buildSem
+	}
 }
 
 const defaultISOCacheDir = "/var/lib/clonr/iso-cache"
@@ -153,7 +216,14 @@ func (f *Factory) PullImage(ctx context.Context, req api.PullRequest) (*api.Base
 }
 
 func (f *Factory) pullAsync(imageID, url string) {
-	ctx := context.Background()
+	if !f.acquireSem() {
+		f.Logger.Warn().Str("image_id", imageID).Msg("factory: pullAsync cancelled — server shutting down")
+		_ = f.Store.UpdateBaseImageStatus(f.ctx, imageID, api.ImageStatusError, "server shutting down")
+		return
+	}
+	defer f.releaseSem()
+
+	ctx := f.ctx
 
 	rootfs, size, checksum, err := f.pullAndExtract(ctx, imageID, url)
 	if err != nil {
@@ -346,7 +416,14 @@ func (f *Factory) ImportISO(ctx context.Context, isoPath, name, version string) 
 }
 
 func (f *Factory) importISOAsync(imageID, isoPath string) {
-	ctx := context.Background()
+	if !f.acquireSem() {
+		f.Logger.Warn().Str("image_id", imageID).Msg("factory: importISOAsync cancelled — server shutting down")
+		_ = f.Store.UpdateBaseImageStatus(f.ctx, imageID, api.ImageStatusError, "server shutting down")
+		return
+	}
+	defer f.releaseSem()
+
+	ctx := f.ctx
 
 	// Clean up the source file (may be a browser-upload temp) after we are done
 	// with it regardless of success or failure.
@@ -587,7 +664,14 @@ func (f *Factory) rejectSelfCapture(sourceHost string) error {
 }
 
 func (f *Factory) captureAsync(imageID string, req CaptureRequest, sshUser string, sshPort int) {
-	ctx := context.Background()
+	if !f.acquireSem() {
+		f.Logger.Warn().Str("image_id", imageID).Msg("factory: captureAsync cancelled — server shutting down")
+		_ = f.Store.UpdateBaseImageStatus(f.ctx, imageID, api.ImageStatusError, "server shutting down")
+		return
+	}
+	defer f.releaseSem()
+
+	ctx := f.ctx
 
 	rootfs := filepath.Join(f.ImageDir, imageID, "rootfs")
 	if err := os.MkdirAll(rootfs, 0o755); err != nil {
@@ -1335,7 +1419,14 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 }
 
 func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, distro isoinstaller.Distro) {
-	ctx := context.Background()
+	if !f.acquireSem() {
+		f.Logger.Warn().Str("image_id", imageID).Msg("factory: buildISOAsync cancelled — server shutting down")
+		_ = f.Store.UpdateBaseImageStatus(f.ctx, imageID, api.ImageStatusError, "server shutting down")
+		return
+	}
+	defer f.releaseSem()
+
+	ctx := f.ctx
 
 	// ── Progress handle ───────────────────────────────────────────────────
 	// Acquire a progress handle if a reporter is wired in; otherwise use the
