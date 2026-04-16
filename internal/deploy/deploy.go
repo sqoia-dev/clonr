@@ -46,6 +46,22 @@ func logger() *zerolog.Logger {
 	return &l
 }
 
+// deployLogger returns l when non-nil (a per-deploy logger with node/image context
+// fields set by the caller), otherwise falls back to the package-level logger.
+// Per-deploy loggers prevent concurrent deploys from producing interleaved log lines
+// with no way to correlate output to a specific deployment.
+//
+// Callers should build the per-deploy logger and assign it to opts.Logger:
+//
+//	enriched := pkgLog.With().Str("node_id", nodeID).Str("image_id", imageID).Logger()
+//	opts.Logger = &enriched
+func deployLogger(l *zerolog.Logger) *zerolog.Logger {
+	if l != nil {
+		return l
+	}
+	return logger()
+}
+
 // runAndLog executes cmd and streams each line of stdout and stderr to the
 // package logger at Info level with the command name and stream as fields.
 // Returns an error if the process exits non-zero (error message includes the

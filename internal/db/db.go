@@ -133,6 +133,24 @@ func (db *DB) SQL() *sql.DB {
 
 // migrate applies all SQL migration files in order. Each file is applied once;
 // applied migrations are tracked in the schema_migrations table.
+//
+// IMPORTANT — FORWARD-ONLY MIGRATIONS, NO AUTOMATIC ROLLBACK:
+//
+//  1. Migrations are forward-only. There is no automatic rollback mechanism.
+//     Once a migration has been applied and committed, it will not be reversed
+//     by this runner under any circumstances.
+//
+//  2. If a bad migration ships to production, operators must manually intervene
+//     using the SQLite CLI:
+//     a. Stop clonr-serverd.
+//     b. Open the database: sqlite3 /var/lib/clonr/clonr.db
+//     c. Reverse the schema change manually (DROP TABLE, ALTER TABLE, etc.).
+//     d. Remove the migration record: DELETE FROM schema_migrations WHERE name = '<file>';
+//     e. Restart clonr-serverd (the fixed migration will be re-applied on startup).
+//
+//  3. Always test migrations on a copy of the production database before shipping.
+//     Use: sqlite3 /var/lib/clonr/clonr.db ".backup /tmp/clonr-test.db" and run
+//     the server against /tmp/clonr-test.db first to validate the migration.
 func (db *DB) migrate() error {
 	// Ensure tracking table exists.
 	if _, err := db.sql.Exec(`

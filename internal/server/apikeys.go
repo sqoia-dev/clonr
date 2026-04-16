@@ -161,17 +161,13 @@ func CreateAPIKeyFull(ctx context.Context, database *db.DB, scope api.KeyScope, 
 }
 
 // CreateNodeScopedKey mints a fresh node-scoped API key bound to nodeID with a
-// 1-hour TTL. Any existing node-scoped keys for the same node are revoked first
-// (clean rotation: exactly one live token per node at any given time).
+// 1-hour TTL. Any existing node-scoped keys for the same node are revoked atomically
+// in the same database transaction as the insert, eliminating the window between
+// revoke and create where the node would temporarily have no valid key.
 //
 // Returns the raw key (prefix: clonr-node-<raw>) for embedding in the iPXE cmdline.
 // The raw key is never stored — only its SHA-256 hash is persisted.
 func CreateNodeScopedKey(ctx context.Context, database *db.DB, nodeID string) (rawKey string, err error) {
-	// Revoke any existing node-scoped keys for this node before minting a new one.
-	if err := database.RevokeNodeScopedKeys(ctx, nodeID); err != nil {
-		return "", fmt.Errorf("create node scoped key: revoke old keys: %w", err)
-	}
-
 	raw, err := generateRawKey()
 	if err != nil {
 		return "", err
@@ -188,8 +184,11 @@ func CreateNodeScopedKey(ctx context.Context, database *db.DB, nodeID string) (r
 		CreatedAt:   time.Now(),
 		ExpiresAt:   &exp,
 	}
-	if err := database.CreateAPIKey(ctx, rec); err != nil {
-		return "", fmt.Errorf("create node scoped key: persist: %w", err)
+
+	// Revoke old keys and insert the new one atomically — no window where the
+	// node is left without a valid key between the two operations.
+	if err := database.RevokeAndCreateNodeScopedKey(ctx, nodeID, rec); err != nil {
+		return "", fmt.Errorf("create node scoped key: %w", err)
 	}
 
 	log.Info().
