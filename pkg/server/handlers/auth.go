@@ -267,9 +267,9 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if len(req.NewPassword) < 8 {
+	if msg := validatePassword(req.NewPassword); msg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Password must be at least 8 characters",
+			"error": msg,
 			"code":  "validation_error",
 		})
 		return

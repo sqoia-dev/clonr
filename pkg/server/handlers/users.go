@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -103,8 +104,8 @@ func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, "role must be one of: admin, operator, readonly")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeValidationError(w, "Password must be at least 8 characters")
+	if msg := validatePassword(req.Password); msg != "" {
+		writeValidationError(w, msg)
 		return
 	}
 
@@ -250,8 +251,8 @@ func (h *UsersHandler) HandleResetPassword(w http.ResponseWriter, r *http.Reques
 		writeValidationError(w, "password is required")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeValidationError(w, "Password must be at least 8 characters")
+	if msg := validatePassword(req.Password); msg != "" {
+		writeValidationError(w, msg)
 		return
 	}
 
@@ -350,4 +351,39 @@ func isSQLiteUniqueErr(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// validatePassword checks that the password meets complexity requirements:
+// minimum 8 characters, at least one uppercase letter, one lowercase letter,
+// and one digit. Returns an empty string on success or a human-readable
+// message describing which requirements are not met.
+func validatePassword(password string) string {
+	var missing []string
+	if len(password) < 8 {
+		missing = append(missing, "at least 8 characters")
+	}
+	var hasUpper, hasLower, hasDigit bool
+	for _, r := range password {
+		switch {
+		case unicode.IsUpper(r):
+			hasUpper = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		}
+	}
+	if !hasUpper {
+		missing = append(missing, "one uppercase letter")
+	}
+	if !hasLower {
+		missing = append(missing, "one lowercase letter")
+	}
+	if !hasDigit {
+		missing = append(missing, "one digit")
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return "Password must contain: " + strings.Join(missing, ", ")
 }

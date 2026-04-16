@@ -15,6 +15,7 @@ type ProgressStore struct {
 	states      map[string]*api.DeployProgress // keyed by node MAC
 	subsMu      sync.RWMutex
 	subscribers map[string]chan api.DeployProgress
+	done        chan struct{}
 }
 
 // NewProgressStore creates a ProgressStore and starts the background cleanup goroutine.
@@ -22,9 +23,15 @@ func NewProgressStore() *ProgressStore {
 	ps := &ProgressStore{
 		states:      make(map[string]*api.DeployProgress),
 		subscribers: make(map[string]chan api.DeployProgress),
+		done:        make(chan struct{}),
 	}
 	go ps.cleanupLoop()
 	return ps
+}
+
+// Stop shuts down the background cleanup goroutine.
+func (ps *ProgressStore) Stop() {
+	close(ps.done)
 }
 
 // Update stores the latest progress for the node and publishes it to all SSE subscribers.
@@ -108,8 +115,13 @@ func (ps *ProgressStore) publish(entry api.DeployProgress) {
 func (ps *ProgressStore) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		ps.Cleanup(30 * time.Minute)
+	for {
+		select {
+		case <-ticker.C:
+			ps.Cleanup(30 * time.Minute)
+		case <-ps.done:
+			return
+		}
 	}
 }
 

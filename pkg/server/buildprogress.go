@@ -86,6 +86,8 @@ type BuildProgressStore struct {
 	// imageDir is used to persist build-state.json alongside image files.
 	// It may be empty (tests, non-ISO flows); persistence is skipped when empty.
 	imageDir string
+
+	done chan struct{}
 }
 
 // NewBuildProgressStore creates a store and starts the background cleanup goroutine.
@@ -97,9 +99,15 @@ func NewBuildProgressStore(imageDir string) *BuildProgressStore {
 		states:      make(map[string]*buildStateInternal),
 		subscribers: make(map[string]chan api.BuildEvent),
 		imageDir:    imageDir,
+		done:        make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
+}
+
+// Stop shuts down the background cleanup goroutine.
+func (s *BuildProgressStore) Stop() {
+	close(s.done)
 }
 
 // Start registers a new build for imageID, returning a *BuildHandle the factory uses
@@ -375,17 +383,22 @@ func (s *BuildProgressStore) CancelAllActive(reason string) {
 func (s *BuildProgressStore) cleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		cutoff := time.Now().Add(-2 * time.Hour)
-		s.mu.Lock()
-		for id, internal := range s.states {
-			phase := internal.state.Phase
-			terminal := phase == PhaseComplete || phase == PhaseFailed || phase == PhaseCanceled
-			if terminal && internal.state.UpdatedAt.Before(cutoff) {
-				delete(s.states, id)
+	for {
+		select {
+		case <-ticker.C:
+			cutoff := time.Now().Add(-2 * time.Hour)
+			s.mu.Lock()
+			for id, internal := range s.states {
+				phase := internal.state.Phase
+				terminal := phase == PhaseComplete || phase == PhaseFailed || phase == PhaseCanceled
+				if terminal && internal.state.UpdatedAt.Before(cutoff) {
+					delete(s.states, id)
+				}
 			}
+			s.mu.Unlock()
+		case <-s.done:
+			return
 		}
-		s.mu.Unlock()
 	}
 }
 
