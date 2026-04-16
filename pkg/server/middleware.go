@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,6 +19,21 @@ import (
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/db"
 )
+
+// imageAccessCacheEntry is a single cached result from requireImageAccess.
+// allowed records whether the nodeID:imageID pair was authorized, and expiresAt
+// is when this entry must be re-validated against the database.
+type imageAccessCacheEntry struct {
+	allowed   bool
+	expiresAt time.Time
+}
+
+// imageAccessCache caches node→image authorization results to avoid a DB lookup
+// on every blob chunk download. Keys are "nodeID:imageID" strings.
+// Entries expire after imageAccessCacheTTL; on miss or expiry the DB is queried.
+var imageAccessCache sync.Map
+
+const imageAccessCacheTTL = 60 * time.Second
 
 // ctxKeyScope is the context key used to store the resolved API key scope.
 type ctxKeyScope struct{}
@@ -350,12 +366,34 @@ func requireImageAccess(imageIDParam string, database *db.DB) func(http.Handler)
 				writeForbidden(w, "unrecognized scope")
 				return
 			}
-			// Node scope: look up the node's assigned image and compare.
+			// Node scope: verify the node's assigned base image matches the requested image.
+			// The node-to-image assignment does not change during an active deploy, so we
+			// cache results for imageAccessCacheTTL to avoid a DB round-trip on every
+			// blob chunk download.
 			tokenNodeID := nodeIDFromContext(r.Context())
 			if tokenNodeID == "" {
 				writeForbidden(w, "node key has no bound node ID")
 				return
 			}
+			urlImageID := chi.URLParam(r, imageIDParam)
+			cacheKey := tokenNodeID + ":" + urlImageID
+
+			// Check in-process cache first.
+			if raw, ok := imageAccessCache.Load(cacheKey); ok {
+				entry := raw.(imageAccessCacheEntry)
+				if time.Now().Before(entry.expiresAt) {
+					if !entry.allowed {
+						writeForbidden(w, "node key is not authorized to access this image")
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
+				// Entry expired — fall through to DB lookup.
+				imageAccessCache.Delete(cacheKey)
+			}
+
+			// Cache miss or expired: query the database.
 			nodeCfg, err := database.GetNodeConfig(r.Context(), tokenNodeID)
 			if err != nil {
 				log.Error().Err(err).Str("node_id", tokenNodeID).Msg("requireImageAccess: lookup node")
@@ -364,8 +402,12 @@ func requireImageAccess(imageIDParam string, database *db.DB) func(http.Handler)
 				_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "internal server error", Code: "internal_error"})
 				return
 			}
-			urlImageID := chi.URLParam(r, imageIDParam)
-			if nodeCfg.BaseImageID == "" || nodeCfg.BaseImageID != urlImageID {
+			allowed := nodeCfg.BaseImageID != "" && nodeCfg.BaseImageID == urlImageID
+			imageAccessCache.Store(cacheKey, imageAccessCacheEntry{
+				allowed:   allowed,
+				expiresAt: time.Now().Add(imageAccessCacheTTL),
+			})
+			if !allowed {
 				writeForbidden(w, "node key is not authorized to access this image")
 				return
 			}

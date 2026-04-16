@@ -133,6 +133,56 @@ func (db *DB) RevokeNodeScopedKeys(ctx context.Context, nodeID string) error {
 	return nil
 }
 
+// RevokeAndCreateNodeScopedKey atomically revokes all existing node-scoped keys for
+// nodeID and inserts rec in a single SQLite transaction. This closes the window between
+// the revoke and create steps where the node would momentarily have no valid key.
+func (db *DB) RevokeAndCreateNodeScopedKey(ctx context.Context, nodeID string, rec APIKeyRecord) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("db: begin revoke-and-create tx: %w", err)
+	}
+
+	// Revoke existing node-scoped keys within the transaction.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE api_keys SET revoked_at = ? WHERE node_id = ? AND scope = 'node' AND revoked_at IS NULL`,
+		time.Now().Unix(), nodeID,
+	); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return fmt.Errorf("db: revoke node scoped keys (tx): %w", err)
+	}
+
+	// Insert the new key within the same transaction.
+	var expiresAt interface{}
+	if rec.ExpiresAt != nil {
+		expiresAt = rec.ExpiresAt.Unix()
+	}
+	var nodeIDVal interface{}
+	if rec.NodeID != "" {
+		nodeIDVal = rec.NodeID
+	}
+	var label interface{}
+	if rec.Label != "" {
+		label = rec.Label
+	}
+	var createdBy interface{}
+	if rec.CreatedBy != "" {
+		createdBy = rec.CreatedBy
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO api_keys (id, scope, node_id, key_hash, description, label, created_by, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, string(rec.Scope), nodeIDVal, rec.KeyHash, rec.Description, label, createdBy, rec.CreatedAt.Unix(), expiresAt,
+	); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return fmt.Errorf("db: create node scoped key (tx): %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("db: commit revoke-and-create tx: %w", err)
+	}
+	return nil
+}
+
 // CountAPIKeysByScope returns the number of active (non-revoked, non-expired) keys for the given scope.
 func (db *DB) CountAPIKeysByScope(ctx context.Context, scope api.KeyScope) (int, error) {
 	var count int
