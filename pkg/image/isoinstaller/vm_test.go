@@ -164,7 +164,10 @@ func TestBuildQEMUArgs_MachineTypeQ35(t *testing.T) {
 		Firmware:   "bios",
 		WorkDir:    t.TempDir(),
 	}
-	args := buildQEMUArgs(opts, "/tmp/disk.raw", "/tmp/seed.iso", "/tmp/serial.log", "/tmp/qmp.sock", nil)
+	args, err := buildQEMUArgs(opts, "/tmp/disk.raw", "/tmp/seed.iso", "/tmp/serial.log", "/tmp/qmp.sock", nil)
+	if err != nil {
+		t.Fatalf("buildQEMUArgs returned unexpected error: %v", err)
+	}
 
 	// Find -machine value.
 	for i, a := range args {
