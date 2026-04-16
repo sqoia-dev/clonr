@@ -344,3 +344,102 @@ func TestImages_Status(t *testing.T) {
 		t.Errorf("status field: got %v", status["status"])
 	}
 }
+
+// TestNodes_UpdatePreservesPowerProvider is a regression test for the bug where
+// a PUT /api/v1/nodes/:id that omits power_provider would silently wipe stored
+// Proxmox credentials, causing subsequent reimages to fail with:
+//
+//	"proxmox provider: must supply either (username+password) or (token_id+token_secret)"
+//
+// The handler must preserve existing PowerProvider credentials when the PUT body
+// does not include power_provider (omitempty field absent / nil pointer).
+func TestNodes_UpdatePreservesPowerProvider(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	var img api.BaseImage
+	doJSON(t, ts, http.MethodPost, "/api/v1/images", api.CreateImageRequest{
+		Name: "base", Format: api.ImageFormatFilesystem,
+	}, &img)
+
+	// Create a node with Proxmox power provider credentials.
+	var node api.NodeConfig
+	doJSON(t, ts, http.MethodPost, "/api/v1/nodes", api.CreateNodeConfigRequest{
+		Hostname:    "vm206",
+		PrimaryMAC:  "aa:bb:cc:dd:ee:06",
+		BaseImageID: img.ID,
+	}, &node)
+
+	// Set the power provider via an initial PUT (simulates operator configuring creds).
+	initialUpdate := api.UpdateNodeConfigRequest{
+		Hostname:    "vm206",
+		PrimaryMAC:  "aa:bb:cc:dd:ee:06",
+		BaseImageID: img.ID,
+		PowerProvider: &api.PowerProviderConfig{
+			Type: "proxmox",
+			Fields: map[string]string{
+				"api_url":  "https://192.168.1.223:8006",
+				"node":     "pve",
+				"vmid":     "206",
+				"username": "root@pam",
+				"password": "secret-password",
+				"insecure": "true",
+			},
+		},
+	}
+	var afterFirstPUT api.NodeConfig
+	resp := doJSON(t, ts, http.MethodPut, "/api/v1/nodes/"+node.ID, initialUpdate, &afterFirstPUT)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initial update: got %d want 200", resp.StatusCode)
+	}
+
+	// A second PUT that only changes the hostname and omits power_provider entirely.
+	// This simulates the "innocent rename" that previously wiped credentials.
+	renameUpdate := api.UpdateNodeConfigRequest{
+		Hostname:    "vm206-renamed",
+		PrimaryMAC:  "aa:bb:cc:dd:ee:06",
+		BaseImageID: img.ID,
+		// PowerProvider intentionally omitted — must be preserved from existing record.
+	}
+	var afterSecondPUT api.NodeConfig
+	resp2 := doJSON(t, ts, http.MethodPut, "/api/v1/nodes/"+node.ID, renameUpdate, &afterSecondPUT)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("rename update: got %d want 200", resp2.StatusCode)
+	}
+
+	// Re-fetch the node from the DB to confirm stored state.
+	var fetched api.NodeConfig
+	doJSON(t, ts, http.MethodGet, "/api/v1/nodes/"+node.ID, nil, &fetched)
+
+	if fetched.PowerProvider == nil {
+		t.Fatal("power provider was wiped by rename PUT — regression: credentials must be preserved when power_provider is omitted from request")
+	}
+	if fetched.PowerProvider.Type != "proxmox" {
+		t.Errorf("power provider type: got %q want \"proxmox\"", fetched.PowerProvider.Type)
+	}
+	// The GET response sanitizes credentials (password → "****"), so we check
+	// the type and non-secret fields are intact, not the raw password.
+	if fetched.PowerProvider.Fields["api_url"] != "https://192.168.1.223:8006" {
+		t.Errorf("api_url field lost after rename: got %q", fetched.PowerProvider.Fields["api_url"])
+	}
+	if fetched.PowerProvider.Fields["username"] != "root@pam" {
+		t.Errorf("username field lost after rename: got %q", fetched.PowerProvider.Fields["username"])
+	}
+
+	// Confirm ClearPowerProvider=true actually removes the provider.
+	clearUpdate := api.UpdateNodeConfigRequest{
+		Hostname:           "vm206-renamed",
+		PrimaryMAC:         "aa:bb:cc:dd:ee:06",
+		BaseImageID:        img.ID,
+		ClearPowerProvider: true,
+	}
+	var afterClear api.NodeConfig
+	resp3 := doJSON(t, ts, http.MethodPut, "/api/v1/nodes/"+node.ID, clearUpdate, &afterClear)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("clear update: got %d want 200", resp3.StatusCode)
+	}
+	var fetchedAfterClear api.NodeConfig
+	doJSON(t, ts, http.MethodGet, "/api/v1/nodes/"+node.ID, nil, &fetchedAfterClear)
+	if fetchedAfterClear.PowerProvider != nil {
+		t.Errorf("ClearPowerProvider=true should have removed the provider, got: %+v", fetchedAfterClear.PowerProvider)
+	}
+}

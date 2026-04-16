@@ -556,7 +556,14 @@ type UpdateNodeConfigRequest struct {
 	Groups             []string             `json:"groups"`
 	CustomVars         map[string]string    `json:"custom_vars"`
 	BaseImageID        string               `json:"base_image_id"`
+	// PowerProvider, when non-nil, replaces the power provider config for this
+	// node. Omit (or send null) to preserve the existing provider and credentials.
+	// Use ClearPowerProvider=true to explicitly remove the power provider.
 	PowerProvider      *PowerProviderConfig `json:"power_provider,omitempty"`
+	// ClearPowerProvider, when true, explicitly removes the power provider config.
+	// Use this instead of omitting power_provider (which preserves the existing
+	// config) when you want to revert to the legacy BMC/IPMI fallback.
+	ClearPowerProvider  bool                `json:"clear_power_provider,omitempty"`
 	GroupID            string               `json:"group_id,omitempty"`
 	// DiskLayoutOverride, when non-nil, replaces the image/group disk layout for
 	// this node. Send null or omit to clear a previously set override.

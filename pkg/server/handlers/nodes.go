@@ -193,6 +193,22 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	default:
 		layoutOverride = existing.DiskLayoutOverride // preserve existing
 	}
+
+	// Resolve the power provider:
+	//   - ClearPowerProvider=true → explicitly remove (revert to BMC/IPMI fallback)
+	//   - PowerProvider present in request → use the new config (credentials updated)
+	//   - Neither present (omitempty field absent) → preserve existing config so
+	//     that a PUT to change hostname/image does not silently wipe credentials.
+	var powerProvider *api.PowerProviderConfig
+	switch {
+	case req.ClearPowerProvider:
+		powerProvider = nil // explicit clear
+	case req.PowerProvider != nil:
+		powerProvider = req.PowerProvider // caller supplied a new provider config
+	default:
+		powerProvider = existing.PowerProvider // preserve existing credentials
+	}
+
 	// Preserve the existing group assignment unless explicitly changed in the request.
 	groupID := existing.GroupID
 	if req.GroupID != "" || req.GroupID == "" && existing.GroupID != "" {
@@ -211,7 +227,7 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		Groups:             req.Groups,
 		CustomVars:         req.CustomVars,
 		BaseImageID:        req.BaseImageID,
-		PowerProvider:      req.PowerProvider,
+		PowerProvider:      powerProvider,
 		GroupID:            groupID,
 		DiskLayoutOverride: layoutOverride,
 		ExtraMounts:        req.ExtraMounts,
