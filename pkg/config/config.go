@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -47,6 +48,10 @@ type PXEConfig struct {
 	// TFTPDir is where TFTP-served boot files (ipxe.efi, undionly.kpxe)
 	// live (CLONR_TFTP_DIR). Default: "/var/lib/clonr/tftpboot".
 	TFTPDir string `json:"tftp_dir"`
+	// SubnetCIDR is the prefix length of the provisioning subnet advertised via
+	// DHCP Option 1 (subnet mask). Must be between 1 and 30 inclusive.
+	// Configured via CLONR_PXE_SUBNET_CIDR. Default: 24.
+	SubnetCIDR int `json:"subnet_cidr"`
 	// HTTPPort is the port the clonr-serverd HTTP API listens on, used by the
 	// DHCP server when building the iPXE chainload URL. Populated at runtime
 	// from ListenAddr — not a user-facing config field.
@@ -122,13 +127,29 @@ func parseLogRetention() time.Duration {
 // LoadPXEConfig populates PXEConfig from environment variables.
 func LoadPXEConfig() PXEConfig {
 	return PXEConfig{
-		Enabled:   os.Getenv("CLONR_PXE_ENABLED") == "true",
-		Interface: os.Getenv("CLONR_PXE_INTERFACE"),
-		IPRange:   envOrDefault("CLONR_PXE_RANGE", "10.99.0.100-10.99.0.200"),
-		ServerIP:  os.Getenv("CLONR_PXE_SERVER_IP"),
-		BootDir:   envOrDefault("CLONR_BOOT_DIR", "/var/lib/clonr/boot"),
-		TFTPDir:   envOrDefault("CLONR_TFTP_DIR", "/var/lib/clonr/tftpboot"),
+		Enabled:    os.Getenv("CLONR_PXE_ENABLED") == "true",
+		Interface:  os.Getenv("CLONR_PXE_INTERFACE"),
+		IPRange:    envOrDefault("CLONR_PXE_RANGE", "10.99.0.100-10.99.0.200"),
+		ServerIP:   os.Getenv("CLONR_PXE_SERVER_IP"),
+		BootDir:    envOrDefault("CLONR_BOOT_DIR", "/var/lib/clonr/boot"),
+		TFTPDir:    envOrDefault("CLONR_TFTP_DIR", "/var/lib/clonr/tftpboot"),
+		SubnetCIDR: parsePXESubnetCIDR(),
 	}
+}
+
+// parsePXESubnetCIDR reads CLONR_PXE_SUBNET_CIDR and returns its value,
+// validated to [1, 30]. Falls back to 24 if the variable is unset or invalid.
+func parsePXESubnetCIDR() int {
+	const defaultCIDR = 24
+	v := os.Getenv("CLONR_PXE_SUBNET_CIDR")
+	if v == "" {
+		return defaultCIDR
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 30 {
+		return defaultCIDR
+	}
+	return n
 }
 
 // Default returns a Config with sensible production defaults.

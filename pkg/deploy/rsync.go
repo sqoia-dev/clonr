@@ -22,6 +22,7 @@ import (
 
 	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/pkg/hardware"
+	"golang.org/x/sys/unix"
 )
 
 // FilesystemDeployer deploys a filesystem-format image (tar archive).
@@ -1111,7 +1112,9 @@ func ensurePartitionNodes(disk string, count int) {
 			continue
 		}
 		// syscall.Mknod creates a block device node (S_IFBLK = 0x6000).
-		devNum := major*256 + minor
+		// Use unix.Mkdev for correct Linux device number encoding — the naive
+		// major*256+minor formula breaks for NVMe where minor > 255.
+		devNum := unix.Mkdev(major, minor)
 		if err := syscall.Mknod(devPath, syscall.S_IFBLK|0o600, int(devNum)); err != nil {
 			log.Warn().Str("dev", devPath).Uint32("major", major).Uint32("minor", minor).Err(err).Msg("mknod failed")
 		} else {

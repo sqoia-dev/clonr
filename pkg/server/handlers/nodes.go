@@ -46,10 +46,15 @@ type NodesHandler struct {
 	DB *db.DB
 }
 
-// sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider redacted.
-// Call this on every outbound NodeConfig so credentials never leak in responses.
+// sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
+// redacted. Call this on every outbound NodeConfig so credentials never leak in responses.
 func sanitizeNodeConfig(cfg api.NodeConfig) api.NodeConfig {
 	cfg.PowerProvider = cfg.PowerProvider.Sanitize()
+	if cfg.BMC != nil {
+		bmc := *cfg.BMC
+		bmc.Password = ""
+		cfg.BMC = &bmc
+	}
 	return cfg
 }
 

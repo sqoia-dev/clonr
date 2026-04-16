@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sqoia-dev/clonr/pkg/api"
@@ -27,6 +28,15 @@ var ErrExpired = fmt.Errorf("api key expired")
 // DB wraps sql.DB with typed clonr operations.
 type DB struct {
 	sql *sql.DB
+
+	// lastUsedMu protects lastUsedBatch. Keys are key_hash values; values are
+	// the timestamp of the most recent use. The background flusher drains the
+	// map every 30 seconds and writes all pending updates in a single transaction.
+	lastUsedMu    sync.Mutex
+	lastUsedBatch map[string]int64 // key_hash → unix timestamp
+
+	// lastUsedDone signals the background flusher to stop.
+	lastUsedDone chan struct{}
 }
 
 // Open opens (or creates) the SQLite database at path and applies all pending migrations.
@@ -108,14 +118,23 @@ func (db *DB) migrate() error {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 
-		if _, err := db.sql.Exec(string(sql)); err != nil {
+		tx, err := db.sql.Begin()
+		if err != nil {
+			return fmt.Errorf("begin transaction for migration %s: %w", entry.Name(), err)
+		}
+		if _, err := tx.Exec(string(sql)); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 		}
-		if _, err := db.sql.Exec(
+		if _, err := tx.Exec(
 			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
 			entry.Name(), time.Now().Unix(),
 		); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
 		}
 	}
 	return nil

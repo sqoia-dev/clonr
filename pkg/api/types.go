@@ -12,8 +12,9 @@ import (
 type KeyScope string
 
 const (
-	KeyScopeAdmin KeyScope = "admin" // full access to all admin routes
-	KeyScopeNode  KeyScope = "node"  // limited: register, deploy-complete, logs ingest
+	KeyScopeAdmin    KeyScope = "admin"    // full access to all admin routes
+	KeyScopeOperator KeyScope = "operator" // operator session scope: admin routes minus key/user management
+	KeyScopeNode     KeyScope = "node"     // limited: register, deploy-complete, logs ingest
 )
 
 // ImageStatus represents the lifecycle state of a BaseImage.

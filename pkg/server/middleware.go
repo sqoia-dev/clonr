@@ -134,10 +134,16 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 							}
 						}
 						// Map the user role to a scope for existing requireScope middleware.
-						// admin → admin scope; operator/readonly → admin scope (read path)
+						// admin → KeyScopeAdmin; operator → KeyScopeOperator;
+						// readonly → sentinel "readonly" (blocked by requireScope adminOnly=true).
 						// Fine-grained gating uses requireRole middleware.
 						roleScope := api.KeyScopeAdmin
-						if result.payload.Role == "readonly" {
+						switch result.payload.Role {
+						case "operator":
+							// Operator gets a distinct scope so requireScope can differentiate
+							// operator from true admin without relying solely on requireRole.
+							roleScope = api.KeyScopeOperator
+						case "readonly":
 							// readonly maps to a sentinel string that requireScope(adminOnly=true) will block.
 							// We keep the real role in ctxKeyUserRole for requireRole checks.
 							roleScope = api.KeyScope("readonly")
@@ -224,7 +230,11 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 
 // requireScope returns a middleware that enforces a minimum scope on the route.
 // It must be placed after apiKeyAuth in the middleware chain (which populates the context).
-// adminOnly=true → only admin keys pass; adminOnly=false → both admin and node keys pass.
+// adminOnly=true → admin and operator scopes pass (node and readonly are blocked);
+// adminOnly=false → admin, operator, and node scopes pass.
+//
+// Admin-only operations (e.g. API key management, user management) must additionally
+// use requireRole("admin") to block operator-scoped sessions from those routes.
 //
 // Unauthenticated requests (empty scope) always get 401.
 // Authenticated requests with insufficient scope get 403.
@@ -238,11 +248,11 @@ func requireScope(adminOnly bool) func(http.Handler) http.Handler {
 				return
 			}
 			// Valid scope but insufficient level → 403 Forbidden.
-			if adminOnly && scope != api.KeyScopeAdmin {
+			if adminOnly && scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator {
 				writeForbidden(w, "this route requires an admin-scope API key or admin/operator user")
 				return
 			}
-			if scope != api.KeyScopeAdmin && scope != api.KeyScopeNode && scope != api.KeyScope("readonly") {
+			if scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator && scope != api.KeyScopeNode && scope != api.KeyScope("readonly") {
 				writeForbidden(w, "unrecognized scope")
 				return
 			}

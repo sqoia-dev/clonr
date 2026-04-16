@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,12 +353,41 @@ func (h *ImagesHandler) PutDiskLayout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, layout)
 }
 
+// defaultBlobMaxBytes is the default upload size cap (50 GiB).
+// Override via CLONR_BLOB_MAX_SIZE (bytes).
+const defaultBlobMaxBytes = 50 * 1024 * 1024 * 1024 // 50 GiB
+
+// blobMaxBytes returns the effective upload size limit by reading
+// CLONR_BLOB_MAX_SIZE from the environment on every call (cheap string parse,
+// avoids package-level init ordering issues).
+func blobMaxBytes() int64 {
+	if v := os.Getenv("CLONR_BLOB_MAX_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultBlobMaxBytes
+}
+
 // UploadBlob handles POST /api/v1/images/:id/blob
 // Streams the request body to disk and finalizes the image record.
 // The SHA256 is always computed server-side from the bytes as they stream in;
 // if the client supplied X-Checksum-SHA256, we compare and reject on mismatch.
+// Upload size is capped at CLONR_BLOB_MAX_SIZE (default 50 GiB) to prevent
+// OOM and disk exhaustion from unbounded uploads.
 func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	maxBytes := blobMaxBytes()
+
+	// Reject early if Content-Length is provided and already exceeds the limit.
+	if r.ContentLength > 0 && r.ContentLength > maxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"error": fmt.Sprintf("blob exceeds maximum allowed size of %d bytes", maxBytes),
+			"code":  "blob_too_large",
+		})
+		return
+	}
 
 	img, err := h.DB.GetBaseImage(r.Context(), id)
 	if err != nil {
@@ -384,14 +414,27 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	// Wrap r.Body with MaxBytesReader to enforce the upload size limit at the
+	// streaming layer. If the body exceeds maxBytes, io.Copy will return an error
+	// and we clean up the partial file before responding 413.
+	limitedBody := http.MaxBytesReader(w, r.Body, maxBytes)
+
 	// Compute SHA256 server-side as we write, using TeeReader.
 	// This ensures the stored checksum reflects the actual bytes written, not
 	// a value supplied (and potentially incorrect or malicious) from the client.
 	hasher := sha256.New()
-	n, err := io.Copy(f, io.TeeReader(r.Body, hasher))
+	n, err := io.Copy(f, io.TeeReader(limitedBody, hasher))
 	if err != nil {
-		log.Error().Err(err).Msg("write blob")
 		_ = os.Remove(blobPath)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": fmt.Sprintf("blob exceeds maximum allowed size of %d bytes", maxBytes),
+				"code":  "blob_too_large",
+			})
+			return
+		}
+		log.Error().Err(err).Msg("write blob")
 		writeError(w, err)
 		return
 	}

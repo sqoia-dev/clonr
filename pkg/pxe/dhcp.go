@@ -34,6 +34,7 @@ type DHCPServer struct {
 	serverIP   net.IP
 	rangeStart net.IP
 	rangeEnd   net.IP
+	subnetCIDR int    // prefix length for DHCP option 1 (subnet mask), e.g. 24
 	leaseDur   time.Duration
 	httpPort   string // port of the clonr-serverd HTTP API (for iPXE chainload URL)
 
@@ -45,7 +46,8 @@ type DHCPServer struct {
 }
 
 // newDHCPServer creates a DHCPServer from config. It does not start listening.
-func newDHCPServer(iface string, serverIP net.IP, ipRange string, httpPort string) (*DHCPServer, error) {
+// subnetCIDR is the prefix length advertised via DHCP option 1; must be 1–30.
+func newDHCPServer(iface string, serverIP net.IP, ipRange string, httpPort string, subnetCIDR int) (*DHCPServer, error) {
 	start, end, err := parseIPRange(ipRange)
 	if err != nil {
 		return nil, fmt.Errorf("pxe/dhcp: parse ip range: %w", err)
@@ -56,11 +58,16 @@ func newDHCPServer(iface string, serverIP net.IP, ipRange string, httpPort strin
 		return nil, fmt.Errorf("pxe/dhcp: ip range %s produced no addresses", ipRange)
 	}
 
+	if subnetCIDR < 1 || subnetCIDR > 30 {
+		return nil, fmt.Errorf("pxe/dhcp: SubnetCIDR %d out of range [1, 30]", subnetCIDR)
+	}
+
 	return &DHCPServer{
 		iface:      iface,
 		serverIP:   serverIP,
 		rangeStart: start,
 		rangeEnd:   end,
+		subnetCIDR: subnetCIDR,
 		leaseDur:   24 * time.Hour,
 		httpPort:   httpPort,
 		leases:     make(map[string]leaseEntry),
@@ -196,8 +203,8 @@ func (d *DHCPServer) populateBootOptions(resp *dhcpv4.DHCPv4, req *dhcpv4.DHCPv4
 	resp.YourIPAddr = ip
 	resp.ServerIPAddr = d.serverIP
 
-	// Subnet mask -- /24 for the provisioning range.
-	resp.UpdateOption(dhcpv4.OptSubnetMask(net.CIDRMask(24, 32)))
+	// Subnet mask — derived from configured SubnetCIDR (default /24).
+	resp.UpdateOption(dhcpv4.OptSubnetMask(net.CIDRMask(d.subnetCIDR, 32)))
 	resp.UpdateOption(dhcpv4.OptRouter(d.serverIP))
 	resp.UpdateOption(dhcpv4.OptIPAddressLeaseTime(d.leaseDur))
 	resp.UpdateOption(dhcpv4.OptServerIdentifier(d.serverIP))

@@ -366,11 +366,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.Group(func(r chi.Router) {
 			r.Use(requireScope(true)) // admin scope required
 
-			// API key management — admin can create, list, revoke, and rotate keys.
-			r.Get("/admin/api-keys", apiKeysH.HandleList)
-			r.Post("/admin/api-keys", apiKeysH.HandleCreate)
-			r.Delete("/admin/api-keys/{id}", apiKeysH.HandleRevoke)
-			r.Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
+			// API key management — admin role only (operators cannot manage API keys).
+			r.With(requireRole("admin")).Get("/admin/api-keys", apiKeysH.HandleList)
+			r.With(requireRole("admin")).Post("/admin/api-keys", apiKeysH.HandleCreate)
+			r.With(requireRole("admin")).Delete("/admin/api-keys/{id}", apiKeysH.HandleRevoke)
+			r.With(requireRole("admin")).Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
 
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
 			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleList)

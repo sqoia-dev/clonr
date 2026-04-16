@@ -39,7 +39,11 @@ func New(cfg config.PXEConfig) (*Server, error) {
 	if httpPort == "" {
 		httpPort = "8080"
 	}
-	dhcp, err := newDHCPServer(cfg.Interface, net.ParseIP(serverIP), cfg.IPRange, httpPort)
+	subnetCIDR := cfg.SubnetCIDR
+	if subnetCIDR == 0 {
+		subnetCIDR = 24
+	}
+	dhcp, err := newDHCPServer(cfg.Interface, net.ParseIP(serverIP), cfg.IPRange, httpPort, subnetCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("pxe: init dhcp server: %w", err)
 	}
