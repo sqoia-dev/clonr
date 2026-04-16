@@ -95,7 +95,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 			case api.NodeStateDeployed, api.NodeStateDeployedVerified:
 				// Terminal success states -- node is confirmed healthy. Boot from disk.
 				log.Info().Str("mac", mac).Str("hostname", nodeCfg.Hostname).Str("state", string(state)).Msg("boot: disk-boot (verified deployed)")
-				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
+				script, genErr := h.generateDiskBootScript(r, &nodeCfg)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -127,7 +127,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 				} else {
 					log.Info().Str("mac", mac).Str("hostname", nodeCfg.Hostname).Msg("boot: disk-boot (deployed_preboot, awaiting verify-boot phone-home)")
 				}
-				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
+				script, genErr := h.generateDiskBootScript(r, &nodeCfg)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -147,7 +147,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 					Str("hostname", nodeCfg.Hostname).
 					Time("deploy_verify_timeout_at", *nodeCfg.DeployVerifyTimeoutAt).
 					Msg("boot: PXE from deploy_verify_timeout node -- disk-booting; OS failed to phone home; manual reimage may be required")
-				script, genErr := pxe.GenerateDiskBootScript(nodeCfg.Hostname)
+				script, genErr := h.generateDiskBootScript(r, &nodeCfg)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -190,6 +190,32 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(script)
+}
+
+// generateDiskBootScript returns an iPXE disk boot script for the node, branching
+// on the node's image firmware type:
+//
+//   - BIOS: sanboot --no-describe --drive 0x80  (INT 13h, works on SeaBIOS/real BIOS)
+//   - UEFI: exit  (returns to UEFI firmware boot order → grubx64.efi on ESP)
+//
+// The firmware type is read from the node's associated BaseImage. If the image
+// cannot be fetched (no DB, no BaseImageID, or DB error), UEFI is assumed as the
+// safe default for new images.
+func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConfig) ([]byte, error) {
+	firmware := "uefi" // safe default
+	if h.DB != nil && node.BaseImageID != "" {
+		if img, err := h.DB.GetBaseImage(r.Context(), node.BaseImageID); err == nil {
+			if img.Firmware != "" {
+				firmware = string(img.Firmware)
+			}
+		} else {
+			log.Warn().Err(err).Str("image_id", node.BaseImageID).Str("node", node.Hostname).
+				Msg("boot: could not fetch image firmware type — defaulting to uefi")
+		}
+	}
+	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
+		Msg("boot: generating disk boot script")
+	return pxe.GenerateDiskBootScript(node.Hostname, firmware)
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw

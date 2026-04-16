@@ -156,6 +156,19 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 			Msgf("finalize: wrote /etc/NetworkManager/system-connections/%s.nmconnection", iface.Name)
 	}
 
+	// Inject a high-priority DHCP fallback profile so clonr-verify-boot.service
+	// has network connectivity to phone home even when the node has static NM
+	// profiles that may not cover the interface that comes up first after reboot.
+	// autoconnect-priority=100 ensures this profile wins over the static config
+	// if needed; it is intentionally generic (no interface-name pinning) so it
+	// works on any hardware with any NIC naming scheme.
+	if err := writeClonrDHCPProfile(mountRoot); err != nil {
+		// Non-fatal: static NM profiles may still provide connectivity.
+		log.Warn().Err(err).Msg("WARNING finalize: could not write clonr-dhcp NM profile (non-fatal)")
+	} else {
+		log.Info().Msg("finalize: wrote clonr-dhcp NetworkManager DHCP fallback profile")
+	}
+
 	if len(cfg.SSHKeys) > 0 {
 		log.Info().Int("keys", len(cfg.SSHKeys)).Msg("finalize: writing /root/.ssh/authorized_keys")
 		if err := writeSSHKeys(mountRoot, cfg.SSHKeys); err != nil {
@@ -410,6 +423,36 @@ method=ignore
 		}
 	}
 	return nil
+}
+
+// writeClonrDHCPProfile writes a minimal NetworkManager connection profile that
+// auto-connects via DHCP on the first available ethernet interface. This ensures
+// clonr-verify-boot.service can reach the server after reboot even when all other
+// NM profiles have static IPs or are bound to a specific interface name.
+//
+// File permissions MUST be 0600 — NetworkManager silently ignores world-readable
+// connection files. The high autoconnect-priority (100) means this profile is
+// preferred over NM's built-in defaults but yields to operator-created profiles
+// (which should specify interface-name= to pin to a specific NIC).
+func writeClonrDHCPProfile(mountRoot string) error {
+	nmDir := filepath.Join(mountRoot, "etc", "NetworkManager", "system-connections")
+	if err := os.MkdirAll(nmDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir NM connections: %w", err)
+	}
+	profile := `[connection]
+id=clonr-dhcp
+type=ethernet
+autoconnect=true
+autoconnect-priority=100
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+`
+	profilePath := filepath.Join(nmDir, "clonr-dhcp.nmconnection")
+	return os.WriteFile(profilePath, []byte(profile), 0o600)
 }
 
 // writeNMKeyfile writes a single NetworkManager keyfile for an interface.
@@ -892,71 +935,29 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Msg("finalize/boot: dracut complete")
 	}
 
-	// ── 6. Run kernel-install to generate production kernel BLS entries ────────
-	// Rocky 10 minimal ISO installs don't always call `kernel-install add` during
-	// Anaconda %post, so the production kernel BLS entry may be absent from the
-	// captured rootfs (only the rescue entry — written by a different mechanism —
-	// is present). Without a production kernel BLS entry GRUB only sees the rescue
-	// initramfs, which lacks mdraid assembly modules and hangs at "Probing EDD".
+	// ── 6. Delete all BLS entries — hand-crafted grub.cfg is sole boot authority ─
+	// Option A: clonr writes grub.cfg, clonr controls entry order, production
+	// kernel is always set default=0. Rocky's GRUB2 has BLS auto-scan compiled
+	// in and cannot be disabled without rebuilding GRUB. Without nuking all BLS
+	// entries, rescue entries (sorted "0-rescue-" prefix) appear before the
+	// production kernel in the GRUB menu, causing RAID1 nodes to boot rescue
+	// (which lacks mdraid modules) and hang at "Probing EDD".
 	//
-	// We run `kernel-install add <kver> /lib/modules/<kver>/vmlinuz` inside the
-	// chroot for every production kernel found under /boot/vmlinuz-* (rescue
-	// kernels have no matching /lib/modules/<kver>/ tree and are skipped). This is
-	// safe to run after dracut because dracut already regenerated the initramfs;
-	// kernel-install only writes the BLS entry file, it does not rebuild initramfs.
-	//
-	// Non-fatal: if kernel-install fails we fall through to generateBLSEntries
-	// (step 3 already ran) and the hand-crafted grub.cfg (step 7), either of
-	// which is sufficient to boot the node.
-	if kiEntries, kiErr := os.ReadDir(filepath.Join(mountRoot, "boot")); kiErr == nil {
-		for _, kiEntry := range kiEntries {
-			kiName := kiEntry.Name()
-			if !strings.HasPrefix(kiName, "vmlinuz-") {
-				continue
-			}
-			kver := strings.TrimPrefix(kiName, "vmlinuz-")
-			if kver == "" {
-				continue
-			}
-			// Only call kernel-install for kernels that have a modules directory —
-			// the rescue kernel (vmlinuz-0-rescue-*) has no /lib/modules/<kver>/ tree.
-			modulesDir := filepath.Join(mountRoot, "lib", "modules", kver)
-			if _, statErr := os.Stat(modulesDir); statErr != nil {
-				log.Info().Str("kver", kver).Msg("finalize/boot: kernel-install: no modules dir, skipping (rescue kernel)")
-				continue
-			}
-			vmlinuzInChroot := "/lib/modules/" + kver + "/vmlinuz"
-			kiCmd := exec.CommandContext(ctx, "chroot", mountRoot, "kernel-install", "add", kver, vmlinuzInChroot)
-			if kiErr2 := runAndLog(ctx, "kernel-install-add", kiCmd); kiErr2 != nil {
-				log.Warn().Err(kiErr2).Str("kver", kver).
-					Msg("finalize/boot: kernel-install add failed (non-fatal — BLS entry from step 3 is still present)")
+	// Nuke them all. The hand-crafted grub.cfg written in step 7 is the sole
+	// boot authority. No kernel-install is needed — grub.cfg references the
+	// kernel by path directly.
+	if allBLSEntries, globErr := filepath.Glob(filepath.Join(mountRoot, "boot/loader/entries/*.conf")); globErr == nil {
+		for _, e := range allBLSEntries {
+			if removeErr := os.Remove(e); removeErr != nil {
+				log.Warn().Err(removeErr).Str("path", e).Msg("finalize/boot: could not remove BLS entry (non-fatal)")
 			} else {
-				log.Info().Str("kver", kver).Msg("finalize/boot: kernel-install add: BLS entry generated")
+				log.Info().Str("path", e).Msg("finalize/boot: removed BLS entry")
 			}
 		}
+		log.Info().Int("count", len(allBLSEntries)).Msg("finalize/boot: all BLS entries deleted — grub.cfg is sole boot authority")
 	}
 
-	// ── 7. Pin GRUB default to the production kernel ────────────────────────
-	// dracut --regenerate-all writes a rescue BLS entry whose filename starts
-	// with "0-rescue-", which sorts lexicographically before production kernel
-	// entries. On BIOS RAID1 (VM206) Rocky's GRUB2 has BLS support compiled in
-	// and auto-loads all entries from /boot/loader/entries/; without explicit
-	// pinning it picks entry 0 — the rescue initramfs — which lacks mdraid
-	// assembly modules and hangs at "Probing EDD".
-	//
-	// We write grubenv directly (grub2-editenv is not staged in the deploy
-	// initramfs) and update grub.cfg to honour saved_entry via load_env.
-	log.Info().Msg("finalize/boot: pinning GRUB saved_entry to production kernel")
-	savedEntry, pinErr := pinGrubDefaultBLSEntry(mountRoot)
-	if pinErr != nil {
-		// Non-fatal: grub.cfg still boots explicitly via menuentry. Log loudly
-		// so operators know the RAID1 rescue-hang risk is not mitigated.
-		log.Warn().Err(pinErr).Msg("WARNING finalize/boot: could not pin GRUB saved_entry (non-fatal, but RAID1 may boot rescue kernel)")
-	} else {
-		log.Info().Str("saved_entry", savedEntry).Msg("finalize/boot: GRUB saved_entry pinned to production kernel")
-	}
-
-	// ── 8. Write minimal hand-crafted grub.cfg ──────────────────────────────
+	// ── 7. Write minimal hand-crafted grub.cfg ──────────────────────────────
 	// Do NOT run grub2-mkconfig: it produces save_env / saved_entry calls that
 	// fail on BIOS RAID (diskfilter writes are not supported) and injects
 	// unnecessary multi-boot / rescue complexity. We generate a minimal config
@@ -1234,13 +1235,11 @@ func writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID string, layout api.Di
 	var cfg strings.Builder
 	cfg.WriteString("# /boot/grub2/grub.cfg — generated by clonr (content-only deploy)\n")
 	cfg.WriteString("# DO NOT EDIT: regenerated on every reimage\n\n")
-	// load_env reads saved_entry from grubenv (written by pinGrubDefaultBLSEntry).
-	// On BIOS RAID diskfilter allows reads but not writes, so we use load_env
-	// (read-only) rather than save_env. This pins GRUB to the production kernel
-	// BLS entry even when Rocky's built-in BLS loader auto-adds rescue entries
-	// that would otherwise sort to index 0.
-	cfg.WriteString("load_env\n")
-	cfg.WriteString("set default=\"${saved_entry}\"\n")
+	// set default=0: the hand-crafted menuentry below is always entry 0 and is
+	// the sole boot entry. All BLS entries are deleted before this file is written
+	// so Rocky's built-in BLS auto-scan finds nothing. No load_env, no saved_entry,
+	// no rescue menuentry — clean deterministic boot for provisioned compute nodes.
+	cfg.WriteString("set default=0\n")
 	cfg.WriteString("set timeout=5\n")
 	cfg.WriteString("insmod gzio\n")
 	cfg.WriteString("insmod part_gpt\n")

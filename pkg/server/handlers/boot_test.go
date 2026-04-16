@@ -93,16 +93,67 @@ func newBootHandler(d *db.DB) *BootHandler {
 	}
 }
 
-// assertDiskBoot checks that the response body contains the sanboot command
-// (disk boot iPXE script) and does NOT contain the kernel/initrd boot commands.
+// assertDiskBoot checks that the response body is a disk boot iPXE script
+// (either sanboot for BIOS or exit for UEFI) and does NOT contain initramfs
+// boot commands (kernel/initrd). This is the firmware-agnostic check used by
+// tests that don't care which disk-boot variant is returned.
 func assertDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	body := w.Body.String()
-	if !strings.Contains(body, "sanboot") {
-		t.Errorf("%s: expected disk-boot (sanboot) script; got:\n%s", label, body)
+	// A disk-boot script must contain either sanboot (BIOS) or a bare exit line (UEFI).
+	hasSanboot := strings.Contains(body, "sanboot")
+	hasExit := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			hasExit = true
+			break
+		}
+	}
+	if !hasSanboot && !hasExit {
+		t.Errorf("%s: expected disk-boot script (sanboot or exit); got:\n%s", label, body)
 	}
 	if strings.Contains(body, "kernel") && strings.Contains(body, "initrd") {
 		t.Errorf("%s: response contains initramfs boot commands; expected disk-boot only; got:\n%s", label, body)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("%s: expected HTTP 200, got %d", label, w.Code)
+	}
+}
+
+// assertBIOSDiskBoot checks that the response is a BIOS sanboot script.
+func assertBIOSDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
+	t.Helper()
+	body := w.Body.String()
+	if !strings.Contains(body, "sanboot --no-describe --drive 0x80") {
+		t.Errorf("%s: expected BIOS sanboot script; got:\n%s", label, body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			t.Errorf("%s: BIOS disk boot script must not contain bare 'exit' (SeaBIOS loop); got:\n%s", label, body)
+			break
+		}
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("%s: expected HTTP 200, got %d", label, w.Code)
+	}
+}
+
+// assertUEFIDiskBoot checks that the response is a UEFI exit script.
+func assertUEFIDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
+	t.Helper()
+	body := w.Body.String()
+	hasExit := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			hasExit = true
+			break
+		}
+	}
+	if !hasExit {
+		t.Errorf("%s: expected UEFI exit script; got:\n%s", label, body)
+	}
+	if strings.Contains(body, "sanboot") {
+		t.Errorf("%s: UEFI disk boot script must not contain sanboot; got:\n%s", label, body)
 	}
 	if w.Code != http.StatusOK {
 		t.Errorf("%s: expected HTTP 200, got %d", label, w.Code)
@@ -323,4 +374,101 @@ func TestServeIPXEScript_UnknownMAC_InitramfsBoot(t *testing.T) {
 	h.ServeIPXEScript(w, req)
 
 	assertInitramfsBoot(t, w, "unknown MAC -> initramfs boot")
+}
+
+// makeTestImage creates a BaseImage with the given firmware type and returns its ID.
+func makeTestImage(t *testing.T, d *db.DB, firmware api.ImageFirmware) string {
+	t.Helper()
+	imgID := "img-" + string(firmware) + "-test"
+	img := api.BaseImage{
+		ID:       imgID,
+		Name:     "test-image-" + string(firmware),
+		Version:  "1.0",
+		OS:       "rocky",
+		Arch:     "x86_64",
+		Status:   api.ImageStatusReady,
+		Format:   api.ImageFormatFilesystem,
+		Firmware: firmware,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := d.CreateBaseImage(t.Context(), img); err != nil {
+		t.Fatalf("makeTestImage CreateBaseImage(%s): %v", firmware, err)
+	}
+	return imgID
+}
+
+// makeDeployedNodeWithImage creates a deployed+verified node linked to an image.
+func makeDeployedNodeWithImage(t *testing.T, d *db.DB, mac, hostname, imageID string) api.NodeConfig {
+	t.Helper()
+	node := makeTestNode(t, d, mac, hostname)
+	node.BaseImageID = imageID
+	if err := d.UpdateNodeConfig(t.Context(), node); err != nil {
+		t.Fatalf("makeDeployedNodeWithImage UpdateNodeConfig: %v", err)
+	}
+	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
+		t.Fatalf("makeDeployedNodeWithImage RecordDeploySucceeded: %v", err)
+	}
+	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+		t.Fatalf("makeDeployedNodeWithImage RecordVerifyBooted: %v", err)
+	}
+	got, err := d.GetNodeConfigByMAC(t.Context(), mac)
+	if err != nil {
+		t.Fatalf("makeDeployedNodeWithImage GetNodeConfigByMAC: %v", err)
+	}
+	return got
+}
+
+// TestServeIPXEScript_BIOSNode_UsesSanboot verifies that a deployed BIOS node
+// receives a sanboot disk-boot script (INT 13h), not an exit-based UEFI script.
+// sanboot is required for SeaBIOS — exit causes an infinite PXE loop on SeaBIOS.
+func TestServeIPXEScript_BIOSNode_UsesSanboot(t *testing.T) {
+	d := openTestDB(t)
+	imgID := makeTestImage(t, d, api.FirmwareBIOS)
+	makeDeployedNodeWithImage(t, d, "aa:bb:cc:dd:ee:b1", "bios-node01", imgID)
+
+	h := newBootHandler(d)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/ipxe?mac=aa:bb:cc:dd:ee:b1", nil)
+	w := httptest.NewRecorder()
+	h.ServeIPXEScript(w, req)
+
+	assertBIOSDiskBoot(t, w, "BIOS deployed_verified -> sanboot")
+}
+
+// TestServeIPXEScript_UEFINode_UsesExit verifies that a deployed UEFI node
+// receives an exit-based disk-boot script (returns to UEFI firmware boot order),
+// NOT a sanboot script. sanboot uses INT 13h which is unavailable on OVMF/EDK2.
+func TestServeIPXEScript_UEFINode_UsesExit(t *testing.T) {
+	d := openTestDB(t)
+	imgID := makeTestImage(t, d, api.FirmwareUEFI)
+	makeDeployedNodeWithImage(t, d, "aa:bb:cc:dd:ee:e1", "uefi-node01", imgID)
+
+	h := newBootHandler(d)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/ipxe?mac=aa:bb:cc:dd:ee:e1", nil)
+	w := httptest.NewRecorder()
+	h.ServeIPXEScript(w, req)
+
+	assertUEFIDiskBoot(t, w, "UEFI deployed_verified -> exit")
+}
+
+// TestServeIPXEScript_NoImageID_DefaultsToUEFI verifies that a deployed node with
+// no BaseImageID (e.g. manually deployed without image assignment) defaults to the
+// UEFI exit script, which is the safe default for modern hardware.
+func TestServeIPXEScript_NoImageID_DefaultsToUEFI(t *testing.T) {
+	d := openTestDB(t)
+	node := makeTestNode(t, d, "aa:bb:cc:dd:ee:f0", "noimage-node01")
+	// Deploy without setting BaseImageID.
+	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
+		t.Fatalf("RecordDeploySucceeded: %v", err)
+	}
+	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+		t.Fatalf("RecordVerifyBooted: %v", err)
+	}
+
+	h := newBootHandler(d)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/ipxe?mac=aa:bb:cc:dd:ee:f0", nil)
+	w := httptest.NewRecorder()
+	h.ServeIPXEScript(w, req)
+
+	// No image = no firmware info = UEFI default (safe for new images).
+	assertUEFIDiskBoot(t, w, "no image -> UEFI exit default")
 }

@@ -8,26 +8,72 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-func TestGenerateDiskBootScript_UsesSanboot(t *testing.T) {
-	script, err := GenerateDiskBootScript("node207")
+// TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h).
+// bare `exit` must NOT appear — it causes SeaBIOS to restart the PXE loop.
+func TestGenerateDiskBootScript_BIOS(t *testing.T) {
+	script, err := GenerateDiskBootScript("node207", "bios")
 	if err != nil {
-		t.Fatalf("GenerateDiskBootScript returned error: %v", err)
+		t.Fatalf("GenerateDiskBootScript(bios) returned error: %v", err)
 	}
 	out := string(script)
 
 	if !strings.Contains(out, "sanboot --no-describe --drive 0x80") {
-		t.Errorf("disk boot script missing sanboot command; got:\n%s", out)
+		t.Errorf("BIOS disk boot script missing sanboot command; got:\n%s", out)
 	}
 
 	// Ensure bare "exit" line is not present — it causes SeaBIOS PXE loop.
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == "exit" {
-			t.Errorf("disk boot script must not contain bare 'exit' line (SeaBIOS loop); got line: %q", line)
+			t.Errorf("BIOS disk boot script must not contain bare 'exit' line (SeaBIOS loop); got line: %q", line)
 		}
 	}
 
 	if !strings.Contains(out, "node207") {
-		t.Errorf("disk boot script should include hostname 'node207'; got:\n%s", out)
+		t.Errorf("BIOS disk boot script should include hostname 'node207'; got:\n%s", out)
+	}
+}
+
+// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get `exit` (return to UEFI
+// firmware boot order) and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
+func TestGenerateDiskBootScript_UEFI(t *testing.T) {
+	script, err := GenerateDiskBootScript("node201", "uefi")
+	if err != nil {
+		t.Fatalf("GenerateDiskBootScript(uefi) returned error: %v", err)
+	}
+	out := string(script)
+
+	// Must contain bare `exit` so UEFI firmware takes over.
+	hasExit := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			hasExit = true
+			break
+		}
+	}
+	if !hasExit {
+		t.Errorf("UEFI disk boot script must contain bare 'exit' line; got:\n%s", out)
+	}
+
+	if strings.Contains(out, "sanboot") {
+		t.Errorf("UEFI disk boot script must not contain sanboot (INT 13h fails on OVMF); got:\n%s", out)
+	}
+
+	if !strings.Contains(out, "node201") {
+		t.Errorf("UEFI disk boot script should include hostname 'node201'; got:\n%s", out)
+	}
+}
+
+// TestGenerateDiskBootScript_DefaultsToUEFI verifies that an empty/unknown firmware
+// string is treated as UEFI (safe default for new images).
+func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
+	script, err := GenerateDiskBootScript("node-unknown", "")
+	if err != nil {
+		t.Fatalf("GenerateDiskBootScript('') returned error: %v", err)
+	}
+	out := string(script)
+
+	if strings.Contains(out, "sanboot") {
+		t.Errorf("default (empty firmware) disk boot script must not use sanboot; got:\n%s", out)
 	}
 }
 

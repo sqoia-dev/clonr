@@ -3,6 +3,7 @@ package pxe
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"text/template"
 )
 
@@ -54,36 +55,58 @@ func GenerateBootScript(serverURL, token string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// diskBootScriptTemplate is the iPXE response returned for nodes in NodeStateDeployed.
+// diskBootBIOSTemplate is the iPXE response for BIOS-firmware nodes in NodeStateDeployed.
 //
 // We use `sanboot --no-describe --drive 0x80` instead of `exit` because SeaBIOS
 // (used by Proxmox/QEMU VMs) restarts the PXE loop on exit rather than falling
 // through to the next boot order entry, causing an infinite PXE loop. sanboot
 // uses iPXE's built-in INT 13h chainload to explicitly boot the first local disk
 // (0x80), bypassing firmware boot-order handling entirely. This works on both
-// SeaBIOS VMs and real BIOS/UEFI hardware — same pattern used by xCAT and
-// Warewulf. Diagnosed by Gilfoyle; VM207 was stuck in the loop before this fix.
+// SeaBIOS VMs and real BIOS hardware — same pattern used by xCAT and Warewulf.
+// Diagnosed by Gilfoyle; VM207 was stuck in the loop before this fix.
 //
 // The hostname comment is templated in so operators can confirm the correct node
 // is receiving the disk-boot response in packet captures or iPXE serial output.
-const diskBootScriptTemplate = `#!ipxe
-echo Node {{.Hostname}} is deployed -- booting from local disk
+const diskBootBIOSTemplate = `#!ipxe
+echo Node {{.Hostname}} is deployed (BIOS) -- booting from local disk via sanboot
 sanboot --no-describe --drive 0x80
 `
 
-var diskBootTmpl = template.Must(template.New("diskboot").Parse(diskBootScriptTemplate))
+// diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
+//
+// On UEFI nodes, `sanboot --drive 0x80` uses INT 13h — a BIOS concept not
+// available under OVMF/EDK2. On OVMF, sanboot with no SAN device silently fails
+// or returns to the firmware picker, so the node never boots from disk.
+//
+// `exit` returns control from iPXE to the UEFI firmware, which follows the NVRAM
+// boot order (set by grub2-install --removable + efibootmgr during finalization)
+// and finds grubx64.efi on the ESP. This is the correct pattern for UEFI HTTP boot.
+const diskBootUEFITemplate = `#!ipxe
+echo Node {{.Hostname}} is deployed (UEFI) -- returning to UEFI firmware boot order
+exit
+`
+
+var diskBootBIOSTmpl = template.Must(template.New("diskboot-bios").Parse(diskBootBIOSTemplate))
+var diskBootUEFITmpl = template.Must(template.New("diskboot-uefi").Parse(diskBootUEFITemplate))
 
 // diskBootScriptData holds template vars for the disk boot script.
 type diskBootScriptData struct {
 	Hostname string
 }
 
-// GenerateDiskBootScript returns an iPXE script that hands control back to
-// the BIOS/UEFI boot order (local disk). Used for nodes in NodeStateDeployed.
-func GenerateDiskBootScript(hostname string) ([]byte, error) {
+// GenerateDiskBootScript returns an iPXE script that boots the node from local
+// disk. Used for nodes in NodeStateDeployed and related states.
+//
+// firmware must be "bios" or "uefi" (case-insensitive). Any value other than
+// "bios" is treated as UEFI (fail-safe: UEFI is the default for new images).
+func GenerateDiskBootScript(hostname, firmware string) ([]byte, error) {
+	tmpl := diskBootUEFITmpl
+	if strings.EqualFold(firmware, "bios") {
+		tmpl = diskBootBIOSTmpl
+	}
 	data := diskBootScriptData{Hostname: hostname}
 	var buf bytes.Buffer
-	if err := diskBootTmpl.Execute(&buf, data); err != nil {
+	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("pxe/boot: render disk boot script: %w", err)
 	}
 	return buf.Bytes(), nil
