@@ -162,6 +162,19 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
+	// One-time fix: CR-1 renamed duplicate-prefixed migrations.
+	// Update schema_migrations so existing databases recognize the new filenames.
+	renames := map[string]string{
+		"020_group_memberships.sql":        "021_group_memberships.sql",
+		"020_reimage_terminal_state.sql":   "022_reimage_terminal_state.sql",
+		"021_image_metadata.sql":           "023_image_metadata.sql",
+		"022_post_reboot_verification.sql": "024_post_reboot_verification.sql",
+		"022_users.sql":                    "025_users.sql",
+	}
+	for oldName, newName := range renames {
+		db.sql.Exec(`UPDATE schema_migrations SET name = ? WHERE name = ?`, newName, oldName)
+	}
+
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
