@@ -219,7 +219,7 @@ func ExtractRootfs(opts ExtractOptions) error {
 	}
 	defer os.RemoveAll(rootMnt)
 
-	if out, err := exec.Command("mount", "-o", "ro", rootDev, rootMnt).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mount", rootDev, rootMnt).CombinedOutput(); err != nil {
 		return fmt.Errorf("mount root %s: %w\noutput: %s", rootDev, err, string(out))
 	}
 	defer func() { _ = exec.Command("umount", "-l", rootMnt).Run() }()
