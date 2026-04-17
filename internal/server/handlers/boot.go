@@ -159,7 +159,34 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Non-deployed node: mint a fresh node-scoped token for this deploy run.
+			// Non-deployed node: guard against reimage_pending with no image assigned.
+			// A node in reimage_pending without a base_image_id will PXE boot,
+			// attempt to fetch an image in the deploy agent, and get 403 from
+			// requireImageAccess. Serve a wait/retry script instead so the node
+			// loops in iPXE until the operator assigns an image, preventing a
+			// flood of failing deploy attempts.
+			// Nodes in registered/configured state without an image (no ReimagePending)
+			// are intentionally allowed through — the initramfs deploy agent handles
+			// the no-image case gracefully for freshly-registered nodes.
+			if state == api.NodeStateReimagePending && nodeCfg.BaseImageID == "" {
+				log.Warn().
+					Str("mac", mac).
+					Str("hostname", nodeCfg.Hostname).
+					Str("node_id", nodeCfg.ID).
+					Msg("boot: node has reimage_pending but no image assigned — serving wait script")
+				script, genErr := pxe.GenerateWaitRetryScript(nodeCfg.Hostname)
+				if genErr != nil {
+					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate wait-retry script")
+					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(script)
+				return
+			}
+
+			// Mint a fresh node-scoped token for this deploy run.
 			token := h.mintToken(r, nodeCfg.ID)
 			script, genErr := pxe.GenerateBootScript(h.ServerURL, "clonr-node-"+token)
 			if genErr != nil {

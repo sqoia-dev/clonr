@@ -86,12 +86,39 @@ echo Node {{.Hostname}} is deployed (UEFI) -- returning to UEFI firmware boot or
 exit
 `
 
+// waitRetryTemplate is served to nodes in reimage_pending state that have no
+// base_image_id assigned. The node sleeps 60 seconds in iPXE and retries,
+// looping until the operator assigns an image and triggers a fresh PXE boot.
+// Using iPXE's built-in sleep+goto avoids an immediate flood of PXE requests
+// while the operator is still configuring the node.
+const waitRetryTemplate = `#!ipxe
+echo Node {{.Hostname}} is pending reimage but has no image assigned -- retrying in 60s
+:retry
+sleep 60
+chain ${next-server}/api/v1/boot/ipxe?mac=${mac} || goto retry
+`
+
+var waitRetryTmpl = template.Must(template.New("wait-retry").Parse(waitRetryTemplate))
+
 var diskBootBIOSTmpl = template.Must(template.New("diskboot-bios").Parse(diskBootBIOSTemplate))
 var diskBootUEFITmpl = template.Must(template.New("diskboot-uefi").Parse(diskBootUEFITemplate))
 
 // diskBootScriptData holds template vars for the disk boot script.
 type diskBootScriptData struct {
 	Hostname string
+}
+
+// GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
+// state that have no base_image_id assigned. The node sleeps 60 seconds and
+// re-chains to the boot endpoint so the operator can assign an image without
+// requiring a manual BMC power cycle.
+func GenerateWaitRetryScript(hostname string) ([]byte, error) {
+	data := diskBootScriptData{Hostname: hostname}
+	var buf bytes.Buffer
+	if err := waitRetryTmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("pxe/boot: render wait-retry script: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // GenerateDiskBootScript returns an iPXE script that boots the node from local

@@ -329,19 +329,15 @@ func TestServeIPXEScript_Registered_InitramfsBoot(t *testing.T) {
 }
 
 // TestServeIPXEScript_ReimagePending_InitramfsBoot verifies that a node with
-// reimage_pending=true receives the initramfs boot script even if it was previously
-// deployed, triggering a fresh deployment.
+// reimage_pending=true AND a base_image_id assigned receives the initramfs boot
+// script, triggering a fresh deployment.
 func TestServeIPXEScript_ReimagePending_InitramfsBoot(t *testing.T) {
 	d := openTestDB(t)
-	node := makeTestNode(t, d, "aa:bb:cc:dd:ee:06", "node06")
+	imgID := makeTestImage(t, d, api.FirmwareUEFI)
+	// Use makeDeployedNodeWithImage to ensure base_image_id is set — a real reimage
+	// flow always has an image assigned before the operator triggers reimage.
+	node := makeDeployedNodeWithImage(t, d, "aa:bb:cc:dd:ee:06", "node06", imgID)
 
-	// Deploy and verify the node first.
-	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
-		t.Fatalf("RecordDeploySucceeded: %v", err)
-	}
-	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
-		t.Fatalf("RecordVerifyBooted: %v", err)
-	}
 	// Now flip reimage_pending.
 	if err := d.SetReimagePending(t.Context(), node.ID, true); err != nil {
 		t.Fatalf("SetReimagePending: %v", err)
@@ -360,7 +356,50 @@ func TestServeIPXEScript_ReimagePending_InitramfsBoot(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeIPXEScript(w, req)
 
-	assertInitramfsBoot(t, w, "reimage_pending -> initramfs boot")
+	assertInitramfsBoot(t, w, "reimage_pending (with image) -> initramfs boot")
+}
+
+// TestServeIPXEScript_ReimagePending_NoImage_WaitRetry verifies that a node in
+// reimage_pending state with no base_image_id receives a wait/retry iPXE script
+// instead of a deploy script. Without an image, the deploy agent would attempt
+// to fetch an image and get 403 from requireImageAccess. The wait-retry script
+// keeps the node looping in iPXE until an operator assigns an image.
+func TestServeIPXEScript_ReimagePending_NoImage_WaitRetry(t *testing.T) {
+	d := openTestDB(t)
+	node := makeTestNode(t, d, "aa:bb:cc:dd:ee:07", "node07")
+
+	// Set reimage_pending WITHOUT assigning a base_image_id — the bug scenario.
+	if err := d.SetReimagePending(t.Context(), node.ID, true); err != nil {
+		t.Fatalf("SetReimagePending: %v", err)
+	}
+
+	got, err := d.GetNodeConfigByMAC(t.Context(), node.PrimaryMAC)
+	if err != nil {
+		t.Fatalf("GetNodeConfigByMAC: %v", err)
+	}
+	if got.State() != api.NodeStateReimagePending {
+		t.Fatalf("precondition: expected reimage_pending, got %s", got.State())
+	}
+	if got.BaseImageID != "" {
+		t.Fatalf("precondition: expected empty BaseImageID, got %q", got.BaseImageID)
+	}
+
+	h := newBootHandler(d)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/ipxe?mac="+node.PrimaryMAC, nil)
+	w := httptest.NewRecorder()
+	h.ServeIPXEScript(w, req)
+
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("reimage_pending (no image) -> expected HTTP 200, got %d", w.Code)
+	}
+	// Must contain sleep+retry logic, NOT kernel+initrd (no deploy attempt).
+	if !strings.Contains(body, "sleep") || !strings.Contains(body, "retry") {
+		t.Errorf("reimage_pending (no image) -> expected wait-retry script; got:\n%s", body)
+	}
+	if strings.Contains(body, "kernel") && strings.Contains(body, "initrd") {
+		t.Errorf("reimage_pending (no image) -> must not serve deploy script when no image assigned; got:\n%s", body)
+	}
 }
 
 // TestServeIPXEScript_UnknownMAC_InitramfsBoot verifies that an unrecognised MAC

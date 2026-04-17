@@ -164,7 +164,7 @@ func ExtractRootfs(opts ExtractOptions) error {
 		return fmt.Errorf("lsblk: %w\noutput: %s", err, partOut)
 	}
 
-	var rootDev, bootDev string
+	var rootDev, bootDev, espDev string
 	loopBase := filepath.Base(loopDev)
 
 	for _, line := range strings.Split(strings.TrimSpace(string(partOut)), "\n") {
@@ -178,13 +178,20 @@ func ExtractRootfs(opts ExtractOptions) error {
 			continue // skip the loop device itself
 		}
 
-		// Skip non-data filesystems.
-		if fstype == "" || fstype == "vfat" || strings.EqualFold(fstype, "biosboot") {
+		dev := "/dev/" + name
+		if _, statErr := os.Stat(dev); statErr != nil {
 			continue
 		}
 
-		dev := "/dev/" + name
-		if _, statErr := os.Stat(dev); statErr != nil {
+		// Detect the ESP (EFI System Partition): vfat filesystem.
+		// Anaconda always formats the ESP as vfat; this is the canonical indicator.
+		if fstype == "vfat" && espDev == "" {
+			espDev = dev
+			continue
+		}
+
+		// Skip other non-data filesystems (no fstype, biosboot).
+		if fstype == "" || strings.EqualFold(fstype, "biosboot") {
 			continue
 		}
 
@@ -230,6 +237,26 @@ func ExtractRootfs(opts ExtractOptions) error {
 			_ = string(out) // suppress unused variable
 		} else {
 			defer func() { _ = exec.Command("umount", "-l", bootMnt).Run() }()
+		}
+	}
+
+	// If an ESP was detected, mount it at /boot/efi so rsync captures
+	// grubx64.efi, shimx64.efi, and other EFI binaries (ADR-0009).
+	// Anaconda's 3-partition GPT layout places these on a vfat ESP that is
+	// distinct from /boot; without this mount the ESP contents are never included
+	// in the rootfs blob and deploy finalize fails with "grubx64.efi missing".
+	if espDev != "" {
+		efiMnt := filepath.Join(rootMnt, "boot", "efi")
+		if err := os.MkdirAll(efiMnt, 0o755); err != nil {
+			return fmt.Errorf("create ESP mount point: %w", err)
+		}
+		if out, err := exec.Command("mount", "-o", "ro", espDev, efiMnt).CombinedOutput(); err != nil {
+			// Non-fatal: log and continue — deploy will fail later with a clear
+			// message if grubx64.efi is missing, which is preferable to a hard
+			// extraction error on systems where the ESP probe is a false positive.
+			_ = string(out) // suppress unused variable
+		} else {
+			defer func() { _ = exec.Command("umount", "-l", efiMnt).Run() }()
 		}
 	}
 
@@ -334,13 +361,20 @@ var contentOnlyExcludes = []string{
 	"--exclude=/boot/grub2/grub.cfg",
 	"--exclude=/boot/grub2/grubenv",
 	// ── Bootloader binaries ──────────────────────────────────────────────────
-	// UEFI grub binaries on the ESP: re-installed by grub2-install at deploy.
-	"--exclude=/boot/efi/EFI/*/grub*.efi",
+	// grubx64.efi and shimx64.efi MUST be present in the image (ADR-0009).
+	// The deploy initramfs has no DNS/network access so dnf install is not a
+	// viable fallback — include these binaries from the ESP at image-build time.
+	// Only grub.cfg is excluded (regenerated per-deploy by grub2-mkconfig) and
+	// EFI/BOOT/ (the removable fallback path written fresh by grub2-install --removable).
 	"--exclude=/boot/efi/EFI/*/grub.cfg",
 	"--exclude=/boot/efi/EFI/BOOT/**",
 	// BIOS grub modules: re-installed by grub2-install --target=i386-pc.
 	"--exclude=/boot/grub2/i386-pc/**",
-	// UEFI grub modules: re-installed by grub2-install --target=x86_64-efi.
+	// UEFI grub modules in /boot/grub2/x86_64-efi/ are excluded: grub2-install
+	// --target=x86_64-efi reads its modules from /usr/lib/grub/x86_64-efi/ inside
+	// the chroot (the deployed OS RPM-owned copy), not from /boot/grub2/x86_64-efi/.
+	// The modules in /boot/ are a generated cache written by grub2-install itself;
+	// they are re-created at deploy time and must not be pinned to the build VM.
 	"--exclude=/boot/grub2/x86_64-efi/**",
 	// ── Anaconda artefacts ────────────────────────────────────────────────────
 	// Kickstart that Anaconda saved to /root — build-session specific.
