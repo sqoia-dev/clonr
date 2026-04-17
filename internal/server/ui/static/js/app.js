@@ -35,6 +35,10 @@ const Router = {
         if (Pages._closeActionsDropdownOnOutsideClick) {
             document.removeEventListener('click', Pages._closeActionsDropdownOnOutsideClick);
         }
+        // Remove nodes list page click listener for power dropdowns.
+        if (Pages._closePowerDropdownsOnOutsideClick) {
+            document.removeEventListener('click', Pages._closePowerDropdownsOnOutsideClick);
+        }
 
         // Match exact or prefix.
         let handler = this._routes[hash];
@@ -2163,6 +2167,9 @@ const Pages = {
             // Incremental auto-refresh — updates rows in-place without blowing away the DOM.
             App.setAutoRefresh(() => Pages.nodesRefresh());
 
+            // Close power dropdowns when clicking outside any of them.
+            document.addEventListener('click', Pages._closePowerDropdownsOnOutsideClick);
+
         } catch (e) {
             App.render(alertBox(`Failed to load nodes: ${e.message}`));
         }
@@ -2218,9 +2225,22 @@ const Pages = {
             </td>
             <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
             <td>
-                <div class="flex gap-6">
+                <div class="flex gap-6" style="align-items:center">
                     <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
-                    <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
+                    <div class="actions-dropdown" id="pwr-dd-${n.id}">
+                        <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
+                            &#9889;
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
+                        </button>
+                        <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
+                            <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
+                            <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
+                            <div class="actions-dropdown-sep"></div>
+                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
+                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
+                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
+                        </div>
+                    </div>
                 </div>
             </td>
         </tr>`;
@@ -2261,9 +2281,22 @@ const Pages = {
                     if (cells[2]) cells[2].innerHTML = nodeBadge(n);
                     if (cells[5]) cells[5].textContent = fmtRelative(n.updated_at);
                     // Refresh action buttons.
-                    if (cells[6]) cells[6].innerHTML = `<div class="flex gap-6">
+                    if (cells[6]) cells[6].innerHTML = `<div class="flex gap-6" style="align-items:center">
                         <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
-                        <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
+                        <div class="actions-dropdown" id="pwr-dd-${n.id}">
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
+                                &#9889;
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
+                            </button>
+                            <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
+                                <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
+                                <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
+                                <div class="actions-dropdown-sep"></div>
+                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
+                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
+                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
+                            </div>
+                        </div>
                     </div>`;
                     existing.delete(key);
                 } else {
@@ -2702,6 +2735,71 @@ const Pages = {
             Pages.nodes();
         } catch (e) {
             alert(`Delete failed: ${e.message}`);
+        }
+    },
+
+    // _togglePowerDropdown opens/closes the per-row power dropdown on the nodes list.
+    // Closes all other open power dropdowns first so only one is open at a time.
+    _togglePowerDropdown(nodeId, event) {
+        if (event) event.stopPropagation();
+        // Close every other open power menu.
+        document.querySelectorAll('.actions-dropdown-menu[id^="pwr-menu-"]').forEach(m => {
+            if (m.id !== `pwr-menu-${nodeId}`) m.classList.remove('open');
+        });
+        const menu = document.getElementById(`pwr-menu-${nodeId}`);
+        if (menu) menu.classList.toggle('open');
+    },
+
+    // _closePowerDropdownsOnOutsideClick is bound as a document listener on the nodes
+    // list page and removed on navigation. It closes any open power dropdown when the
+    // user clicks outside of it.
+    _closePowerDropdownsOnOutsideClick(e) {
+        if (!e.target.closest('[id^="pwr-dd-"]')) {
+            document.querySelectorAll('.actions-dropdown-menu[id^="pwr-menu-"]')
+                .forEach(m => m.classList.remove('open'));
+        }
+    },
+
+    // _listPowerAction executes a non-destructive power action from the nodes list.
+    // Handles: on (power on) and status (check and report via toast).
+    async _listPowerAction(nodeId, action) {
+        if (action === 'status') {
+            try {
+                App.toast(`Checking power status for ${nodeId}…`, 'info');
+                const data = await API.nodes.power.status(nodeId);
+                const state = (data && data.state) ? data.state.toUpperCase() : 'UNKNOWN';
+                App.toast(`${nodeId}: power is ${state}`, 'info');
+            } catch (e) {
+                App.toast(`Status check failed: ${e.message}`, 'error');
+            }
+            return;
+        }
+        if (action === 'on') {
+            try {
+                await API.nodes.power.on(nodeId);
+                App.toast(`Power on sent to ${nodeId}`, 'success');
+            } catch (e) {
+                App.toast(`Power on failed: ${e.message}`, 'error');
+            }
+        }
+    },
+
+    // _listConfirmPowerAction shows a confirmation dialog before executing a destructive
+    // power action from the nodes list (off, reset, cycle).
+    async _listConfirmPowerAction(nodeId, action, title, description) {
+        if (!confirm(`${title}\n\n${description}\n\nNode: ${nodeId}\n\nAre you sure?`)) return;
+        const actionFns = {
+            off:   () => API.nodes.power.off(nodeId),
+            reset: () => API.nodes.power.reset(nodeId),
+            cycle: () => API.nodes.power.cycle(nodeId),
+        };
+        const fn = actionFns[action];
+        if (!fn) return;
+        try {
+            await fn();
+            App.toast(`${title} sent to ${nodeId}`, 'success');
+        } catch (e) {
+            App.toast(`${title} failed: ${e.message}`, 'error');
         }
     },
 
