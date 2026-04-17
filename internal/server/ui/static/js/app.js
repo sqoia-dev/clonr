@@ -2129,13 +2129,6 @@ const Pages = {
                         <div class="page-subtitle" id="nodes-subtitle">${filteredNodes.length}${groupFilter ? ' (filtered)' : ''} of ${nodes.length} node${nodes.length !== 1 ? 's' : ''}</div>
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-secondary" onclick="Router.navigate('/nodes/groups')">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
-                                <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
-                            </svg>
-                            Manage Groups
-                        </button>
                         <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
