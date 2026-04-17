@@ -2219,7 +2219,7 @@ const Pages = {
             <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
             <td>
                 <div class="flex gap-6">
-                    <button class="btn btn-secondary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(n))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
+                    <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
                     <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
                 </div>
             </td>
@@ -2260,9 +2260,9 @@ const Pages = {
                     const cells = tr.querySelectorAll('td');
                     if (cells[2]) cells[2].innerHTML = nodeBadge(n);
                     if (cells[5]) cells[5].textContent = fmtRelative(n.updated_at);
-                    // Refresh action buttons with latest node JSON (hostname may have changed).
+                    // Refresh action buttons.
                     if (cells[6]) cells[6].innerHTML = `<div class="flex gap-6">
-                        <button class="btn btn-secondary btn-sm" onclick='Pages.showNodeModal(${JSON.stringify(JSON.stringify(n))}, ${JSON.stringify(JSON.stringify(images))})'>Edit</button>
+                        <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
                         <button class="btn btn-danger btn-sm" onclick="Pages.deleteNode('${n.id}', '${escHtml(n.hostname || n.primary_mac)}')">Delete</button>
                     </div>`;
                     existing.delete(key);
