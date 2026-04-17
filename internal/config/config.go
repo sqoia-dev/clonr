@@ -14,7 +14,7 @@ import (
 type ServerConfig struct {
 	ListenAddr      string        `json:"listen_addr"`      // default ":8080"
 	ImageDir        string        `json:"image_dir"`        // default "/var/lib/clonr/images"
-	DBPath          string        `json:"db_path"`          // default "/var/lib/clonr/clonr.db"
+	DBPath          string        `json:"db_path"`          // default "/var/lib/clonr/db/clonr.db"
 	AuthToken       string        `json:"auth_token"`       // legacy: from CLONR_AUTH_TOKEN; superseded by api_keys table
 	AuthDevMode     bool          `json:"auth_dev_mode"`    // from CLONR_AUTH_DEV_MODE=1; bypasses auth for local dev ONLY
 	SessionSecret   string        `json:"session_secret"`   // CLONR_SESSION_SECRET: HMAC key for browser session tokens (32+ bytes)
@@ -70,7 +70,7 @@ func LoadServerConfig() ServerConfig {
 	return ServerConfig{
 		ListenAddr:    envOrDefault("CLONR_LISTEN_ADDR", ":8080"),
 		ImageDir:      envOrDefault("CLONR_IMAGE_DIR", "/var/lib/clonr/images"),
-		DBPath:        envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/clonr.db"),
+		DBPath:        envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/db/clonr.db"),
 		AuthToken:     os.Getenv("CLONR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
 		AuthDevMode:   os.Getenv("CLONR_AUTH_DEV_MODE") == "1",
 		SessionSecret: os.Getenv("CLONR_SESSION_SECRET"),
@@ -158,7 +158,7 @@ func Default() *Config {
 		Server: ServerConfig{
 			ListenAddr: ":8080",
 			ImageDir:   "/var/lib/clonr/images",
-			DBPath:     "/var/lib/clonr/clonr.db",
+			DBPath:     "/var/lib/clonr/db/clonr.db",
 			LogLevel:   "info",
 		},
 	}

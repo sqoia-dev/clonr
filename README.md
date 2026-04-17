@@ -227,7 +227,7 @@ clonr-serverd creates these on first run. The parent path (`/var/lib/clonr/`) mu
 | Path | Config variable | Notes |
 |---|---|---|
 | `/var/lib/clonr/images` | `CLONR_IMAGE_DIR` | Image blob storage — needs 200 GB+ free |
-| `/var/lib/clonr/clonr.db` | `CLONR_DB_PATH` | SQLite database |
+| `/var/lib/clonr/db/clonr.db` | `CLONR_DB_PATH` | SQLite database |
 | `/var/lib/clonr/boot` | `CLONR_BOOT_DIR` | Kernel and initramfs for PXE |
 | `/var/lib/clonr/tftpboot` | `CLONR_TFTP_DIR` | TFTP root (iPXE binaries) |
 | `/var/lib/clonr/iso` | `CLONR_ISO_DIR` | ISO import staging area |
@@ -816,7 +816,7 @@ The server only allows ISO imports from paths under `CLONR_ISO_DIR` (default: `/
 |---|---|---|
 | `CLONR_LISTEN_ADDR` | `:8080` | Listen address |
 | `CLONR_IMAGE_DIR` | `/var/lib/clonr/images` | Image blob storage directory |
-| `CLONR_DB_PATH` | `/var/lib/clonr/clonr.db` | SQLite database path |
+| `CLONR_DB_PATH` | `/var/lib/clonr/db/clonr.db` | SQLite database path |
 | `CLONR_AUTH_TOKEN` | _(empty = auth disabled)_ | Bearer token for API auth |
 | `CLONR_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `CLONR_ISO_DIR` | `/var/lib/clonr/iso` | Allowed directory for ISO imports |
