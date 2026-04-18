@@ -121,7 +121,11 @@ func parseNewBootNum(output string) (string, error) {
 	return "", fmt.Errorf("efiboot: cannot parse new boot number from output")
 }
 
-// setBootEntry sets the specified boot entry as first in the boot order and activates it.
+// setBootEntry sets the specified boot entry as first in the persistent BootOrder
+// and activates it. It reads the current BootOrder, removes any duplicate occurrence
+// of bootNum, then prepends bootNum to produce the new order. This writes a permanent
+// BootOrder rather than the one-shot BootNext variable, so the firmware always finds
+// a valid boot target after the first boot.
 func setBootEntry(ctx context.Context, bootNum string) error {
 	// Activate the entry.
 	activateCmd := exec.CommandContext(ctx, "efibootmgr", "--bootnum", bootNum, "--active")
@@ -129,10 +133,26 @@ func setBootEntry(ctx context.Context, bootNum string) error {
 		return fmt.Errorf("efiboot: activate %s: %w\noutput: %s", bootNum, err, string(out))
 	}
 
-	// Set it as first in the boot order.
-	orderCmd := exec.CommandContext(ctx, "efibootmgr", "--bootnext", bootNum)
+	// Read the current BootOrder so we can prepend the new entry.
+	currentOut, err := exec.CommandContext(ctx, "efibootmgr").Output()
+	var existingOrder []string
+	if err == nil {
+		existingOrder = parseBootOrder(string(currentOut))
+	}
+
+	// Build new order: new entry first, then existing entries (excluding any
+	// duplicate of the new entry to avoid repeated entries).
+	newOrder := []string{bootNum}
+	for _, num := range existingOrder {
+		if strings.TrimSpace(num) != bootNum {
+			newOrder = append(newOrder, strings.TrimSpace(num))
+		}
+	}
+
+	orderStr := strings.Join(newOrder, ",")
+	orderCmd := exec.CommandContext(ctx, "efibootmgr", "-o", orderStr)
 	if out, err := orderCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("efiboot: set boot order %s: %w\noutput: %s", bootNum, err, string(out))
+		return fmt.Errorf("efiboot: set BootOrder %s: %w\noutput: %s", orderStr, err, string(out))
 	}
 	return nil
 }
@@ -220,7 +240,11 @@ func SetPXEBootFirst(ctx context.Context) error {
 	}
 
 	if pxeIdx < 0 {
-		return fmt.Errorf("efiboot: SetPXEBootFirst: no PXE entry found in BootOrder %v", currentOrder)
+		// No PXE entry in NVRAM — common on fresh OVMF VMs where PXE is dynamic
+		// and not persisted. The OS entry is already first in BootOrder from
+		// FixEFIBoot, which is a valid state: the node boots OS, phones home, and
+		// clonr manages future boot order from there.
+		return nil
 	}
 
 	if pxeIdx == 0 {

@@ -1062,8 +1062,8 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		// We must put the PXE entry back at position 0 so that clonr's PXE server
 		// gets to route the next boot (confirming deploy-complete state before
 		// handing off to disk). The OS entry remains second: after the PXE server
-		// sees NodeStateDeployed it returns an iPXE `sanboot --drive 0x80` which
-		// explicitly boots disk, so boot order position 2 is never actually reached
+		// sees NodeStateDeployed it returns an iPXE `exit` which returns control to
+		// the firmware boot order, so boot order position 2 is never actually reached
 		// in normal operation.
 		efiOrderCtx, efiOrderCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		if efiErr := deploy.SetPXEBootFirst(efiOrderCtx); efiErr != nil {
