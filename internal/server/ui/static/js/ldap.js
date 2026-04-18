@@ -9,15 +9,31 @@ const LDAPPages = {
 
     // ── Nav bootstrap ────────────────────────────────────────────────────────
 
-    // bootstrapNav fetches /api/v1/ldap/status and shows/hides the LDAP nav
-    // section. Called once on app boot. Re-called after enable/disable.
+    // bootstrapNav fetches /api/v1/ldap/status and updates LDAP nav visibility.
+    // Called once on app boot and re-called after enable/disable.
+    //
+    // Layout contract (index.html):
+    //   #nav-ldap-section  — outer wrapper, always visible for admins
+    //   #nav-ldap-status-badge — "Disabled" pill, shown when !enabled
+    //   #nav-ldap-managed  — inner wrapper for Users + Groups, shown when enabled
+    //
+    // On 403 / fetch error (non-admin or server down) the entire section is
+    // hidden to avoid a broken-looking entry for non-admin users.
     async bootstrapNav() {
         const section = document.getElementById('nav-ldap-section');
         if (!section) return;
         try {
             const st = await API.ldap.status();
-            section.style.display = (st && st.enabled) ? '' : 'none';
+            const enabled = !!(st && st.enabled);
+
+            section.style.display = '';
+
+            const badge   = document.getElementById('nav-ldap-status-badge');
+            const managed = document.getElementById('nav-ldap-managed');
+            if (badge)   badge.style.display   = enabled ? 'none' : '';
+            if (managed) managed.style.display = enabled ? ''     : 'none';
         } catch (_) {
+            // Non-admin (403) or unreachable — hide entire section.
             section.style.display = 'none';
         }
     },
