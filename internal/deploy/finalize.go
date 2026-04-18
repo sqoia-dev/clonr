@@ -963,12 +963,20 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	}()
 
 	// Rocky 10+ dracut with BLS Type 2 layout writes kernel+initramfs into
-	// /boot/efi/<machine-id>/<kernel-version>/. Create the machine-id dir on
-	// the ESP so dracut doesn't fail with "Directory does not exist".
+	// /boot/efi/<machine-id>/<kernel-version>/. Create the directory tree
+	// so dracut doesn't fail with "Directory does not exist".
 	espMachineDir := filepath.Join(mountRoot, "boot", "efi", machineID)
 	if err := os.MkdirAll(espMachineDir, 0o755); err != nil {
 		log.Warn().Err(err).Str("path", espMachineDir).
 			Msg("finalize/boot: could not create ESP machine-id dir (non-fatal — dracut may fail)")
+	}
+	if bootEntries, readErr := os.ReadDir(filepath.Join(mountRoot, "boot")); readErr == nil {
+		for _, e := range bootEntries {
+			if strings.HasPrefix(e.Name(), "vmlinuz-") {
+				kver := strings.TrimPrefix(e.Name(), "vmlinuz-")
+				_ = os.MkdirAll(filepath.Join(espMachineDir, kver), 0o755)
+			}
+		}
 	}
 
 	// --no-hostonly: build a generic initramfs (hardware-agnostic, not tailored
