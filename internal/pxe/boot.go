@@ -73,16 +73,16 @@ const diskBootBIOSTemplate = `#!ipxe
 # --- menu ------------------------------------------------------------------
 menu clonr -- Boot Manager (BIOS)
 item --gap --
-item --gap --              c l o n r   B o o t   M a n a g e r
+item --gap --                    c l o n r   B o o t   M a n a g e r
 item --gap --
-item --gap --              Node : {{.Hostname}}
-item --gap --              MAC  : ${mac}
+item --gap --                    Node : {{.Hostname}}
+item --gap --                    MAC  : ${mac}
 item --gap --
-item --gap --              ------------------------------------------------
-item --default disk --timeout 5000 disk   Boot from disk          [auto 5s]
-item reimage                              Reimage this node
-item rescue                               Rescue shell
-item --gap --              ------------------------------------------------
+item --gap --               --------------------------------------------------
+item --default disk --timeout 5000 disk        Boot from disk      [auto 5s]
+item reimage                                   Reimage this node
+item rescue                                    Rescue shell
+item --gap --               --------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
@@ -121,16 +121,16 @@ const diskBootUEFITemplate = `#!ipxe
 # --- menu ------------------------------------------------------------------
 menu clonr -- Boot Manager (UEFI)
 item --gap --
-item --gap --              c l o n r   B o o t   M a n a g e r
+item --gap --                    c l o n r   B o o t   M a n a g e r
 item --gap --
-item --gap --              Node : {{.Hostname}}
-item --gap --              MAC  : ${mac}
+item --gap --                    Node : {{.Hostname}}
+item --gap --                    MAC  : ${mac}
 item --gap --
-item --gap --              ------------------------------------------------
-item --default disk --timeout 5000 disk   Boot from disk          [auto 5s]
-item reimage                              Reimage this node
-item rescue                               Rescue shell
-item --gap --              ------------------------------------------------
+item --gap --               --------------------------------------------------
+item --default disk --timeout 5000 disk        Boot from disk      [auto 5s]
+item reimage                                   Reimage this node
+item rescue                                    Rescue shell
+item --gap --               --------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
