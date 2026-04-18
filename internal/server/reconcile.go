@@ -65,6 +65,24 @@ func (s *Server) ReconcileStuckBuilds(ctx context.Context) error {
 	return nil
 }
 
+// ReconcileStuckInitramfsBuilds marks any initramfs_builds rows still in
+// 'pending' state as failed. These are orphaned records left by a mid-build
+// server crash or restart — the build goroutine is gone, so the record will
+// never progress on its own.
+//
+// Call this once at startup, after ReconcileStuckBuilds.
+func (s *Server) ReconcileStuckInitramfsBuilds(ctx context.Context) error {
+	n, err := s.db.MarkPendingInitramfsBuildsAsFailed(ctx)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Warn().Int64("count", n).
+			Msg("reconcile: marked pending initramfs builds as failed (server restarted during build)")
+	}
+	return nil
+}
+
 // AutoResumeBuilds is called at startup when CLONR_BUILD_AUTO_RESUME=1 is set.
 // It scans for resumable=true builds and re-submits them to the factory.
 // The factory field is injected so this function doesn't import pkg/image (would be circular).

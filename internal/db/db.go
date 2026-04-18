@@ -2183,6 +2183,23 @@ func (db *DB) GetLatestSuccessfulBuildBySHA256(ctx context.Context, sha256 strin
 	return id, kernelVersion, nil
 }
 
+// MarkPendingInitramfsBuildsAsFailed updates every initramfs_builds row whose
+// outcome is still 'pending' to 'failed: server restarted during build'.
+// Call this once at server startup to clear ghost records left by a mid-build crash.
+func (db *DB) MarkPendingInitramfsBuildsAsFailed(ctx context.Context) (int64, error) {
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE initramfs_builds
+		SET outcome = 'failed: server restarted during build', finished_at = ?
+		WHERE outcome = 'pending'
+	`, now)
+	if err != nil {
+		return 0, fmt.Errorf("db: mark pending initramfs builds failed: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // LatestSuccessfulInitramfsBuildID returns the ID of the most recent build with
 // outcome = 'success'. Returns ("", sql.ErrNoRows) when none exists.
 func (db *DB) LatestSuccessfulInitramfsBuildID(ctx context.Context) (string, error) {

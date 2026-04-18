@@ -200,6 +200,17 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Deferred panic guard: if anything in this handler panics after the DB
+	// record was created, mark the build as failed so it does not stay 'pending'
+	// forever. The panic is re-raised after the DB write so the server still
+	// crashes (and the operator sees the panic in the journal).
+	defer func() {
+		if r := recover(); r != nil {
+			h.failBuild(buildID, fmt.Errorf("panic during rebuild: %v", r))
+			panic(r) // re-raise so the server's default recovery middleware handles it
+		}
+	}()
+
 	// Audit log start.
 	log.Info().
 		Str("build_id", buildID).

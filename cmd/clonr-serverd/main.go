@@ -276,6 +276,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		log.Error().Err(err).Msg("reconcile stuck builds failed (non-fatal)")
 	}
 
+	// Reconcile any initramfs builds left in 'pending' state by a prior crash
+	// or server restart mid-build. The build goroutine is gone; mark them failed.
+	if err := srv.ReconcileStuckInitramfsBuilds(ctx); err != nil {
+		log.Error().Err(err).Msg("reconcile stuck initramfs builds failed (non-fatal)")
+	}
+
 	// Start background workers (reimage scheduler, etc.) before accepting traffic.
 	srv.StartBackgroundWorkers(ctx)
 
