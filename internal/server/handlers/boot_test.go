@@ -100,7 +100,7 @@ func newBootHandler(d *db.DB) *BootHandler {
 func assertDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	body := w.Body.String()
-	// A disk-boot script must contain either sanboot (BIOS) or exit/exit 1 (UEFI).
+	// A disk-boot script must contain either sanboot (BIOS) or exit (UEFI).
 	hasSanboot := strings.Contains(body, "sanboot")
 	hasExit := strings.Contains(body, "exit")
 	if !hasSanboot && !hasExit {
@@ -133,13 +133,19 @@ func assertBIOSDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string
 }
 
 // assertUEFIDiskBoot checks that the response is a UEFI exit script.
-// The script must contain `exit 1` (non-zero exit signals PXE failure to UEFI
-// firmware, causing it to fall through to the next BootOrder entry — the disk).
+// The script must contain plain `exit` (not `exit 1`). Boot routing for UEFI
+// nodes is handled via NVRAM BootOrder (OS entry first, set by FixEFIBoot).
+// `exit 1` was previously used but caused OVMF to try HTTP IPv6 boot instead
+// of the OS disk because `exit 1` triggers OVMF's firmware-enumerated fallback
+// rather than walking BootOrder.
 func assertUEFIDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	body := w.Body.String()
-	if !strings.Contains(body, "exit 1") {
-		t.Errorf("%s: expected UEFI exit script with 'exit 1'; got:\n%s", label, body)
+	if !strings.Contains(body, "exit") {
+		t.Errorf("%s: expected UEFI exit script with 'exit'; got:\n%s", label, body)
+	}
+	if strings.Contains(body, "exit 1") {
+		t.Errorf("%s: UEFI disk boot script must NOT contain 'exit 1' (breaks OVMF BootOrder routing); got:\n%s", label, body)
 	}
 	if strings.Contains(body, "sanboot") {
 		t.Errorf("%s: UEFI disk boot script must not contain sanboot; got:\n%s", label, body)

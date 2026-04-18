@@ -33,13 +33,15 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 	}
 }
 
-// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get `exit 1` (signal PXE
-// failure to UEFI firmware so it falls through to the next boot entry — the disk)
-// and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
+// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a plain `exit`
+// (not `exit 1`) and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
 //
-// `exit 1` (non-zero) is required: `exit` or `exit 0` tells OVMF that PXE
-// succeeded and it shows the boot picker. A non-zero exit signals failure,
-// causing OVMF to try the next BootOrder entry (the OS disk).
+// Plain `exit` (not `exit 1`) is correct for UEFI: boot routing is handled via
+// NVRAM BootOrder (OS entry first, written by FixEFIBoot during finalize).
+// After iPXE exits OVMF walks BootOrder and finds the OS entry first. Using
+// `exit 1` on OVMF caused firmware to try the next firmware-enumerated option
+// (HTTP IPv6) rather than the OS disk, because HTTP boot entries appear before
+// the disk in OVMF's internal enumeration.
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	script, err := GenerateDiskBootScript("node201", "uefi")
 	if err != nil {
@@ -47,9 +49,12 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 	out := string(script)
 
-	// Must contain `exit 1` so UEFI firmware falls through to the next boot entry.
-	if !strings.Contains(out, "exit 1") {
-		t.Errorf("UEFI disk boot script must contain 'exit 1'; got:\n%s", out)
+	// Must contain `exit` (plain, not `exit 1`) so OVMF proceeds through BootOrder.
+	if !strings.Contains(out, "exit") {
+		t.Errorf("UEFI disk boot script must contain 'exit'; got:\n%s", out)
+	}
+	if strings.Contains(out, "exit 1") {
+		t.Errorf("UEFI disk boot script must NOT contain 'exit 1' (breaks OVMF BootOrder routing); got:\n%s", out)
 	}
 
 	if strings.Contains(out, "sanboot") {
