@@ -100,15 +100,9 @@ func newBootHandler(d *db.DB) *BootHandler {
 func assertDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	body := w.Body.String()
-	// A disk-boot script must contain either sanboot (BIOS) or a bare exit line (UEFI).
+	// A disk-boot script must contain either sanboot (BIOS) or exit/exit 1 (UEFI).
 	hasSanboot := strings.Contains(body, "sanboot")
-	hasExit := false
-	for _, line := range strings.Split(body, "\n") {
-		if strings.TrimSpace(line) == "exit" {
-			hasExit = true
-			break
-		}
-	}
+	hasExit := strings.Contains(body, "exit")
 	if !hasSanboot && !hasExit {
 		t.Errorf("%s: expected disk-boot script (sanboot or exit); got:\n%s", label, body)
 	}
@@ -139,18 +133,13 @@ func assertBIOSDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string
 }
 
 // assertUEFIDiskBoot checks that the response is a UEFI exit script.
+// The script must contain `exit 1` (non-zero exit signals PXE failure to UEFI
+// firmware, causing it to fall through to the next BootOrder entry — the disk).
 func assertUEFIDiskBoot(t *testing.T, w *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	body := w.Body.String()
-	hasExit := false
-	for _, line := range strings.Split(body, "\n") {
-		if strings.TrimSpace(line) == "exit" {
-			hasExit = true
-			break
-		}
-	}
-	if !hasExit {
-		t.Errorf("%s: expected UEFI exit script; got:\n%s", label, body)
+	if !strings.Contains(body, "exit 1") {
+		t.Errorf("%s: expected UEFI exit script with 'exit 1'; got:\n%s", label, body)
 	}
 	if strings.Contains(body, "sanboot") {
 		t.Errorf("%s: UEFI disk boot script must not contain sanboot; got:\n%s", label, body)

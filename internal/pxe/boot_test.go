@@ -33,8 +33,13 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 	}
 }
 
-// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get `exit` (return to UEFI
-// firmware boot order) and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
+// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get `exit 1` (signal PXE
+// failure to UEFI firmware so it falls through to the next boot entry — the disk)
+// and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
+//
+// `exit 1` (non-zero) is required: `exit` or `exit 0` tells OVMF that PXE
+// succeeded and it shows the boot picker. A non-zero exit signals failure,
+// causing OVMF to try the next BootOrder entry (the OS disk).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	script, err := GenerateDiskBootScript("node201", "uefi")
 	if err != nil {
@@ -42,16 +47,9 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 	out := string(script)
 
-	// Must contain bare `exit` so UEFI firmware takes over.
-	hasExit := false
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "exit" {
-			hasExit = true
-			break
-		}
-	}
-	if !hasExit {
-		t.Errorf("UEFI disk boot script must contain bare 'exit' line; got:\n%s", out)
+	// Must contain `exit 1` so UEFI firmware falls through to the next boot entry.
+	if !strings.Contains(out, "exit 1") {
+		t.Errorf("UEFI disk boot script must contain 'exit 1'; got:\n%s", out)
 	}
 
 	if strings.Contains(out, "sanboot") {
