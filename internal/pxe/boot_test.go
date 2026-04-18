@@ -22,7 +22,7 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 	}
 
 	// Boot menu must be present.
-	if !strings.Contains(out, "menu clonr") {
+	if !strings.Contains(out, "menu ") {
 		t.Errorf("BIOS disk boot script missing boot menu; got:\n%s", out)
 	}
 	if !strings.Contains(out, "reimage") {
@@ -70,7 +70,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 
 	// Boot menu must be present.
-	if !strings.Contains(out, "menu clonr") {
+	if !strings.Contains(out, "menu ") {
 		t.Errorf("UEFI disk boot script missing boot menu; got:\n%s", out)
 	}
 	if !strings.Contains(out, "reimage") {

@@ -66,23 +66,28 @@ func GenerateBootScript(serverURL, token string) ([]byte, error) {
 // server uses to mark the node for reimage and serve the deploy initramfs on the next
 // PXE request.
 //
-// Visual layout uses iPXE cpair colour pairs (blue/white header, dark body) and
-// item --gap for non-selectable separator and info lines.
+// Visual layout: branded header is emitted via echo BEFORE the menu command so that
+// iPXE's console renderer (which honours whitespace) displays it centred. The menu
+// command creates its own rendering context that strips leading spaces from item --gap
+// text, so all decorative/info lines live outside the menu block.
 const diskBootBIOSTemplate = `#!ipxe
 
+# --- header (echo preserves whitespace; item --gap strips leading spaces) ---
+echo
+echo                    c l o n r   B o o t   M a n a g e r
+echo                                                  {{.Version}}
+echo
+echo                    Node : {{.Hostname}}
+echo                    MAC  : ${mac}
+echo
+
 # --- menu ------------------------------------------------------------------
-menu clonr -- Boot Manager (BIOS)
+menu Select boot option:
 item --gap --
-item --gap --                    c l o n r   B o o t   M a n a g e r
-item --gap --                                                  {{.Version}}
-item --gap --                    Node : {{.Hostname}}
-item --gap --                    MAC  : ${mac}
+item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
+item reimage                              Reimage this node
+item rescue                               Rescue shell
 item --gap --
-item --gap --               --------------------------------------------------
-item --default disk --timeout 5000 disk        Boot from disk      [auto 5s]
-item reimage                                   Reimage this node
-item rescue                                    Rescue shell
-item --gap --               --------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
@@ -114,23 +119,28 @@ goto disk
 //
 // The "reimage" option re-chains to the boot endpoint with force_reimage=1.
 //
-// Visual layout uses iPXE cpair colour pairs (blue/white header, dark body) and
-// item --gap for non-selectable separator and info lines.
+// Visual layout: branded header is emitted via echo BEFORE the menu command so that
+// iPXE's console renderer (which honours whitespace) displays it centred. The menu
+// command creates its own rendering context that strips leading spaces from item --gap
+// text, so all decorative/info lines live outside the menu block.
 const diskBootUEFITemplate = `#!ipxe
 
+# --- header (echo preserves whitespace; item --gap strips leading spaces) ---
+echo
+echo                    c l o n r   B o o t   M a n a g e r
+echo                                                  {{.Version}}
+echo
+echo                    Node : {{.Hostname}}
+echo                    MAC  : ${mac}
+echo
+
 # --- menu ------------------------------------------------------------------
-menu clonr -- Boot Manager (UEFI)
+menu Select boot option:
 item --gap --
-item --gap --                    c l o n r   B o o t   M a n a g e r
-item --gap --                                                  {{.Version}}
-item --gap --                    Node : {{.Hostname}}
-item --gap --                    MAC  : ${mac}
+item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
+item reimage                              Reimage this node
+item rescue                               Rescue shell
 item --gap --
-item --gap --               --------------------------------------------------
-item --default disk --timeout 5000 disk        Boot from disk      [auto 5s]
-item reimage                                   Reimage this node
-item rescue                                    Rescue shell
-item --gap --               --------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
