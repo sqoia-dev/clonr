@@ -351,7 +351,29 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", scriptPath, clonrBin, outputPath) //nolint:gosec
+	// Wrap the script in a shell that starts ssh-agent and loads the root key.
+	// build-initramfs.sh uses sshpass+scp to pull binaries from localhost; without
+	// an agent the SSH connection fails with exit 255.
+	wrapper := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+if [[ -f /root/.ssh/id_ed25519 ]]; then
+    eval "$(ssh-agent -s)" > /dev/null 2>&1
+    ssh-add /root/.ssh/id_ed25519 < /dev/null 2>/dev/null || true
+fi
+exec bash %q %q %q
+`, scriptPath, clonrBin, outputPath)
+
+	wrapperFile, wErr := os.CreateTemp("", "clonr-initramfs-wrapper-*.sh")
+	if wErr != nil {
+		return fmt.Errorf("create wrapper script: %w", wErr)
+	}
+	wrapperPath := wrapperFile.Name()
+	defer os.Remove(wrapperPath)
+	wrapperFile.WriteString(wrapper)
+	wrapperFile.Chmod(0o700)
+	wrapperFile.Close()
+
+	cmd := exec.CommandContext(ctx, "bash", wrapperPath) //nolint:gosec
 	cmd.Dir = workDir
 	// Include /root/bin in PATH so busybox-static and other root-installed tools
 	// are visible to the script even when running under a restricted systemd unit.
