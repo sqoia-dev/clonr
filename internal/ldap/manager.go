@@ -52,6 +52,12 @@ type Manager struct {
 	// Cached service bind password (in-memory copy for DIT operations).
 	// The plaintext is also stored in the DB row (v1 limitation — see migration comment).
 	servicePassword string
+
+	// slapdUser is the OS system user that slapd runs as.
+	// On EL (Rocky/RHEL/AlmaLinux/CentOS): "ldap".
+	// On Debian/Ubuntu: "openldap".
+	// Detected during Enable() by EnsureOpenLDAP() and threaded into all chown calls.
+	slapdUser string
 }
 
 // New creates a new LDAP Manager. Call StartBackgroundWorkers to start health checks.
@@ -137,7 +143,7 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 	}
 
 	// Transition to provisioning.
-	if err := m.db.LDAPSetStatus(ctx, statusProvisioning, "generating certificates"); err != nil {
+	if err := m.db.LDAPSetStatus(ctx, statusProvisioning, "starting provisioning"); err != nil {
 		return fmt.Errorf("ldap: set provisioning status: %w", err)
 	}
 
@@ -160,6 +166,28 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	ldapCfg := m.cfg.LDAPConfigDir
 	pkiDir := m.cfg.LDAPPKIDir
 	ldapDataDir := m.cfg.LDAPDataDir
+
+	// ── Step 0: Ensure openldap-servers is installed ──────────────────────────
+	log.Info().Msg("ldap: step 0/6: ensuring openldap-servers is installed")
+	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "Installing openldap-servers...")
+
+	slapdUser, err := EnsureOpenLDAP(ctx)
+	if err != nil {
+		setError(fmt.Sprintf("openldap-servers install failed: %v", err))
+		return
+	}
+
+	// Store the detected slapd system user on the Manager for this session.
+	m.mu.Lock()
+	m.slapdUser = slapdUser
+	m.mu.Unlock()
+
+	log.Info().Str("slapd_user", slapdUser).Msg("ldap: openldap-servers ready")
+
+	// MaskDistroSlapd must run AFTER the package lands (the unit doesn't exist until then).
+	if err := MaskDistroSlapd(ctx); err != nil {
+		log.Warn().Err(err).Msg("ldap: mask distro slapd (non-fatal)")
+	}
 
 	// ── Step 1: Generate certificates ────────────────────────────────────────
 	log.Info().Msg("ldap: step 1/6: generating certificates")
@@ -188,7 +216,7 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		setError(fmt.Sprintf("write CA cert failed: %v", err))
 		return
 	}
-	if err := WriteServerCert(ldapCfg, serverBundle.CertPEM, serverBundle.KeyPEM); err != nil {
+	if err := WriteServerCert(ldapCfg, serverBundle.CertPEM, serverBundle.KeyPEM, slapdUser); err != nil {
 		setError(fmt.Sprintf("write server cert failed: %v", err))
 		return
 	}
@@ -198,12 +226,9 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		log.Warn().Err(err).Msg("ldap: update-ca-trust failed (non-fatal)")
 	}
 
-	// Mask distro slapd and create data directory.
-	if err := MaskDistroSlapd(ctx); err != nil {
-		log.Warn().Err(err).Msg("ldap: mask distro slapd (non-fatal)")
-	}
+	// Create data directory, using the detected slapd system user for ownership.
 	dataDir := ldapDataDir + "/data"
-	if err := CreateDataDir(ctx, dataDir); err != nil {
+	if err := CreateDataDir(ctx, dataDir, slapdUser); err != nil {
 		setError(fmt.Sprintf("create data dir failed: %v", err))
 		return
 	}
@@ -237,8 +262,9 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		CACertPath:      caCertPath,
 		ServerCertPath:  serverCertPath,
 		ServerKeyPath:   serverKeyPath,
-		AdminPassword:   req.AdminPassword, // plaintext; slapd hashes per olcPasswordHash
+		AdminPassword:   req.AdminPassword, // plaintext; slapd hashes via olcPasswordHash: {CRYPT}
 		ServicePassword: svcPasswd,
+		SlapdUser:       slapdUser,
 	}
 
 	if err := SeedConfig(ctx, seedData); err != nil {

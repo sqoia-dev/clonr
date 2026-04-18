@@ -222,9 +222,14 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	addReq.Attribute("loginShell", []string{shell})
 	addReq.Attribute("uidNumber", []string{strconv.Itoa(req.UIDNumber)})
 	addReq.Attribute("gidNumber", []string{strconv.Itoa(req.GIDNumber)})
-	// Password is passed plaintext; slapd hashes it using olcPasswordHash: {SSHA512}.
+	// Hash the password with {CRYPT} $6$ SHA-512-crypt (100k rounds) before sending.
+	// slapd stores the pre-hashed value verbatim; subsequent binds use crypt(3) to verify.
 	if req.Password != "" {
-		addReq.Attribute("userPassword", []string{req.Password})
+		hashed, err := HashPasswordCrypt(req.Password)
+		if err != nil {
+			return fmt.Errorf("ldap dit: hash password for %s: %w", req.UID, err)
+		}
+		addReq.Attribute("userPassword", []string{hashed})
 	}
 	// shadowAccount attributes — set sensible defaults (no expiry, no aging).
 	addReq.Attribute("shadowLastChange", []string{"0"})
@@ -278,8 +283,14 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 }
 
 // SetPassword changes a user's userPassword attribute.
-// The password is passed plaintext; slapd hashes it via olcPasswordHash: {SSHA512}.
+// The password is hashed with {CRYPT} $6$ SHA-512-crypt (100k rounds) before
+// being sent to slapd, so the plaintext never travels over the LDAP connection.
 func (c *ditClient) SetPassword(uid, password string) error {
+	hashed, err := HashPasswordCrypt(password)
+	if err != nil {
+		return fmt.Errorf("ldap dit: hash password for %s: %w", uid, err)
+	}
+
 	conn, err := c.connect()
 	if err != nil {
 		return err
@@ -288,7 +299,7 @@ func (c *ditClient) SetPassword(uid, password string) error {
 
 	dn := c.userDN(uid)
 	modReq := goldap.NewModifyRequest(dn, nil)
-	modReq.Replace("userPassword", []string{password})
+	modReq.Replace("userPassword", []string{hashed})
 
 	if err := conn.Modify(modReq); err != nil {
 		return fmt.Errorf("ldap dit: set password for %s: %w", uid, err)

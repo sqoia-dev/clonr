@@ -26,7 +26,7 @@ The feature is opt-in. A clonr install with the module disabled must behave iden
 | **LDAP server** | OpenLDAP (`slapd`) | HPC default; what OpenHPC / xCAT / Warewulf / Bright assume. |
 | **Config backend** | `cn=config` (OLC), **seeded once** via `slapadd -n 0 -F` from a rendered LDIF; never edited by clonr at runtime | Rocky 9 ships cn=config by default; avoids fighting the packaging. cn=config stays a deployment artifact, not a runtime control plane. |
 | **Schema** | Classic NIS: `nis` + `cosine` + `inetorgperson` (posixAccount, posixGroup, memberUid) | Every HPC doc, every pam_ldap example, every sssd.conf in the wild assumes memberUid. sssd handles rfc2307bis too, but classic matches operator muscle memory. |
-| **Password hashing** | `{SSHA512}` via `slapo-pw-sha2` | Packaged on RHEL 9 / Rocky 9. Argon2 isn't reliably packaged across the HPC OS matrix yet. Module loaded in the seed LDIF. |
+| **Password hashing** | `{CRYPT}` with glibc `$6$` (SHA-512-crypt, 100k rounds, built into stock slapd) | No module load required — `pw-sha2` is not packaged in EPEL's openldap-servers-2.6.8. Go-side hashing via `github.com/GehirnInc/crypt/sha512_crypt` (pure Go, no CGO). |
 | **systemd unit** | Ship `clonr-slapd.service`; distro `slapd.service` masked on install | Full control over paths, no collision with a pre-existing slapd. |
 | **Paths** | Data `/var/lib/clonr/ldap/` (mdb), config `/etc/clonr/ldap/slapd.d/`, TLS `/etc/clonr/ldap/tls/`, PKI `/etc/clonr/pki/` (CA) | Everything clonr-owned lives under `/*/clonr/`. |
 | **Runtime user** | clonr-serverd runs as a dedicated `clonr` system user. Polkit rule grants `clonr` exactly `start`, `stop`, `restart` on `clonr-slapd.service`. Initial `slapadd` seed runs as root during module enable. | Principle of least privilege. |
@@ -285,7 +285,7 @@ Push via the standard ssh-agent pattern in `CLAUDE.md`.
 | Operator disables module while nodes still use it | Two-mode disable; 409 with affected node list unless `nodes_acknowledged: true`; docs point to de-provision path. |
 | Base DN change after first node | Locked in DB once first node reports configured; UI hides the field. |
 | Node TLS fails due to missing IP SAN | SAN generator in `cert.go` pulls hostname, primary IP, and `clonr.local` by default. Log and surface TLS errors from reimage clearly. |
-| `{SSHA512}` module not present on host | Install script verifies `openldap-servers` package exposes pw-sha2; fail fast on enable if missing. |
+| argon2 upgrade in v2 | Currently SHA-512-crypt is weaker than argon2id; v2 path is LTB Project's pw-argon2.so or building from contrib. |
 | clonr user can't control clonr-slapd.service | Install script places polkit rule; enable flow errors out clearly if polkit denies. |
 | Operator manually edits cn=config | Health watcher hashes `/etc/clonr/ldap/slapd.d/`; drift surfaces as a warning, not an error. Module keeps operating. |
 | Secrets (admin DN password, service bind password) leak via logs | Never log passwords. Redact request bodies on the enable/disable handlers. |

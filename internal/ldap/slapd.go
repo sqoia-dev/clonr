@@ -42,16 +42,17 @@ func init() {
 
 // slapdSeedData holds the values templated into the cn=config seed LDIF.
 type slapdSeedData struct {
-	BaseDN         string
-	DC1            string
-	DC2            string
-	ConfigDir      string
-	DataDir        string
-	CACertPath     string
-	ServerCertPath string
-	ServerKeyPath  string
-	AdminPassword  string // {SSHA512}-hashed DM password
-	ServicePassword string // plaintext; slapd will hash via olcPasswordHash
+	BaseDN          string
+	DC1             string
+	DC2             string
+	ConfigDir       string
+	DataDir         string
+	CACertPath      string
+	ServerCertPath  string
+	ServerKeyPath   string
+	AdminPassword   string // plaintext; slapd hashes via olcPasswordHash: {CRYPT}
+	ServicePassword string // plaintext; slapd hashes via olcPasswordHash: {CRYPT}
+	SlapdUser       string // OS user that slapd runs as: "ldap" (EL) or "openldap" (Debian)
 }
 
 // ouSeedData holds values templated into the data DIT seed LDIF.
@@ -117,12 +118,13 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 		}
 	}
 
-	// (Re)create the config dir with restricted permissions (0700, ldap:ldap).
+	// (Re)create the config dir with restricted permissions.
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("ldap slapd: mkdir config dir: %w", err)
 	}
-	// chown to ldap:ldap so slapd can read/write its own config tree.
-	if out, err := exec.CommandContext(ctx, "chown", "-R", "ldap:ldap", configDir).CombinedOutput(); err != nil {
+	// chown to slapd system user so slapd can read/write its own config tree.
+	slapdOwner := data.SlapdUser + ":" + data.SlapdUser
+	if out, err := exec.CommandContext(ctx, "chown", "-R", slapdOwner, configDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("ldap slapd: chown config dir: %w (output: %s)", err, string(out))
 	}
 
@@ -153,7 +155,7 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 	log.Info().Str("output", string(out)).Msg("ldap slapd: slapadd cn=config seeded")
 
 	// Fix ownership again after slapadd (it may create files as root).
-	if out2, err := exec.CommandContext(ctx, "chown", "-R", "ldap:ldap", configDir).CombinedOutput(); err != nil {
+	if out2, err := exec.CommandContext(ctx, "chown", "-R", slapdOwner, configDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("ldap slapd: chown config dir post-slapadd: %w (output: %s)", err, string(out2))
 	}
 	if err := os.Chmod(configDir, 0o700); err != nil {
@@ -164,8 +166,9 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 }
 
 // WriteServerCert writes the server TLS cert and key to the configured paths.
-// Creates parent directories as needed. Key is written 0600 root:root.
-func WriteServerCert(configDir string, certPEM, keyPEM []byte) error {
+// Creates parent directories as needed. Key is written 0600.
+// slapdUser is the OS user that slapd runs as ("ldap" on EL, "openldap" on Debian).
+func WriteServerCert(configDir string, certPEM, keyPEM []byte, slapdUser string) error {
 	tlsDir := filepath.Join(configDir, "tls")
 	if err := os.MkdirAll(tlsDir, 0o755); err != nil {
 		return fmt.Errorf("ldap slapd: mkdir tls dir: %w", err)
@@ -181,9 +184,10 @@ func WriteServerCert(configDir string, certPEM, keyPEM []byte) error {
 		return fmt.Errorf("ldap slapd: write server key: %w", err)
 	}
 
-	// slapd needs to read the key — chown to ldap user.
+	// slapd needs to read the key — chown to slapd system user.
+	owner := slapdUser + ":" + slapdUser
 	for _, p := range []string{certPath, keyPath} {
-		if out, err := exec.Command("chown", "ldap:ldap", p).CombinedOutput(); err != nil {
+		if out, err := exec.Command("chown", owner, p).CombinedOutput(); err != nil {
 			return fmt.Errorf("ldap slapd: chown tls file %s: %w (output: %s)", p, err, string(out))
 		}
 	}
@@ -297,11 +301,13 @@ func SlapcatBackup(ctx context.Context, backupDir string) (string, error) {
 }
 
 // CreateDataDir creates the mdb data directory with correct ownership.
-func CreateDataDir(ctx context.Context, dataDir string) error {
+// slapdUser is the OS user that slapd runs as ("ldap" on EL, "openldap" on Debian).
+func CreateDataDir(ctx context.Context, dataDir string, slapdUser string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("ldap slapd: mkdir data dir: %w", err)
 	}
-	out, err := exec.CommandContext(ctx, "chown", "-R", "ldap:ldap", dataDir).CombinedOutput()
+	owner := slapdUser + ":" + slapdUser
+	out, err := exec.CommandContext(ctx, "chown", "-R", owner, dataDir).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ldap slapd: chown data dir: %w (output: %s)", err, string(out))
 	}

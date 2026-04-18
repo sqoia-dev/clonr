@@ -11,8 +11,8 @@
 #   .CACertPath       — absolute path to CA cert PEM, e.g. /etc/clonr/ldap/tls/ca.crt
 #   .ServerCertPath   — absolute path to server cert PEM
 #   .ServerKeyPath    — absolute path to server key PEM
-#   .AdminPassword    — {SSHA512} hashed Directory Manager password (pre-hashed)
-#   .ServicePassword  — {SSHA512} hashed node-reader service account password
+#   .AdminPassword    — plaintext Directory Manager password (slapd hashes via olcPasswordHash)
+#   .ServicePassword  — plaintext node-reader service account password (slapd hashes via olcPasswordHash)
 
 # ── Global config ─────────────────────────────────────────────────────────────
 dn: cn=config
@@ -23,21 +23,17 @@ olcArgsFile: /var/run/slapd/slapd.args
 # Require TLS for all connections. We bind ldaps:// only (port 636).
 # No StartTLS, no plain 389 listener.
 olcSecurity: tls=0
-# {SSHA512} password hashing via slapo-pw-sha2
-olcPasswordHash: {SSHA512}
+# {CRYPT} with glibc $6$ SHA-512-crypt at 100k rounds.
+# Built into stock slapd — no external module required.
+# %.16s tells slapd to take 16 chars from its random salt for slapadd-time hashing.
+olcPasswordHash: {CRYPT}
+olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
 olcLogLevel: stats
 olcTLSCACertificateFile: {{.CACertPath}}
 olcTLSCertificateFile: {{.ServerCertPath}}
 olcTLSCertificateKeyFile: {{.ServerKeyPath}}
 olcTLSVerifyClient: never
 olcTLSProtocolMin: 3.3
-
-# ── Module loading ─────────────────────────────────────────────────────────────
-dn: cn=module{0},cn=config
-objectClass: olcModuleList
-cn: module{0}
-olcModulePath: /usr/lib/openldap
-olcModuleLoad: pw-sha2
 
 # ── Schema includes ────────────────────────────────────────────────────────────
 dn: cn=schema,cn=config
