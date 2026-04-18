@@ -242,25 +242,27 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 }
 
 // generateDiskBootScript returns an iPXE disk boot script for the node, branching
-// on the node's image firmware type:
+// on the node's detected firmware type:
 //
 //   - BIOS: sanboot --no-describe --drive 0x80  (INT 13h, works on SeaBIOS/real BIOS)
-//   - UEFI: exit  (returns to UEFI firmware boot order → grubx64.efi on ESP)
+//   - UEFI: chain grub.efi from clonr server (reliable across OVMF and real firmware)
 //
-// The firmware type is read from the node's associated BaseImage. If the image
-// cannot be fetched (no DB, no BaseImageID, or DB error), UEFI is assumed as the
-// safe default for new images.
+// Firmware source priority: node.DetectedFirmware (set at PXE registration from
+// /sys/firmware/efi check) > image.Firmware > default "uefi".
 func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConfig) ([]byte, error) {
-	firmware := "uefi" // safe default
-	if h.DB != nil && node.BaseImageID != "" {
+	firmware := node.DetectedFirmware
+	if firmware == "" && h.DB != nil && node.BaseImageID != "" {
 		if img, err := h.DB.GetBaseImage(r.Context(), node.BaseImageID); err == nil {
 			if img.Firmware != "" {
 				firmware = string(img.Firmware)
 			}
 		} else {
 			log.Warn().Err(err).Str("image_id", node.BaseImageID).Str("node", node.Hostname).
-				Msg("boot: could not fetch image firmware type — defaulting to uefi")
+				Msg("boot: could not fetch image firmware type")
 		}
+	}
+	if firmware == "" {
+		firmware = "uefi"
 	}
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
 		Msg("boot: generating disk boot script")
@@ -391,25 +393,24 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 // includes part_gpt, search, xfs, ext2, and fat built-in, so insmod is a
 // no-op when the module is already present but harmless otherwise.
 func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
-	const cfg = `# grub.cfg stub served by clonr
-# GRUB loaded this file automatically because it was loaded via HTTP and
-# $prefix resolves to the clonr server. We redirect to the local disk config.
-insmod part_gpt
-insmod search
-insmod xfs
-insmod ext2
-insmod fat
+	const cfg = `# grub.cfg stub served by clonr — redirects to local disk config.
+# No insmod needed: grub.efi built by grub2-install has modules compiled in.
+# Modules can't be loaded over HTTP so insmod would fail silently here.
 
-# Rocky/RHEL: grub.cfg lives on the /boot partition (separate from /)
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then
     configfile ($root)/grub2/grub.cfg
 fi
 
-# Fallback: grub.cfg on the ESP written by grub2-install --efi-directory
 search --file --set=root /EFI/rocky/grub.cfg
 if [ -f ($root)/EFI/rocky/grub.cfg ]; then
     configfile ($root)/EFI/rocky/grub.cfg
+fi
+
+# Last resort: try each disk manually
+set root=(hd0,gpt2)
+if [ -f /grub2/grub.cfg ]; then
+    configfile /grub2/grub.cfg
 fi
 
 echo "clonr: grub.cfg not found on any local partition"
