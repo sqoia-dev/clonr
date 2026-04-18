@@ -905,7 +905,46 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	log.Info().Str("root_uuid", rootUUID).Str("boot_uuid", bootUUID).
 		Msg("finalize/boot: partition UUIDs resolved")
 
-	// ── 3. Discover kernels and generate BLS entries ─────────────────────────
+	// ── 3. Populate /boot with kernels from /usr/lib/modules/ ───────────────
+	// Rocky 10+ uses kernel-install(8) which places kernels at
+	// /usr/lib/modules/<kver>/vmlinuz rather than /boot/vmlinuz-<kver>.
+	// Content-only images have an empty /boot/, so BLS generation and grub.cfg
+	// both fail with "no kernel found". Copy any missing kernels into /boot now
+	// so that all subsequent steps (BLS, dracut, grub.cfg) can find them.
+	modulesDir := filepath.Join(mountRoot, "usr", "lib", "modules")
+	if modEntries, modErr := os.ReadDir(modulesDir); modErr == nil {
+		for _, e := range modEntries {
+			if !e.IsDir() {
+				continue
+			}
+			kver := e.Name()
+			src := filepath.Join(modulesDir, kver, "vmlinuz")
+			dst := filepath.Join(mountRoot, "boot", "vmlinuz-"+kver)
+			if _, statErr := os.Stat(src); statErr != nil {
+				// No vmlinuz under this modules dir — skip.
+				continue
+			}
+			if _, statErr := os.Stat(dst); statErr == nil {
+				// Already present in /boot — nothing to do.
+				continue
+			}
+			data, readErr := os.ReadFile(src)
+			if readErr != nil {
+				log.Warn().Err(readErr).Str("src", src).
+					Msg("finalize/boot: could not read kernel from /usr/lib/modules (non-fatal)")
+				continue
+			}
+			if writeErr := os.WriteFile(dst, data, 0o644); writeErr != nil {
+				log.Warn().Err(writeErr).Str("dst", dst).
+					Msg("finalize/boot: could not copy kernel to /boot (non-fatal)")
+				continue
+			}
+			log.Info().Str("kver", kver).Str("src", src).Str("dst", dst).
+				Msg("finalize/boot: copied vmlinuz from /usr/lib/modules to /boot")
+		}
+	}
+
+	// ── 4. Discover kernels and generate BLS entries ─────────────────────────
 	// List all vmlinuz-* files under /boot to enumerate installed kernels.
 	// One BLS entry is generated per kernel with the fresh machine-id.
 	log.Info().Msg("finalize/boot: generating BLS boot entries")
@@ -915,7 +954,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Warn().Err(err).Msg("WARNING finalize/boot: BLS entry generation failed — node will boot via direct grub.cfg menuentry")
 	}
 
-	// ── 4. RAID dracut prep (if RAID layout) ────────────────────────────────
+	// ── 5. RAID dracut prep (if RAID layout) ────────────────────────────────
 	// Inject mdraid dracut module config, mdadm binary, and udev rules into the
 	// chroot so dracut builds an initramfs that can assemble md arrays on first boot.
 	if len(layout.RAIDArrays) > 0 {
@@ -935,7 +974,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		}
 	}
 
-	// ── 5. Bind-mount virtual filesystems and rebuild initramfs via dracut ───
+	// ── 6. Bind-mount virtual filesystems and rebuild initramfs via dracut ───
 	// dracut's module-setup.sh scripts inspect /proc/cpuinfo, /sys/module/*,
 	// and /dev/fd to detect hardware and build the correct initramfs.
 	// Without these bind-mounts, dracut warns "/proc/ is not mounted" and may
@@ -993,7 +1032,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Msg("finalize/boot: dracut complete")
 	}
 
-	// ── 6. Delete all BLS entries — hand-crafted grub.cfg is sole boot authority ─
+	// ── 7. Delete all BLS entries — hand-crafted grub.cfg is sole boot authority ─
 	// Option A: clonr writes grub.cfg, clonr controls entry order, production
 	// kernel is always set default=0. Rocky's GRUB2 has BLS auto-scan compiled
 	// in and cannot be disabled without rebuilding GRUB. Without nuking all BLS
@@ -1015,7 +1054,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Info().Int("count", len(allBLSEntries)).Msg("finalize/boot: all BLS entries deleted — grub.cfg is sole boot authority")
 	}
 
-	// ── 7. Write minimal hand-crafted grub.cfg ──────────────────────────────
+	// ── 8. Write minimal hand-crafted grub.cfg ──────────────────────────────
 	// Do NOT run grub2-mkconfig: it produces save_env / saved_entry calls that
 	// fail on BIOS RAID (diskfilter writes are not supported) and injects
 	// unnecessary multi-boot / rescue complexity. We generate a minimal config
@@ -1184,6 +1223,46 @@ func generateBLSEntries(mountRoot, machineID, rootUUID string, layout api.DiskLa
 		}
 	}
 
+	// Safety net: if /boot/vmlinuz-* is still empty, fall back to kernels
+	// found at /usr/lib/modules/<kver>/vmlinuz (Rocky 10 kernel-install layout).
+	hasBootKernel := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "vmlinuz-") {
+			hasBootKernel = true
+			break
+		}
+	}
+	if !hasBootKernel {
+		log.Warn().Msg("finalize/boot: no vmlinuz-* in /boot — falling back to /usr/lib/modules/*/vmlinuz for BLS generation")
+		modulesDir := filepath.Join(mountRoot, "usr", "lib", "modules")
+		if modEntries, modErr := os.ReadDir(modulesDir); modErr == nil {
+			for _, e := range modEntries {
+				if !e.IsDir() {
+					continue
+				}
+				kver := e.Name()
+				src := filepath.Join(modulesDir, kver, "vmlinuz")
+				dst := filepath.Join(bootDir, "vmlinuz-"+kver)
+				if _, statErr := os.Stat(src); statErr != nil {
+					continue
+				}
+				data, readErr := os.ReadFile(src)
+				if readErr != nil {
+					continue
+				}
+				if writeErr := os.WriteFile(dst, data, 0o644); writeErr != nil {
+					log.Warn().Err(writeErr).Str("dst", dst).Msg("finalize/boot: BLS fallback: could not copy vmlinuz to /boot")
+					continue
+				}
+				log.Info().Str("kver", kver).Msg("finalize/boot: BLS fallback: copied vmlinuz from /usr/lib/modules to /boot")
+			}
+		}
+		// Re-read /boot after fallback copies.
+		if refreshed, reErr := os.ReadDir(bootDir); reErr == nil {
+			entries = refreshed
+		}
+	}
+
 	written := 0
 	for _, e := range entries {
 		name := e.Name()
@@ -1256,8 +1335,37 @@ func writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID string, layout api.Di
 			break
 		}
 	}
+	// Safety net: fall back to /usr/lib/modules/<kver>/vmlinuz if /boot is empty.
 	if kver == "" {
-		return fmt.Errorf("no kernel found under /boot/vmlinuz-* — cannot write grub.cfg")
+		log.Warn().Msg("finalize/boot: no vmlinuz-* in /boot — falling back to /usr/lib/modules/*/vmlinuz for grub.cfg")
+		modulesDir := filepath.Join(mountRoot, "usr", "lib", "modules")
+		if modEntries, modErr := os.ReadDir(modulesDir); modErr == nil {
+			for _, e := range modEntries {
+				if !e.IsDir() {
+					continue
+				}
+				candidate := e.Name()
+				src := filepath.Join(modulesDir, candidate, "vmlinuz")
+				dst := filepath.Join(bootDir, "vmlinuz-"+candidate)
+				if _, statErr := os.Stat(src); statErr != nil {
+					continue
+				}
+				data, readErr := os.ReadFile(src)
+				if readErr != nil {
+					continue
+				}
+				if writeErr := os.WriteFile(dst, data, 0o644); writeErr != nil {
+					log.Warn().Err(writeErr).Str("dst", dst).Msg("finalize/boot: grub.cfg fallback: could not copy vmlinuz to /boot")
+					continue
+				}
+				log.Info().Str("kver", candidate).Msg("finalize/boot: grub.cfg fallback: copied vmlinuz from /usr/lib/modules to /boot")
+				kver = candidate
+				break
+			}
+		}
+	}
+	if kver == "" {
+		return fmt.Errorf("no kernel found under /boot/vmlinuz-* or /usr/lib/modules/*/vmlinuz — cannot write grub.cfg")
 	}
 
 	// Build kernel cmdline.
