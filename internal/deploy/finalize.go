@@ -808,6 +808,7 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 		"--removable",
 		"--no-nvram",
 		"--recheck",
+		"--force",
 	}
 	log.Info().Strs("chroot_args", args[1:]).Msg("finalize/boot: running grub2-install --target=x86_64-efi inside chroot")
 	if err := runAndLog(ctx, "grub2-install-efi-chroot", exec.CommandContext(ctx, "chroot", args...)); err != nil {
