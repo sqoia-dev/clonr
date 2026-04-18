@@ -1,0 +1,39 @@
+[Unit]
+Description=clonr slapd (OpenLDAP daemon — managed by clonr-serverd)
+Documentation=https://github.com/sqoia-dev/clonr
+After=network.target
+# Ensure the distro slapd is masked (done by clonr-serverd during Enable()).
+# This unit conflicts with the distro unit to prevent dual-running.
+Conflicts=slapd.service
+
+[Service]
+Type=forking
+User=ldap
+Group=ldap
+PIDFile=/var/run/slapd/slapd.pid
+RuntimeDirectory=slapd
+RuntimeDirectoryMode=0755
+
+ExecStart=/usr/sbin/slapd \
+    -F /etc/clonr/ldap/slapd.d \
+    -h ldaps://0.0.0.0:636 \
+    -u ldap \
+    -g ldap
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart automatically if slapd crashes. Do NOT restart if stopped by
+# systemctl stop (clonr-serverd calls that explicitly on Disable()).
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+
+# Security hardening — slapd does not need most kernel capabilities.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,47 @@
+# ou-seed.ldif.tmpl — data DIT seed for clonr LDAP module.
+# Loaded via ldapadd against the mdb database (-n 1) after slapd is running.
+# Creates the base DN entry, standard OUs, and the node-reader service account.
+#
+# Template fields:
+#   .BaseDN          — e.g. "dc=cluster,dc=local"
+#   .DC1             — first DC component, e.g. "cluster"
+#   .DC2             — second DC component, e.g. "local"
+#   .ServicePassword — plaintext password for the node-reader account
+#                      (slapd will hash it using the configured olcPasswordHash)
+
+# Base DN entry
+dn: {{.BaseDN}}
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+dc: {{.DC1}}
+o: {{.DC1}}
+
+# OU: people — POSIX users
+dn: ou=people,{{.BaseDN}}
+objectClass: top
+objectClass: organizationalUnit
+ou: people
+
+# OU: groups — POSIX groups
+dn: ou=groups,{{.BaseDN}}
+objectClass: top
+objectClass: organizationalUnit
+ou: groups
+
+# OU: services — internal service accounts
+dn: ou=services,{{.BaseDN}}
+objectClass: top
+objectClass: organizationalUnit
+ou: services
+
+# node-reader service account — read-only access to ou=people and ou=groups.
+# Used by sssd on deployed nodes. The admin (Directory Manager) credentials
+# never leave clonr-serverd and are never written to any node asset.
+dn: cn=node-reader,ou=services,{{.BaseDN}}
+objectClass: top
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: node-reader
+description: clonr node read-only service account (managed by clonr-serverd)
+userPassword: {{.ServicePassword}}

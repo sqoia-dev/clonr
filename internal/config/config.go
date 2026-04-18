@@ -27,6 +27,17 @@ type ServerConfig struct {
 	// From CLONR_VERIFY_TIMEOUT (Go duration string, e.g. "5m"). Default: 5 minutes.
 	VerifyTimeout   time.Duration `json:"verify_timeout"`   // CLONR_VERIFY_TIMEOUT; default 5m
 	PXE             PXEConfig     `json:"pxe"`
+
+	// LDAP module directories.
+	// LDAPDataDir is the root for slapd mdb files and backups.
+	// Default: /var/lib/clonr/ldap
+	LDAPDataDir   string `json:"ldap_data_dir"`   // CLONR_LDAP_DATA_DIR
+	// LDAPConfigDir is where the slapd.d cn=config tree and TLS certs live.
+	// Default: /etc/clonr/ldap
+	LDAPConfigDir string `json:"ldap_config_dir"` // CLONR_LDAP_CONFIG_DIR
+	// LDAPPKIDir is where the CA key and certificate are stored.
+	// Default: /etc/clonr/pki
+	LDAPPKIDir    string `json:"ldap_pki_dir"`    // CLONR_LDAP_PKI_DIR
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -80,6 +91,9 @@ func LoadServerConfig() ServerConfig {
 		ClonrBinPath:  envOrDefault("CLONR_BIN_PATH", "/usr/local/bin/clonr"),
 		VerifyTimeout: parseVerifyTimeout(),
 		PXE:           LoadPXEConfig(),
+		LDAPDataDir:   envOrDefault("CLONR_LDAP_DATA_DIR", "/var/lib/clonr/ldap"),
+		LDAPConfigDir: envOrDefault("CLONR_LDAP_CONFIG_DIR", "/etc/clonr/ldap"),
+		LDAPPKIDir:    envOrDefault("CLONR_LDAP_PKI_DIR", "/etc/clonr/pki"),
 	}
 }
 

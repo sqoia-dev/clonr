@@ -1,0 +1,22 @@
+// polkit rule: grant the clonr service user exactly start|stop|restart|reload
+// on clonr-slapd.service — nothing else, no other units.
+//
+// This allows clonr-serverd (running as the clonr user) to manage its own
+// slapd instance without requiring full root access to systemctl.
+// Privileged operations at Enable() time (slapadd, cert writes, systemctl mask)
+// still run as root — this rule is only for runtime management.
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "clonr") {
+
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+
+        if (unit == "clonr-slapd.service" &&
+            (verb == "start" || verb == "stop" ||
+             verb == "restart" || verb == "reload")) {
+            return polkit.Result.YES;
+        }
+    }
+});

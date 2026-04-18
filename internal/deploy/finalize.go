@@ -215,6 +215,19 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		log.Info().Int("devices", len(cfg.IBConfig)).Msg("finalize: InfiniBand/IPoIB configuration written")
 	}
 
+	// LDAP module — write sssd.conf, ldap.conf, and CA bundle into the deployed
+	// filesystem so the node can authenticate users via the clonr LDAP server.
+	if cfg.LDAPConfig != nil {
+		log.Info().Str("base_dn", cfg.LDAPConfig.BaseDN).Msg("finalize: writing LDAP client configuration")
+		if err := writeLDAPConfig(ctx, mountRoot, cfg.LDAPConfig); err != nil {
+			// Non-fatal: LDAP config failure should not abort a deployment.
+			// The node will boot without LDAP; operator can re-image to add LDAP.
+			log.Warn().Err(err).Msg("WARNING: finalize: LDAP config failed (non-fatal)")
+		} else {
+			log.Info().Msg("finalize: LDAP client configuration written")
+		}
+	}
+
 	return nil
 }
 
@@ -1680,4 +1693,196 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return fmt.Errorf("copyFile: copy: %w", err)
 	}
 	return nil
+}
+
+// writeLDAPConfig writes the node-side LDAP client configuration into the deployed
+// filesystem rooted at mountRoot. This includes:
+// (uses the package-level logger() like other finalize helpers)
+//   - /etc/sssd/sssd.conf (sssd authentication configuration)
+//   - /etc/openldap/ldap.conf (OpenLDAP client tools config)
+//   - CA certificate in three locations (system trust, openldap, sssd)
+//   - Enabling sssd.service in the systemd chroot
+//   - Running update-ca-trust in the chroot
+//
+// The LDAPNodeConfig carries only the read-only service account credentials;
+// the Directory Manager password is never present here.
+func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNodeConfig) error {
+	if ldapCfg == nil {
+		return nil
+	}
+
+	log := logger()
+
+	// Derive domain name from base DN for sssd domain config.
+	domain := ldapDomainFromBaseDN(ldapCfg.BaseDN)
+
+	// ── sssd.conf ─────────────────────────────────────────────────────────────
+	sssdDir := filepath.Join(mountRoot, "etc", "sssd")
+	if err := os.MkdirAll(sssdDir, 0o700); err != nil {
+		return fmt.Errorf("ldap finalize: mkdir sssd dir: %w", err)
+	}
+
+	sssdContent := renderSSSDConf(ldapCfg, domain)
+	sssdPath := filepath.Join(sssdDir, "sssd.conf")
+	if err := os.WriteFile(sssdPath, []byte(sssdContent), 0o600); err != nil {
+		return fmt.Errorf("ldap finalize: write sssd.conf: %w", err)
+	}
+
+	// sssd PKI dir for the CA cert (some sssd builds look here).
+	sssdPKIDir := filepath.Join(sssdDir, "pki")
+	if err := os.MkdirAll(sssdPKIDir, 0o755); err != nil {
+		return fmt.Errorf("ldap finalize: mkdir sssd pki dir: %w", err)
+	}
+
+	// ── ldap.conf ─────────────────────────────────────────────────────────────
+	ldapConfDir := filepath.Join(mountRoot, "etc", "openldap")
+	if err := os.MkdirAll(ldapConfDir, 0o755); err != nil {
+		return fmt.Errorf("ldap finalize: mkdir openldap dir: %w", err)
+	}
+	ldapConfContent := renderLDAPConf(ldapCfg)
+	if err := os.WriteFile(filepath.Join(ldapConfDir, "ldap.conf"), []byte(ldapConfContent), 0o644); err != nil {
+		return fmt.Errorf("ldap finalize: write ldap.conf: %w", err)
+	}
+
+	// OpenLDAP certs dir for tools that don't use the system trust store.
+	openldapCertsDir := filepath.Join(ldapConfDir, "certs")
+	if err := os.MkdirAll(openldapCertsDir, 0o755); err != nil {
+		return fmt.Errorf("ldap finalize: mkdir openldap certs dir: %w", err)
+	}
+
+	// ── CA certificate — three locations ─────────────────────────────────────
+	caPEM := []byte(ldapCfg.CACertPEM)
+
+	// 1. System trust anchor (update-ca-trust reads from here).
+	sysAnchorDir := filepath.Join(mountRoot, "etc", "pki", "ca-trust", "source", "anchors")
+	if err := os.MkdirAll(sysAnchorDir, 0o755); err != nil {
+		return fmt.Errorf("ldap finalize: mkdir ca-trust anchors: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(sysAnchorDir, "clonr-ca.crt"), caPEM, 0o644); err != nil {
+		return fmt.Errorf("ldap finalize: write system CA: %w", err)
+	}
+
+	// 2. OpenLDAP certs dir.
+	if err := os.WriteFile(filepath.Join(openldapCertsDir, "clonr-ca.pem"), caPEM, 0o644); err != nil {
+		return fmt.Errorf("ldap finalize: write openldap CA: %w", err)
+	}
+
+	// 3. sssd PKI dir.
+	if err := os.WriteFile(filepath.Join(sssdPKIDir, "clonr-ca.pem"), caPEM, 0o644); err != nil {
+		return fmt.Errorf("ldap finalize: write sssd CA: %w", err)
+	}
+
+	// ── update-ca-trust in chroot ─────────────────────────────────────────────
+	// Run update-ca-trust inside the chroot so the system trust bundle is built
+	// from the anchors we just wrote. Non-fatal — the anchor file is already in place.
+	if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "update-ca-trust", "extract").CombinedOutput(); err != nil {
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize: update-ca-trust in chroot failed (non-fatal) — CA anchor file is still in place")
+	}
+
+	// ── Enable sssd.service in chroot ────────────────────────────────────────
+	// sssd must start on first boot for user authentication to work.
+	if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "systemctl", "enable", "sssd.service").CombinedOutput(); err != nil {
+		// Non-fatal: the unit file may not exist if sssd is not installed.
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize: systemctl enable sssd.service in chroot failed (non-fatal) — sssd may not be installed in the image")
+	}
+
+	// ── Enable oddjobd for pam_mkhomedir (if available) ───────────────────────
+	if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "systemctl", "enable", "oddjobd.service").CombinedOutput(); err != nil {
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize: systemctl enable oddjobd.service in chroot failed (non-fatal)")
+	}
+
+	return nil
+}
+
+// renderSSSDConf renders the sssd.conf content for a node.
+// Inline template instead of file-based to avoid importing the ldap package from deploy.
+func renderSSSDConf(cfg *api.LDAPNodeConfig, domain string) string {
+	return fmt.Sprintf(`# sssd.conf — generated by clonr-serverd
+# DO NOT EDIT — managed by clonr. Regenerated on each reimage.
+
+[sssd]
+services = nss, pam
+config_file_version = 2
+domains = %s
+
+[nss]
+homedir_substring = /home
+
+[pam]
+
+[domain/%s]
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = ldap
+access_provider = ldap
+
+ldap_uri = %s
+ldap_search_base = %s
+
+ldap_default_bind_dn = %s
+ldap_default_authtok_type = password
+ldap_default_authtok = %s
+
+ldap_user_object_class = posixAccount
+ldap_user_search_base = ou=people,%s
+ldap_user_name = uid
+ldap_user_uid_number = uidNumber
+ldap_user_gid_number = gidNumber
+ldap_user_home_directory = homeDirectory
+ldap_user_shell = loginShell
+ldap_user_gecos = gecos
+ldap_user_shadow_expire = shadowExpire
+
+ldap_group_object_class = posixGroup
+ldap_group_search_base = ou=groups,%s
+ldap_group_name = cn
+ldap_group_gid_number = gidNumber
+ldap_group_member = memberUid
+ldap_group_membership_check_against_member_of = false
+
+ldap_tls_reqcert = demand
+ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clonr-ca.crt
+
+ldap_account_expire_policy = shadow
+ldap_access_order = expire
+
+ldap_id_use_start_tls = false
+ldap_referrals = false
+enumerate = false
+cache_credentials = true
+entry_cache_timeout = 300
+offline_credentials_expiration = 7
+`, domain, domain,
+		cfg.ServerURI, cfg.BaseDN,
+		cfg.ServiceBindDN, cfg.ServiceBindPasswd,
+		cfg.BaseDN, cfg.BaseDN)
+}
+
+// renderLDAPConf renders the /etc/openldap/ldap.conf content for a node.
+func renderLDAPConf(cfg *api.LDAPNodeConfig) string {
+	return fmt.Sprintf(`# /etc/openldap/ldap.conf — generated by clonr-serverd
+# DO NOT EDIT — managed by clonr.
+
+URI     %s
+BASE    %s
+TLS_CACERT /etc/openldap/certs/clonr-ca.pem
+TLS_REQCERT demand
+`, cfg.ServerURI, cfg.BaseDN)
+}
+
+// ldapDomainFromBaseDN extracts the first DC component from a base DN.
+// "dc=cluster,dc=local" → "cluster"
+func ldapDomainFromBaseDN(baseDN string) string {
+	parts := strings.SplitN(baseDN, ",", 2)
+	if len(parts) > 0 {
+		p := strings.TrimSpace(parts[0])
+		lower := strings.ToLower(p)
+		if strings.HasPrefix(lower, "dc=") {
+			return lower[3:]
+		}
+	}
+	return "cluster"
 }

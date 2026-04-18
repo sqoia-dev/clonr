@@ -24,6 +24,7 @@ import (
 	"github.com/sqoia-dev/clonr/internal/config"
 	"github.com/sqoia-dev/clonr/internal/db"
 	"github.com/sqoia-dev/clonr/internal/image"
+	ldapmodule "github.com/sqoia-dev/clonr/internal/ldap"
 	"github.com/sqoia-dev/clonr/internal/power"
 	ipmipower "github.com/sqoia-dev/clonr/internal/power/ipmi"
 	proxmoxpower "github.com/sqoia-dev/clonr/internal/power/proxmox"
@@ -50,6 +51,7 @@ type Server struct {
 	powerCache          *PowerCache
 	powerRegistry       *power.Registry
 	reimageOrchestrator *reimage.Orchestrator
+	ldapMgr             *ldapmodule.Manager
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
 	http                *http.Server
@@ -107,6 +109,8 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		log.Warn().Msg("CLONR_SESSION_SECRET not set — generated ephemeral session secret (sessions will not survive restarts)")
 	}
 
+	ldapMgr := ldapmodule.New(cfg, database)
+
 	s := &Server{
 		cfg:                 cfg,
 		db:                  database,
@@ -117,6 +121,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		powerCache:          NewPowerCache(15 * time.Second),
 		powerRegistry:       registry,
 		reimageOrchestrator: reimageOrch,
+		ldapMgr:             ldapMgr,
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -144,6 +149,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	go s.runLogPurger(ctx)
 	// ADR-0008: Post-reboot verification timeout scanner.
 	go s.runVerifyTimeoutScanner(ctx)
+	// LDAP module health checker.
+	s.ldapMgr.StartBackgroundWorkers(ctx)
 }
 
 // runVerifyTimeoutScanner ticks every 60 seconds and marks as timed-out any node
@@ -268,7 +275,15 @@ func (s *Server) buildRouter() chi.Router {
 		BuildTime: s.buildInfo.BuildTime,
 	}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
-	nodes := &handlers.NodesHandler{DB: s.db}
+	nodes := &handlers.NodesHandler{
+		DB: s.db,
+		LDAPNodeConfig: func(ctx context.Context) (*api.LDAPNodeConfig, error) {
+			return s.ldapMgr.NodeConfig(ctx)
+		},
+		RecordNodeLDAPConfigured: func(ctx context.Context, nodeID, configHash string) error {
+			return s.ldapMgr.RecordNodeConfigured(ctx, nodeID, configHash)
+		},
+	}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	// Use NewFactory so the build semaphore is initialised (capacity from
@@ -517,6 +532,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/deploy/progress/stream", progress.StreamProgress)
 			r.Get("/deploy/progress/{mac}", progress.GetProgress)
 			r.Get("/deploy/progress", progress.ListProgress)
+
+			// LDAP module — admin-only management routes.
+			r.With(requireRole("admin")).Group(func(r chi.Router) {
+				ldapmodule.RegisterRoutes(r, s.ldapMgr)
+			})
 		})
 	})
 

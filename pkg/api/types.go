@@ -307,6 +307,28 @@ const (
 	NodeStateDeployVerifyTimeout NodeState = "deploy_verify_timeout"
 )
 
+// LDAPNodeConfig holds the read-only LDAP client configuration injected into
+// a node's deployed filesystem during finalization. It carries the service
+// account credentials — NEVER the Directory Manager (admin) credentials.
+// The admin password is held only in clonr-serverd's memory and is never
+// templated into any node asset.
+type LDAPNodeConfig struct {
+	// ServerURI is the ldaps:// URI of the slapd server, e.g. "ldaps://clonr-server:636".
+	ServerURI string `json:"server_uri"`
+	// BaseDN is the LDAP base DN, e.g. "dc=cluster,dc=local".
+	BaseDN string `json:"base_dn"`
+	// ServiceBindDN is the read-only service account DN used by nodes.
+	// e.g. "cn=node-reader,ou=services,dc=cluster,dc=local"
+	ServiceBindDN string `json:"service_bind_dn"`
+	// ServiceBindPasswd is the plaintext password for the service account.
+	// This is stored in sssd.conf on each node and should be treated as
+	// a low-privilege read-only credential.
+	ServiceBindPasswd string `json:"service_bind_passwd"`
+	// CACertPEM is the PEM-encoded CA certificate used to verify the slapd TLS cert.
+	// Written to multiple locations on the node during finalization.
+	CACertPEM string `json:"ca_cert_pem"`
+}
+
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
@@ -333,6 +355,13 @@ type NodeConfig struct {
 	// DiskLayoutOverride, when non-nil, completely replaces the image's disk
 	// layout for this specific node. Takes highest priority in resolution.
 	DiskLayoutOverride *DiskLayout       `json:"disk_layout_override,omitempty"`
+	// LDAPConfig, when non-nil, causes finalization to write sssd.conf, ldap.conf,
+	// and the CA certificate bundle into the deployed filesystem so the node can
+	// authenticate users against the clonr LDAP server.
+	// ServiceBindDN/ServiceBindPasswd carry the read-only node-reader account;
+	// the admin (Directory Manager) credentials are NEVER present here.
+	LDAPConfig *LDAPNodeConfig `json:"ldap_config,omitempty"`
+
 	// ExtraMounts holds additional /etc/fstab entries written during finalization.
 	// The effective list is group mounts merged with node mounts; use
 	// EffectiveExtraMounts to resolve. Stored as node-level on NodeConfig only

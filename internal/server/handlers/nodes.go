@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,6 +45,13 @@ func autoHostname(mac string) string {
 // NodesHandler handles all /api/v1/nodes routes.
 type NodesHandler struct {
 	DB *db.DB
+	// LDAPNodeConfig, when non-nil, is called during RegisterNode to inject the
+	// current LDAP client config into the NodeConfig returned to the deploy agent.
+	// Returns nil if the LDAP module is disabled or not ready.
+	LDAPNodeConfig func(ctx context.Context) (*api.LDAPNodeConfig, error)
+	// RecordNodeLDAPConfigured, when non-nil, is called from DeployComplete to record
+	// that a node's LDAP client config was applied and to lock the base DN on first use.
+	RecordNodeLDAPConfigured func(ctx context.Context, nodeID, configHash string) error
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -398,6 +406,16 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 	// Pre-merge group extra mounts so the deploy client's ExtraMounts is complete.
 	nodeCfg = mergeGroupExtraMounts(r.Context(), h.DB, nodeCfg)
 
+	// Populate LDAP client config if the module is enabled. This allows the
+	// deploy agent to write sssd.conf + CA into the deployed filesystem.
+	if h.LDAPNodeConfig != nil && action == "deploy" {
+		if ldapCfg, err := h.LDAPNodeConfig(r.Context()); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch LDAP config (non-fatal)")
+		} else {
+			nodeCfg.LDAPConfig = ldapCfg
+		}
+	}
+
 	writeJSON(w, http.StatusOK, api.RegisterResponse{
 		NodeConfig: &nodeCfg,
 		Action:     action,
@@ -438,6 +456,24 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
+
+	// Record LDAP configuration for this node if the module is enabled.
+	// This locks the base DN on the first node to be configured.
+	if h.RecordNodeLDAPConfigured != nil {
+		// Re-read the node to get the current config hash. If the node had LDAP
+		// config injected at registration time the deploy agent wrote sssd.conf; we
+		// record that fact here using the node's hostname as a stable identifier.
+		// The hash is computed server-side from the current LDAP config so it stays
+		// in sync even if the config changed between registration and deploy-complete.
+		//
+		// Non-fatal: LDAP recording failure should not fail the deploy-complete response.
+		if _, err := h.DB.GetNodeConfig(r.Context(), id); err == nil {
+			if err := h.RecordNodeLDAPConfigured(r.Context(), id, "deploy-complete"); err != nil {
+				log.Warn().Err(err).Str("node_id", id).Msg("deploy-complete: LDAP RecordNodeConfigured failed (non-fatal)")
+			}
+		}
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

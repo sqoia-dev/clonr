@@ -1,0 +1,121 @@
+# slapd-seed.ldif.tmpl — cn=config seed LDIF for clonr LDAP module.
+# Rendered once during Enable() and loaded via slapadd -n 0.
+# After seeding, clonr-serverd NEVER modifies the cn=config tree.
+#
+# Template fields:
+#   .BaseDN           — e.g. "dc=cluster,dc=local"
+#   .DC1              — first DC component, e.g. "cluster"
+#   .DC2              — second DC component, e.g. "local"
+#   .ConfigDir        — absolute path to slapd.d/, e.g. /etc/clonr/ldap/slapd.d
+#   .DataDir          — absolute path to mdb data dir, e.g. /var/lib/clonr/ldap/data
+#   .CACertPath       — absolute path to CA cert PEM, e.g. /etc/clonr/ldap/tls/ca.crt
+#   .ServerCertPath   — absolute path to server cert PEM
+#   .ServerKeyPath    — absolute path to server key PEM
+#   .AdminPassword    — {SSHA512} hashed Directory Manager password (pre-hashed)
+#   .ServicePassword  — {SSHA512} hashed node-reader service account password
+
+# ── Global config ─────────────────────────────────────────────────────────────
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcPidFile: /var/run/slapd/slapd.pid
+olcArgsFile: /var/run/slapd/slapd.args
+# Require TLS for all connections. We bind ldaps:// only (port 636).
+# No StartTLS, no plain 389 listener.
+olcSecurity: tls=0
+# {SSHA512} password hashing via slapo-pw-sha2
+olcPasswordHash: {SSHA512}
+olcLogLevel: stats
+olcTLSCACertificateFile: {{.CACertPath}}
+olcTLSCertificateFile: {{.ServerCertPath}}
+olcTLSCertificateKeyFile: {{.ServerKeyPath}}
+olcTLSVerifyClient: never
+olcTLSProtocolMin: 3.3
+
+# ── Module loading ─────────────────────────────────────────────────────────────
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module{0}
+olcModulePath: /usr/lib/openldap
+olcModuleLoad: pw-sha2
+
+# ── Schema includes ────────────────────────────────────────────────────────────
+dn: cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: schema
+
+include: file:///etc/openldap/schema/core.ldif
+include: file:///etc/openldap/schema/cosine.ldif
+include: file:///etc/openldap/schema/inetorgperson.ldif
+include: file:///etc/openldap/schema/nis.ldif
+
+# ── Frontend database (cn=frontend) ───────────────────────────────────────────
+dn: olcDatabase={-1}frontend,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcFrontendConfig
+olcDatabase: {-1}frontend
+olcAccess: to * by * read
+
+# ── cn=config database (config backend) ───────────────────────────────────────
+dn: olcDatabase={0}config,cn=config
+objectClass: olcDatabaseConfig
+olcDatabase: {0}config
+# Only root (via SASL/EXTERNAL or local socket) may manage cn=config.
+# clonr-serverd seeds this once and never touches it again.
+olcRootDN: cn=config
+olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none
+
+# ── mdb (user data) database ──────────────────────────────────────────────────
+dn: olcDatabase={1}mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {1}mdb
+olcDbDirectory: {{.DataDir}}
+olcSuffix: {{.BaseDN}}
+olcRootDN: cn=Directory Manager,{{.BaseDN}}
+olcRootPW: {{.AdminPassword}}
+# 1 GB mdb map size
+olcDbMaxSize: 1073741824
+# Checkpoint every 512KB written or every 5 minutes
+olcDbCheckpoint: 512 5
+olcLastMod: TRUE
+
+# ── Indices ────────────────────────────────────────────────────────────────────
+dn: olcDatabase={1}mdb,cn=config
+olcDbIndex: uid eq
+olcDbIndex: uidNumber eq
+olcDbIndex: gidNumber eq
+olcDbIndex: memberUid eq
+olcDbIndex: cn eq,sub
+olcDbIndex: entryCSN eq
+olcDbIndex: entryUUID eq
+
+# ── ACLs ──────────────────────────────────────────────────────────────────────
+# Rule order matters: first match wins.
+#
+# 1. Directory Manager has full access (implicit via olcRootDN — not needed here,
+#    but we add an explicit ACL for clarity).
+# 2. Service account (node-reader) has read-only access to ou=people and ou=groups.
+# 3. Authenticated users may read their own entry.
+# 4. Anonymous access denied everywhere (we're ldaps:// only, but belt-and-suspenders).
+dn: olcDatabase={1}mdb,cn=config
+olcAccess: to dn.subtree="ou=people,{{.BaseDN}}" attrs=userPassword
+  by self write
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by anonymous auth
+  by * none
+olcAccess: to dn.subtree="ou=people,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by dn.exact="cn=node-reader,ou=services,{{.BaseDN}}" read
+  by self read
+  by * none
+olcAccess: to dn.subtree="ou=groups,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by dn.exact="cn=node-reader,ou=services,{{.BaseDN}}" read
+  by * none
+olcAccess: to dn.subtree="ou=services,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by * none
+olcAccess: to *
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by * none
