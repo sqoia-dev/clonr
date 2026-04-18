@@ -146,12 +146,14 @@ const App = {
             const parts = h.split('/');
             if (parts.length === 3 && parts[2] === 'users') LDAPPages.users();
             else if (parts.length === 3 && parts[2] === 'groups') LDAPPages.groups();
+            else if (parts.length === 3 && parts[2] === 'logs') LDAPPages.logs();
             else LDAPPages.settings();
         });
         Router.register('/ldap/*',   (h)  => {
             const parts = h.split('/');
             if (parts[2] === 'users') LDAPPages.users();
             else if (parts[2] === 'groups') LDAPPages.groups();
+            else if (parts[2] === 'logs') LDAPPages.logs();
             else LDAPPages.settings();
         });
     },

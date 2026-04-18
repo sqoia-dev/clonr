@@ -29,6 +29,10 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Post("/ldap/users/{uid}/lock", mgr.handleLockUser)
 	r.Post("/ldap/users/{uid}/unlock", mgr.handleUnlockUser)
 
+	// Logs
+	r.Get("/ldap/logs", mgr.handleLogs)
+	r.Get("/ldap/logs/stream", mgr.handleLogsStream)
+
 	// Groups
 	r.Get("/ldap/groups", mgr.handleListGroups)
 	r.Post("/ldap/groups", mgr.handleCreateGroup)

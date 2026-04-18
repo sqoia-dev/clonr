@@ -293,6 +293,8 @@ const API = {
         deleteGroup(cn)                 { return API.del(`/ldap/groups/${encodeURIComponent(cn)}`); },
         addMember(cn, uid)              { return API.post(`/ldap/groups/${encodeURIComponent(cn)}/members`, { uid }); },
         removeMember(cn, uid)           { return API.del(`/ldap/groups/${encodeURIComponent(cn)}/members/${encodeURIComponent(uid)}`); },
+        // Logs
+        logs(params = {})               { return API.get('/ldap/logs', params); },
     },
     resume: {
         // resume — POST to resume an interrupted image build.

@@ -725,4 +725,157 @@ const LDAPPages = {
             App.toast('Remove failed: ' + err.message, 'error');
         }
     },
+
+    // ── Logs page ─────────────────────────────────────────────────────────────
+
+    // _ldapLogStream holds the active EventSource for the LDAP log follow mode.
+    // Disconnected on page navigation via the Router teardown (App._logStream).
+    // We reuse App._logStream so the Router's existing disconnect-on-navigate
+    // hook cleans it up automatically without any extra wiring.
+
+    async logs() {
+        App.render(`
+            <div class="page-header">
+                <div>
+                    <div class="page-title">LDAP Logs</div>
+                    <div class="page-subtitle">Journal of clonr-slapd.service</div>
+                </div>
+            </div>
+
+            <div class="log-filter-bar">
+                <div class="follow-toggle-wrap">
+                    <label class="toggle">
+                        <input type="checkbox" id="ldap-follow-toggle" onchange="LDAPPages.toggleFollow(this.checked)">
+                        Live
+                    </label>
+                    <span class="follow-indicator" id="ldap-follow-ind">
+                        <span class="follow-dot"></span>static
+                    </span>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="LDAPPages.clearLogs()">Clear</button>
+            </div>
+
+            <div id="ldap-log-viewer" class="log-viewer tall"></div>
+        `);
+
+        await LDAPPages._loadLogs();
+    },
+
+    async _loadLogs() {
+        const viewer = document.getElementById('ldap-log-viewer');
+        if (!viewer) return;
+
+        const followToggle = document.getElementById('ldap-follow-toggle');
+        if (App._logStream && followToggle && followToggle.checked) {
+            // Already streaming — nothing to do.
+            return;
+        }
+
+        try {
+            const resp = await API.ldap.logs({ lines: '500' });
+            const lines = Array.isArray(resp) ? resp : [];
+
+            if (!App._logStream) {
+                App._logStream = new LogStream(viewer);
+            }
+
+            // Convert raw journal lines into LogEntry-shaped objects for the
+            // existing LogStream renderer. We set level=info and put the raw
+            // line into message — the journal already contains timestamps inline.
+            const entries = lines.map(l => ({
+                timestamp: l.timestamp || new Date().toISOString(),
+                level: 'info',
+                message: l.line || '',
+            }));
+            App._logStream.loadEntries(entries);
+
+            if (!lines.length) {
+                viewer.innerHTML = `<div class="empty-state" style="padding:30px">
+                    <div class="empty-state-text">No log entries yet — slapd may not have started</div>
+                </div>`;
+            }
+        } catch (e) {
+            const viewer2 = document.getElementById('ldap-log-viewer');
+            if (viewer2) {
+                viewer2.innerHTML = `<div style="padding:12px;color:var(--error);font-size:12px;font-family:var(--font-mono)">Error: ${escHtml(e.message)}</div>`;
+            }
+        }
+    },
+
+    clearLogs() {
+        if (App._logStream) App._logStream.clear();
+    },
+
+    toggleFollow(enabled) {
+        const viewer = document.getElementById('ldap-log-viewer');
+        const ind    = document.getElementById('ldap-follow-ind');
+        if (!viewer) return;
+
+        if (enabled) {
+            if (!App._logStream) App._logStream = new LogStream(viewer);
+
+            // Build the SSE stream URL for the LDAP log endpoint.
+            const url = new URL('/api/v1/ldap/logs/stream', window.location.origin);
+            const tok = document.querySelector('meta[name="clonr-token"]');
+            if (tok && tok.content) url.searchParams.set('token', tok.content);
+
+            // Swap LogStream's internal URL by monkey-patching _attemptConnect
+            // for this instance so it hits /api/v1/ldap/logs/stream.
+            // We do this by overriding _attemptConnect on the instance rather
+            // than modifying the shared LogStream class.
+            const stream = App._logStream;
+            stream._ldapStreamURL = url.toString();
+            stream._attemptConnect = function() {
+                const src = new EventSource(this._ldapStreamURL);
+                this.source = src;
+
+                src.onopen = () => {
+                    this._retryCount = 0;
+                    if (this._onConnect) this._onConnect();
+                };
+
+                src.onerror = () => {
+                    if (this.source) { this.source.close(); this.source = null; }
+                    if (!this._shouldReconnect) return;
+                    this._retryCount++;
+                    if (this._retryCount > this._maxRetries) {
+                        this._shouldReconnect = false;
+                        if (this._onDisconnect) this._onDisconnect(true);
+                        return;
+                    }
+                    if (this._onDisconnect) this._onDisconnect(false);
+                    const delay = 3000 * Math.pow(2, this._retryCount - 1);
+                    setTimeout(() => { if (this._shouldReconnect) this._attemptConnect(); }, delay);
+                };
+
+                src.onmessage = (evt) => {
+                    try {
+                        const raw = JSON.parse(evt.data);
+                        // Map raw journal line to LogEntry shape.
+                        this.appendEntry({
+                            timestamp: raw.timestamp || new Date().toISOString(),
+                            level: 'info',
+                            message: raw.line || '',
+                        });
+                    } catch (_) {}
+                };
+
+                this._shouldReconnect = true;
+            };
+
+            stream.setAutoScroll(true);
+            stream.onConnect(() => {
+                if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
+            });
+            stream.onDisconnect(() => {
+                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
+            });
+            stream.connect();
+        } else {
+            if (App._logStream) {
+                App._logStream.disconnect();
+                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
+            }
+        }
+    },
 };
