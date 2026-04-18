@@ -970,11 +970,10 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		log.Warn().Err(err).Str("path", espMachineDir).
 			Msg("finalize/boot: could not create ESP machine-id dir (non-fatal — dracut may fail)")
 	}
-	if bootEntries, readErr := os.ReadDir(filepath.Join(mountRoot, "boot")); readErr == nil {
-		for _, e := range bootEntries {
-			if strings.HasPrefix(e.Name(), "vmlinuz-") {
-				kver := strings.TrimPrefix(e.Name(), "vmlinuz-")
-				_ = os.MkdirAll(filepath.Join(espMachineDir, kver), 0o755)
+	if modEntries, readErr := os.ReadDir(filepath.Join(mountRoot, "lib", "modules")); readErr == nil {
+		for _, e := range modEntries {
+			if e.IsDir() && e.Name() != "" {
+				_ = os.MkdirAll(filepath.Join(espMachineDir, e.Name()), 0o755)
 			}
 		}
 	}
