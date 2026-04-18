@@ -6004,20 +6004,7 @@ const Pages = {
                             <div id="build-iso-role-preview" class="form-hint" style="margin-top:8px;min-height:18px"></div>
                         </div>
 
-                        <div class="form-group" style="margin-bottom:16px">
-                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Firmware</label>
-                            <div style="display:flex;gap:20px;align-items:center">
-                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
-                                    <input type="radio" name="firmware" value="uefi" id="build-iso-fw-uefi" checked>
-                                    <span>UEFI <span class="badge badge-neutral badge-sm" style="margin-left:2px">default</span></span>
-                                </label>
-                                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
-                                    <input type="radio" name="firmware" value="bios" id="build-iso-fw-bios">
-                                    <span>BIOS <span style="color:var(--text-secondary);font-size:11px">(legacy)</span></span>
-                                </label>
-                            </div>
-                            <div class="form-hint">UEFI: OVMF + ESP partition. BIOS: SeaBIOS + biosboot GPT partition. Use BIOS for legacy HPC nodes without EFI firmware.</div>
-                        </div>
+                        <input type="hidden" name="firmware" value="uefi">
 
                         <div class="form-group" style="margin-bottom:16px">
                             <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">SELinux Mode</label>
