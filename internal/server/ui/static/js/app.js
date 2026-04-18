@@ -6660,7 +6660,7 @@ const Pages = {
         } else if (tab === 'server-info') {
             body = `<div class="card"><div class="card-header"><span class="card-title">Server Info</span></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>`;
         } else {
-            body = `<div class="card"><div class="card-header"><span class="card-title">About clonr</span></div><p class="text-secondary" style="padding:16px">clonr — open-source node cloning and image management for HPC clusters.</p></div>`;
+            body = await Pages._settingsAboutTab();
         }
 
         App.render(`
@@ -6783,6 +6783,51 @@ const Pages = {
                 </div>`;
         } catch (err) {
             return alertBox('Failed to load users: ' + err.message);
+        }
+    },
+
+    async _settingsAboutTab() {
+        try {
+            const info = await API.health.get();
+            const version   = info.version   || 'dev';
+            const commit    = info.commit     || 'unknown';
+            const buildTime = info.build_time || 'unknown';
+            return `
+                <div class="card">
+                    <div class="card-header"><span class="card-title">About clonr</span></div>
+                    <div style="padding:16px 20px;">
+                        <p style="margin:0 0 16px;color:var(--text-secondary);">
+                            clonr — open-source node cloning and image management for HPC clusters.
+                        </p>
+                        <table style="border-collapse:collapse;width:100%;max-width:480px;">
+                            <tbody>
+                                <tr>
+                                    <td style="padding:6px 16px 6px 0;color:var(--text-secondary);white-space:nowrap;font-size:13px;">Version</td>
+                                    <td style="padding:6px 0;font-family:monospace;font-size:13px;">${escHtml(version)}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding:6px 16px 6px 0;color:var(--text-secondary);white-space:nowrap;font-size:13px;">Commit</td>
+                                    <td style="padding:6px 0;font-family:monospace;font-size:13px;">${escHtml(commit)}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding:6px 16px 6px 0;color:var(--text-secondary);white-space:nowrap;font-size:13px;">Built</td>
+                                    <td style="padding:6px 0;font-family:monospace;font-size:13px;">${escHtml(buildTime)}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>`;
+        } catch (err) {
+            return `
+                <div class="card">
+                    <div class="card-header"><span class="card-title">About clonr</span></div>
+                    <div style="padding:16px 20px;">
+                        <p style="margin:0 0 16px;color:var(--text-secondary);">
+                            clonr — open-source node cloning and image management for HPC clusters.
+                        </p>
+                        ${alertBox('Could not load build info: ' + err.message)}
+                    </div>
+                </div>`;
         }
     },
 

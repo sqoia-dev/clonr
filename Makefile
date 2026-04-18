@@ -1,5 +1,7 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags="-X main.version=$(VERSION) -s -w"
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS    := -ldflags="-X main.version=$(VERSION) -X main.commitSHA=$(COMMIT) -X main.buildTime=$(BUILD_TIME) -s -w"
 
 .PHONY: all client server static clean test
 

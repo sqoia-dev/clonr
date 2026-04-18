@@ -20,7 +20,11 @@ import (
 	"github.com/sqoia-dev/clonr/internal/server"
 )
 
-var version = "dev"
+var (
+	version   = "dev"
+	commitSHA = "unknown"
+	buildTime = "unknown"
+)
 
 // imageFirmwareLayoutMismatch returns a non-empty description when img's declared
 // firmware field contradicts its stored default_layout.  Returns "" when consistent.
@@ -243,7 +247,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wire up and start the HTTP server.
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{
+		Version:   version,
+		CommitSHA: commitSHA,
+		BuildTime: buildTime,
+	})
 
 	// Startup firmware/layout consistency audit.
 	// Log warnings for any image whose declared firmware contradicts its stored

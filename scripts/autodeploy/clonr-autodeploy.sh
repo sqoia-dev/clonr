@@ -124,7 +124,11 @@ log "Building clonr-serverd..."
 # Write to a staging path so the running binary is never replaced mid-build.
 # Capture build output to a temp file to avoid pipefail masking errors from sed.
 _BUILD_LOG=$(mktemp /tmp/clonr-build.XXXXXXXX)
-GOTOOLCHAIN=auto "${GOBIN}" build -o "${SERVERD_NEW}" ./cmd/clonr-serverd > "${_BUILD_LOG}" 2>&1 \
+_VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+_LDFLAGS="-X main.version=${_VERSION} -X main.commitSHA=${_COMMIT} -X main.buildTime=${_BUILD_TIME} -s -w"
+GOTOOLCHAIN=auto "${GOBIN}" build -ldflags="${_LDFLAGS}" -o "${SERVERD_NEW}" ./cmd/clonr-serverd > "${_BUILD_LOG}" 2>&1 \
     || { sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"; log "ERROR: clonr-serverd build failed"; exit 1; }
 sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"
 log "clonr-serverd build OK ($(du -h "${SERVERD_NEW}" | cut -f1))"

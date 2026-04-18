@@ -35,7 +35,7 @@ func newNodeScopedTestServer(t *testing.T) (*server.Server, *httptest.Server, st
 		SessionSecure: false,
 	}
 
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{})
 
 	// Bootstrap admin key.
 	rawAdminKey, _, err := server.CreateAPIKey(context.Background(), database, api.KeyScopeAdmin, "test admin key")
@@ -191,7 +191,7 @@ func TestImageAccess_NodeKeyBlockedForOtherImage(t *testing.T) {
 		SessionSecret: "test-session-secret-32-bytes-xxx",
 		SessionSecure: false,
 	}
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -244,7 +244,7 @@ func TestDeployCallbacks_NodeKeyOwnership(t *testing.T) {
 		SessionSecret: "test-session-secret-32-bytes-xxx",
 		SessionSecure: false,
 	}
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

@@ -722,8 +722,10 @@ type ListNodesResponse struct {
 
 // HealthResponse is returned by GET /api/v1/health.
 type HealthResponse struct {
-	Status  string `json:"status"`
-	Version string `json:"version,omitempty"`
+	Status    string `json:"status"`
+	Version   string `json:"version,omitempty"`
+	CommitSHA string `json:"commit,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
 }
 
 // ImageInUseResponse is returned with 409 Conflict when a DELETE /api/v1/images/:id

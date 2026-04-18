@@ -33,7 +33,7 @@ func newTestServer(t *testing.T) (*server.Server, *httptest.Server) {
 		LogLevel:    "error",
 	}
 
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts
@@ -110,7 +110,7 @@ func TestAuth_RequiresToken(t *testing.T) {
 		LogLevel:   "error",
 		// AuthDevMode intentionally false — auth should be enforced.
 	}
-	srv := server.New(cfg, database)
+	srv := server.New(cfg, database, server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 

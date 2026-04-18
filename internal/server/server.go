@@ -32,6 +32,13 @@ import (
 	"github.com/sqoia-dev/clonr/internal/server/ui"
 )
 
+// BuildInfo holds build-time metadata injected via -ldflags.
+type BuildInfo struct {
+	Version   string
+	CommitSHA string
+	BuildTime string
+}
+
 // Server wraps the HTTP server and all its dependencies.
 type Server struct {
 	cfg                 config.ServerConfig
@@ -48,6 +55,7 @@ type Server struct {
 	http                *http.Server
 	logsHandler         *handlers.LogsHandler
 	imgFactory          *image.Factory
+	buildInfo           BuildInfo
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -75,7 +83,7 @@ func (a buildProgressAdapter) Start(imageID string) image.BuildHandle {
 }
 
 // New creates a Server wired with the given config and database.
-func New(cfg config.ServerConfig, database *db.DB) *Server {
+func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	// Build the power provider registry and register all supported backends.
 	registry := power.NewRegistry()
 	ipmipower.Register(registry)
@@ -110,6 +118,7 @@ func New(cfg config.ServerConfig, database *db.DB) *Server {
 		powerRegistry:       registry,
 		reimageOrchestrator: reimageOrch,
 		sessionSecret:       secret,
+		buildInfo:           info,
 	}
 	s.router = s.buildRouter()
 	s.http = &http.Server{
@@ -253,7 +262,11 @@ func (s *Server) buildRouter() chi.Router {
 	apiKeysH := s.buildAPIKeysHandler()
 	usersH := s.buildUsersHandler()
 
-	health := &handlers.HealthHandler{Version: "dev"}
+	health := &handlers.HealthHandler{
+		Version:   s.buildInfo.Version,
+		CommitSHA: s.buildInfo.CommitSHA,
+		BuildTime: s.buildInfo.BuildTime,
+	}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
 	nodes := &handlers.NodesHandler{DB: s.db, Registry: s.powerRegistry}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
