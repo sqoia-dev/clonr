@@ -26,6 +26,10 @@ type BootHandler struct {
 	// ServerURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
 	// Used to generate the iPXE boot script.
 	ServerURL string
+	// ImageDir is the root directory where image subdirectories live.
+	// Each image subdirectory may contain a grub.efi file extracted at build time.
+	// Used by ServeGrubEFI to serve the correct bootloader for a node's image.
+	ImageDir string
 	// DB is used to look up node state by MAC for PXE boot routing.
 	// When nil the handler always returns the full boot script (safe default).
 	DB *db.DB
@@ -74,9 +78,27 @@ type BootHandler struct {
 // order, set once during rack/stack and never changed.
 func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 	mac := r.URL.Query().Get("mac")
+	forceReimage := r.URL.Query().Get("force_reimage") == "1"
 
 	// If we have a MAC and a DB, look up the node state and route the boot.
 	if mac != "" && h.DB != nil {
+		// Handle force_reimage=1: mark the node reimage_pending so the next routing
+		// decision below (after the state lookup) will serve the deploy initramfs.
+		// This is triggered from the boot menu "Request reimage" option.
+		if forceReimage {
+			existing, lookupErr := h.DB.GetNodeConfigByMAC(r.Context(), mac)
+			if lookupErr == nil && existing.BaseImageID != "" {
+				if setErr := h.DB.SetReimagePending(r.Context(), existing.ID, true); setErr != nil {
+					log.Error().Err(setErr).Str("mac", mac).Msg("boot: force_reimage: SetReimagePending failed")
+				} else {
+					log.Info().Str("mac", mac).Str("hostname", existing.Hostname).
+						Msg("boot: force_reimage=1 received from boot menu — node marked reimage_pending")
+				}
+			} else if lookupErr != nil {
+				log.Warn().Err(lookupErr).Str("mac", mac).Msg("boot: force_reimage: node lookup failed (ignored)")
+			}
+		}
+
 		nodeCfg, err := h.DB.GetNodeConfigByMAC(r.Context(), mac)
 		if err != nil && !errors.Is(err, api.ErrNotFound) {
 			// DB error: log and fall through to the safe default (full boot script).
@@ -242,7 +264,7 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 	}
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
 		Msg("boot: generating disk boot script")
-	return pxe.GenerateDiskBootScript(node.Hostname, firmware)
+	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL)
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw
@@ -284,6 +306,73 @@ func (h *BootHandler) ServeInitramfs(w http.ResponseWriter, r *http.Request) {
 func (h *BootHandler) ServeIPXEEFI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/efi")
 	http.ServeContent(w, r, "ipxe.efi", time.Time{}, bytes.NewReader(bootassets.IPXEEFI))
+}
+
+// ServeGrubEFI handles GET /api/v1/boot/grub.efi.
+//
+// Serves the grubx64.efi binary extracted from the node's assigned image at
+// build time. This allows UEFI iPXE boot scripts to chain directly to the OS
+// bootloader rather than relying on `exit` and OVMF's BootOrder, which is less
+// reliable across firmware implementations (ADR-0010).
+//
+// Query param: mac — the node's primary MAC address (iPXE sets ${mac}).
+// If the MAC is missing, the node is unknown, or the image has no grub.efi
+// (e.g. BIOS-only images), 404 is returned.
+func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
+	mac := r.URL.Query().Get("mac")
+	if mac == "" || h.DB == nil || h.ImageDir == "" {
+		writeError(w, api.ErrNotFound)
+		return
+	}
+
+	nodeCfg, err := h.DB.GetNodeConfigByMAC(r.Context(), mac)
+	if err != nil {
+		if errors.Is(err, api.ErrNotFound) {
+			writeError(w, api.ErrNotFound)
+			return
+		}
+		log.Error().Err(err).Str("mac", mac).Msg("grub.efi: lookup node by MAC")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if nodeCfg.BaseImageID == "" {
+		writeError(w, api.ErrNotFound)
+		return
+	}
+
+	grubPath := filepath.Join(h.ImageDir, nodeCfg.BaseImageID, "grub.efi")
+	f, err := os.Open(grubPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Debug().
+				Str("mac", mac).
+				Str("image_id", nodeCfg.BaseImageID).
+				Str("path", grubPath).
+				Msg("grub.efi: file not present for this image (BIOS image or not yet extracted)")
+			writeError(w, api.ErrNotFound)
+			return
+		}
+		log.Error().Err(err).Str("path", grubPath).Msg("grub.efi: open file")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info().
+		Str("mac", mac).
+		Str("hostname", nodeCfg.Hostname).
+		Str("image_id", nodeCfg.BaseImageID).
+		Msg("grub.efi: serving for UEFI iPXE chain-boot")
+
+	w.Header().Set("Content-Type", "application/efi")
+	http.ServeContent(w, r, "grub.efi", stat.ModTime(), f)
 }
 
 // ServeUndionlyKPXE handles GET /api/v1/boot/undionly.kpxe.

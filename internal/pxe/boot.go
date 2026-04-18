@@ -57,42 +57,53 @@ func GenerateBootScript(serverURL, token string) ([]byte, error) {
 
 // diskBootBIOSTemplate is the iPXE response for BIOS-firmware nodes in NodeStateDeployed.
 //
-// We use `sanboot --no-describe --drive 0x80` instead of `exit` because SeaBIOS
-// (used by Proxmox/QEMU VMs) restarts the PXE loop on exit rather than falling
-// through to the next boot order entry, causing an infinite PXE loop. sanboot
-// uses iPXE's built-in INT 13h chainload to explicitly boot the first local disk
-// (0x80), bypassing firmware boot-order handling entirely. This works on both
-// SeaBIOS VMs and real BIOS hardware — same pattern used by xCAT and Warewulf.
-// Diagnosed by Gilfoyle; VM207 was stuck in the loop before this fix.
+// Presents a 5-second boot menu. The default action "disk" uses `sanboot` instead
+// of `exit` because SeaBIOS (Proxmox/QEMU VMs) restarts the PXE loop on exit rather
+// than falling through to the next boot order entry, causing an infinite PXE loop.
+// sanboot uses iPXE's INT 13h chainload to explicitly boot the first local disk (0x80).
 //
-// The hostname comment is templated in so operators can confirm the correct node
-// is receiving the disk-boot response in packet captures or iPXE serial output.
+// The "reimage" option re-chains to the boot endpoint with force_reimage=1, which the
+// server uses to mark the node for reimage and serve the deploy initramfs on the next
+// PXE request.
 const diskBootBIOSTemplate = `#!ipxe
-echo Node {{.Hostname}} is deployed (BIOS) -- booting from local disk via sanboot
-sanboot --no-describe --drive 0x80
+menu clonr -- {{.Hostname}}
+item --default disk --timeout 5000 disk  Boot from disk (auto in 5s)
+item reimage  Request reimage
+choose --default disk --timeout 5000 target && goto ${target} || goto disk
+
+:disk
+echo Booting from local disk...
+sanboot --no-describe --drive 0x80 || exit
+
+:reimage
+chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
 `
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
-// We use plain `exit` (not `exit 1`) here. The boot routing for UEFI nodes is
-// controlled at the NVRAM BootOrder level: FixEFIBoot sets the OS entry first
-// in BootOrder during finalize. Proxmox forces the first PXE boot after a
-// reimage via `boot=order=net0;scsi0` at the VM level, so iPXE runs once, sees
-// NodeStateDeployed, and exits. OVMF then walks BootOrder, skips the PXE entry
-// that just ran, and finds the OS entry (grubx64.efi) next — booting from disk.
+// Presents a 5-second boot menu. The default "disk" action chain-loads grubx64.efi
+// directly from the clonr server (served from the image's extracted EFI binary).
+// This is more reliable than plain `exit` on OVMF, which depends on BootOrder being
+// correctly set via efibootmgr — chain-loading works regardless of BootOrder state.
 //
-// `exit 1` (non-zero) was previously used to signal PXE failure, but on OVMF
-// it causes the firmware to try the NEXT firmware-enumerated boot option rather
-// than the NEXT BootOrder entry. On VMs with HTTP boot over IPv6 registered
-// before the disk entry, `exit 1` triggers the HTTP IPv6 boot instead of the
-// OS disk. Plain `exit` (success) lets OVMF proceed through BootOrder normally,
-// where the OS entry (written by FixEFIBoot) is guaranteed to be first.
+// Falls back to plain `exit` (returns to firmware) if the grub chain fails (e.g. for
+// images where grub.efi was not extracted because the image is BIOS-type or was built
+// before grub.efi extraction was added). The fallback `exit` restores the previous
+// behavior so UEFI nodes with correct BootOrder still boot correctly.
 //
-// SetPXEBootFirst is NOT called during finalize — BootOrder is left with the OS
-// entry first. PXE boot order is enforced by Proxmox VM config, not NVRAM.
+// The "reimage" option re-chains to the boot endpoint with force_reimage=1.
 const diskBootUEFITemplate = `#!ipxe
-echo Node {{.Hostname}} is deployed (UEFI) -- returning to firmware
-exit
+menu clonr -- {{.Hostname}}
+item --default disk --timeout 5000 disk  Boot from disk (auto in 5s)
+item reimage  Request reimage
+choose --default disk --timeout 5000 target && goto ${target} || goto disk
+
+:disk
+echo Loading bootloader from clonr server...
+chain {{.ServerURL}}/api/v1/boot/grub.efi?mac=${mac} || echo WARN: grub chain failed, falling back to firmware && exit
+
+:reimage
+chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
 `
 
 // waitRetryTemplate is served to nodes in reimage_pending state that have no
@@ -114,7 +125,11 @@ var diskBootUEFITmpl = template.Must(template.New("diskboot-uefi").Parse(diskBoo
 
 // diskBootScriptData holds template vars for the disk boot script.
 type diskBootScriptData struct {
-	Hostname string
+	Hostname  string
+	// ServerURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
+	// Used to build the grub.efi chain URL and the reimage re-chain URL.
+	// The ${mac} variable in the template is expanded by iPXE at runtime.
+	ServerURL string
 }
 
 // GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
@@ -135,12 +150,16 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 //
 // firmware must be "bios" or "uefi" (case-insensitive). Any value other than
 // "bios" is treated as UEFI (fail-safe: UEFI is the default for new images).
-func GenerateDiskBootScript(hostname, firmware string) ([]byte, error) {
+//
+// serverURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
+// It is embedded in the boot script for the grub.efi chain URL and the reimage
+// re-chain URL. The ${mac} variable in the script is expanded by iPXE at runtime.
+func GenerateDiskBootScript(hostname, firmware, serverURL string) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
 		tmpl = diskBootBIOSTmpl
 	}
-	data := diskBootScriptData{Hostname: hostname}
+	data := diskBootScriptData{Hostname: hostname, ServerURL: serverURL}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("pxe/boot: render disk boot script: %w", err)

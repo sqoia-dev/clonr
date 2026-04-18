@@ -307,6 +307,7 @@ func (s *Server) buildRouter() chi.Router {
 		BootDir:   s.cfg.PXE.BootDir,
 		TFTPDir:   s.cfg.PXE.TFTPDir,
 		ServerURL: serverURL,
+		ImageDir:  s.cfg.ImageDir,
 		DB:        s.db,
 		MintNodeToken: func(nodeID string) (string, error) {
 			return CreateNodeScopedKey(context.Background(), s.db, nodeID)
@@ -342,6 +343,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
 		r.Get("/boot/initramfs.img", boot.ServeInitramfs)
 		r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
+		r.Get("/boot/grub.efi", boot.ServeGrubEFI)
 		r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
 
 		// Node-scope callbacks — accept both node and admin keys, or no key (legacy PXE nodes).

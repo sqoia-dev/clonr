@@ -8,10 +8,10 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-// TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h).
-// bare `exit` must NOT appear — it causes SeaBIOS to restart the PXE loop.
+// TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h) in the
+// disk boot path, a boot menu with a reimage option, and no bare `exit` line.
 func TestGenerateDiskBootScript_BIOS(t *testing.T) {
-	script, err := GenerateDiskBootScript("node207", "bios")
+	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(bios) returned error: %v", err)
 	}
@@ -21,7 +21,20 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 		t.Errorf("BIOS disk boot script missing sanboot command; got:\n%s", out)
 	}
 
-	// Ensure bare "exit" line is not present — it causes SeaBIOS PXE loop.
+	// Boot menu must be present.
+	if !strings.Contains(out, "menu clonr") {
+		t.Errorf("BIOS disk boot script missing boot menu; got:\n%s", out)
+	}
+	if !strings.Contains(out, "reimage") {
+		t.Errorf("BIOS disk boot script missing reimage menu item; got:\n%s", out)
+	}
+
+	// Reimage URL must use the provided server URL.
+	if !strings.Contains(out, "http://10.0.0.1:8080/api/v1/boot/ipxe") {
+		t.Errorf("BIOS disk boot script missing reimage URL with server; got:\n%s", out)
+	}
+
+	// Bare "exit" must not appear as a standalone line — it causes SeaBIOS PXE loop.
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == "exit" {
 			t.Errorf("BIOS disk boot script must not contain bare 'exit' line (SeaBIOS loop); got line: %q", line)
@@ -33,32 +46,35 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 	}
 }
 
-// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a plain `exit`
-// (not `exit 1`) and NOT sanboot (INT 13h is a BIOS concept, fails on OVMF).
-//
-// Plain `exit` (not `exit 1`) is correct for UEFI: boot routing is handled via
-// NVRAM BootOrder (OS entry first, written by FixEFIBoot during finalize).
-// After iPXE exits OVMF walks BootOrder and finds the OS entry first. Using
-// `exit 1` on OVMF caused firmware to try the next firmware-enumerated option
-// (HTTP IPv6) rather than the OS disk, because HTTP boot entries appear before
-// the disk in OVMF's internal enumeration.
+// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a grub.efi chain URL,
+// a boot menu with reimage option, and NOT sanboot (INT 13h is a BIOS concept).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node201", "uefi")
+	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(uefi) returned error: %v", err)
 	}
 	out := string(script)
 
-	// Must contain `exit` (plain, not `exit 1`) so OVMF proceeds through BootOrder.
-	if !strings.Contains(out, "exit") {
-		t.Errorf("UEFI disk boot script must contain 'exit'; got:\n%s", out)
+	// Must chain grub.efi from the clonr server.
+	if !strings.Contains(out, "/api/v1/boot/grub.efi") {
+		t.Errorf("UEFI disk boot script must contain grub.efi chain URL; got:\n%s", out)
 	}
+
+	// Must NOT contain `exit 1` (breaks OVMF BootOrder routing).
 	if strings.Contains(out, "exit 1") {
 		t.Errorf("UEFI disk boot script must NOT contain 'exit 1' (breaks OVMF BootOrder routing); got:\n%s", out)
 	}
 
 	if strings.Contains(out, "sanboot") {
 		t.Errorf("UEFI disk boot script must not contain sanboot (INT 13h fails on OVMF); got:\n%s", out)
+	}
+
+	// Boot menu must be present.
+	if !strings.Contains(out, "menu clonr") {
+		t.Errorf("UEFI disk boot script missing boot menu; got:\n%s", out)
+	}
+	if !strings.Contains(out, "reimage") {
+		t.Errorf("UEFI disk boot script missing reimage menu item; got:\n%s", out)
 	}
 
 	if !strings.Contains(out, "node201") {
@@ -69,7 +85,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 // TestGenerateDiskBootScript_DefaultsToUEFI verifies that an empty/unknown firmware
 // string is treated as UEFI (safe default for new images).
 func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node-unknown", "")
+	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript('') returned error: %v", err)
 	}
@@ -77,6 +93,11 @@ func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
 
 	if strings.Contains(out, "sanboot") {
 		t.Errorf("default (empty firmware) disk boot script must not use sanboot; got:\n%s", out)
+	}
+
+	// Default (UEFI) should have grub chain.
+	if !strings.Contains(out, "/api/v1/boot/grub.efi") {
+		t.Errorf("default (UEFI) disk boot script must contain grub.efi chain URL; got:\n%s", out)
 	}
 }
 

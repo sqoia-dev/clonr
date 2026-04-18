@@ -261,7 +261,54 @@ func ExtractRootfs(opts ExtractOptions) error {
 	}
 
 	// rsync the full mounted tree.
-	return rsyncExtracted(rootMnt+"/", opts.RootfsDestDir)
+	if err := rsyncExtracted(rootMnt+"/", opts.RootfsDestDir); err != nil {
+		return err
+	}
+
+	// Copy grubx64.efi to a known location alongside the rootfs so the clonr
+	// server can serve it directly for UEFI iPXE chain-boot (ADR-0010).
+	// We search candidate distro-specific paths in order of preference.
+	copyGrubEFI(rootMnt, opts.RootfsDestDir)
+
+	return nil
+}
+
+// grubEFICandidates lists the paths (relative to the ESP mount at /boot/efi)
+// where grubx64.efi may reside, ordered by preference.
+var grubEFICandidates = []string{
+	"EFI/rocky/grubx64.efi",
+	"EFI/redhat/grubx64.efi",
+	"EFI/centos/grubx64.efi",
+	"EFI/fedora/grubx64.efi",
+	"EFI/ubuntu/grubx64.efi",
+	"EFI/debian/grubx64.efi",
+	"EFI/BOOT/BOOTX64.EFI", // removable fallback, last resort
+}
+
+// copyGrubEFI locates grubx64.efi in the mounted rootfs and copies it to
+// <rootfsDestDir>/../grub.efi so the server can serve it as a static asset.
+// Non-fatal: if the file is not found (BIOS-only images, custom layouts) we log
+// a debug message and return — the server's /api/v1/boot/grub.efi handler will
+// return 404, which is the correct behaviour for non-UEFI images.
+func copyGrubEFI(rootMnt, rootfsDestDir string) {
+	efiBase := filepath.Join(rootMnt, "boot", "efi")
+	for _, rel := range grubEFICandidates {
+		src := filepath.Join(efiBase, rel)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		// Place grub.efi one level up from rootfs, alongside it.
+		imageDir := filepath.Dir(rootfsDestDir)
+		dst := filepath.Join(imageDir, "grub.efi")
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			continue
+		}
+		return
+	}
 }
 
 // probeMountPoint attempts to identify the likely mount point of a block device
