@@ -212,6 +212,13 @@ dnf install -y lustre-client --nogpgcheck || true
 wget -q https://www.beegfs.io/release/beegfs_7.4/dists/beegfs-rhel9.repo -O /etc/yum.repos.d/beegfs-rhel9.repo || true
 dnf install -y beegfs-storage beegfs-meta --nogpgcheck || true
 {{end}}
+# ── Enable SSH password authentication ────────────────────────────────────
+# RHEL 10 / Rocky 10 changed the OpenSSH compiled-in default to
+# PasswordAuthentication no. Write a drop-in so clonr users can log in
+# with the default clonr/clonr credentials after deployment.
+mkdir -p /etc/ssh/sshd_config.d
+echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
+chmod 600 /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
 # ── Strip node identity — regenerated on first boot by clonr finalize ──────
 rm -f /etc/machine-id
 touch /etc/machine-id
