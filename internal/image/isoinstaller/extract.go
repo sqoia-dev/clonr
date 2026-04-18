@@ -62,6 +62,7 @@ func ExtractViaSubprocess(buildID string, opts ExtractOptions, onStdout, onStder
 			"--slice=clonr-builders.slice",
 			"--unit=" + unitName,
 			"--quiet",
+			"--property=AmbientCapabilities=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE",
 			"--",
 			selfBin,
 		}
