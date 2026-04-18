@@ -142,6 +142,18 @@ const App = {
         });
         Router.register('/logs',    ()    => Pages.logs());
         Router.register('/settings', ()   => Pages.settings());
+        Router.register('/ldap',     (h)  => {
+            const parts = h.split('/');
+            if (parts.length === 3 && parts[2] === 'users') LDAPPages.users();
+            else if (parts.length === 3 && parts[2] === 'groups') LDAPPages.groups();
+            else LDAPPages.settings();
+        });
+        Router.register('/ldap/*',   (h)  => {
+            const parts = h.split('/');
+            if (parts[2] === 'users') LDAPPages.users();
+            else if (parts[2] === 'groups') LDAPPages.groups();
+            else LDAPPages.settings();
+        });
     },
 
     render(html) {
@@ -7160,6 +7172,10 @@ const Auth = {
             Auth._role = me.role || 'admin';
         } catch (_) {
             // Network error — still try to start the app; api.js will redirect on 401.
+        }
+        // Bootstrap LDAP nav visibility. Non-fatal — missing nav section is safe.
+        if (typeof LDAPPages !== 'undefined') {
+            LDAPPages.bootstrapNav().catch(() => {});
         }
         App.init();
     },

@@ -274,6 +274,26 @@ const API = {
         rebuildInitramfs()        { return API.post('/system/initramfs/rebuild', {}); },
         deleteInitramfsHistory(id){ return API.del(`/system/initramfs/history/${encodeURIComponent(id)}`); },
     },
+    ldap: {
+        status()                        { return API.get('/ldap/status'); },
+        enable(body)                    { return API.post('/ldap/enable', body); },
+        disable(body)                   { return API.post('/ldap/disable', body); },
+        backup()                        { return API.post('/ldap/backup', {}); },
+        // Users
+        listUsers()                     { return API.get('/ldap/users'); },
+        createUser(body)                { return API.post('/ldap/users', body); },
+        updateUser(uid, body)           { return API.put(`/ldap/users/${encodeURIComponent(uid)}`, body); },
+        deleteUser(uid)                 { return API.del(`/ldap/users/${encodeURIComponent(uid)}`); },
+        setPassword(uid, password)      { return API.post(`/ldap/users/${encodeURIComponent(uid)}/password`, { password }); },
+        lockUser(uid)                   { return API.post(`/ldap/users/${encodeURIComponent(uid)}/lock`, {}); },
+        unlockUser(uid)                 { return API.post(`/ldap/users/${encodeURIComponent(uid)}/unlock`, {}); },
+        // Groups
+        listGroups()                    { return API.get('/ldap/groups'); },
+        createGroup(body)               { return API.post('/ldap/groups', body); },
+        deleteGroup(cn)                 { return API.del(`/ldap/groups/${encodeURIComponent(cn)}`); },
+        addMember(cn, uid)              { return API.post(`/ldap/groups/${encodeURIComponent(cn)}/members`, { uid }); },
+        removeMember(cn, uid)           { return API.del(`/ldap/groups/${encodeURIComponent(cn)}/members/${encodeURIComponent(uid)}`); },
+    },
     resume: {
         // resume — POST to resume an interrupted image build.
         image(id)             { return API.post(`/images/${id}/resume`, {}); },
