@@ -25,6 +25,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// partitionEntry pairs a PartitionSpec with its original index in the layout.
+// Used internally by partitionDisk and expandTargetMapForRAIDMembers.
+// origIdx == -1 indicates a synthesised entry (not from the user-supplied layout).
+type partitionEntry struct {
+	origIdx int
+	spec    api.PartitionSpec
+}
+
 // FilesystemDeployer deploys a filesystem-format image (tar archive).
 // Flow: download tarball → partition disk → mkfs → mount → extract → unmount.
 type FilesystemDeployer struct {
@@ -953,6 +961,111 @@ func rawDiskFromDevice(dev string) string {
 	return dev
 }
 
+// expandTargetMapForRAIDMembers fixes up the targetMap for md-on-partitions
+// layouts. When RAID members are named like "sda2"/"sdb2", every raw member
+// disk must have a complete, self-consistent GPT so that mdadm --create can
+// open each member partition (e.g. /dev/sda2, /dev/sdb2).
+//
+// The initial targetMap built by partitionDisk only contains entries that
+// came from explicit partition specs. For a layout like:
+//
+//	{label:"biosboot", device:""},              → sda1 (defaultDisk only)
+//	{label:"boot",     device:"md0", ...},      → skipped (md device)
+//	{label:"swap",     device:"md1", ...},      → skipped (md device)
+//	{label:"root",     device:"md2", ...},      → skipped (md device)
+//
+// …only sda ends up in targetMap, with a single biosboot entry. sdb has no
+// entry at all, so sdb2/sdb3/sdb4 are never created.
+//
+// This function:
+//  1. Collects all unique raw member disks from the RAID specs.
+//  2. Replicates no-device partition entries (those on defaultDisk) to every
+//     other raw member disk, so biosboot lands on both sda and sdb.
+//  3. For each RAID array, finds the corresponding md-targeting partition spec
+//     (the one with Device == "md0" etc.) to get the size, then appends a
+//     synthetic "linux_raid_member" slot entry to each member disk's list.
+//
+// The synthesised entries use origIdx == -1 so callers can distinguish them
+// from real layout entries if needed (currently they are treated identically).
+func expandTargetMapForRAIDMembers(
+	targetMap map[string][]partitionEntry,
+	defaultDisk string,
+	layout api.DiskLayout,
+) map[string][]partitionEntry {
+	// Step 1 – collect all unique raw member disks, preserving order.
+	seenDisk := make(map[string]bool)
+	var memberDisks []string
+	for _, raid := range layout.RAIDArrays {
+		for _, m := range raid.Members {
+			if strings.HasPrefix(m, "smallest-") {
+				continue
+			}
+			raw := rawDiskFromDevice("/dev/" + strings.TrimPrefix(m, "/dev/"))
+			if !seenDisk[raw] {
+				seenDisk[raw] = true
+				memberDisks = append(memberDisks, raw)
+			}
+		}
+	}
+	if len(memberDisks) == 0 {
+		return targetMap
+	}
+
+	// Step 2 – entries currently on defaultDisk with no explicit device should
+	// be mirrored to every other raw member disk.
+	defaultEntries := targetMap[defaultDisk]
+
+	// Step 3 – build md-device → PartitionSpec map so we can look up the size
+	// for each RAID array's logical filesystem partition.
+	mdPartSpec := make(map[string]api.PartitionSpec) // "md0" → spec
+	for _, p := range layout.Partitions {
+		if p.Device != "" && isMdDevice("/dev/"+strings.TrimPrefix(p.Device, "/dev/")) {
+			mdPartSpec[strings.TrimPrefix(p.Device, "/dev/")] = p
+		}
+	}
+
+	// Build an ordered list of RAID slot entries to append after the mirrored
+	// no-device partitions. The order must match across all member disks so the
+	// partition numbers (sda2/sdb2, sda3/sdb3, …) are consistent.
+	var raidSlots []partitionEntry
+	for _, raid := range layout.RAIDArrays {
+		spec, ok := mdPartSpec[raid.Name]
+		if !ok {
+			// No logical partition targets this array — skip (unusual config).
+			continue
+		}
+		// Synthesise a raw member slot: same size as the logical partition, no
+		// filesystem label, typecode fd00 (Linux RAID autodetect). Label the
+		// slot with the array name for operator visibility in gdisk/parted.
+		slot := api.PartitionSpec{
+			Label:      raid.Name,
+			SizeBytes:  spec.SizeBytes,
+			Filesystem: "linux_raid_member",
+			Flags:      []string{"raid"},
+		}
+		raidSlots = append(raidSlots, partitionEntry{origIdx: -1, spec: slot})
+	}
+
+	// Step 4 – populate targetMap for every raw member disk.
+	newMap := make(map[string][]partitionEntry)
+
+	// Preserve any non-member-disk entries already in the map (rare, but safe).
+	for k, v := range targetMap {
+		if !seenDisk[k] {
+			newMap[k] = v
+		}
+	}
+
+	for _, rawDisk := range memberDisks {
+		var entries []partitionEntry
+		entries = append(entries, defaultEntries...)
+		entries = append(entries, raidSlots...)
+		newMap[rawDisk] = entries
+	}
+
+	return newMap
+}
+
 // partitionDisk wipes and repartitions the target disk(s) according to the layout.
 //
 // For single-disk layouts all partitions land on `disk`. For RAID-on-whole-disk
@@ -970,11 +1083,7 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	// can issue one sgdisk call per unique target disk. In single-disk layouts
 	// there is only one target. In RAID-on-whole-disk layouts all partitions target
 	// the md device (e.g. /dev/md0) and `disk` is unused for partitioning.
-	type partEntry struct {
-		origIdx int
-		spec    api.PartitionSpec
-	}
-	targetMap := make(map[string][]partEntry) // target disk path → partitions
+	targetMap := make(map[string][]partitionEntry) // target disk path → partitions
 	for i, p := range d.layout.Partitions {
 		target := resolvePartitionDisk(disk, p)
 		// Skip md virtual devices — they are assembled AFTER partitioning raw disks
@@ -983,7 +1092,26 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 		if isMdDevice(target) {
 			continue
 		}
-		targetMap[target] = append(targetMap[target], partEntry{i, p})
+		targetMap[target] = append(targetMap[target], partitionEntry{i, p})
+	}
+
+	// md-on-partitions topology: RAID members are named like "sda2", "sdb3".
+	// The partition entries that target md devices (md0, md1, md2) were skipped
+	// above — those are the logical filesystems that land on the assembled arrays.
+	// However, before mdadm can create those arrays, the raw partition slots
+	// (sda2/sdb2, sda3/sdb3, etc.) must exist on every member disk.
+	//
+	// We synthesise the missing raw member-disk partitions here so that every
+	// RAID member disk ends up with a complete partition table:
+	//
+	//   sda1  biosboot  (replicated from no-device partition entries)
+	//   sda2  linux_raid_member  (slot for md0, sized from the /boot spec)
+	//   sda3  linux_raid_member  (slot for md1, sized from the swap spec)
+	//   sda4  linux_raid_member  (slot for md2, sized from the / spec)
+	//
+	// …and the same table is created on sdb.
+	if raidMembersArePartitions(d.layout) {
+		targetMap = expandTargetMapForRAIDMembers(targetMap, disk, d.layout)
 	}
 
 	for target, parts := range targetMap {
@@ -1022,6 +1150,8 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 					args = append(args, fmt.Sprintf("--typecode=%d:ef00", num))
 				case "bios_grub":
 					args = append(args, fmt.Sprintf("--typecode=%d:ef02", num))
+				case "raid":
+					args = append(args, fmt.Sprintf("--typecode=%d:fd00", num))
 				}
 			}
 
@@ -1829,10 +1959,13 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		}
 	}
 
-	// tar -xvf - streams each extracted filename to stdout, which we scan and log
-	// at Info level. Stderr is captured separately so we can inspect it for
-	// truncation indicators (e.g. "Unexpected EOF") before deciding whether a
-	// non-zero exit code is a tolerable warning or a hard failure.
+	// tar -xvf - streams each extracted filename to stdout, which we use to track
+	// progress (file count). Individual filenames are NOT logged to avoid flooding
+	// the deploy log with thousands of lines. Instead, a periodic summary is logged
+	// every 5 seconds: "extracting: N files extracted".
+	// Stderr is captured separately so we can inspect it for truncation indicators
+	// (e.g. "Unexpected EOF") before deciding whether a non-zero exit code is a
+	// tolerable warning or a hard failure.
 	//
 	// Flags used:
 	//   --numeric-owner        preserve UID/GID as numbers (no user DB needed in initramfs)
@@ -1865,7 +1998,7 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 	tarCmd.Stdin = tarSrc
 
 	// Capture tar stderr so we can detect truncation-specific errors. Stdout (the
-	// per-file list) is streamed to the logger as before.
+	// per-file list) is consumed to count files without logging each one.
 	tarStdoutPipe, err := tarCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("tar stdout pipe: %w", err)
@@ -1879,20 +2012,42 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		return fmt.Errorf("tar start: %w", err)
 	}
 
-	// Stream tar stdout (filenames) to the logger and tar stderr to a buffer.
+	// Count extracted files from tar stdout without logging individual filenames.
+	// A background ticker logs a progress summary every 5 seconds so the operator
+	// can see activity without thousands of file-path lines in the deploy log.
 	var (
-		tarWg         sync.WaitGroup
-		tarStderrBuf  strings.Builder
-		tarStderrMu   sync.Mutex
+		tarWg        sync.WaitGroup
+		tarStderrBuf strings.Builder
+		tarStderrMu  sync.Mutex
+		fileCount    atomic.Int64
 	)
+
+	// Progress reporter: log file count every 5 seconds while extraction runs.
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n := fileCount.Load()
+				if n > 0 {
+					log.Info().Int64("files", n).Msg("extracting: files extracted so far")
+				}
+			case <-progressDone:
+				return
+			}
+		}
+	}()
+
 	tarWg.Add(2)
 	go func() {
 		defer tarWg.Done()
+		// Drain stdout (verbose file list) counting lines; never log individual filenames.
 		scanner := bufio.NewScanner(tarStdoutPipe)
 		for scanner.Scan() {
-			line := scanner.Text()
-			if line != "" {
-				log.Info().Str("cmd", "tar").Str("stream", "stdout").Msg(line)
+			if scanner.Text() != "" {
+				fileCount.Add(1)
 			}
 		}
 	}()
@@ -1912,6 +2067,8 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		}
 	}()
 	tarWg.Wait()
+	close(progressDone)
+	log.Info().Int64("files", fileCount.Load()).Msg("extracting: complete")
 
 	tarErr := tarCmd.Wait()
 	tarStderr := tarStderrBuf.String()
