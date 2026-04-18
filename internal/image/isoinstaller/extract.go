@@ -54,23 +54,14 @@ func ExtractViaSubprocess(buildID string, opts ExtractOptions, onStdout, onStder
 	var bin string
 	var args []string
 
-	if extractSystemdRunAvailable {
-		unitName := "clonr-extract-" + buildID + ".scope"
-		bin = "systemd-run"
-		args = []string{
-			"--scope",
-			"--slice=clonr-builders.slice",
-			"--unit=" + unitName,
-			"--quiet",
-			"--property=AmbientCapabilities=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE",
-			"--",
-			selfBin,
-		}
-		args = append(args, extractArgs...)
-	} else {
-		bin = selfBin
-		args = extractArgs
-	}
+	// Run extract directly as a child process. The server runs as root so the
+	// subprocess inherits full capabilities for losetup/mount. Previously this
+	// used systemd-run --scope --slice=clonr-builders.slice, but the slice's
+	// CapabilityBoundingSet restricts rather than grants, causing losetup EPERM.
+	// The QEMU builder still uses the slice (via the factory's systemd-run call);
+	// only the extract step runs directly.
+	bin = selfBin
+	args = extractArgs
 
 	cmd := exec.Command(bin, args...)
 
