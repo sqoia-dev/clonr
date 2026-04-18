@@ -2,12 +2,14 @@ package isoinstaller_test
 
 import (
 	"archive/tar"
+	"context"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
 )
@@ -143,7 +145,13 @@ func TestExtractViaSubprocess_MissingBinary(t *testing.T) {
 	// ExtractViaSubprocess will re-exec os.Executable which is the test
 	// binary — which doesn't implement "extract", so cobra will error.
 	// Either way, the error should propagate back non-nil.
-	err := isoinstaller.ExtractViaSubprocess("test-build-id", opts, nil, nil)
+	//
+	// Use a short context deadline so the re-exec'd subprocess is killed
+	// promptly rather than running the full test suite before exiting,
+	// which previously caused a ~26 s delay and non-deterministic exit code.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := isoinstaller.ExtractViaSubprocess(ctx, "test-build-id", opts, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from ExtractViaSubprocess with nonexistent disk, got nil")
 	}

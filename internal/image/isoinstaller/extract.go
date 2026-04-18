@@ -3,6 +3,7 @@ package isoinstaller
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -39,7 +40,7 @@ func init() {
 // receive stdout/stderr lines from the subprocess in real time (fed to the
 // build's progress store so the serial-console panel in the UI shows extraction
 // progress).
-func ExtractViaSubprocess(buildID string, opts ExtractOptions, onStdout, onStderr func(string)) error {
+func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptions, onStdout, onStderr func(string)) error {
 	selfBin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("extract subprocess: locate own binary: %w", err)
@@ -63,7 +64,7 @@ func ExtractViaSubprocess(buildID string, opts ExtractOptions, onStdout, onStder
 	bin = selfBin
 	args = extractArgs
 
-	cmd := exec.Command(bin, args...)
+	cmd := exec.CommandContext(ctx, bin, args...)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

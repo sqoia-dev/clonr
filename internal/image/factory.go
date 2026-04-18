@@ -1611,7 +1611,7 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		RawDiskPath:   result.RawDiskPath,
 		RootfsDestDir: rootfsPath,
 	}
-	if err := isoinstaller.ExtractViaSubprocess(imageID, extractOpts, ph.AddSerialLine, ph.AddStderrLine); err != nil {
+	if err := isoinstaller.ExtractViaSubprocess(ctx, imageID, extractOpts, ph.AddSerialLine, ph.AddStderrLine); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: rootfs extraction failed")
 		failBuild("extract rootfs", err)
 		return
@@ -1747,7 +1747,7 @@ func (f *Factory) buildFromISOFile(
 		RawDiskPath:   result.RawDiskPath,
 		RootfsDestDir: rootfsPath,
 	}
-	if err := isoinstaller.ExtractViaSubprocess(imageID, extractOpts, nil, nil); err != nil {
+	if err := isoinstaller.ExtractViaSubprocess(ctx, imageID, extractOpts, nil, nil); err != nil {
 		return "", 0, "", fmt.Errorf("extract rootfs: %w", err)
 	}
 
@@ -1821,7 +1821,7 @@ func (f *Factory) ResumeFromPhase(imageID string, img api.BaseImage, phase strin
 			RawDiskPath:   diskRaw,
 			RootfsDestDir: rootfsPath,
 		}
-		if err := isoinstaller.ExtractViaSubprocess(imageID, extractOpts, ph.AddSerialLine, ph.AddStderrLine); err != nil {
+		if err := isoinstaller.ExtractViaSubprocess(ctx, imageID, extractOpts, ph.AddSerialLine, ph.AddStderrLine); err != nil {
 			failResume("extract rootfs", err)
 			return
 		}
