@@ -321,6 +321,7 @@ func (s *Server) buildRouter() chi.Router {
 		TFTPDir:   s.cfg.PXE.TFTPDir,
 		ServerURL: serverURL,
 		ImageDir:  s.cfg.ImageDir,
+		Version:   s.buildInfo.Version,
 		DB:        s.db,
 		MintNodeToken: func(nodeID string) (string, error) {
 			return CreateNodeScopedKey(context.Background(), s.db, nodeID)

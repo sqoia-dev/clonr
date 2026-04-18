@@ -74,7 +74,7 @@ const diskBootBIOSTemplate = `#!ipxe
 menu clonr -- Boot Manager (BIOS)
 item --gap --
 item --gap --                    c l o n r   B o o t   M a n a g e r
-item --gap --
+item --gap --                                                  {{.Version}}
 item --gap --                    Node : {{.Hostname}}
 item --gap --                    MAC  : ${mac}
 item --gap --
@@ -122,7 +122,7 @@ const diskBootUEFITemplate = `#!ipxe
 menu clonr -- Boot Manager (UEFI)
 item --gap --
 item --gap --                    c l o n r   B o o t   M a n a g e r
-item --gap --
+item --gap --                                                  {{.Version}}
 item --gap --                    Node : {{.Hostname}}
 item --gap --                    MAC  : ${mac}
 item --gap --
@@ -172,6 +172,8 @@ type diskBootScriptData struct {
 	// Used to build the grub.efi chain URL and the reimage re-chain URL.
 	// The ${mac} variable in the template is expanded by iPXE at runtime.
 	ServerURL string
+	// Version is the clonr server version string displayed in the boot menu.
+	Version string
 }
 
 // GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
@@ -196,12 +198,12 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 // serverURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
 // It is embedded in the boot script for the grub.efi chain URL and the reimage
 // re-chain URL. The ${mac} variable in the script is expanded by iPXE at runtime.
-func GenerateDiskBootScript(hostname, firmware, serverURL string) ([]byte, error) {
+func GenerateDiskBootScript(hostname, firmware, serverURL, version string) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
 		tmpl = diskBootBIOSTmpl
 	}
-	data := diskBootScriptData{Hostname: hostname, ServerURL: serverURL}
+	data := diskBootScriptData{Hostname: hostname, ServerURL: serverURL, Version: version}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("pxe/boot: render disk boot script: %w", err)

@@ -11,7 +11,7 @@ import (
 // TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h) in the
 // disk boot path, a boot menu with a reimage option, and no bare `exit` line.
 func TestGenerateDiskBootScript_BIOS(t *testing.T) {
-	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080")
+	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080", "v0.1.0-test")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(bios) returned error: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 // TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a grub.efi chain URL,
 // a boot menu with reimage option, and NOT sanboot (INT 13h is a BIOS concept).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080")
+	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(uefi) returned error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 // TestGenerateDiskBootScript_DefaultsToUEFI verifies that an empty/unknown firmware
 // string is treated as UEFI (safe default for new images).
 func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080")
+	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080", "v0.1.0-test")
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript('') returned error: %v", err)
 	}

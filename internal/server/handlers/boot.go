@@ -33,6 +33,8 @@ type BootHandler struct {
 	// DB is used to look up node state by MAC for PXE boot routing.
 	// When nil the handler always returns the full boot script (safe default).
 	DB *db.DB
+	// Version is the clonr server version string displayed in boot menus.
+	Version string
 	// MintNodeToken is called to generate a fresh node-scoped API key at PXE-serve
 	// time. The returned raw key is embedded in the kernel cmdline as clonr.token.
 	// When nil (e.g. in tests that don't need auth), an empty token is used.
@@ -266,7 +268,7 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 	}
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
 		Msg("boot: generating disk boot script")
-	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL)
+	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version)
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw
