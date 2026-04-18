@@ -65,18 +65,47 @@ func GenerateBootScript(serverURL, token string) ([]byte, error) {
 // The "reimage" option re-chains to the boot endpoint with force_reimage=1, which the
 // server uses to mark the node for reimage and serve the deploy initramfs on the next
 // PXE request.
+//
+// Visual layout uses iPXE cpair colour pairs (blue/white header, dark body) and
+// item --gap for non-selectable separator and info lines.
 const diskBootBIOSTemplate = `#!ipxe
-menu clonr -- {{.Hostname}}
-item --default disk --timeout 5000 disk  Boot from disk (auto in 5s)
-item reimage  Request reimage
+
+# --- colour scheme ---------------------------------------------------------
+# cpair index 0: title bar   — bright-white on blue
+# cpair index 1: body        — white on black (default)
+# cpair index 2: selected    — black on cyan
+cpair --foreground 15 --background 4 0
+cpair --foreground 7  --background 0 1
+cpair --foreground 0  --background 6 2
+
+# --- menu ------------------------------------------------------------------
+menu clonr -- Boot Manager (BIOS)
+item --gap --
+item --gap --              c l o n r   B o o t   M a n a g e r
+item --gap --
+item --gap --              Node : {{.Hostname}}
+item --gap --              MAC  : ${mac}
+item --gap --
+item --gap --              ------------------------------------------------
+item --default disk --timeout 5000 disk   Boot from disk          [auto 5s]
+item reimage                              Reimage this node
+item rescue                               Rescue shell
+item --gap --              ------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
-echo Booting from local disk...
 sanboot --no-describe --drive 0x80 || exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
+
+:rescue
+echo
+echo  Rescue shell is not yet configured for this node.
+echo  Contact your administrator or reimage to recover.
+echo
+sleep 10
+goto disk
 `
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
@@ -92,18 +121,47 @@ chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
 // behavior so UEFI nodes with correct BootOrder still boot correctly.
 //
 // The "reimage" option re-chains to the boot endpoint with force_reimage=1.
+//
+// Visual layout uses iPXE cpair colour pairs (blue/white header, dark body) and
+// item --gap for non-selectable separator and info lines.
 const diskBootUEFITemplate = `#!ipxe
-menu clonr -- {{.Hostname}}
-item --default disk --timeout 5000 disk  Boot from disk (auto in 5s)
-item reimage  Request reimage
+
+# --- colour scheme ---------------------------------------------------------
+# cpair index 0: title bar   — bright-white on blue
+# cpair index 1: body        — white on black (default)
+# cpair index 2: selected    — black on cyan
+cpair --foreground 15 --background 4 0
+cpair --foreground 7  --background 0 1
+cpair --foreground 0  --background 6 2
+
+# --- menu ------------------------------------------------------------------
+menu clonr -- Boot Manager (UEFI)
+item --gap --
+item --gap --              c l o n r   B o o t   M a n a g e r
+item --gap --
+item --gap --              Node : {{.Hostname}}
+item --gap --              MAC  : ${mac}
+item --gap --
+item --gap --              ------------------------------------------------
+item --default disk --timeout 5000 disk   Boot from disk          [auto 5s]
+item reimage                              Reimage this node
+item rescue                               Rescue shell
+item --gap --              ------------------------------------------------
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
-echo Loading bootloader from clonr server...
-chain {{.ServerURL}}/api/v1/boot/grub.efi?mac=${mac} || echo WARN: grub chain failed, falling back to firmware && exit
+chain {{.ServerURL}}/api/v1/boot/grub.efi?mac=${mac} || exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
+
+:rescue
+echo
+echo  Rescue shell is not yet configured for this node.
+echo  Contact your administrator or reimage to recover.
+echo
+sleep 10
+goto disk
 `
 
 // waitRetryTemplate is served to nodes in reimage_pending state that have no
