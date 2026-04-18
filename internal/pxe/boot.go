@@ -74,16 +74,15 @@ sanboot --no-describe --drive 0x80
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
-// On UEFI nodes, `sanboot --drive 0x80` uses INT 13h — a BIOS concept not
-// available under OVMF/EDK2. On OVMF, sanboot with no SAN device silently fails
-// or returns to the firmware picker, so the node never boots from disk.
-//
-// `exit` returns control from iPXE to the UEFI firmware, which follows the NVRAM
-// boot order (set by grub2-install --removable + efibootmgr during finalization)
-// and finds grubx64.efi on the ESP. This is the correct pattern for UEFI HTTP boot.
+// `exit 1` signals a boot failure to the UEFI firmware, causing it to skip the
+// current (PXE) boot entry and try the next entry in BootOrder — which is the
+// OS disk. Using `exit 1` (non-zero) is critical: `exit` or `exit 0` tells
+// OVMF/EDK2 that PXE succeeded, so the firmware stops trying other entries and
+// shows the boot picker. A non-zero exit tells the firmware "this boot path
+// failed, try the next one" which is exactly what we want.
 const diskBootUEFITemplate = `#!ipxe
-echo Node {{.Hostname}} is deployed (UEFI) -- returning to UEFI firmware boot order
-exit
+echo Node {{.Hostname}} is deployed (UEFI) -- signaling PXE failure to fall through to disk
+exit 1
 `
 
 // waitRetryTemplate is served to nodes in reimage_pending state that have no
