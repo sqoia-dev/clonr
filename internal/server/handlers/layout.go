@@ -47,13 +47,20 @@ func (h *LayoutHandler) GetLayoutRecommendation(w http.ResponseWriter, r *http.R
 	// Determine image format and firmware for the recommendation.
 	// Both affect partition layout: format determines whether /boot is needed,
 	// firmware determines whether an ESP or biosboot partition is used.
+	// Node's detected firmware (from /sys/firmware/efi at PXE boot) takes
+	// priority over the image's firmware field.
 	imageFormat := string(api.ImageFormatFilesystem)
-	imageFirmware := ""
-	if node.BaseImageID != "" {
+	imageFirmware := node.DetectedFirmware
+	if imageFirmware == "" && node.BaseImageID != "" {
 		img, imgErr := h.DB.GetBaseImage(r.Context(), node.BaseImageID)
 		if imgErr == nil {
 			imageFormat = string(img.Format)
 			imageFirmware = string(img.Firmware)
+		}
+	} else if node.BaseImageID != "" {
+		img, imgErr := h.DB.GetBaseImage(r.Context(), node.BaseImageID)
+		if imgErr == nil {
+			imageFormat = string(img.Format)
 		}
 	}
 
