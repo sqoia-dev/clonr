@@ -375,6 +375,50 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "grub.efi", stat.ModTime(), f)
 }
 
+// ServeGrubCfg handles GET /api/v1/boot/grub.cfg.
+//
+// When iPXE chainloads grub.efi via HTTP, GRUB sets $prefix to the directory
+// it was loaded from — i.e. (http,server)/api/v1/boot — and immediately
+// attempts to read ($prefix)/grub.cfg from the same HTTP server. Without this
+// endpoint GRUB drops to the grub> rescue shell.
+//
+// The stub served here uses GRUB's search command to locate the local disk
+// partition that contains the OS-installed grub.cfg, then redirects GRUB to
+// that config via configfile. This works regardless of the disk layout because
+// search scans all partitions rather than relying on a hardcoded device path.
+//
+// Module availability: grubx64.efi built by grub2-install --target=x86_64-efi
+// includes part_gpt, search, xfs, ext2, and fat built-in, so insmod is a
+// no-op when the module is already present but harmless otherwise.
+func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
+	const cfg = `# grub.cfg stub served by clonr
+# GRUB loaded this file automatically because it was loaded via HTTP and
+# $prefix resolves to the clonr server. We redirect to the local disk config.
+insmod part_gpt
+insmod search
+insmod xfs
+insmod ext2
+insmod fat
+
+# Rocky/RHEL: grub.cfg lives on the /boot partition (separate from /)
+search --file --set=root /grub2/grub.cfg
+if [ -f ($root)/grub2/grub.cfg ]; then
+    configfile ($root)/grub2/grub.cfg
+fi
+
+# Fallback: grub.cfg on the ESP written by grub2-install --efi-directory
+search --file --set=root /EFI/rocky/grub.cfg
+if [ -f ($root)/EFI/rocky/grub.cfg ]; then
+    configfile ($root)/EFI/rocky/grub.cfg
+fi
+
+echo "clonr: grub.cfg not found on any local partition"
+echo "Dropping to GRUB shell for manual recovery."
+`
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte(cfg))
+}
+
 // ServeUndionlyKPXE handles GET /api/v1/boot/undionly.kpxe.
 func (h *BootHandler) ServeUndionlyKPXE(w http.ResponseWriter, r *http.Request) {
 	h.serveFile(w, r, filepath.Join(h.TFTPDir, "undionly.kpxe"), "application/octet-stream")

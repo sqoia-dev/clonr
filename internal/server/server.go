@@ -344,6 +344,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/boot/initramfs.img", boot.ServeInitramfs)
 		r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
 		r.Get("/boot/grub.efi", boot.ServeGrubEFI)
+		r.Get("/boot/grub.cfg", boot.ServeGrubCfg)
 		r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
 
 		// Node-scope callbacks — accept both node and admin keys, or no key (legacy PXE nodes).
