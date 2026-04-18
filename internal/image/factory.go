@@ -99,6 +99,13 @@ type Factory struct {
 	ctx context.Context
 }
 
+func defaultIfEmpty(val, fallback string) string {
+	if val == "" {
+		return fallback
+	}
+	return val
+}
+
 // NewFactory constructs a Factory with a bounded build semaphore.
 // Capacity is read from CLONR_MAX_CONCURRENT_BUILDS (default 4).
 func NewFactory(store *db.DB, imageDir string, logger zerolog.Logger, progress BuildProgressReporter, isoCacheDir string) *Factory {
@@ -1557,8 +1564,8 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
-		DefaultUsername: req.DefaultUsername,
-		DefaultPassword: req.DefaultPassword, // plaintext; hashed inside GenerateAutoInstallConfig
+		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
+		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
 		Firmware:        req.Firmware,
 		BuildID:         imageID, // used to name the systemd-run scope unit
 		// Progress callbacks — feed events into the build handle.
@@ -1725,8 +1732,8 @@ func (f *Factory) buildFromISOFile(
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
-		DefaultUsername: req.DefaultUsername,
-		DefaultPassword: req.DefaultPassword,
+		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
+		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
 	}
 
 	result, err := isoinstaller.Build(ctx, buildOpts)
