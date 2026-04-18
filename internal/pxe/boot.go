@@ -70,14 +70,6 @@ func GenerateBootScript(serverURL, token string) ([]byte, error) {
 // item --gap for non-selectable separator and info lines.
 const diskBootBIOSTemplate = `#!ipxe
 
-# --- colour scheme ---------------------------------------------------------
-# cpair index 0: title bar   — bright-white on blue
-# cpair index 1: body        — white on black (default)
-# cpair index 2: selected    — black on cyan
-cpair --foreground 15 --background 4 0
-cpair --foreground 7  --background 0 1
-cpair --foreground 0  --background 6 2
-
 # --- menu ------------------------------------------------------------------
 menu clonr -- Boot Manager (BIOS)
 item --gap --
@@ -125,14 +117,6 @@ goto disk
 // Visual layout uses iPXE cpair colour pairs (blue/white header, dark body) and
 // item --gap for non-selectable separator and info lines.
 const diskBootUEFITemplate = `#!ipxe
-
-# --- colour scheme ---------------------------------------------------------
-# cpair index 0: title bar   — bright-white on blue
-# cpair index 1: body        — white on black (default)
-# cpair index 2: selected    — black on cyan
-cpair --foreground 15 --background 4 0
-cpair --foreground 7  --background 0 1
-cpair --foreground 0  --background 6 2
 
 # --- menu ------------------------------------------------------------------
 menu clonr -- Boot Manager (UEFI)
