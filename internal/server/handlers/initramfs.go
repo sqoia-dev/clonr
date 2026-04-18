@@ -351,15 +351,31 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Wrap the script in a shell that starts ssh-agent and loads the root key.
-	// build-initramfs.sh uses sshpass+scp to pull binaries from localhost; without
-	// an agent the SSH connection fails with exit 255.
+	// build-initramfs.sh uses `sshpass -p $PASS scp user@host:/path` to pull
+	// binaries from localhost. When running on the server itself we create a
+	// sshpass shim that drops the -p flag and relies on root's SSH key via
+	// ssh-agent — same pattern as clonr-autodeploy.sh.
+	shimDir, shimErr := os.MkdirTemp("", "clonr-sshpass-shim-*")
+	if shimErr != nil {
+		return fmt.Errorf("create shim dir: %w", shimErr)
+	}
+	defer os.RemoveAll(shimDir)
+	shimPath := filepath.Join(shimDir, "sshpass")
+	shimContent := `#!/bin/bash
+# sshpass shim: strip -p <password> and exec ssh/scp directly with key auth.
+shift 2  # drop -p <password>
+exec "$@"
+`
+	os.WriteFile(shimPath, []byte(shimContent), 0o755)
+
 	wrapper := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
+# Start ssh-agent and load root's key for localhost SCP.
 if [[ -f /root/.ssh/id_ed25519 ]]; then
     eval "$(ssh-agent -s)" > /dev/null 2>&1
     ssh-add /root/.ssh/id_ed25519 < /dev/null 2>/dev/null || true
 fi
+export CLONR_SERVER_USER=root
 exec bash %q %q %q
 `, scriptPath, clonrBin, outputPath)
 
@@ -375,17 +391,18 @@ exec bash %q %q %q
 
 	cmd := exec.CommandContext(ctx, "bash", wrapperPath) //nolint:gosec
 	cmd.Dir = workDir
-	// Include /root/bin in PATH so busybox-static and other root-installed tools
-	// are visible to the script even when running under a restricted systemd unit.
+	// Prepend the sshpass shim dir to PATH so build-initramfs.sh finds our
+	// shim before the real sshpass. Also add /root/bin for busybox-static.
 	env := os.Environ()
 	for i, e := range env {
 		if strings.HasPrefix(e, "PATH=") {
-			env[i] = e + ":/root/bin"
+			env[i] = "PATH=" + shimDir + ":" + strings.TrimPrefix(e, "PATH=") + ":/root/bin"
 			break
 		}
 	}
 	cmd.Env = append(env,
 		"CLONR_SERVER_HOST=127.0.0.1",
+		"CLONR_SERVER_USER=root",
 	)
 
 	stdout, err := cmd.StdoutPipe()
