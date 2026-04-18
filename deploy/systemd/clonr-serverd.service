@@ -43,9 +43,24 @@ EnvironmentFile=-/etc/clonr/secrets.env
 Restart=on-failure
 RestartSec=5s
 
+# Give systemd 5 minutes to wait for a clean stop before sending SIGKILL.
+# ISO builds via QEMU take 10-15 minutes; the server's graceful shutdown
+# handler drains in-flight builds for up to 120 seconds (see server.go
+# ListenAndServe). 300s gives the entire shutdown sequence ample headroom
+# without risking an indefinite hang: the Go shutdown code always cancels
+# stuck builds and closes the HTTP listener before returning.
+TimeoutStopSec=300
+
 # ---------------------------------------------------------------------------
 # Resource limits
 # ---------------------------------------------------------------------------
+# QEMU spawns a large number of threads (vCPU threads, I/O threads, signal
+# handler threads) plus dracut and rsync subprocesses during a build. The
+# default TasksMax on many systemd versions is 512, which is easily exceeded
+# when multiple QEMU instances run concurrently. Setting infinity removes the
+# cap; resource safety is provided by the MemoryMax ceiling below.
+TasksMax=infinity
+
 # 8G ceiling: clonr-serverd is a combined management plane + ISO builder that
 # spawns QEMU children. Each QEMU builder VM requests -m 2048 (2G), and
 # multiple concurrent builds plus Go runtime overhead easily exceed 2G.

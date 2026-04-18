@@ -790,13 +790,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 
-		// Give in-flight builds up to 25 seconds to finish naturally before
+		// Give in-flight builds up to 120 seconds to finish naturally before
 		// we force-cancel them. HTTP shutdown gets its own 5-second window on
-		// top of that. Total wall-clock budget: 30 seconds.
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
+		// top of that. Total wall-clock budget: 125 seconds.
+		//
+		// The systemd unit sets TimeoutStopSec=300 which comfortably covers
+		// this window. Previously the 25s budget caused QEMU builds to be
+		// interrupted mid-install when the autodeploy timer restarted the
+		// service; 120s gives most OS package-download phases time to complete.
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer drainCancel()
 
-		log.Info().Msg("shutdown: waiting for in-flight builds to complete (up to 25s)")
+		log.Info().Msg("shutdown: waiting for in-flight builds to complete (up to 120s)")
 		s.buildProgress.WaitForActive(drainCtx)
 
 		// Any builds still active after the drain window are stuck — cancel them

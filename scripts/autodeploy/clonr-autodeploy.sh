@@ -170,6 +170,36 @@ fi
 rm -f "${_INITRAMFS_LOG}"
 
 # ---------------------------------------------------------------------------
+# Build-in-progress guard — defer restart if an ISO build is active
+# ---------------------------------------------------------------------------
+# ISO builds via QEMU take 10-15 minutes. Restarting clonr-serverd mid-build
+# sends SIGTERM to the process tree, kills the in-progress QEMU VM, and marks
+# the image "interrupted". We query the running server before restarting; if
+# any image is in "building" state we skip the restart and let the next
+# 2-minute timer cycle re-evaluate.
+#
+# The new binaries are already compiled and staged (SERVERD_NEW, CLI_STATIC_NEW).
+# They remain in /tmp until either this cycle restarts the service or the
+# next cycle picks up the same REMOTE_SHA (no drift → early exit before here).
+# Because we reset --hard to REMOTE_SHA above, the next cycle will see no drift
+# and exit early — so if a build runs for more than one cycle we keep deferring
+# until the server is idle, then deploy in one shot.
+BUILD_STATUS=$(curl -s --max-time 5 "http://localhost:8080/api/v1/images" 2>/dev/null \
+    | python3 -c 'import json,sys; imgs=json.load(sys.stdin).get("images",[]); print("building" if any(i.get("status")=="building" for i in imgs) else "idle")' \
+    2>/dev/null || echo "unknown")
+
+if [ "${BUILD_STATUS}" = "building" ]; then
+    log "Build in progress — deferring restart to next cycle (binary staged, will deploy when idle)"
+    # Clean up staged binaries so next cycle recompiles from the already-reset tree.
+    rm -f "${SERVERD_NEW}" "${CLI_STATIC_NEW}"
+    exit 0
+fi
+
+if [ "${BUILD_STATUS}" = "unknown" ]; then
+    log "Could not reach clonr-serverd API to check build status — proceeding with restart"
+fi
+
+# ---------------------------------------------------------------------------
 # Atomic replace: server binary + restart service
 # ---------------------------------------------------------------------------
 log "Replacing clonr-serverd binary and restarting service..."
