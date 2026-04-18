@@ -6020,6 +6020,16 @@ const Pages = {
                         </div>
 
                         <div class="form-group" style="margin-bottom:16px">
+                            <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">SELinux Mode</label>
+                            <select name="selinux_mode" id="build-iso-selinux" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+                                <option value="disabled" selected>Disabled (default — recommended for HPC)</option>
+                                <option value="permissive">Permissive (logs violations, does not enforce)</option>
+                                <option value="enforcing">Enforcing (full SELinux enforcement)</option>
+                            </select>
+                            <div class="form-hint">Controls the SELinux enforcement mode written into the kickstart. Most HPC clusters run with SELinux disabled.</div>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:16px">
                             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
                                 <input type="checkbox" name="install_updates" id="build-iso-updates">
                                 <span>Install OS updates during build</span>
@@ -6188,6 +6198,7 @@ const Pages = {
             cpus:             parseInt(data.get('cpus') || '2', 10),
             role_ids:         roleIds,
             firmware:         firmwareEl ? firmwareEl.value : 'uefi',
+            selinux_mode:     data.get('selinux_mode') || 'disabled',
             install_updates:  form.querySelector('input[name="install_updates"]').checked,
             custom_kickstart: data.get('custom_kickstart') || '',
             default_username: data.get('default_username') || undefined,

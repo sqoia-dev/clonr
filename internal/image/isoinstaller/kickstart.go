@@ -127,6 +127,9 @@ type ksTemplateData struct {
 	// Controls whether an ESP (vfat /boot/efi) or a biosboot partition is
 	// included in the kickstart partition directives.
 	Firmware string
+	// SELinuxMode is the SELinux enforcement directive: "disabled", "permissive",
+	// or "enforcing". Defaults to "disabled" for HPC compatibility.
+	SELinuxMode string
 }
 
 // joinStrings is the template func for joining slices — kept here so the
@@ -150,7 +153,7 @@ rootpw --iscrypted {{.RootPasswordHash}}
 {{- if .HasDefaultUser}}
 user --name={{.DefaultUser}} --password={{.DefaultPasswordHash}} --iscrypted --groups=wheel
 {{- end}}
-selinux --permissive
+selinux --{{.SELinuxMode}}
 firewall --disabled
 network --bootproto=dhcp --device=link --activate
 skipx
@@ -252,6 +255,16 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		return nil, fmt.Errorf("isoinstaller: unknown firmware %q -- accepted values are bios and uefi", firmware)
 	}
 
+	selinuxMode := opts.SELinuxMode
+	switch selinuxMode {
+	case "disabled", "permissive", "enforcing":
+		// valid — use as-is
+	case "":
+		selinuxMode = "disabled" // HPC default
+	default:
+		return nil, fmt.Errorf("isoinstaller: unknown selinux_mode %q -- accepted values are disabled, permissive, enforcing", selinuxMode)
+	}
+
 	d := ksTemplateData{
 		templateData:   data,
 		Distro:         distro.FamilyName(),
@@ -264,6 +277,7 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		NeedsBeeGFS:    hasRole(opts.RoleIDs, "storage"),
 		HasDefaultUser: opts.DefaultUsername != "",
 		Firmware:       firmware,
+		SELinuxMode:    selinuxMode,
 	}
 
 	var buf bytes.Buffer

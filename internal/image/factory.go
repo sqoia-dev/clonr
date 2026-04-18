@@ -1567,6 +1567,7 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
 		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
 		Firmware:        req.Firmware,
+		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
 		BuildID:         imageID, // used to name the systemd-run scope unit
 		// Progress callbacks — feed events into the build handle.
 		OnPhase:       ph.SetPhase,
@@ -1734,6 +1735,7 @@ func (f *Factory) buildFromISOFile(
 		InstallUpdates:  req.InstallUpdates,
 		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
 		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
+		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
 	}
 
 	result, err := isoinstaller.Build(ctx, buildOpts)

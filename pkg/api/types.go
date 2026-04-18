@@ -955,6 +955,11 @@ type BuildFromISORequest struct {
 	//   grub2-install --target=i386-pc is run during finalization.
 	Firmware string `json:"firmware,omitempty"`
 
+	// SELinuxMode controls the SELinux mode in the built image.
+	// Allowed values: "disabled", "permissive", "enforcing".
+	// Default: "disabled" (common for HPC clusters).
+	SELinuxMode string `json:"selinux_mode,omitempty"`
+
 	// Tags is an optional list of string tags attached to the resulting image.
 	Tags []string `json:"tags,omitempty"`
 

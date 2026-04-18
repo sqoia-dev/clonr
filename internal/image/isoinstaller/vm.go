@@ -105,6 +105,11 @@ type BuildOptions struct {
 	// can correlate systemctl status with a specific build.
 	// When empty, "unknown" is used.
 	BuildID string
+
+	// SELinuxMode sets the SELinux enforcement mode in the installed OS.
+	// Allowed values: "disabled", "permissive", "enforcing".
+	// Default (empty): "disabled" — correct for most HPC clusters.
+	SELinuxMode string
 }
 
 // BuildResult is returned by a successful Build call.
