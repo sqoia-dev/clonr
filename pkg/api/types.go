@@ -689,6 +689,41 @@ type LayoutRecommendation struct {
 	Warnings  []string   `json:"warnings,omitempty"`
 }
 
+// StorageRecommendation is the response from
+// GET /api/v1/nodes/:id/layout-recommendation?role=storage.
+// It separates the OS mdadm RAID1 layout from the ZFS data pool configuration
+// so that storage node provisioning can be reviewed and overridden independently.
+type StorageRecommendation struct {
+	// OSLayout is the mdadm RAID1 layout for the OS drives (2 smallest drives).
+	OSLayout  DiskLayout  `json:"os_layout"`
+	// ZFSPools contains the data pool plus optional SLOG/L2ARC vdevs.
+	ZFSPools  []ZFSPool   `json:"zfs_pools"`
+	// Reasoning contains a human-readable explanation of every decision made.
+	Reasoning []string    `json:"reasoning"`
+	// Warnings lists non-fatal concerns the operator should review.
+	Warnings  []string    `json:"warnings,omitempty"`
+	// Stats summarises capacity and drive allocation at a glance.
+	Stats     StorageStats `json:"stats"`
+}
+
+// StorageStats provides a capacity summary for a StorageRecommendation.
+type StorageStats struct {
+	// RawCapacityBytes is the total raw bytes across all data drives.
+	RawCapacityBytes    int64   `json:"raw_capacity_bytes"`
+	// UsableCapacityBytes is the estimated usable capacity after parity overhead.
+	UsableCapacityBytes int64   `json:"usable_capacity_bytes"`
+	// VdevCount is the number of ZFS vdevs in the data pool.
+	VdevCount           int     `json:"vdev_count"`
+	// DrivesForOS is the number of drives consumed by the OS RAID1.
+	DrivesForOS         int     `json:"drives_for_os"`
+	// DrivesForData is the number of HDD/SSD drives allocated to the ZFS data pool.
+	DrivesForData       int     `json:"drives_for_data"`
+	// DrivesForCache is the number of NVMe/SSD drives used for SLOG + L2ARC.
+	DrivesForCache      int     `json:"drives_for_cache"`
+	// ParityOverhead is the fraction of raw capacity consumed by parity (e.g. 0.20 for raidz2/10-wide).
+	ParityOverhead      float64 `json:"parity_overhead"`
+}
+
 // LayoutValidationRequest is the body for POST /api/v1/nodes/:id/layout/validate.
 type LayoutValidationRequest struct {
 	Layout DiskLayout `json:"layout"`

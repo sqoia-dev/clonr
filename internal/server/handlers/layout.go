@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
@@ -20,9 +21,16 @@ type LayoutHandler struct {
 
 // GetLayoutRecommendation handles GET /api/v1/nodes/:id/layout-recommendation.
 // Returns a hardware-aware DiskLayout recommendation for the node, based on its
-// stored hardware profile. The recommendation includes human-readable reasoning
-// so the admin can evaluate it before applying.
+// stored hardware profile. When the query parameter ?role=storage is present,
+// the response is a StorageRecommendation (ZFS pool layout) instead of a general
+// DiskLayout. The recommendation includes human-readable reasoning so the admin
+// can evaluate it before applying.
 func (h *LayoutHandler) GetLayoutRecommendation(w http.ResponseWriter, r *http.Request) {
+	role := r.URL.Query().Get("role")
+	if strings.EqualFold(role, "storage") {
+		h.getStorageLayoutRecommendation(w, r)
+		return
+	}
 	id := chi.URLParam(r, "id")
 
 	node, err := h.DB.GetNodeConfig(r.Context(), id)
@@ -76,6 +84,48 @@ func (h *LayoutHandler) GetLayoutRecommendation(w http.ResponseWriter, r *http.R
 		Reasoning: rec.Reasoning,
 		Warnings:  rec.Warnings,
 	})
+}
+
+// getStorageLayoutRecommendation is the storage-role sub-handler called when
+// ?role=storage is passed to GetLayoutRecommendation.
+func (h *LayoutHandler) getStorageLayoutRecommendation(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	node, err := h.DB.GetNodeConfig(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if len(node.HardwareProfile) == 0 {
+		writeValidationError(w, "node has no hardware profile — hardware is discovered on first PXE boot")
+		return
+	}
+
+	var hw hardware.SystemInfo
+	if err := json.Unmarshal(node.HardwareProfile, &hw); err != nil {
+		log.Error().Err(err).Str("node_id", id).Msg("parse hardware profile for storage layout recommendation")
+		writeError(w, fmt.Errorf("cannot parse hardware profile: %w", err))
+		return
+	}
+
+	// Firmware preference: node's detected firmware takes priority.
+	imageFirmware := node.DetectedFirmware
+	if imageFirmware == "" && node.BaseImageID != "" {
+		img, imgErr := h.DB.GetBaseImage(r.Context(), node.BaseImageID)
+		if imgErr == nil {
+			imageFirmware = string(img.Firmware)
+		}
+	}
+
+	rec, err := layout.RecommendStorage(hw, imageFirmware)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", id).Msg("storage layout recommendation failed")
+		writeValidationError(w, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rec)
 }
 
 // GetEffectiveLayout handles GET /api/v1/nodes/:id/effective-layout.
