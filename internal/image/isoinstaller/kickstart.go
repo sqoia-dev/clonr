@@ -222,6 +222,14 @@ dnf install -y beegfs-storage beegfs-meta --nogpgcheck || true
 mkdir -p /etc/ssh/sshd_config.d
 echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
 chmod 600 /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
+{{- if .HasDefaultUser}}
+# ── Fix password last-changed date ───────────────────────────────────────
+# Anaconda's user --iscrypted leaves the shadow last-changed field empty on
+# Rocky 10, which forces a password change on first console login (shows
+# "Login incorrect" instead of a change prompt). Set it to today.
+chage -d "$(date +%Y-%m-%d)" {{.DefaultUser}}
+chage -d "$(date +%Y-%m-%d)" root
+{{- end}}
 # ── Strip node identity — regenerated on first boot by clonr finalize ──────
 rm -f /etc/machine-id
 touch /etc/machine-id
