@@ -389,18 +389,19 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	stub := api.NodeConfig{
-		ID:              uuid.New().String(),
-		Hostname:        hostname,
-		HostnameAuto:    hostnameAuto,
-		FQDN:            fqdn,
-		PrimaryMAC:      primaryMAC,
-		Interfaces:      []api.InterfaceConfig{},
-		SSHKeys:         []string{},
-		Groups:          []string{},
-		CustomVars:      map[string]string{},
-		HardwareProfile: req.HardwareProfile,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:               uuid.New().String(),
+		Hostname:         hostname,
+		HostnameAuto:     hostnameAuto,
+		FQDN:             fqdn,
+		PrimaryMAC:       primaryMAC,
+		Interfaces:       []api.InterfaceConfig{},
+		SSHKeys:          []string{},
+		Groups:           []string{},
+		CustomVars:       map[string]string{},
+		HardwareProfile:  req.HardwareProfile,
+		DetectedFirmware: req.DetectedFirmware,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 
 	nodeCfg, err := h.DB.UpsertNodeByMAC(r.Context(), stub)

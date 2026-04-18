@@ -31,6 +31,18 @@ type SystemInfo struct {
 	DMI       DMIInfo
 	IBDevices []IBDevice
 	MDArrays  []MDArray
+	// Firmware is the detected boot firmware type: "uefi" or "bios".
+	// Detected by checking for the presence of /sys/firmware/efi.
+	Firmware  string
+}
+
+// DetectFirmware detects the node's boot firmware type by checking for the
+// EFI sysfs interface. Returns "uefi" if /sys/firmware/efi exists, "bios" otherwise.
+func DetectFirmware() string {
+	if _, err := os.Stat("/sys/firmware/efi"); err == nil {
+		return "uefi"
+	}
+	return "bios"
 }
 
 // Discover runs all hardware discovery routines and returns a consolidated
@@ -78,6 +90,8 @@ func Discover() (*SystemInfo, error) {
 	if err == nil {
 		info.MDArrays = mdArrays
 	}
+
+	info.Firmware = DetectFirmware()
 
 	return info, nil
 }

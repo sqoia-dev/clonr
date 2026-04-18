@@ -7,10 +7,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/internal/db"
 	"github.com/sqoia-dev/clonr/internal/hardware"
 	"github.com/sqoia-dev/clonr/internal/image/layout"
+	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
 // LayoutHandler handles layout recommendation, validation, and override endpoints.
@@ -101,6 +101,15 @@ func (h *LayoutHandler) GetEffectiveLayout(w http.ResponseWriter, r *http.Reques
 
 	effective := node.EffectiveLayout(img, group)
 	source := node.EffectiveLayoutSource(img, group)
+
+	// Auto-correct layout when:
+	//   - The node reported its firmware type at registration (DetectedFirmware set).
+	//   - The layout came from the image default (no operator override).
+	//   - The image's firmware type doesn't match the node's actual firmware.
+	// Operator overrides (node-level or group-level) are always respected as-is.
+	if node.DetectedFirmware != "" && source == "image" && img != nil {
+		effective = layout.AutoCorrectForFirmware(effective, string(img.Firmware), node.DetectedFirmware, node.ID, node.Hostname)
+	}
 
 	resp := api.EffectiveLayoutResponse{
 		Layout:  effective,

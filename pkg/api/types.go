@@ -349,8 +349,12 @@ type NodeConfig struct {
 	// HardwareProfile is the raw hardware discovery JSON from the node.
 	// Populated on auto-registration; nil when node was created manually.
 	HardwareProfile json.RawMessage      `json:"hardware_profile,omitempty"`
-	CreatedAt       time.Time            `json:"created_at"`
-	UpdatedAt       time.Time            `json:"updated_at"`
+	// DetectedFirmware is the node's boot firmware type reported by the deploy
+	// agent on registration: "uefi" or "bios". Empty for manually-created nodes
+	// or legacy registrations that predate this field.
+	DetectedFirmware string               `json:"detected_firmware,omitempty"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 // State derives the current lifecycle state of this node from its stored fields.
@@ -767,6 +771,10 @@ type ListLogsResponse struct {
 type RegisterRequest struct {
 	// HardwareProfile is the raw JSON from hardware.Discover().
 	HardwareProfile json.RawMessage `json:"hardware_profile"`
+	// DetectedFirmware is the node's boot firmware type as detected by the
+	// deploy agent: "uefi" or "bios". Populated from hardware.DetectFirmware().
+	// Empty string means unknown (legacy clients that predate this field).
+	DetectedFirmware string `json:"detected_firmware,omitempty"`
 }
 
 // RegisterResponse is the response body for POST /api/v1/nodes/register.

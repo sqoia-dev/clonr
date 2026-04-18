@@ -483,8 +483,9 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+			 detected_firmware)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -492,6 +493,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
+		cfg.DetectedFirmware,
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
@@ -511,8 +513,9 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 	// Check whether a record for this MAC already exists.
 	existing, err := db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
 	if err == nil {
-		// Exists — update hardware_profile. Only overwrite hostname when the stored
-		// hostname was auto-generated; admin-set hostnames are preserved.
+		// Exists — update hardware_profile and detected_firmware. Only overwrite
+		// hostname when the stored hostname was auto-generated; admin-set hostnames
+		// are preserved.
 		newHostname := existing.Hostname
 		newHostnameAuto := existing.HostnameAuto
 		if existing.HostnameAuto && cfg.Hostname != "" {
@@ -521,9 +524,9 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		}
 		_, err = db.sql.ExecContext(ctx, `
 			UPDATE node_configs
-			SET hardware_profile = ?, hostname = ?, hostname_auto = ?, updated_at = ?
+			SET hardware_profile = ?, hostname = ?, hostname_auto = ?, detected_firmware = ?, updated_at = ?
 			WHERE primary_mac = ?
-		`, string(hwProfile), newHostname, boolToInt(newHostnameAuto), time.Now().Unix(), cfg.PrimaryMAC)
+		`, string(hwProfile), newHostname, boolToInt(newHostnameAuto), cfg.DetectedFirmware, time.Now().Unix(), cfg.PrimaryMAC)
 		if err != nil {
 			return api.NodeConfig{}, fmt.Errorf("db: upsert node (update): %w", err)
 		}
@@ -548,14 +551,16 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]')
+			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+			 detected_firmware)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]', ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(groups), string(customVars),
 		string(hwProfile),
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
+		cfg.DetectedFirmware,
 	)
 	if err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: upsert node (insert): %w", err)
@@ -576,12 +581,13 @@ func nullableString(s string) interface{} {
 // Update this constant whenever columns are added or removed.
 // ADR-0008: deploy_completed_preboot_at, deploy_verified_booted_at,
 //           deploy_verify_timeout_at, and last_seen_at added in migration 022.
+// Migration 026: detected_firmware added.
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
 	       created_at, updated_at, group_id, disk_layout_override, extra_mounts,
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
-	       deploy_verify_timeout_at, last_seen_at`
+	       deploy_verify_timeout_at, last_seen_at, detected_firmware`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -686,7 +692,8 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
 		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?,
-		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?
+		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
+		    detected_firmware = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
@@ -694,7 +701,8 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		string(groups), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
-		time.Now().Unix(), cfg.ID,
+		time.Now().Unix(), cfg.DetectedFirmware,
+		cfg.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("db: update node config: %w", err)
@@ -1195,6 +1203,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&groupID, &diskLayoutOverrideJSON, &extraMountsJSON,
 		&deployCompletedPrebootAtVal, &deployVerifiedBootedAtVal,
 		&deployVerifyTimeoutAtVal, &lastSeenAtVal,
+		&cfg.DetectedFirmware,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound

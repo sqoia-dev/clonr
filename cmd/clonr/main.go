@@ -21,6 +21,7 @@ import (
 	"github.com/sqoia-dev/clonr/internal/config"
 	"github.com/sqoia-dev/clonr/internal/deploy"
 	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clonr/internal/image/layout"
 	"github.com/sqoia-dev/clonr/internal/ipmi"
 	"github.com/sqoia-dev/clonr/internal/power"
 	poweripm "github.com/sqoia-dev/clonr/internal/power/ipmi"
@@ -700,7 +701,10 @@ func runAutoDeployMode() error {
 	}
 
 	fmt.Fprintln(os.Stderr, "[auto] Registering with server...")
-	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{HardwareProfile: hwJSON})
+	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{
+		HardwareProfile:  hwJSON,
+		DetectedFirmware: hw.Firmware,
+	})
 	if err != nil {
 		return fmt.Errorf("register node: %w", err)
 	}
@@ -899,6 +903,14 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	}
 	effectiveLayout := nodeCfg.EffectiveLayout(img, group)
 	layoutSource := nodeCfg.EffectiveLayoutSource(img, group)
+
+	// Auto-correct layout when the node reported its firmware at registration and
+	// the image's firmware type doesn't match. Only applies when no operator override
+	// is present (layoutSource == "image") so admin overrides are always respected.
+	if nodeCfg.DetectedFirmware != "" && layoutSource == "image" {
+		effectiveLayout = layout.AutoCorrectForFirmware(effectiveLayout, string(img.Firmware), nodeCfg.DetectedFirmware, nodeCfg.ID, nodeCfg.Hostname)
+	}
+
 	deployLog.Info().Str("layout_source", layoutSource).
 		Msg("disk layout resolved")
 
