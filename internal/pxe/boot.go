@@ -74,15 +74,25 @@ sanboot --no-describe --drive 0x80
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
-// `exit 1` signals a boot failure to the UEFI firmware, causing it to skip the
-// current (PXE) boot entry and try the next entry in BootOrder — which is the
-// OS disk. Using `exit 1` (non-zero) is critical: `exit` or `exit 0` tells
-// OVMF/EDK2 that PXE succeeded, so the firmware stops trying other entries and
-// shows the boot picker. A non-zero exit tells the firmware "this boot path
-// failed, try the next one" which is exactly what we want.
+// We use plain `exit` (not `exit 1`) here. The boot routing for UEFI nodes is
+// controlled at the NVRAM BootOrder level: FixEFIBoot sets the OS entry first
+// in BootOrder during finalize. Proxmox forces the first PXE boot after a
+// reimage via `boot=order=net0;scsi0` at the VM level, so iPXE runs once, sees
+// NodeStateDeployed, and exits. OVMF then walks BootOrder, skips the PXE entry
+// that just ran, and finds the OS entry (grubx64.efi) next — booting from disk.
+//
+// `exit 1` (non-zero) was previously used to signal PXE failure, but on OVMF
+// it causes the firmware to try the NEXT firmware-enumerated boot option rather
+// than the NEXT BootOrder entry. On VMs with HTTP boot over IPv6 registered
+// before the disk entry, `exit 1` triggers the HTTP IPv6 boot instead of the
+// OS disk. Plain `exit` (success) lets OVMF proceed through BootOrder normally,
+// where the OS entry (written by FixEFIBoot) is guaranteed to be first.
+//
+// SetPXEBootFirst is NOT called during finalize — BootOrder is left with the OS
+// entry first. PXE boot order is enforced by Proxmox VM config, not NVRAM.
 const diskBootUEFITemplate = `#!ipxe
-echo Node {{.Hostname}} is deployed (UEFI) -- signaling PXE failure to fall through to disk
-exit 1
+echo Node {{.Hostname}} is deployed (UEFI) -- returning to firmware
+exit
 `
 
 // waitRetryTemplate is served to nodes in reimage_pending state that have no

@@ -1054,25 +1054,16 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			return Wrap(ExitBootloader, "efi_boot_entry", fmt.Errorf("efibootmgr --create failed: %w", efiErr))
 		}
 		efiBootCancel()
-		deployLog.Info().Str("label", label).Msg("EFI boot setup: NVRAM OS boot entry created")
-
-		// Step 2: Reorder BootOrder so PXE is first (before the new OS entry).
+		deployLog.Info().Str("label", label).Msg("EFI boot setup: NVRAM OS boot entry created — OS is first in BootOrder")
+		// NOTE: SetPXEBootFirst is intentionally NOT called here.
 		//
-		// After FixEFIBoot creates the OS entry, it becomes the next boot target.
-		// We must put the PXE entry back at position 0 so that clonr's PXE server
-		// gets to route the next boot (confirming deploy-complete state before
-		// handing off to disk). The OS entry remains second: after the PXE server
-		// sees NodeStateDeployed it returns an iPXE `exit` which returns control to
-		// the firmware boot order, so boot order position 2 is never actually reached
-		// in normal operation.
-		efiOrderCtx, efiOrderCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if efiErr := deploy.SetPXEBootFirst(efiOrderCtx); efiErr != nil {
-			deployLog.Warn().Err(efiErr).
-				Msg("EFI boot setup: SetPXEBootFirst failed (non-fatal — PXE may not be in NVRAM yet)")
-		} else {
-			deployLog.Info().Msg("EFI boot setup: PXE entry promoted to first position in NVRAM BootOrder")
-		}
-		efiOrderCancel()
+		// FixEFIBoot already placed the OS entry first in NVRAM BootOrder. Proxmox
+		// enforces the initial post-reimage PXE boot via VM-level boot order
+		// (boot=order=net0;scsi0), not via NVRAM. Calling SetPXEBootFirst would put
+		// a PXE entry before the OS in BootOrder, which causes OVMF to try HTTP IPv6
+		// boot (or similar) instead of the OS disk when the iPXE script exits after
+		// seeing NodeStateDeployed. Leave BootOrder with OS first so OVMF always has
+		// a direct path to grubx64.efi after iPXE exits.
 	}
 	// ──────────────────────────────────────────────────────────────────────
 
