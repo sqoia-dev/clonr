@@ -459,17 +459,21 @@ PXE-booted nodes running from initramfs.`,
 			// ─────────────────────────────────────────────────────────────────
 
 			// Step 1: Discover hardware.
-			fmt.Fprintln(os.Stderr, "[1/6] Discovering hardware...")
+			printPhase(phaseInProgress, "Discovering hardware")
 			deployLog.Info().Str("component", "hardware").Msg("starting hardware discovery")
 			hw, err := hardware.Discover()
 			if err != nil {
+				printPhase(phaseFailed, "Hardware discovery")
+				printDeployError("hardware_discovery", err.Error())
 				return fmt.Errorf("hardware discovery: %w", err)
 			}
+			printPhase(phaseDone, "Hardware discovered")
 
 			// Step 2: Get node config by primary MAC.
-			fmt.Fprintln(os.Stderr, "[2/6] Fetching node config from server...")
+			printPhase(phaseInProgress, "Fetching node config from server")
 			primaryMAC := primaryMACFromHW(hw)
 			if primaryMAC == "" {
+				printDeployError("hardware_discovery", "no usable NIC found — cannot look up node config")
 				return fmt.Errorf("no usable NIC found — cannot look up node config")
 			}
 
@@ -480,26 +484,32 @@ PXE-booted nodes running from initramfs.`,
 
 			nodeCfg, err := c.GetNodeConfigByMAC(ctx, primaryMAC)
 			if err != nil {
+				printPhase(phaseFailed, "Node config fetch")
+				printDeployError("node_config", err.Error())
 				deployLog.Error().Str("component", "deploy").Err(err).Msg("failed to fetch node config")
 				return fmt.Errorf("get node config (MAC %s): %w", primaryMAC, err)
 			}
 			remoteWriter.SetHostname(nodeCfg.Hostname)
 			progressReporter.SetNode(primaryMAC, nodeCfg.Hostname)
-			fmt.Fprintf(os.Stderr, "    Node: %s (%s)\n", nodeCfg.Hostname, nodeCfg.ID)
+			printPhase(phaseDone, fmt.Sprintf("Node config loaded  (%s)", nodeCfg.Hostname))
 			deployLog.Info().Str("component", "deploy").Str("hostname", nodeCfg.Hostname).Msg("node config loaded")
 
 			// Step 3: Get image details.
-			fmt.Fprintln(os.Stderr, "[3/6] Fetching image details...")
+			printPhase(phaseInProgress, "Fetching image details")
 			deployLog.Info().Str("component", "deploy").Str("image_id", flagImage).Msg("fetching image details")
 			img, err := c.GetImage(ctx, flagImage)
 			if err != nil {
+				printPhase(phaseFailed, "Image details fetch")
+				printDeployError("image_fetch", err.Error())
 				deployLog.Error().Str("component", "deploy").Err(err).Msg("failed to fetch image")
 				return fmt.Errorf("get image %s: %w", flagImage, err)
 			}
 			if img.Status != api.ImageStatusReady {
+				printPhase(phaseFailed, "Image details fetch")
+				printDeployError("image_fetch", fmt.Sprintf("image %s is not ready (status: %s)", img.ID, img.Status))
 				return fmt.Errorf("image %s is not ready (status: %s)", img.ID, img.Status)
 			}
-			fmt.Fprintf(os.Stderr, "    Image: %s %s (%s)\n", img.Name, img.Version, img.Format)
+			printPhase(phaseDone, fmt.Sprintf("Image details fetched  (%s %s)", img.Name, img.Version))
 			deployLog.Info().Str("component", "deploy").
 				Str("image", img.Name).Str("version", img.Version).Str("format", string(img.Format)).
 				Msg("image ready")
@@ -510,6 +520,9 @@ PXE-booted nodes running from initramfs.`,
 				cfg.ServerURL = flagServer
 			}
 			blobURL := cfg.ServerURL + "/api/v1/images/" + img.ID + "/blob"
+
+			// Print the deploy header now that we have node + image identity.
+			printDeployHeader(nodeCfg.Hostname, fmt.Sprintf("%s %s", img.Name, img.Version), cfg.ServerURL)
 
 			// Resolve mount root.
 			mountRoot := flagMountRoot
@@ -523,7 +536,7 @@ PXE-booted nodes running from initramfs.`,
 			}
 
 			// Step 4: Preflight.
-			fmt.Fprintln(os.Stderr, "[4/6] Running preflight checks...")
+			printPhase(phaseInProgress, "Running preflight checks")
 			deployLog.Info().Str("component", "deploy").Msg("running preflight checks")
 			progressReporter.StartPhase("preflight", 0)
 			var deployer deploy.Deployer
@@ -535,15 +548,17 @@ PXE-booted nodes running from initramfs.`,
 			}
 
 			if err := deployer.Preflight(ctx, img.DiskLayout, *hw); err != nil {
+				printPhase(phaseFailed, "Preflight checks")
+				printDeployError("preflight", err.Error())
 				deployLog.Error().Str("component", "deploy").Err(err).Msg("preflight failed")
 				progressReporter.EndPhase(err.Error())
 				return fmt.Errorf("preflight: %w", err)
 			}
+			printPhase(phaseDone, "Preflight checks passed")
 			deployLog.Info().Str("component", "deploy").Msg("preflight passed")
 			progressReporter.EndPhase("")
 
 			// Step 5: Deploy.
-			fmt.Fprintln(os.Stderr, "[5/6] Deploying image...")
 			deployLog.Info().Str("component", "deploy").Msg("starting image write")
 			opts := deploy.DeployOpts{
 				ImageURL:         blobURL,
@@ -559,41 +574,58 @@ PXE-booted nodes running from initramfs.`,
 
 			start := time.Now()
 			var lastPhase string
+			var lastLoggedPct int64
 			progressFn := func(written, total int64, phase string) {
 				if phase != lastPhase {
 					if lastPhase != "" {
-						fmt.Fprintln(os.Stderr) // newline after previous phase
+						consolePrintln("") // end the previous \r line
+						printPhase(phaseDone, phaseLabel(lastPhase))
 					}
 					lastPhase = phase
 					deployLog.Info().Str("component", "deploy").Str("phase", phase).Msg("deployment phase started")
 				}
+				printProgressBar(phaseLabel(phase), written, total)
+
 				if total > 0 {
 					pct := float64(written) / float64(total) * 100
-					fmt.Fprintf(os.Stderr, "\r    %s: %.1f%% (%s / %s)",
-						phase, pct, humanBytes(written), humanBytes(total))
-				} else {
-					fmt.Fprintf(os.Stderr, "\r    %s: %s written", phase, humanBytes(written))
+					milestone := int64(pct/10) * 10
+					if milestone > lastLoggedPct && milestone > 0 {
+						lastLoggedPct = milestone
+						deployLog.Info().Str("component", "deploy").
+							Str("phase", phase).Int64("pct", milestone).
+							Str("written", humanBytes(written)).Str("total", humanBytes(total)).
+							Msg("image write progress")
+					}
 				}
 			}
 
 			if err := deployer.Deploy(ctx, opts, progressFn); err != nil {
-				fmt.Fprintln(os.Stderr) // newline after progress
+				consolePrintln("") // end any in-progress \r line
+				if lastPhase != "" {
+					printPhase(phaseFailed, phaseLabel(lastPhase))
+				}
 				if ctx.Err() != nil {
+					printDeployError("deploy", fmt.Sprintf("timed out after %s", deployTimeout))
 					deployLog.Error().Str("component", "deploy").
 						Dur("timeout", deployTimeout).
 						Msg("deployment timed out — rollback attempted")
 					return fmt.Errorf("deploy: timed out after %s (limit set by --timeout / CLONR_DEPLOY_TIMEOUT): %w",
 						deployTimeout, err)
 				}
+				printDeployError("deploy", err.Error())
 				deployLog.Error().Str("component", "deploy").Err(err).Msg("image write failed")
 				return fmt.Errorf("deploy: %w", err)
 			}
+			// Close the last progress line and mark it done.
+			consolePrintln("")
+			if lastPhase != "" {
+				printPhase(phaseDone, phaseLabel(lastPhase))
+			}
 			elapsed := time.Since(start).Round(time.Second)
-			fmt.Fprintf(os.Stderr, "\n    Done in %s\n", elapsed)
 			deployLog.Info().Str("component", "deploy").Str("duration", elapsed.String()).Msg("image write complete")
 
 			// Step 6: Finalize.
-			fmt.Fprintln(os.Stderr, "[6/6] Applying node configuration...")
+			printPhase(phaseInProgress, "Finalizing node (hostname, network, SSH keys, bootloader)")
 			deployLog.Info().Str("component", "chroot").Msg("applying node configuration")
 			progressReporter.StartPhase("finalizing", 0)
 			// Wire phone-home injection (ADR-0008): set node token and verify-boot URL
@@ -603,11 +635,13 @@ PXE-booted nodes running from initramfs.`,
 				phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
 			}
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
+				printPhase(phaseFailed, "Finalize")
+				printDeployError("finalize", err.Error())
 				deployLog.Error().Str("component", "chroot").Err(err).Msg("finalize failed")
 				progressReporter.EndPhase(err.Error())
 				return fmt.Errorf("finalize: %w", err)
 			}
-			fmt.Fprintln(os.Stderr, "    Hostname, network, and SSH keys applied.")
+			printPhase(phaseDone, "Node configuration applied")
 			deployLog.Info().Str("component", "chroot").Msg("node configuration applied")
 			progressReporter.EndPhase("")
 
@@ -618,11 +652,11 @@ PXE-booted nodes running from initramfs.`,
 			isBIOSImage := img.Firmware == "bios"
 			if flagFixEFI {
 				if isBIOSImage {
-					fmt.Fprintln(os.Stderr, "[+] Skipping EFI boot repair — image firmware=bios (grub2-install handled by Finalize)")
+					printPhase(phaseDone, "EFI boot repair skipped (BIOS image)")
 					deployLog.Info().Str("component", "efiboot").Str("firmware", "bios").
 						Msg("skipping FixEFIBoot — BIOS image; grub2-install into biosboot partition is sufficient")
 				} else {
-					fmt.Fprintln(os.Stderr, "[+] Repairing EFI boot entries...")
+					printPhase(phaseInProgress, "Repairing EFI boot entries")
 					deployLog.Info().Str("component", "efiboot").Msg("repairing EFI boot entries")
 					disk := flagDisk
 					if disk == "" {
@@ -631,19 +665,25 @@ PXE-booted nodes running from initramfs.`,
 					label := img.Name
 					if err := deploy.FixEFIBoot(ctx, disk, 1, label, `\EFI\rocky\grubx64.efi`); err != nil {
 						// Non-fatal — log the error but don't fail the deployment.
-						fmt.Fprintf(os.Stderr, "    Warning: EFI boot repair failed: %v\n", err)
+						consolePrintln("") // close the in-progress line
+						printPhase(phaseFailed, fmt.Sprintf("EFI boot repair (non-fatal): %v", err))
 						deployLog.Warn().Str("component", "efiboot").Err(err).Msg("EFI boot repair failed (non-fatal)")
 					} else {
-						fmt.Fprintln(os.Stderr, "    EFI boot entry set.")
+						printPhase(phaseDone, "EFI boot entry set")
 						deployLog.Info().Str("component", "efiboot").Msg("EFI boot entry set")
 					}
 				}
 			}
 
-			fmt.Printf("\nDeployment complete.\n")
-			fmt.Printf("  Node:     %s\n", nodeCfg.Hostname)
-			fmt.Printf("  Image:    %s %s\n", img.Name, img.Version)
-			fmt.Printf("  Duration: %s\n", time.Since(start).Round(time.Second))
+			totalDuration := time.Since(start).Round(time.Second)
+			consolePrintln("")
+			consolePrint(ansiBold + ansiGreen)
+			consolePrintln("  Deployment complete.")
+			consolePrint(ansiReset)
+			consolePrintln(fmt.Sprintf("  Node:     %s", nodeCfg.Hostname))
+			consolePrintln(fmt.Sprintf("  Image:    %s %s", img.Name, img.Version))
+			consolePrintln(fmt.Sprintf("  Duration: %s", totalDuration))
+			consolePrintln("")
 			return nil
 		},
 	}
@@ -671,15 +711,25 @@ func runAutoDeployMode() error {
 	ctx := context.Background()
 	c := clientFromFlags()
 
+	// Resolve server URL for the header (best-effort; may be empty before config load).
+	cfg := config.LoadClientConfig()
+	if flagServer != "" {
+		cfg.ServerURL = flagServer
+	}
+
 	// Step 1: Discover hardware.
-	fmt.Fprintln(os.Stderr, "[auto] Discovering hardware...")
+	printPhase(phaseInProgress, "Discovering hardware")
 	hw, err := hardware.Discover()
 	if err != nil {
+		printPhase(phaseFailed, "Hardware discovery")
+		printDeployError("hardware_discovery", err.Error())
 		return fmt.Errorf("hardware discovery: %w", err)
 	}
+	printPhase(phaseDone, "Hardware discovered")
 
 	primaryMAC := primaryMACFromHW(hw)
 	if primaryMAC == "" {
+		printDeployError("hardware_discovery", "no usable NIC found — cannot register node")
 		return fmt.Errorf("no usable NIC found — cannot register node")
 	}
 
@@ -700,14 +750,17 @@ func runAutoDeployMode() error {
 		return fmt.Errorf("marshal hardware profile: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "[auto] Registering with server...")
+	printPhase(phaseInProgress, "Registering with server")
 	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{
 		HardwareProfile:  hwJSON,
 		DetectedFirmware: hw.Firmware,
 	})
 	if err != nil {
+		printPhase(phaseFailed, "Registration")
+		printDeployError("register", err.Error())
 		return fmt.Errorf("register node: %w", err)
 	}
+	printPhase(phaseDone, "Registered with server")
 
 	deployLog.Info().
 		Str("action", regResp.Action).
@@ -715,18 +768,23 @@ func runAutoDeployMode() error {
 		Msg("registered with server")
 
 	// Update log writer with the server-assigned hostname now that we have it.
+	nodeName := hw.Hostname
 	if regResp.NodeConfig != nil && regResp.NodeConfig.Hostname != "" {
 		remoteWriter.SetHostname(regResp.NodeConfig.Hostname)
+		nodeName = regResp.NodeConfig.Hostname
 	}
 
 	// Step 3: Act on server directive.
 	switch regResp.Action {
 	case "deploy":
-		fmt.Fprintln(os.Stderr, "[auto] Image assigned — proceeding with deployment")
+		// Print header now that we have node identity; image will be fetched next.
+		printDeployHeader(nodeName, "", cfg.ServerURL)
+		printPhase(phaseDone, "Image assigned — proceeding with deployment")
 		return runAutoDeployImage(ctx, c, *regResp.NodeConfig, deployLog, remoteWriter)
 
 	case "wait":
-		fmt.Fprintln(os.Stderr, "[auto] Waiting for admin to assign an image (polling every 30s)...")
+		printDeployHeader(nodeName, "waiting for assignment", cfg.ServerURL)
+		printPhase(phaseInProgress, "Waiting for admin to assign an image (polling every 30s)")
 		deployLog.Info().Msg("entering wait loop — assign an image via the clonr UI or API")
 		for {
 			select {
@@ -742,7 +800,8 @@ func runAutoDeployMode() error {
 			}
 			if nodeCfg.BaseImageID != "" {
 				deployLog.Info().Str("image_id", nodeCfg.BaseImageID).Msg("image assigned, starting deployment")
-				fmt.Fprintln(os.Stderr, "[auto] Image assigned — proceeding with deployment")
+				consolePrintln("") // close the waiting line
+				printPhase(phaseDone, "Image assigned — proceeding with deployment")
 				// Admin may have assigned a hostname since registration — update now.
 				if nodeCfg.Hostname != "" {
 					remoteWriter.SetHostname(nodeCfg.Hostname)
@@ -753,7 +812,7 @@ func runAutoDeployMode() error {
 		}
 
 	case "capture":
-		fmt.Fprintln(os.Stderr, "[auto] Capture mode not yet implemented")
+		printPhase(phaseFailed, "Capture mode not yet implemented")
 		deployLog.Info().Msg("capture action received — not yet implemented")
 		return nil
 
@@ -870,20 +929,36 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	defer reporter.Complete()
 
 	// Fetch image details.
+	printPhase(phaseInProgress, "Fetching image details")
 	img, err := c.GetImage(ctx, nodeCfg.BaseImageID)
 	if err != nil {
+		printPhase(phaseFailed, "Image details fetch")
+		printDeployError("image_fetch", err.Error())
 		return Wrap(ExitImageFetch, "image_fetch", fmt.Errorf("fetch image %s: %w", nodeCfg.BaseImageID, err))
 	}
 	if img.Status != api.ImageStatusReady {
+		printPhase(phaseFailed, "Image details fetch")
+		printDeployError("image_fetch", fmt.Sprintf("image %s is not ready (status: %s)", img.ID, img.Status))
 		return Wrap(ExitImageFetch, "image_fetch", fmt.Errorf("image %s is not ready (status: %s)", img.ID, img.Status))
 	}
+	printPhase(phaseDone, fmt.Sprintf("Image details fetched  (%s %s)", img.Name, img.Version))
+
+	// Print the deploy header now that we have both node and image identity.
+	printDeployHeader(
+		nodeCfg.Hostname,
+		fmt.Sprintf("%s %s", img.Name, img.Version),
+		cfg.ServerURL,
+	)
 
 	deployLog.Info().Str("image", img.Name).Str("version", img.Version).
 		Str("format", string(img.Format)).Msg("image details fetched")
 
 	// Resolve hardware for preflight.
+	printPhase(phaseInProgress, "Discovering hardware")
 	hw, err := hardware.Discover()
 	if err != nil {
+		printPhase(phaseFailed, "Hardware discovery")
+		printDeployError("hardware_discovery", err.Error())
 		return Wrap(ExitHardware, "hardware_discovery", fmt.Errorf("hardware discovery for preflight: %w", err))
 	}
 
@@ -911,6 +986,13 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		effectiveLayout = layout.AutoCorrectForFirmware(effectiveLayout, string(img.Firmware), nodeCfg.DetectedFirmware, nodeCfg.ID, nodeCfg.Hostname)
 	}
 
+	partCount := len(effectiveLayout.Partitions)
+	firmware := string(img.Firmware)
+	if nodeCfg.DetectedFirmware != "" {
+		firmware = nodeCfg.DetectedFirmware
+	}
+	printPhase(phaseDone, fmt.Sprintf("Disk layout resolved  (%s, %d partition(s), source: %s)", strings.ToUpper(firmware), partCount, layoutSource))
+
 	deployLog.Info().Str("layout_source", layoutSource).
 		Msg("disk layout resolved")
 
@@ -928,12 +1010,16 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		deployer = &deploy.FilesystemDeployer{}
 	}
 
+	printPhase(phaseInProgress, "Running preflight checks")
 	deployLog.Info().Msg("running preflight checks")
 	reporter.StartPhase("preflight", 0)
 	if err := deployer.Preflight(ctx, effectiveLayout, *hw); err != nil {
+		printPhase(phaseFailed, "Preflight checks")
+		printDeployError("preflight", err.Error())
 		reporter.EndPhase(err.Error())
 		return Wrap(ExitHardware, "preflight", fmt.Errorf("preflight: %w", err))
 	}
+	printPhase(phaseDone, "Preflight checks passed")
 	reporter.EndPhase("")
 
 	blobURL := cfg.ServerURL + "/api/v1/images/" + img.ID + "/blob"
@@ -950,13 +1036,23 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	}
 
 	var lastLoggedPct int64
+	var lastPhase string
 	progressFn := func(written, total int64, phase string) {
+		// When phase transitions, close the previous progress line and start new one.
+		if phase != lastPhase {
+			if lastPhase != "" {
+				consolePrintln("") // end the previous \r line
+				printPhase(phaseDone, phaseLabel(lastPhase))
+			}
+			lastPhase = phase
+			deployLog.Info().Str("phase", phase).Msg("deployment phase started")
+		}
+		printProgressBar(phaseLabel(phase), written, total)
+
+		// Log via zerolog at every 10% milestone so the remote log stream
+		// shows download progress even in silent initramfs environments.
 		if total > 0 {
 			pct := float64(written) / float64(total) * 100
-			fmt.Fprintf(os.Stderr, "\r    %s: %.1f%% (%s / %s)",
-				phase, pct, humanBytes(written), humanBytes(total))
-			// Log via zerolog at every 10% milestone so the remote log stream
-			// shows download progress even in silent initramfs environments.
 			milestone := int64(pct/10) * 10
 			if milestone > lastLoggedPct && milestone > 0 {
 				lastLoggedPct = milestone
@@ -967,26 +1063,39 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 					Str("total", humanBytes(total)).
 					Msg("image write progress")
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "\r    %s: %s written", phase, humanBytes(written))
 		}
 	}
 
 	deployLog.Info().Str("url", blobURL).Msg("downloading image blob from server")
 	start := time.Now()
 	if err := deployer.Deploy(ctx, opts, progressFn); err != nil {
-		fmt.Fprintln(os.Stderr)
+		consolePrintln("") // end any in-progress \r line
+		if lastPhase != "" {
+			printPhase(phaseFailed, phaseLabel(lastPhase))
+		}
 		deployLog.Error().Err(err).Msg("image deploy failed")
+		var failPhase string
+		if lastPhase != "" {
+			failPhase = lastPhase
+		} else {
+			failPhase = "deploy"
+		}
+		printDeployError(failPhase, err.Error())
 		// Classify the failure. The deployer runs partition, format, download, and
 		// extract phases internally. We surface ExitDownload here since a blob stream
 		// or checksum failure is the most common path; partition/format errors from
 		// the underlying deployer will still surface via the error message.
 		return Wrap(ExitDownload, "deploy", fmt.Errorf("deploy: %w", err))
 	}
+	// Close the last progress line and mark it done.
+	consolePrintln("")
+	if lastPhase != "" {
+		printPhase(phaseDone, phaseLabel(lastPhase))
+	}
 	elapsed := time.Since(start).Round(time.Second)
-	fmt.Fprintf(os.Stderr, "\n    Image written in %s\n", elapsed)
 	deployLog.Info().Str("duration", elapsed.String()).Msg("image write complete")
 
+	printPhase(phaseInProgress, "Finalizing node (hostname, network, SSH keys, bootloader)")
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("applying node configuration (hostname, network, SSH keys)")
 	reporter.StartPhase("finalizing", 0)
 	// Wire phone-home injection (ADR-0008): set node token and verify-boot URL
@@ -996,10 +1105,13 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
 	}
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
+		printPhase(phaseFailed, "Finalize")
+		printDeployError("finalize", err.Error())
 		deployLog.Error().Err(err).Msg("finalize failed")
 		reporter.EndPhase(err.Error())
 		return Wrap(ExitFinalize, "finalize", fmt.Errorf("finalize: %w", err))
 	}
+	printPhase(phaseDone, "Node configuration applied")
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 	reporter.EndPhase("")
 
@@ -1063,6 +1175,8 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			// Fatal for UEFI deploys: without an NVRAM entry pointing to grubx64.efi,
 			// OVMF has no OS to boot and falls through to PXE on every restart,
 			// looping forever. The node cannot be left in this state.
+			printPhase(phaseFailed, "EFI boot entry")
+			printDeployError("efi_boot_entry", fmt.Sprintf("efibootmgr --create failed: %v", efiErr))
 			return Wrap(ExitBootloader, "efi_boot_entry", fmt.Errorf("efibootmgr --create failed: %w", efiErr))
 		}
 		efiBootCancel()
@@ -1087,6 +1201,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	//
 	// This replaces the old FlipToDisk/SetNextBoot(disk) approach: the PXE
 	// server handles boot routing, no BMC interaction required.
+	printPhase(phaseInProgress, "Reporting deploy-complete to server")
 	reporter.StartPhase("deploy-complete", 0)
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).
 		Msg("reporting deploy-complete to server")
@@ -1172,8 +1287,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			deployLog.Warn().Msg("wrote /tmp/clonr-deploy-success — init script will retry deploy-complete on next boot")
 		}
 
+		printPhase(phaseFailed, "Server state verification (flag written — will retry on next boot)")
 		reporter.EndPhase("state verification failed — rebooting anyway, flag written")
 	} else {
+		printPhase(phaseDone, "Deploy-complete reported and verified")
 		reporter.EndPhase("")
 	}
 	// ───────────────────────────────────────────────────────────────────────
@@ -1201,8 +1318,9 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	flipCancel()
 	// ──────────────────────────────────────────────────────────────────────
 
+	totalDuration := time.Since(start).Round(time.Second)
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Str("duration",
-		time.Since(start).Round(time.Second).String()).Msg("auto-deployment complete — rebooting")
+		totalDuration.String()).Msg("auto-deployment complete — rebooting")
 
 	// Mark deploy as complete before returning nil so the deferred failure
 	// reporter knows NOT to post deploy-failed (node already transitioned).
@@ -1213,10 +1331,14 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	// the network stack.
 	remoteWriter.FlushSync()
 
-	fmt.Printf("\n[auto] Deployment complete.\n")
-	fmt.Printf("  Node:     %s\n", nodeCfg.Hostname)
-	fmt.Printf("  Image:    %s %s\n", img.Name, img.Version)
-	fmt.Printf("  Duration: %s\n", time.Since(start).Round(time.Second))
+	consolePrintln("")
+	consolePrint(ansiBold + ansiGreen)
+	consolePrintln("  Deployment complete — node will reboot to disk.")
+	consolePrint(ansiReset)
+	consolePrintln(fmt.Sprintf("  Node:     %s", nodeCfg.Hostname))
+	consolePrintln(fmt.Sprintf("  Image:    %s %s", img.Name, img.Version))
+	consolePrintln(fmt.Sprintf("  Duration: %s", totalDuration))
+	consolePrintln("")
 	return nil
 }
 
