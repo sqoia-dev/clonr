@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/power"
 	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
@@ -45,44 +43,7 @@ func autoHostname(mac string) string {
 
 // NodesHandler handles all /api/v1/nodes routes.
 type NodesHandler struct {
-	DB       *db.DB
-	Registry *power.Registry
-}
-
-// flipNodeToDisk attempts to set the node's boot device to disk via its power
-// provider. This is best-effort: errors are logged as warnings but never
-// returned — callers must not block on this succeeding.
-func (h *NodesHandler) flipNodeToDisk(ctx context.Context, nodeID string) {
-	if h.Registry == nil {
-		return
-	}
-	node, err := h.DB.GetNodeConfig(ctx, nodeID)
-	if err != nil {
-		log.Warn().Err(err).Str("node_id", nodeID).Msg("flip-to-disk: could not load node config (skipping)")
-		return
-	}
-	if node.PowerProvider == nil || node.PowerProvider.Type == "" {
-		// No power provider configured — nothing to flip.
-		return
-	}
-	provider, err := h.Registry.Create(power.ProviderConfig{
-		Type:   node.PowerProvider.Type,
-		Fields: node.PowerProvider.Fields,
-	})
-	if err != nil {
-		log.Warn().Err(err).Str("node_id", nodeID).Str("provider_type", node.PowerProvider.Type).
-			Msg("flip-to-disk: could not create power provider (skipping)")
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if err := provider.SetNextBoot(ctx, power.BootDisk); err != nil {
-		log.Warn().Err(err).Str("node_id", nodeID).Str("provider", provider.Name()).
-			Msg("flip-to-disk: SetNextBoot(disk) failed (non-fatal)")
-		return
-	}
-	log.Info().Str("node_id", nodeID).Str("provider", provider.Name()).
-		Msg("flip-to-disk: boot order set to disk-first")
+	DB *db.DB
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -476,11 +437,6 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Flip boot order back to disk-first. The reimage orchestrator set PXE-first
-	// via SetNextBoot(PXE) before power-cycling; if we don't flip it back here
-	// OVMF may show the boot picker on the next power cycle instead of auto-booting.
-	h.flipNodeToDisk(r.Context(), id)
-
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -594,10 +550,6 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 		Float64("uptime_seconds", payload.UptimeSeconds).
 		Msgf("verify-boot: node %s (%s) verified booted: kernel=%s, systemctl=%s",
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
-
-	// Belt-and-suspenders flip: ensure disk is first in boot order now that the
-	// OS has proven it can boot. Complements the flip done at deploy-complete.
-	h.flipNodeToDisk(r.Context(), id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -268,7 +268,7 @@ func (s *Server) buildRouter() chi.Router {
 		BuildTime: s.buildInfo.BuildTime,
 	}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
-	nodes := &handlers.NodesHandler{DB: s.db, Registry: s.powerRegistry}
+	nodes := &handlers.NodesHandler{DB: s.db}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	// Use NewFactory so the build semaphore is initialised (capacity from
