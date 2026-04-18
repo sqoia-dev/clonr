@@ -248,6 +248,17 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		}
 	}
 
+	// Create ZFS pools. For partition-member pools the partitions now exist;
+	// for whole-disk pools this could have been done before partitioning but we
+	// defer until here for simplicity — zpool create -f handles either case.
+	if len(d.layout.ZFSPools) > 0 {
+		logger().Info().Int("count", len(d.layout.ZFSPools)).Msg("creating ZFS pools")
+		if err := CreateZFSPools(ctx, d.layout); err != nil {
+			doRollback("ZFS pool creation failed")
+			return fmt.Errorf("deploy: create zfs pools: %w", err)
+		}
+	}
+
 	// Emit progress: formatting phase.
 	logger().Info().Str("disk", disk).Msg("formatting partitions")
 	if progress != nil {
@@ -282,6 +293,15 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	logger().Info().Str("mount_root", opts.MountRoot).Msg("partitions mounted")
 	// Always attempt unmount on exit.
 	defer d.unmountAll(opts.MountRoot)
+
+	// Mount ZFS datasets under mountRoot alongside regular partitions.
+	if len(d.layout.ZFSPools) > 0 {
+		if _, err := MountZFSPools(ctx, d.layout, opts.MountRoot); err != nil {
+			doRollback("ZFS dataset mount failed")
+			return fmt.Errorf("deploy: mount zfs pools: %w", err)
+		}
+		defer UnmountZFSPools(ctx, d.layout, opts.MountRoot)
+	}
 
 	// ── Wait for the pre-fetched blob connection, then extract ────────────────
 	if progress != nil {
@@ -473,6 +493,23 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		return fmt.Errorf("deploy: finalize: re-mount partitions: %w", err)
 	}
 	defer d.unmountAll(mountRoot)
+
+	// Re-import and mount ZFS pools if present.
+	if len(d.layout.ZFSPools) > 0 {
+		// Re-import any exported pools first (Deploy exports them on unmount).
+		for _, pool := range d.layout.ZFSPools {
+			_ = exec.CommandContext(ctx, "zpool", "import", "-f", pool.Name).Run()
+		}
+		if _, err := MountZFSPools(ctx, d.layout, mountRoot); err != nil {
+			return fmt.Errorf("deploy: finalize: re-mount zfs pools: %w", err)
+		}
+		defer UnmountZFSPools(ctx, d.layout, mountRoot)
+
+		// Write /etc/fstab entries for ZFS automount.
+		if err := WriteZFSFstab(d.layout, mountRoot); err != nil {
+			logger().Warn().Err(err).Msg("finalize: failed to write ZFS fstab entries (non-fatal)")
+		}
+	}
 
 	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
 		return err

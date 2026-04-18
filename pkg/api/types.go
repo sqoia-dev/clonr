@@ -93,12 +93,35 @@ type DiskLayout struct {
 	// Arrays are created first; PartitionSpec.Device may reference an array name
 	// (e.g. "md0") to partition on top of a RAID array instead of a raw disk.
 	RAIDArrays  []RAIDSpec      `json:"raid_arrays,omitempty"`
+	// ZFSPools defines ZFS zpools to create during deployment.
+	// When non-empty, ZFS pool creation replaces the standard mkfs+mount flow for
+	// the affected devices. Supported vdev types: "mirror", "raidz".
+	// v1 constraint: single rpool (root) with optional bpool (/boot) only.
+	ZFSPools    []ZFSPool       `json:"zfs_pools,omitempty"`
 	Partitions  []PartitionSpec `json:"partitions"`
 	Bootloader  Bootloader      `json:"bootloader"`
 	// TargetDevice is an optional operator hint specifying the preferred kernel
 	// device name (e.g. "nvme0n1") to deploy to. When set, selectTargetDisk
 	// will prefer this device over automatic selection heuristics.
 	TargetDevice string          `json:"target_device,omitempty"`
+}
+
+// ZFSPool describes a ZFS zpool to create during deployment.
+// v1 supports mirror and raidz vdev types with a single root dataset.
+type ZFSPool struct {
+	// Name is the zpool name, e.g. "rpool" or "bpool".
+	Name string `json:"name"`
+	// VdevType is the vdev topology: "mirror", "raidz", or "stripe" (no keyword).
+	// Use "stripe" for a single-disk or striped pool.
+	VdevType string `json:"vdev_type"`
+	// Members lists the member devices by kernel name (e.g. ["sda3", "sdb3"])
+	// or whole-disk names (e.g. ["sda", "sdb"]).
+	Members []string `json:"members"`
+	// Mountpoint is where the root dataset of this pool mounts, e.g. "/" or "/boot".
+	Mountpoint string `json:"mountpoint"`
+	// Properties is a map of zpool/dataset properties to set at creation time,
+	// e.g. {"ashift": "12", "compression": "lz4"}.
+	Properties map[string]string `json:"properties,omitempty"`
 }
 
 // RAIDSpec describes a software RAID array to create during deployment.

@@ -198,6 +198,43 @@ func Validate(layout api.DiskLayout, targetDisk hardware.Disk) ValidationResult 
 		}
 	}
 
+	// ── ZFS pool checks ───────────────────────────────────────────────────────
+
+	for i, pool := range layout.ZFSPools {
+		idx := i + 1
+
+		if pool.Name == "" {
+			errs = append(errs, fmt.Sprintf("zfs_pool %d: name is required", idx))
+		}
+		if pool.Mountpoint == "" {
+			errs = append(errs, fmt.Sprintf("zfs_pool %d (%s): mountpoint is required", idx, pool.Name))
+		}
+		if len(pool.Members) == 0 {
+			errs = append(errs, fmt.Sprintf("zfs_pool %d (%s): members list is empty", idx, pool.Name))
+		}
+
+		switch pool.VdevType {
+		case "mirror":
+			if len(pool.Members) < 2 {
+				errs = append(errs, fmt.Sprintf(
+					"zfs_pool %d (%s): mirror vdev requires at least 2 members, got %d",
+					idx, pool.Name, len(pool.Members)))
+			}
+		case "raidz":
+			if len(pool.Members) < 3 {
+				errs = append(errs, fmt.Sprintf(
+					"zfs_pool %d (%s): raidz vdev requires at least 3 members, got %d",
+					idx, pool.Name, len(pool.Members)))
+			}
+		case "stripe", "":
+			// stripe: no minimum member count enforced
+		default:
+			errs = append(errs, fmt.Sprintf(
+				"zfs_pool %d (%s): unsupported vdev_type %q — must be one of: mirror, raidz, stripe",
+				idx, pool.Name, pool.VdevType))
+		}
+	}
+
 	return ValidationResult{
 		Valid:    len(errs) == 0,
 		Errors:   errs,
