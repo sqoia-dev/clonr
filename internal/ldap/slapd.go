@@ -145,7 +145,7 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 	tmpLDIF.Close()
 
 	cmd := exec.CommandContext(ctx, "slapadd", "-n", "0", "-F", configDir, "-l", tmpLDIF.Name())
-	cmd.Env = append(os.Environ()) // inherit env
+	cmd.Env = os.Environ() // inherit env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ldap slapd: slapadd failed: %w\noutput:\n%s", err, string(out))
