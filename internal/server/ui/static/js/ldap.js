@@ -208,36 +208,37 @@ const LDAPPages = {
         if (existingModal) existingModal.remove();
 
         const needsAck = nodeCount > 0;
-        const modal = document.createElement('div');
-        modal.id = 'ldap-disable-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:520px;max-width:95vw;">
-                <div class="card-header">
-                    <span class="card-title">Disable LDAP Module</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-disable-modal').remove()">×</button>
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-disable-modal';
+        overlay.innerHTML = `
+            <div class="modal">
+                <div class="modal-header">
+                    <span class="modal-title">Disable LDAP Module</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-disable-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:14px;">
-                    ${needsAck ? `<div class="alert" style="background:#fef3c7;color:#92400e;border:1px solid #fbbf24;border-radius:6px;padding:10px 14px;">
+                <div class="modal-body">
+                    ${needsAck ? `<div class="alert alert-warning" style="margin-bottom:16px;">
                         <strong>${nodeCount} node(s)</strong> are configured with LDAP. Disabling will break their authentication until they are reimaged.
                     </div>` : ''}
-                    <label class="form-label">Disable mode
-                        <select id="ldap-disable-mode" class="form-input" style="margin-top:4px;">
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>Disable mode</label>
+                        <select id="ldap-disable-mode">
                             <option value="detach">detach — stop slapd, preserve data (can re-enable later)</option>
                             <option value="destroy">destroy — stop slapd and wipe all LDAP data</option>
                         </select>
-                    </label>
-                    ${needsAck ? `<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
-                        <input type="checkbox" id="ldap-disable-ack" style="margin-top:2px;">
-                        <span style="font-size:14px;">I understand that ${nodeCount} node(s) will lose LDAP authentication</span>
+                    </div>
+                    ${needsAck ? `<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-bottom:8px;">
+                        <input type="checkbox" id="ldap-disable-ack" style="margin-top:2px;flex-shrink:0;">
+                        <span style="font-size:13px;">I understand that ${nodeCount} node(s) will lose LDAP authentication</span>
                     </label>` : ''}
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-disable-modal').remove()">Cancel</button>
                         <button class="btn btn-danger" onclick="LDAPPages._disable(${needsAck})">Disable</button>
                     </div>
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
     },
 
     async _disable(needsAck) {
@@ -330,72 +331,204 @@ const LDAPPages = {
             </div>`;
     },
 
+    // _lcuNextId fetches /api/v1/ldap/users and /api/v1/ldap/groups to determine
+    // the next available UID/GID (max existing + 1, floor 10001).
+    async _lcuPrefillIds() {
+        let nextUid = 10001;
+        let nextGid = 10001;
+        try {
+            const [ur, gr] = await Promise.all([API.ldap.listUsers(), API.ldap.listGroups()]);
+            const users  = (ur && ur.users)   ? ur.users   : [];
+            const groups = (gr && gr.groups)  ? gr.groups  : [];
+            const maxUid = users.reduce( (m, u) => Math.max(m, u.uid_number  || 0), 0);
+            const maxGid = groups.reduce((m, g) => Math.max(m, g.gid_number  || 0), 0);
+            if (maxUid >= 10000) nextUid = maxUid + 1;
+            if (maxGid >= 10000) nextGid = maxGid + 1;
+        } catch (_) { /* fall back to defaults */ }
+        const uidEl = document.getElementById('lcu-uidnum');
+        const gidEl = document.getElementById('lcu-gidnum');
+        if (uidEl && !uidEl.value) uidEl.value = nextUid;
+        if (gidEl && !gidEl.value) gidEl.value = nextGid;
+    },
+
+    // _lcuGenPassword generates a 20-char URL-safe random string client-side.
+    _lcuGenPassword() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789-_';
+        const arr   = new Uint8Array(32);
+        crypto.getRandomValues(arr);
+        let out = '';
+        for (let i = 0; i < arr.length && out.length < 20; i++) {
+            const idx = arr[i] % chars.length;
+            out += chars[idx];
+        }
+        const el = document.getElementById('lcu-password');
+        if (el) { el.value = out; el.type = 'text'; }
+        const btn = document.getElementById('lcu-pw-toggle');
+        if (btn) btn.textContent = 'Hide';
+    },
+
     _createUserModal() {
         const existingModal = document.getElementById('ldap-create-user-modal');
         if (existingModal) existingModal.remove();
-        const modal = document.createElement('div');
-        modal.id = 'ldap-create-user-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:540px;max-width:95vw;max-height:90vh;overflow-y:auto;">
-                <div class="card-header">
-                    <span class="card-title">Create LDAP User</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-create-user-modal').remove()">×</button>
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-create-user-modal';
+        overlay.innerHTML = `
+            <div class="modal modal-wide">
+                <div class="modal-header">
+                    <span class="modal-title">Create LDAP User</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-create-user-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                        <label class="form-label">UID (username)
-                            <input id="lcu-uid" class="form-input" type="text" placeholder="jdoe" style="margin-top:4px;font-family:monospace;">
-                        </label>
-                        <label class="form-label">Full Name
-                            <input id="lcu-fullname" class="form-input" type="text" placeholder="Jane Doe" style="margin-top:4px;">
-                        </label>
+                <div class="modal-body">
+
+                    <!-- Section: Identity -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Identity</div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>UID (username)</label>
+                            <input id="lcu-uid" type="text" placeholder="jdoe"
+                                style="font-family:var(--font-mono);"
+                                oninput="LDAPPages._lcuOnUidInput(this.value)">
+                            <div class="form-hint">Lowercase POSIX login name. Permanent — change requires recreating the user.</div>
+                            <div id="lcu-uid-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input id="lcu-fullname" type="text" placeholder="Jane Doe">
+                            <div class="form-hint">Display name shown in account listings. Stored as cn.</div>
+                        </div>
                     </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                        <label class="form-label">UID Number
-                            <input id="lcu-uidnum" class="form-input" type="number" placeholder="10001" min="1000" style="margin-top:4px;">
-                        </label>
-                        <label class="form-label">GID Number
-                            <input id="lcu-gidnum" class="form-input" type="number" placeholder="10001" min="1000" style="margin-top:4px;">
-                        </label>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: POSIX -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">POSIX</div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>UID Number</label>
+                            <input id="lcu-uidnum" type="number" placeholder="10001" min="1000">
+                            <div class="form-hint">Numeric POSIX UID. Cluster convention: ≥10000 for users.</div>
+                            <div id="lcu-uidnum-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>GID Number</label>
+                            <input id="lcu-gidnum" type="number" placeholder="10001" min="1000">
+                            <div class="form-hint">Primary group's numeric GID. Usually matches UID Number.</div>
+                            <div id="lcu-gidnum-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>Home Directory</label>
+                            <input id="lcu-home" type="text" placeholder="/home/jdoe"
+                                style="font-family:var(--font-mono);"
+                                oninput="this._manuallyEdited=true">
+                            <div class="form-hint">Auto-created on first SSH login via pam_mkhomedir.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Shell</label>
+                            <select id="lcu-shell" onchange="LDAPPages._lcuOnShellChange(this.value)">
+                                <option value="/bin/bash" selected>/bin/bash</option>
+                                <option value="/bin/zsh">/bin/zsh</option>
+                                <option value="/bin/sh">/bin/sh</option>
+                                <option value="/sbin/nologin">/sbin/nologin — disable shell access</option>
+                                <option value="__other__">Other…</option>
+                            </select>
+                            <input id="lcu-shell-other" type="text" placeholder="/usr/bin/fish"
+                                style="font-family:var(--font-mono);display:none;margin-top:6px;">
+                            <div class="form-hint">Login shell. Use /sbin/nologin to disable shell access.</div>
+                        </div>
                     </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                        <label class="form-label">Home Directory
-                            <input id="lcu-home" class="form-input" type="text" placeholder="/home/jdoe" style="margin-top:4px;font-family:monospace;">
-                        </label>
-                        <label class="form-label">Shell
-                            <input id="lcu-shell" class="form-input" type="text" value="/bin/bash" style="margin-top:4px;font-family:monospace;">
-                        </label>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: Authentication -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Authentication</div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>SSH Public Key (optional)</label>
+                        <textarea id="lcu-sshkey" rows="4"
+                            placeholder="ssh-ed25519 AAAA... user@host"
+                            style="font-family:var(--font-mono);font-size:12px;resize:vertical;"></textarea>
+                        <div class="form-hint">Optional. Pasted into the user's authorized_keys at first login. One key per user.</div>
                     </div>
-                    <label class="form-label">SSH Public Key (optional)
-                        <textarea id="lcu-sshkey" class="form-input" rows="2" placeholder="ssh-ed25519 AAAA..." style="margin-top:4px;font-family:monospace;resize:vertical;"></textarea>
-                    </label>
-                    <label class="form-label">Initial Password
-                        <input id="lcu-password" class="form-input" type="password" style="margin-top:4px;">
-                    </label>
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                    <div class="form-group">
+                        <label>Initial Password</label>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <input id="lcu-password" type="password" style="flex:1;">
+                            <button type="button" id="lcu-pw-toggle" class="btn btn-secondary btn-sm"
+                                onclick="LDAPPages._lcuTogglePassword()">Show</button>
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                onclick="LDAPPages._lcuGenPassword()">Generate</button>
+                        </div>
+                        <div class="form-hint">Operator can change this; user can change it themselves after first login.</div>
+                        <div id="lcu-pw-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                    </div>
+
+                    <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-create-user-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="LDAPPages._createUserSubmit()">Create</button>
+                        <button id="lcu-submit" class="btn btn-primary" onclick="LDAPPages._createUserSubmit()">Create</button>
                     </div>
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        // Prefill UID/GID from API after modal is in the DOM.
+        LDAPPages._lcuPrefillIds();
+    },
+
+    _lcuOnUidInput(val) {
+        // Auto-fill home directory unless operator has manually overridden it.
+        const homeEl = document.getElementById('lcu-home');
+        if (homeEl && !homeEl._manuallyEdited) {
+            homeEl.value = val ? '/home/' + val : '';
+        }
+    },
+
+    _lcuOnShellChange(val) {
+        const other = document.getElementById('lcu-shell-other');
+        if (other) other.style.display = val === '__other__' ? '' : 'none';
+    },
+
+    _lcuTogglePassword() {
+        const el  = document.getElementById('lcu-password');
+        const btn = document.getElementById('lcu-pw-toggle');
+        if (!el) return;
+        if (el.type === 'password') { el.type = 'text';     if (btn) btn.textContent = 'Hide'; }
+        else                        { el.type = 'password'; if (btn) btn.textContent = 'Show'; }
+    },
+
+    // _lcuSetFieldError shows/clears an inline validation error under a field.
+    _lcuSetFieldError(id, msg) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (msg) { el.textContent = msg; el.style.display = ''; }
+        else     { el.textContent = '';  el.style.display = 'none'; }
     },
 
     async _createUserSubmit() {
+        // Clear previous inline errors.
+        ['lcu-uid-err', 'lcu-uidnum-err', 'lcu-gidnum-err', 'lcu-pw-err'].forEach(id => LDAPPages._lcuSetFieldError(id, ''));
+
         const uid      = (document.getElementById('lcu-uid')      || {}).value || '';
         const fullName = (document.getElementById('lcu-fullname') || {}).value || '';
         const uidNum   = parseInt((document.getElementById('lcu-uidnum') || {}).value || '0', 10);
         const gidNum   = parseInt((document.getElementById('lcu-gidnum') || {}).value || '0', 10);
         const home     = (document.getElementById('lcu-home')     || {}).value || '';
-        const shell    = (document.getElementById('lcu-shell')    || {}).value || '/bin/bash';
+        const shellSel = (document.getElementById('lcu-shell')    || {}).value || '/bin/bash';
+        const shell    = shellSel === '__other__'
+            ? ((document.getElementById('lcu-shell-other') || {}).value || '').trim()
+            : shellSel;
         const sshKey   = (document.getElementById('lcu-sshkey')   || {}).value || '';
         const password = (document.getElementById('lcu-password') || {}).value || '';
 
-        if (!uid.trim())    { App.toast('UID is required', 'error'); return; }
-        if (!uidNum)        { App.toast('UID Number is required', 'error'); return; }
-        if (!gidNum)        { App.toast('GID Number is required', 'error'); return; }
-        if (!password)      { App.toast('Initial password is required', 'error'); return; }
+        let hasErr = false;
+        if (!uid.trim())  { LDAPPages._lcuSetFieldError('lcu-uid-err',    'UID is required'); hasErr = true; }
+        if (!uidNum)      { LDAPPages._lcuSetFieldError('lcu-uidnum-err', 'UID Number is required'); hasErr = true; }
+        if (!gidNum)      { LDAPPages._lcuSetFieldError('lcu-gidnum-err', 'GID Number is required'); hasErr = true; }
+        if (!password)    { LDAPPages._lcuSetFieldError('lcu-pw-err',     'Initial password is required'); hasErr = true; }
+        if (hasErr) return;
+
+        const submitBtn = document.getElementById('lcu-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
 
         const body = {
             uid:            uid.trim(),
@@ -403,7 +536,7 @@ const LDAPPages = {
             uid_number:     uidNum,
             gid_number:     gidNum,
             home_directory: home || '/home/' + uid.trim(),
-            login_shell:    shell,
+            login_shell:    shell || '/bin/bash',
             password:       password,
         };
         if (sshKey.trim()) body.ssh_public_key = sshKey.trim();
@@ -415,6 +548,7 @@ const LDAPPages = {
             App.toast('User created: ' + uid.trim(), 'success');
             LDAPPages.users();
         } catch (err) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create'; }
             App.toast('Create failed: ' + err.message, 'error');
         }
     },
@@ -422,40 +556,98 @@ const LDAPPages = {
     _editUserModal(user) {
         const existingModal = document.getElementById('ldap-edit-user-modal');
         if (existingModal) existingModal.remove();
-        const modal = document.createElement('div');
-        modal.id = 'ldap-edit-user-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:520px;max-width:95vw;">
-                <div class="card-header">
-                    <span class="card-title">Edit User: ${escHtml(user.uid)}</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-edit-user-modal').remove()">×</button>
+
+        // Determine the current shell: known option or "other".
+        const knownShells = ['/bin/bash', '/bin/zsh', '/bin/sh', '/sbin/nologin'];
+        const currentShell = user.login_shell || '/bin/bash';
+        const isOtherShell = !knownShells.includes(currentShell);
+        const shellOptions = knownShells.map(s =>
+            `<option value="${escHtml(s)}" ${!isOtherShell && currentShell === s ? 'selected' : ''}>${escHtml(s)}${s === '/sbin/nologin' ? ' — disable shell access' : ''}</option>`
+        ).join('');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-edit-user-modal';
+        overlay.innerHTML = `
+            <div class="modal modal-wide">
+                <div class="modal-header">
+                    <span class="modal-title">Edit User: ${escHtml(user.uid)}</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-edit-user-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-                    <label class="form-label">Full Name (CN)
-                        <input id="leu-cn" class="form-input" type="text" value="${escHtml(user.cn || '')}" style="margin-top:4px;">
-                    </label>
-                    <label class="form-label">Shell
-                        <input id="leu-shell" class="form-input" type="text" value="${escHtml(user.login_shell || '/bin/bash')}" style="margin-top:4px;font-family:monospace;">
-                    </label>
-                    <label class="form-label">SSH Public Key
-                        <textarea id="leu-sshkey" class="form-input" rows="2" style="margin-top:4px;font-family:monospace;resize:vertical;">${escHtml(user.ssh_public_key || '')}</textarea>
-                    </label>
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                <div class="modal-body">
+
+                    <!-- Section: Identity -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Identity</div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>UID (username)</label>
+                            <input type="text" value="${escHtml(user.uid)}" disabled
+                                style="font-family:var(--font-mono);opacity:0.6;">
+                            <div class="form-hint">UID cannot be changed after creation.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input id="leu-cn" type="text" value="${escHtml(user.cn || '')}">
+                            <div class="form-hint">Display name shown in account listings. Stored as cn.</div>
+                        </div>
+                    </div>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: POSIX -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">POSIX</div>
+                    <div class="form-group">
+                        <label>Shell</label>
+                        <select id="leu-shell" onchange="LDAPPages._leuOnShellChange(this.value)">
+                            ${shellOptions}
+                            <option value="__other__" ${isOtherShell ? 'selected' : ''}>Other…</option>
+                        </select>
+                        <input id="leu-shell-other" type="text" placeholder="/usr/bin/fish"
+                            value="${isOtherShell ? escHtml(currentShell) : ''}"
+                            style="font-family:var(--font-mono);display:${isOtherShell ? '' : 'none'};margin-top:6px;">
+                        <div class="form-hint">Login shell. Use /sbin/nologin to disable shell access.</div>
+                    </div>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: Authentication -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Authentication</div>
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>SSH Public Key</label>
+                        <textarea id="leu-sshkey" rows="4"
+                            style="font-family:var(--font-mono);font-size:12px;resize:vertical;">${escHtml(user.ssh_public_key || '')}</textarea>
+                        <div class="form-hint">Optional. Pasted into the user's authorized_keys at first login. One key per user.</div>
+                    </div>
+                    <div style="padding:12px 14px;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;color:var(--text-secondary);">
+                        To reset this user's password, use the <strong>Reset PW</strong> button on the Users table.
+                    </div>
+
+                    <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-edit-user-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="LDAPPages._editUserSubmit('${escHtml(user.uid)}')">Save</button>
+                        <button id="leu-submit" class="btn btn-primary" onclick="LDAPPages._editUserSubmit('${escHtml(user.uid)}')">Save</button>
                     </div>
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
+    },
+
+    _leuOnShellChange(val) {
+        const other = document.getElementById('leu-shell-other');
+        if (other) other.style.display = val === '__other__' ? '' : 'none';
     },
 
     async _editUserSubmit(uid) {
-        const cn     = (document.getElementById('leu-cn')     || {}).value || '';
-        const shell  = (document.getElementById('leu-shell')  || {}).value || '';
-        const sshKey = (document.getElementById('leu-sshkey') || {}).value || '';
+        const cn       = (document.getElementById('leu-cn')         || {}).value || '';
+        const shellSel = (document.getElementById('leu-shell')       || {}).value || '/bin/bash';
+        const shell    = shellSel === '__other__'
+            ? ((document.getElementById('leu-shell-other') || {}).value || '').trim()
+            : shellSel;
+        const sshKey   = (document.getElementById('leu-sshkey')     || {}).value || '';
 
-        const body = { cn, login_shell: shell };
+        const submitBtn = document.getElementById('leu-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; }
+
+        const body = { cn, login_shell: shell || '/bin/bash' };
         if (sshKey.trim()) body.ssh_public_key = sshKey.trim();
 
         try {
@@ -465,6 +657,7 @@ const LDAPPages = {
             App.toast('User updated', 'success');
             LDAPPages.users();
         } catch (err) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Save'; }
             App.toast('Update failed: ' + err.message, 'error');
         }
     },
@@ -472,37 +665,80 @@ const LDAPPages = {
     _resetPasswordModal(uid) {
         const existingModal = document.getElementById('ldap-reset-pw-modal');
         if (existingModal) existingModal.remove();
-        const modal = document.createElement('div');
-        modal.id = 'ldap-reset-pw-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:400px;max-width:95vw;">
-                <div class="card-header">
-                    <span class="card-title">Reset Password: ${escHtml(uid)}</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-reset-pw-modal').remove()">×</button>
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-reset-pw-modal';
+        overlay.innerHTML = `
+            <div class="modal">
+                <div class="modal-header">
+                    <span class="modal-title">Reset Password: ${escHtml(uid)}</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-reset-pw-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-                    <label class="form-label">New Password
-                        <input id="lrp-password" class="form-input" type="password" style="margin-top:4px;" autofocus>
-                    </label>
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                <div class="modal-body">
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>New Password</label>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <input id="lrp-password" type="password" style="flex:1;" autofocus>
+                            <button type="button" id="lrp-pw-toggle" class="btn btn-secondary btn-sm"
+                                onclick="LDAPPages._lrpTogglePassword()">Show</button>
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                onclick="LDAPPages._lrpGenPassword()">Generate</button>
+                        </div>
+                        <div class="form-hint">Operator can change this; user can change it themselves after first login.</div>
+                        <div id="lrp-pw-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                    </div>
+                    <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-reset-pw-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="LDAPPages._resetPasswordSubmit('${escHtml(uid)}')">Reset</button>
+                        <button id="lrp-submit" class="btn btn-primary" onclick="LDAPPages._resetPasswordSubmit('${escHtml(uid)}')">Reset</button>
                     </div>
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
+    },
+
+    _lrpTogglePassword() {
+        const el  = document.getElementById('lrp-password');
+        const btn = document.getElementById('lrp-pw-toggle');
+        if (!el) return;
+        if (el.type === 'password') { el.type = 'text';     if (btn) btn.textContent = 'Hide'; }
+        else                        { el.type = 'password'; if (btn) btn.textContent = 'Show'; }
+    },
+
+    _lrpGenPassword() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789-_';
+        const arr   = new Uint8Array(32);
+        crypto.getRandomValues(arr);
+        let out = '';
+        for (let i = 0; i < arr.length && out.length < 20; i++) {
+            out += chars[arr[i] % chars.length];
+        }
+        const el = document.getElementById('lrp-password');
+        if (el) { el.value = out; el.type = 'text'; }
+        const btn = document.getElementById('lrp-pw-toggle');
+        if (btn) btn.textContent = 'Hide';
     },
 
     async _resetPasswordSubmit(uid) {
+        const errEl = document.getElementById('lrp-pw-err');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+
         const password = (document.getElementById('lrp-password') || {}).value || '';
-        if (!password) { App.toast('Password is required', 'error'); return; }
+        if (!password) {
+            if (errEl) { errEl.textContent = 'Password is required'; errEl.style.display = ''; }
+            return;
+        }
+
+        const submitBtn = document.getElementById('lrp-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Resetting…'; }
+
         try {
             await API.ldap.setPassword(uid, password);
             const modal = document.getElementById('ldap-reset-pw-modal');
             if (modal) modal.remove();
             App.toast('Password reset for ' + uid, 'success');
         } catch (err) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Reset'; }
             App.toast('Reset failed: ' + err.message, 'error');
         }
     },
@@ -586,39 +822,81 @@ const LDAPPages = {
             </div>`;
     },
 
+    async _lcgPrefillGid() {
+        let nextGid = 10001;
+        try {
+            const gr = await API.ldap.listGroups();
+            const groups = (gr && gr.groups) ? gr.groups : [];
+            const maxGid = groups.reduce((m, g) => Math.max(m, g.gid_number || 0), 0);
+            if (maxGid >= 10000) nextGid = maxGid + 1;
+        } catch (_) {}
+        const el = document.getElementById('lcg-gidnum');
+        if (el && !el.value) el.value = nextGid;
+    },
+
     _createGroupModal() {
         const existingModal = document.getElementById('ldap-create-group-modal');
         if (existingModal) existingModal.remove();
-        const modal = document.createElement('div');
-        modal.id = 'ldap-create-group-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:420px;max-width:95vw;">
-                <div class="card-header">
-                    <span class="card-title">Create LDAP Group</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-create-group-modal').remove()">×</button>
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-create-group-modal';
+        overlay.innerHTML = `
+            <div class="modal">
+                <div class="modal-header">
+                    <span class="modal-title">Create LDAP Group</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-create-group-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-                    <label class="form-label">Group Name (CN)
-                        <input id="lcg-cn" class="form-input" type="text" placeholder="hpc-users" style="margin-top:4px;font-family:monospace;">
-                    </label>
-                    <label class="form-label">GID Number
-                        <input id="lcg-gidnum" class="form-input" type="number" placeholder="10001" min="1000" style="margin-top:4px;">
-                    </label>
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                <div class="modal-body">
+                    <div class="form-group" style="margin-bottom:12px;">
+                        <label>Group Name (CN)</label>
+                        <input id="lcg-cn" type="text" placeholder="hpc-users"
+                            style="font-family:var(--font-mono);">
+                        <div class="form-hint">POSIX group name. Used for membership lookups on nodes.</div>
+                        <div id="lcg-cn-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                    </div>
+                    <div class="form-group">
+                        <label>GID Number</label>
+                        <input id="lcg-gidnum" type="number" placeholder="10001" min="1000">
+                        <div class="form-hint">Numeric POSIX GID. Cluster convention: ≥10000 for user-defined groups.</div>
+                        <div id="lcg-gidnum-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                    </div>
+                    <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-create-group-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="LDAPPages._createGroupSubmit()">Create</button>
+                        <button id="lcg-submit" class="btn btn-primary" onclick="LDAPPages._createGroupSubmit()">Create</button>
                     </div>
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
+        LDAPPages._lcgPrefillGid();
     },
 
     async _createGroupSubmit() {
+        // Clear previous inline errors.
+        ['lcg-cn-err', 'lcg-gidnum-err'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) { el.textContent = ''; el.style.display = 'none'; }
+        });
+
         const cn     = (document.getElementById('lcg-cn')     || {}).value || '';
         const gidNum = parseInt((document.getElementById('lcg-gidnum') || {}).value || '0', 10);
-        if (!cn.trim())  { App.toast('Group name is required', 'error'); return; }
-        if (!gidNum)     { App.toast('GID Number is required', 'error'); return; }
+
+        let hasErr = false;
+        if (!cn.trim()) {
+            const el = document.getElementById('lcg-cn-err');
+            if (el) { el.textContent = 'Group name is required'; el.style.display = ''; }
+            hasErr = true;
+        }
+        if (!gidNum) {
+            const el = document.getElementById('lcg-gidnum-err');
+            if (el) { el.textContent = 'GID Number is required'; el.style.display = ''; }
+            hasErr = true;
+        }
+        if (hasErr) return;
+
+        const submitBtn = document.getElementById('lcg-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
+
         try {
             await API.ldap.createGroup({ cn: cn.trim(), gid_number: gidNum });
             const modal = document.getElementById('ldap-create-group-modal');
@@ -626,6 +904,7 @@ const LDAPPages = {
             App.toast('Group created: ' + cn.trim(), 'success');
             LDAPPages.groups();
         } catch (err) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create'; }
             App.toast('Create failed: ' + err.message, 'error');
         }
     },
@@ -674,22 +953,22 @@ const LDAPPages = {
                 <button class="btn btn-primary" onclick="LDAPPages._addMember('${escHtml(group.cn)}')">Add</button>
             </div>` : '';
 
-        const modal = document.createElement('div');
-        modal.id = 'ldap-group-detail-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
-        modal.innerHTML = `
-            <div class="card" style="width:480px;max-width:95vw;max-height:80vh;display:flex;flex-direction:column;">
-                <div class="card-header">
-                    <span class="card-title">Group: ${escHtml(group.cn)}</span>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ldap-group-detail-modal').remove()">×</button>
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-group-detail-modal';
+        overlay.innerHTML = `
+            <div class="modal" style="max-height:80vh;display:flex;flex-direction:column;">
+                <div class="modal-header">
+                    <span class="modal-title">Group: ${escHtml(group.cn)}</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-group-detail-modal').remove()">×</button>
                 </div>
-                <div style="padding:16px;overflow-y:auto;">
+                <div class="modal-body" style="overflow-y:auto;">
                     <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">GID Number: <span class="text-mono">${escHtml(String(group.gid_number || '—'))}</span></p>
                     <div id="lgd-members">${memberRows}</div>
                     ${addRow}
                 </div>
             </div>`;
-        document.body.appendChild(modal);
+        document.body.appendChild(overlay);
     },
 
     async _addMember(cn) {
