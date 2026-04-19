@@ -296,6 +296,8 @@ const API = {
         removeMember(cn, uid)           { return API.del(`/ldap/groups/${encodeURIComponent(cn)}/members/${encodeURIComponent(uid)}`); },
         // Logs
         logs(params = {})               { return API.get('/ldap/logs', params); },
+        // Admin repair — verifies the admin password and self-heals node-reader bind.
+        repairAdminBind(body)           { return API.post('/ldap/admin/repair', body); },
     },
     resume: {
         // resume — POST to resume an interrupted image build.

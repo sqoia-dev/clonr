@@ -905,3 +905,95 @@ func (m *Manager) RecordNodeConfigured(ctx context.Context, nodeID, configHash s
 func (m *Manager) LockBaseDN(ctx context.Context) error {
 	return m.db.LDAPLockBaseDN(ctx)
 }
+
+// ─── Admin repair ─────────────────────────────────────────────────────────────
+
+// AdminRepairResult is the response body for POST /api/v1/ldap/admin/repair.
+type AdminRepairResult struct {
+	Status   string `json:"status"`
+	Repaired bool   `json:"repaired"`
+}
+
+// AdminRepair verifies the supplied admin password against the stored bcrypt
+// hash, persists the plaintext to the DB (backfilling pre-028 installs),
+// populates the in-memory cache, and then self-heals the node-reader entry's
+// userPassword to match the current service_bind_password.
+//
+// The repair is verified by re-binding as the service account before returning.
+// Returns an error if the password does not match or if the LDAP repair fails.
+func (m *Manager) AdminRepair(ctx context.Context, adminPassword string) (AdminRepairResult, error) {
+	row, err := m.db.LDAPGetConfig(ctx)
+	if err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: read config for repair: %w", err)
+	}
+	if !row.Enabled || row.Status != statusReady {
+		return AdminRepairResult{}, fmt.Errorf("ldap: module is not enabled or not ready (status=%s)", row.Status)
+	}
+	if row.AdminPasswordHash == "" {
+		return AdminRepairResult{}, fmt.Errorf("ldap: no admin password hash found — module may not have been fully provisioned")
+	}
+
+	// Step 1: Verify supplied password against the stored bcrypt hash.
+	if err := bcrypt.CompareHashAndPassword([]byte(row.AdminPasswordHash), []byte(adminPassword)); err != nil {
+		return AdminRepairResult{}, fmt.Errorf("password does not match the one set on Enable")
+	}
+
+	// Step 2: Persist plaintext to DB and populate in-memory cache.
+	if err := m.db.LDAPSetAdminPasswd(ctx, adminPassword); err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: persist admin_passwd: %w", err)
+	}
+	m.mu.Lock()
+	m.adminPassword = adminPassword
+	m.mu.Unlock()
+
+	// Step 3: Bind as admin and issue a Modify REPLACE on node-reader's userPassword.
+	adminBindDN := fmt.Sprintf("cn=Directory Manager,%s", row.BaseDN)
+	nodeReaderDN := fmt.Sprintf("cn=node-reader,ou=services,%s", row.BaseDN)
+	caCertPEM := []byte(row.CACertPEM)
+
+	adminDIT := &ditClient{
+		serverURI:  "ldaps://127.0.0.1:636",
+		bindDN:     adminBindDN,
+		bindPasswd: adminPassword,
+		baseDN:     row.BaseDN,
+		caCertPEM:  caCertPEM,
+	}
+
+	conn, err := adminDIT.connect()
+	if err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: bind as admin for repair: %w", err)
+	}
+	defer conn.Close()
+
+	// Hash the current service_bind_password using the same {CRYPT} helper.
+	hashedSvcPasswd, err := HashPasswordCrypt(row.ServiceBindPassword)
+	if err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: hash service password for repair: %w", err)
+	}
+
+	modReq := goldap.NewModifyRequest(nodeReaderDN, nil)
+	modReq.Replace("userPassword", []string{hashedSvcPasswd})
+	if err := conn.Modify(modReq); err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: Modify REPLACE on node-reader userPassword: %w", err)
+	}
+	log.Info().Str("dn", nodeReaderDN).Msg("ldap: repair: node-reader userPassword updated")
+
+	// Step 4: Verify repair by re-binding as the service account.
+	// Use a fresh connect() rather than HealthBind() so we actually test
+	// the credentials, not just TLS reachability.
+	svcDIT := &ditClient{
+		serverURI:  "ldaps://127.0.0.1:636",
+		bindDN:     row.ServiceBindDN,
+		bindPasswd: row.ServiceBindPassword,
+		baseDN:     row.BaseDN,
+		caCertPEM:  caCertPEM,
+	}
+	svcConn, err := svcDIT.connect()
+	if err != nil {
+		return AdminRepairResult{}, fmt.Errorf("ldap: repair verification failed — service bind still rejected after Modify REPLACE: %w", err)
+	}
+	svcConn.Close()
+
+	log.Info().Msg("ldap: admin repair complete — service bind verified OK")
+	return AdminRepairResult{Status: "ok", Repaired: true}, nil
+}

@@ -19,6 +19,7 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Post("/ldap/enable", mgr.handleEnable)
 	r.Post("/ldap/disable", mgr.handleDisable)
 	r.Post("/ldap/backup", mgr.handleBackup)
+	r.Post("/ldap/admin/repair", mgr.handleAdminRepair)
 
 	// Users
 	r.Get("/ldap/users", mgr.handleListUsers)
@@ -111,6 +112,33 @@ func (m *Manager) handleBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, map[string]string{"filename": filename}, http.StatusOK)
+}
+
+// ─── Admin repair ─────────────────────────────────────────────────────────────
+
+func (m *Manager) handleAdminRepair(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AdminPassword string `json:"admin_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.AdminPassword == "" {
+		jsonError(w, "admin_password is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := m.AdminRepair(r.Context(), body.AdminPassword)
+	if err != nil {
+		msg := err.Error()
+		// Return 422 for password mismatch — 401 would cause api.js to redirect
+		// to the login page, which is wrong here. 422 surfaces the error inline.
+		if msg == "password does not match the one set on Enable" {
+			jsonError(w, "Password does not match the one set on Enable.", http.StatusUnprocessableEntity)
+			return
+		}
+		log.Error().Err(err).Msg("ldap: admin repair failed")
+		jsonError(w, msg, http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, result, http.StatusOK)
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────

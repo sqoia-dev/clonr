@@ -146,6 +146,35 @@ const LDAPPages = {
                 <button class="btn btn-danger" onclick="LDAPPages._disableModal(${st.configured_node_count || 0})" ${!isAdmin ? 'disabled' : ''}>Disable</button>
             </div>` : '';
 
+        // Repair form (shown when enabled so the operator can backfill admin_passwd
+        // on installs provisioned before migration 028, or recover from node-reader
+        // bind divergence without a full Disable/Re-enable cycle).
+        const repairForm = st.enabled ? `
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header"><span class="card-title">Admin password</span></div>
+                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;max-width:480px;">
+                    <p style="margin:0;color:var(--text-secondary);font-size:14px;">
+                        Re-enter the admin password you set on Enable. Persists it across restarts
+                        and repairs the node-reader bind if it has drifted.
+                    </p>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label class="form-label">Admin password
+                            <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+                                <input id="ldap-repair-password" class="form-input" type="password"
+                                    placeholder="Directory Manager password" style="flex:1;">
+                                <button type="button" id="ldap-repair-pw-toggle" class="btn btn-secondary btn-sm"
+                                    onclick="LDAPPages._repairTogglePassword()">Show</button>
+                            </div>
+                            <div id="ldap-repair-err" style="color:var(--error);font-size:12px;margin-top:6px;display:none;"></div>
+                        </label>
+                    </div>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;">
+                        <button class="btn btn-primary" id="ldap-repair-submit"
+                            onclick="LDAPPages._repairAdminBind()" ${!isAdmin ? 'disabled' : ''}>Verify &amp; Repair</button>
+                    </div>
+                </div>
+            </div>` : '';
+
         return `
             <div class="page-header">
                 <div>
@@ -164,6 +193,7 @@ const LDAPPages = {
                 </div>
             </div>
             ${enableForm}
+            ${repairForm}
         `;
     },
 
@@ -266,6 +296,43 @@ const LDAPPages = {
             App.toast('Backup complete: ' + (resp.filename || 'saved'), 'success');
         } catch (err) {
             App.toast('Backup failed: ' + err.message, 'error');
+        }
+    },
+
+    _repairTogglePassword() {
+        const el  = document.getElementById('ldap-repair-password');
+        const btn = document.getElementById('ldap-repair-pw-toggle');
+        if (!el) return;
+        if (el.type === 'password') { el.type = 'text';     if (btn) btn.textContent = 'Hide'; }
+        else                        { el.type = 'password'; if (btn) btn.textContent = 'Show'; }
+    },
+
+    async _repairAdminBind() {
+        const errEl = document.getElementById('ldap-repair-err');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+
+        const password = (document.getElementById('ldap-repair-password') || {}).value || '';
+        if (!password) {
+            if (errEl) { errEl.textContent = 'Password is required'; errEl.style.display = ''; }
+            return;
+        }
+
+        const submitBtn = document.getElementById('ldap-repair-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Verifying…'; }
+
+        try {
+            await API.ldap.repairAdminBind({ admin_password: password });
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Verify & Repair'; }
+            // Clear the password field after success.
+            const pwEl = document.getElementById('ldap-repair-password');
+            if (pwEl) { pwEl.value = ''; pwEl.type = 'password'; }
+            const toggleBtn = document.getElementById('ldap-repair-pw-toggle');
+            if (toggleBtn) toggleBtn.textContent = 'Show';
+            App.toast('Admin bind repaired.', 'success');
+        } catch (err) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Verify & Repair'; }
+            const msg = err.message || 'Repair failed';
+            if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
         }
     },
 
