@@ -107,18 +107,28 @@ const LDAPPages = {
                 </tbody>
             </table>`;
 
-        // Enable form (shown when disabled).
-        const enableForm = !st.enabled ? `
+        // Enable / Re-provision form.
+        // Shown when disabled OR when ready (re-provision) OR when error (retry).
+        // Hidden only during active provisioning.
+        const showEnableForm = !st.enabled || st.status === 'ready' || st.status === 'error';
+        const enableBtnLabel = st.status === 'ready' ? 'Re-provision'
+                             : st.status === 'error'   ? 'Retry'
+                             : 'Enable';
+        const enableOnclick  = st.status === 'ready'
+            ? 'LDAPPages._reprovisionConfirmModal()'
+            : 'LDAPPages._enable()';
+        const enableForm = showEnableForm ? `
             <div class="card" style="margin-top:20px;">
-                <div class="card-header"><span class="card-title">Enable LDAP Module</span></div>
+                <div class="card-header"><span class="card-title">${st.status === 'ready' ? 'Re-provision LDAP Module' : st.status === 'error' ? 'Retry Provisioning' : 'Enable LDAP Module'}</span></div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;max-width:480px;">
                     <p style="margin:0;color:var(--text-secondary);font-size:14px;">
-                        Enabling the LDAP module will start a self-hosted OpenLDAP instance on this server
-                        and configure new nodes to authenticate via it on reimage.
+                        ${st.status === 'ready'
+                            ? 'Re-provisioning regenerates the server certificate (existing CA is preserved), re-seeds slapd configuration, and restarts the LDAP service.'
+                            : 'Enabling the LDAP module will start a self-hosted OpenLDAP instance on this server and configure new nodes to authenticate via it on reimage.'}
                     </p>
                     <label class="form-label">Base DN
                         <input id="ldap-enable-basedn" class="form-input" type="text"
-                            value="dc=cluster,dc=local"
+                            value="${st.base_dn ? escHtml(st.base_dn) : 'dc=cluster,dc=local'}"
                             placeholder="dc=cluster,dc=local"
                             style="margin-top:4px;font-family:monospace;"
                             ${st.base_dn_locked ? 'disabled title="Locked after first node was provisioned"' : ''}>
@@ -134,7 +144,7 @@ const LDAPPages = {
                         </span>
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-primary" onclick="LDAPPages._enable()" ${!isAdmin ? 'disabled' : ''}>Enable</button>
+                        <button class="btn btn-primary" onclick="${enableOnclick}" ${!isAdmin ? 'disabled' : ''}>${enableBtnLabel}</button>
                     </div>
                 </div>
             </div>` : '';
@@ -195,6 +205,36 @@ const LDAPPages = {
             ${enableForm}
             ${repairForm}
         `;
+    },
+
+    // _reprovisionConfirmModal shows a confirmation before re-provisioning a ready module.
+    _reprovisionConfirmModal() {
+        const existingModal = document.getElementById('ldap-reprovision-modal');
+        if (existingModal) existingModal.remove();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-reprovision-modal';
+        overlay.innerHTML = `
+            <div class="modal">
+                <div class="modal-header">
+                    <span class="modal-title">Re-provision LDAP module?</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-reprovision-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin:0 0 16px;font-size:14px;line-height:1.6;">
+                        The module is currently active. Re-provisioning will regenerate the server
+                        certificate (existing CA is preserved), re-seed slapd configuration, and
+                        restart the LDAP service. In-flight LDAP operations may briefly fail during
+                        the restart.
+                    </p>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('ldap-reprovision-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="document.getElementById('ldap-reprovision-modal').remove();LDAPPages._enable()">Re-provision</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
     },
 
     async _enable() {
@@ -353,23 +393,28 @@ const LDAPPages = {
         const isAdmin = typeof Auth !== 'undefined' && Auth._role === 'admin';
 
         const rows = users.length === 0
-            ? `<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
+            ? `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
             : users.map(u => {
                 const lockedBadge = u.locked
-                    ? `<span class="badge" style="background:#fee2e2;color:#dc2626;margin-left:4px;">locked</span>` : '';
+                    ? `<span class="badge" style="background:#fee2e2;color:#dc2626;margin-left:6px;font-size:11px;padding:1px 6px;border-radius:4px;font-weight:600;vertical-align:middle;">Locked</span>` : '';
                 // JSON-encode the user safely for passing into onclick attr.
                 const userJson = escHtml(JSON.stringify(u));
-                return `<tr>
-                    <td class="text-mono text-sm">${escHtml(u.uid)}</td>
+                // Locked users get muted row styling for visual distinction.
+                const rowStyle = u.locked ? ' style="opacity:0.6;"' : '';
+                const lockBtn = u.locked
+                    ? `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._unlockUser('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Unlock</button>`
+                    : `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._lockConfirm('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Lock</button>`;
+                return `<tr${rowStyle}>
+                    <td class="text-mono text-sm">${escHtml(u.uid)}${lockedBadge}</td>
                     <td>${escHtml(u.cn || '—')}</td>
                     <td class="text-mono text-sm">${escHtml(String(u.uid_number || '—'))}</td>
                     <td class="text-mono text-sm">${escHtml(String(u.gid_number || '—'))}</td>
-                    <td>${escHtml(u.login_shell || '/bin/bash')}${lockedBadge}</td>
+                    <td>${escHtml(u.login_shell || '/bin/bash')}</td>
                     <td>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <button class="btn btn-secondary btn-sm" onclick="LDAPPages._resetPasswordModal('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Reset Password</button>
+                            ${lockBtn}
                             <button class="btn btn-secondary btn-sm" onclick="LDAPPages._editUserModal(${userJson})" ${!isAdmin ? 'disabled' : ''}>Edit</button>
-                            <button class="btn btn-secondary btn-sm" onclick="LDAPPages._resetPasswordModal('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Reset PW</button>
-                            <button class="btn btn-secondary btn-sm" onclick="LDAPPages._toggleLock('${escHtml(u.uid)}', ${!!u.locked})" ${!isAdmin ? 'disabled' : ''}>${u.locked ? 'Unlock' : 'Lock'}</button>
                             <button class="btn btn-danger btn-sm" onclick="LDAPPages._deleteUser('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Delete</button>
                         </div>
                     </td>
@@ -390,7 +435,7 @@ const LDAPPages = {
                 <table class="table">
                     <thead>
                         <tr>
-                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Shell / Status</th><th>Actions</th>
+                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Shell</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -810,18 +855,52 @@ const LDAPPages = {
         }
     },
 
-    async _toggleLock(uid, currentlyLocked) {
+    // _lockConfirm shows an inline confirmation before locking a user account.
+    // Uses a modal (not browser confirm()) per the brief. Unlock is a single click.
+    _lockConfirm(uid) {
+        const existingModal = document.getElementById('ldap-lock-confirm-modal');
+        if (existingModal) existingModal.remove();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'ldap-lock-confirm-modal';
+        overlay.innerHTML = `
+            <div class="modal">
+                <div class="modal-header">
+                    <span class="modal-title">Lock user account?</span>
+                    <button class="modal-close" onclick="document.getElementById('ldap-lock-confirm-modal').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin:0 0 16px;font-size:14px;">
+                        Lock <strong>${escHtml(uid)}</strong>? The account will be disabled immediately.
+                        Active sessions are not terminated, but new logins will be rejected.
+                    </p>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('ldap-lock-confirm-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="document.getElementById('ldap-lock-confirm-modal').remove();LDAPPages._doLockUser('${escHtml(uid)}')">Lock</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    },
+
+    async _doLockUser(uid) {
         try {
-            if (currentlyLocked) {
-                await API.ldap.unlockUser(uid);
-                App.toast('User unlocked: ' + uid, 'success');
-            } else {
-                await API.ldap.lockUser(uid);
-                App.toast('User locked: ' + uid, 'success');
-            }
+            await API.ldap.lockUser(uid);
+            App.toast('User locked: ' + uid, 'success');
             LDAPPages.users();
         } catch (err) {
-            App.toast('Failed: ' + err.message, 'error');
+            App.toast('Lock failed: ' + err.message, 'error');
+        }
+    },
+
+    async _unlockUser(uid) {
+        try {
+            await API.ldap.unlockUser(uid);
+            App.toast('User unlocked: ' + uid, 'success');
+            LDAPPages.users();
+        } catch (err) {
+            App.toast('Unlock failed: ' + err.message, 'error');
         }
     },
 
