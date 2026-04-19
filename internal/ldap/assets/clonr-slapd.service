@@ -10,7 +10,7 @@ Conflicts=slapd.service
 Type=forking
 User=ldap
 Group=ldap
-PIDFile=/var/run/slapd/slapd.pid
+PIDFile=/run/slapd/slapd.pid
 RuntimeDirectory=slapd
 RuntimeDirectoryMode=0755
 

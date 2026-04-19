@@ -99,7 +99,15 @@ func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCer
 	if hostname != "" {
 		dnsNames = append(dnsNames, hostname)
 	}
-	var ipAddresses []net.IP
+	// Always include loopback addresses so local probes (readiness check, health
+	// checker) can dial ldaps://127.0.0.1:636 and pass TLS hostname verification.
+	// Go's TLS verifier matches ServerName against IP SANs when the ServerName is
+	// an IP literal, so 127.0.0.1 must appear explicitly in the SAN list.
+	// Certs are regenerated on every Enable(), so no migration is required.
+	ipAddresses := []net.IP{
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("::1"),
+	}
 	if primaryIP != "" {
 		if ip := net.ParseIP(primaryIP); ip != nil {
 			ipAddresses = append(ipAddresses, ip)
