@@ -107,24 +107,21 @@ const LDAPPages = {
                 </tbody>
             </table>`;
 
-        // Enable / Re-provision form.
-        // Shown when disabled OR when ready (re-provision) OR when error (retry).
-        // Hidden only during active provisioning.
-        const showEnableForm = !st.enabled || st.status === 'ready' || st.status === 'error';
-        const enableBtnLabel = st.status === 'ready' ? 'Re-provision'
-                             : st.status === 'error'   ? 'Retry'
-                             : 'Enable';
-        const enableOnclick  = st.status === 'ready'
-            ? 'LDAPPages._reprovisionConfirmModal()'
-            : 'LDAPPages._enable()';
+        // Enable / Retry form.
+        // Shown when disabled (Enable) or when error (Retry).
+        // NOT shown when ready — the destructive rebuild path is explicit
+        // Disable → Enable; the surgical repair path is the "Admin password"
+        // card below (ca80f1e). Re-Enable from a healthy ready state was
+        // reverted per operator clarification.
+        const showEnableForm = st.status === 'disabled' || st.status === 'error';
+        const enableBtnLabel = st.status === 'error' ? 'Retry' : 'Enable';
+        const enableCardTitle = st.status === 'error' ? 'Retry Provisioning' : 'Enable LDAP Module';
         const enableForm = showEnableForm ? `
             <div class="card" style="margin-top:20px;">
-                <div class="card-header"><span class="card-title">${st.status === 'ready' ? 'Re-provision LDAP Module' : st.status === 'error' ? 'Retry Provisioning' : 'Enable LDAP Module'}</span></div>
+                <div class="card-header"><span class="card-title">${enableCardTitle}</span></div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;max-width:480px;">
                     <p style="margin:0;color:var(--text-secondary);font-size:14px;">
-                        ${st.status === 'ready'
-                            ? 'Re-provisioning regenerates the server certificate (existing CA is preserved), re-seeds slapd configuration, and restarts the LDAP service.'
-                            : 'Enabling the LDAP module will start a self-hosted OpenLDAP instance on this server and configure new nodes to authenticate via it on reimage.'}
+                        Enabling the LDAP module will start a self-hosted OpenLDAP instance on this server and configure new nodes to authenticate via it on reimage.
                     </p>
                     <label class="form-label">Base DN
                         <input id="ldap-enable-basedn" class="form-input" type="text"
@@ -144,7 +141,7 @@ const LDAPPages = {
                         </span>
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-primary" onclick="${enableOnclick}" ${!isAdmin ? 'disabled' : ''}>${enableBtnLabel}</button>
+                        <button class="btn btn-primary" onclick="LDAPPages._enable()" ${!isAdmin ? 'disabled' : ''}>${enableBtnLabel}</button>
                     </div>
                 </div>
             </div>` : '';
@@ -205,36 +202,6 @@ const LDAPPages = {
             ${enableForm}
             ${repairForm}
         `;
-    },
-
-    // _reprovisionConfirmModal shows a confirmation before re-provisioning a ready module.
-    _reprovisionConfirmModal() {
-        const existingModal = document.getElementById('ldap-reprovision-modal');
-        if (existingModal) existingModal.remove();
-
-        const overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        overlay.id = 'ldap-reprovision-modal';
-        overlay.innerHTML = `
-            <div class="modal">
-                <div class="modal-header">
-                    <span class="modal-title">Re-provision LDAP module?</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-reprovision-modal').remove()">×</button>
-                </div>
-                <div class="modal-body">
-                    <p style="margin:0 0 16px;font-size:14px;line-height:1.6;">
-                        The module is currently active. Re-provisioning will regenerate the server
-                        certificate (existing CA is preserved), re-seed slapd configuration, and
-                        restart the LDAP service. In-flight LDAP operations may briefly fail during
-                        the restart.
-                    </p>
-                    <div class="form-actions">
-                        <button class="btn btn-secondary" onclick="document.getElementById('ldap-reprovision-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="document.getElementById('ldap-reprovision-modal').remove();LDAPPages._enable()">Re-provision</button>
-                    </div>
-                </div>
-            </div>`;
-        document.body.appendChild(overlay);
     },
 
     async _enable() {
@@ -378,6 +345,25 @@ const LDAPPages = {
 
     // ── Users page ────────────────────────────────────────────────────────
 
+    // _fmtLastLogin formats a pwdLastSuccess ISO timestamp string into a
+    // human-readable relative time. All computation is client-side so it
+    // reflects the current time on page load without backend work.
+    _fmtLastLogin(isoStr) {
+        if (!isoStr) return 'Never';
+        const t = new Date(isoStr);
+        if (isNaN(t)) return 'Never';
+        const diffMs  = Date.now() - t.getTime();
+        const diffSec = Math.floor(diffMs / 1000);
+        if (diffSec < 60)  return 'Just now';
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60)  return diffMin + 'm ago';
+        const diffHr  = Math.floor(diffMin / 60);
+        if (diffHr  < 24)  return diffHr  + 'h ago';
+        const diffDay = Math.floor(diffHr  / 24);
+        if (diffDay < 30)  return diffDay + 'd ago';
+        return '30d+ ago';
+    },
+
     async users() {
         App.render(loading('Loading LDAP users…'));
         try {
@@ -393,7 +379,7 @@ const LDAPPages = {
         const isAdmin = typeof Auth !== 'undefined' && Auth._role === 'admin';
 
         const rows = users.length === 0
-            ? `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
+            ? `<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
             : users.map(u => {
                 const lockedBadge = u.locked
                     ? `<span class="badge" style="background:#fee2e2;color:#dc2626;margin-left:6px;font-size:11px;padding:1px 6px;border-radius:4px;font-weight:600;vertical-align:middle;">Locked</span>` : '';
@@ -404,11 +390,13 @@ const LDAPPages = {
                 const lockBtn = u.locked
                     ? `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._unlockUser('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Unlock</button>`
                     : `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._lockConfirm('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Lock</button>`;
+                const lastLoginCell = LDAPPages._fmtLastLogin(u.last_login);
                 return `<tr${rowStyle}>
                     <td class="text-mono text-sm">${escHtml(u.uid)}${lockedBadge}</td>
                     <td>${escHtml(u.cn || '—')}</td>
                     <td class="text-mono text-sm">${escHtml(String(u.uid_number || '—'))}</td>
                     <td class="text-mono text-sm">${escHtml(String(u.gid_number || '—'))}</td>
+                    <td style="color:var(--text-secondary);font-size:13px;">${lastLoginCell}</td>
                     <td>${escHtml(u.login_shell || '/bin/bash')}</td>
                     <td>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -435,7 +423,7 @@ const LDAPPages = {
                 <table class="table">
                     <thead>
                         <tr>
-                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Shell</th><th>Actions</th>
+                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -800,6 +788,16 @@ const LDAPPages = {
                         <div class="form-hint">Operator can change this; user can change it themselves after first login.</div>
                         <div id="lrp-pw-err" class="form-hint" style="color:var(--error);display:none;"></div>
                     </div>
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-weight:normal;">
+                            <input type="checkbox" name="force_change" id="lrp-force-change" style="margin-top:3px;flex-shrink:0;">
+                            <span>Force user to change password at next login</span>
+                        </label>
+                        <div class="form-hint" style="margin-top:4px;">
+                            User will be required to choose a new password the next time they log in via SSH.
+                            Requires ppolicy to be active (configured automatically on Enable).
+                        </div>
+                    </div>
                     <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-reset-pw-modal').remove()">Cancel</button>
                         <button id="lrp-submit" class="btn btn-primary" onclick="LDAPPages._resetPasswordSubmit('${escHtml(uid)}')">Reset</button>
@@ -835,7 +833,9 @@ const LDAPPages = {
         const errEl = document.getElementById('lrp-pw-err');
         if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
 
-        const password = (document.getElementById('lrp-password') || {}).value || '';
+        const password    = (document.getElementById('lrp-password')     || {}).value   || '';
+        const forceChange = !!(document.getElementById('lrp-force-change') || {}).checked;
+
         if (!password) {
             if (errEl) { errEl.textContent = 'Password is required'; errEl.style.display = ''; }
             return;
@@ -845,7 +845,7 @@ const LDAPPages = {
         if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Resetting…'; }
 
         try {
-            await API.ldap.setPassword(uid, password);
+            await API.ldap.setPassword(uid, password, forceChange);
             const modal = document.getElementById('ldap-reset-pw-modal');
             if (modal) modal.remove();
             App.toast('Password reset for ' + uid, 'success');

@@ -229,7 +229,8 @@ func (m *Manager) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
 	var body struct {
-		Password string `json:"password"`
+		Password    string `json:"password"`
+		ForceChange bool   `json:"force_change"` // default false — backward compat
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Password == "" {
 		jsonError(w, "password is required", http.StatusBadRequest)
@@ -241,7 +242,7 @@ func (m *Manager) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if err := dit.SetPassword(uid, body.Password); err != nil {
+	if err := dit.SetPassword(uid, body.Password, body.ForceChange); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

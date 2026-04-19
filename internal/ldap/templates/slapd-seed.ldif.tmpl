@@ -40,6 +40,16 @@ include: file:///etc/openldap/schema/core.ldif
 include: file:///etc/openldap/schema/cosine.ldif
 include: file:///etc/openldap/schema/inetorgperson.ldif
 include: file:///etc/openldap/schema/nis.ldif
+include: file:///etc/openldap/schema/ppolicy.ldif
+
+# ── Module loading ─────────────────────────────────────────────────────────────
+# ppolicy.so ships with openldap-servers on EL9 at /usr/lib64/openldap/.
+# No index on cn=module — slapd assigns {0} at load.
+dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulePath: /usr/lib64/openldap
+olcModuleLoad: ppolicy.so
 
 # ── Frontend database (cn=frontend) ───────────────────────────────────────────
 # olcPasswordHash lives here (slapd 2.6+ deprecated it on the global entry).
@@ -112,3 +122,17 @@ olcAccess: to dn.subtree="ou=services,{{.BaseDN}}"
 olcAccess: to *
   by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
   by * none
+
+# ── ppolicy overlay ────────────────────────────────────────────────────────────
+# Attached to the mdb backend. Default policy points to
+# cn=default,ou=policies,<baseDN> which is seeded into the DIT by seedDIT().
+# olcPPolicyUseLockout: TRUE — return PasswordPolicyError on lockout so sssd
+# can surface the error accurately via ldap_access_order=ppolicy.
+dn: olcOverlay={0}ppolicy,olcDatabase={1}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcPPolicyConfig
+olcOverlay: {0}ppolicy
+olcPPolicyDefault: cn=default,ou=policies,{{.BaseDN}}
+olcPPolicyHashCleartext: FALSE
+olcPPolicyUseLockout: TRUE
+olcPPolicyForwardUpdates: FALSE

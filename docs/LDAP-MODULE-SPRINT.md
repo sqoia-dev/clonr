@@ -41,6 +41,7 @@ The feature is opt-in. A clonr install with the module disabled must behave iden
 | **Node auth stack** | sssd with offline cache enabled, `pam_mkhomedir`, `TLS_REQCERT demand` enforced | nslcd has no meaningful offline cache; sssd must serve cached creds when clonr is unreachable. |
 | **Home dirs** | Local `/home/<user>` created on first login via `pam_mkhomedir` | NFS/automount is a future module, not this one. |
 | **sudoers** | Opt-in checkbox, **off by default**, with warning | sudoRole schema works but is too easy to foot-gun via a UI click. |
+| **Password policy** | ppolicy overlay enabled by default; default policy at `cn=default,ou=policies,<baseDN>`: min length 8, lockout after 5 failures (permanent, admin unlocks), no expiry, no history, no quality checks. Force-change on reset via per-reset checkbox in the UI. Last-login tracking via `pwdLastSuccess`. | Gilfoyle spec 2026-04-18. |
 | **Module framework** | **None.** Ship as `internal/ldap/` with explicit wiring at two call sites | clonr has no plugin surface today; inventing one for one module is waste. Document the extension seams so a second module (NFS, Slurm) can follow the same shape. |
 
 ### Extension seams (documented convention for future modules)
@@ -264,6 +265,11 @@ Push via the standard ssh-agent pattern in `CLAUDE.md`.
 
 ---
 
+## 7a. V1 scope additions (2026-04-18)
+
+- **Force-change-at-next-login:** `SetPassword(uid, password, forceChange bool)` sets `pwdReset=TRUE` atomically when the operator checks the per-reset checkbox. This is a per-action decision, not a global setting — every admin password reset should be an explicit choice about whether to force rotation.
+- **Last-login tracking:** `pwdLastSuccess` operational attribute requested explicitly in `ListUsers` LDAP search and surfaced as a "Last Login" column in the user table with relative-time display (Never / Just now / Nm ago / Nh ago / Nd ago / 30d+). Computed client-side from the ISO timestamp.
+
 ## 9. Out of Scope (v2)
 
 - Replication / multi-master / HA. Single authoritative server with a 5-minute restore procedure is the correct HA story for a single cluster.
@@ -275,6 +281,9 @@ Push via the standard ssh-agent pattern in `CLAUDE.md`.
 - LDAP restore from backup via UI. CLI-only with a documented procedure.
 - Argon2 password hashing. SSHA512 until the RHEL packaging catches up.
 - Cert auto-renewal notification email. Status banner only.
+- ~~ppolicy overlay~~ — done in v1 (2026-04-18).
+- ~~Force-change-at-next-login~~ — done in v1 (2026-04-18, per-reset checkbox).
+- ~~Last-login column~~ — done in v1 (2026-04-18, pwdLastSuccess relative time).
 
 ---
 

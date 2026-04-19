@@ -284,7 +284,7 @@ const API = {
         createUser(body)                { return API.post('/ldap/users', body); },
         updateUser(uid, body)           { return API.put(`/ldap/users/${encodeURIComponent(uid)}`, body); },
         deleteUser(uid)                 { return API.del(`/ldap/users/${encodeURIComponent(uid)}`); },
-        setPassword(uid, password)      { return API.post(`/ldap/users/${encodeURIComponent(uid)}/password`, { password }); },
+        setPassword(uid, password, forceChange) { return API.post(`/ldap/users/${encodeURIComponent(uid)}/password`, { password, force_change: !!forceChange }); },
         lockUser(uid)                   { return API.post(`/ldap/users/${encodeURIComponent(uid)}/lock`, {}); },
         unlockUser(uid)                 { return API.post(`/ldap/users/${encodeURIComponent(uid)}/unlock`, {}); },
         // Groups

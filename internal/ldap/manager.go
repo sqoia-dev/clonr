@@ -478,6 +478,43 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 			},
 			credentialed: true,
 		},
+		// ── ppolicy container and default policy ──────────────────────────────
+		// The policy entry lives in the DIT (-n 1), not cn=config, so it is
+		// seeded here via go-ldap. The overlay entry in the LDIF seed points to
+		// cn=default,ou=policies,<baseDN>.
+		{
+			dn: fmt.Sprintf("ou=policies,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass": {"top", "organizationalUnit"},
+				"ou":          {"policies"},
+			},
+		},
+		{
+			// objectClass: device is the structural class (cn is its only
+			// mandatory attribute). pwdPolicy is auxiliary and contributes
+			// the pwd* attributes. This is the canonical pattern when no
+			// other structural class is appropriate.
+			dn: fmt.Sprintf("cn=default,ou=policies,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass":            {"top", "device", "pwdPolicy"},
+				"cn":                     {"default"},
+				"pwdAttribute":           {"userPassword"},
+				"pwdMustChange":          {"TRUE"},
+				"pwdAllowUserChange":     {"TRUE"},
+				"pwdInHistory":           {"0"},
+				"pwdMinAge":              {"0"},
+				"pwdMaxAge":              {"0"},
+				"pwdMinLength":           {"8"},
+				"pwdLockout":             {"TRUE"},
+				"pwdLockoutDuration":     {"0"}, // permanent until admin unlocks
+				"pwdMaxFailure":          {"5"},
+				"pwdFailureCountInterval": {"300"},
+				"pwdGraceAuthnLimit":     {"0"},
+				"pwdCheckQuality":        {"0"},
+				"pwdExpireWarning":       {"0"},
+				"pwdSafeModify":          {"FALSE"},
+			},
+		},
 	}
 
 	for _, e := range entries {

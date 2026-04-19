@@ -51,9 +51,15 @@ ldap_group_membership_check_against_member_of = false
 ldap_tls_reqcert = demand
 ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clonr-ca.crt
 
-# Account locking: honor shadowExpire=1 (set by clonr lock endpoint)
+# Account policy: ppolicy overlay handles lockout server-side.
+# Access order: ppolicy first (ppolicy lockout / forced-change check),
+# then expire (shadowExpire=1 for manual clonr lock).
+# ldap_pwd_policy=none disables sssd's local shadow aging check — all
+# password policy enforcement happens server-side via the ppolicy overlay.
 ldap_account_expire_policy = shadow
-ldap_access_order = expire
+ldap_access_order = ppolicy, expire
+ldap_use_ppolicy = true
+ldap_pwd_policy = none
 
 # Performance tuning
 ldap_id_use_start_tls = false

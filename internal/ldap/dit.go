@@ -16,20 +16,22 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	goldap "github.com/go-ldap/ldap/v3"
 )
 
 // LDAPUser is the wire type for a POSIX user in the DIT.
 type LDAPUser struct {
-	UID           string `json:"uid"`
-	UIDNumber     int    `json:"uid_number"`
-	GIDNumber     int    `json:"gid_number"`
-	CN            string `json:"cn"`
-	SN            string `json:"sn"`
-	HomeDirectory string `json:"home_directory"`
-	LoginShell    string `json:"login_shell"`
-	Locked        bool   `json:"locked"` // true if shadowExpire=1
+	UID           string     `json:"uid"`
+	UIDNumber     int        `json:"uid_number"`
+	GIDNumber     int        `json:"gid_number"`
+	CN            string     `json:"cn"`
+	SN            string     `json:"sn"`
+	HomeDirectory string     `json:"home_directory"`
+	LoginShell    string     `json:"login_shell"`
+	Locked        bool       `json:"locked"`              // true if shadowExpire=1
+	LastLogin     *time.Time `json:"last_login,omitempty"` // pwdLastSuccess, nil if never
 }
 
 // LDAPGroup is the wire type for a POSIX group in the DIT.
@@ -130,7 +132,9 @@ func (c *ditClient) ListUsers() ([]LDAPUser, error) {
 		goldap.NeverDerefAliases,
 		0, 0, false,
 		"(objectClass=posixAccount)",
-		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "homeDirectory", "loginShell", "shadowExpire"},
+		// pwdLastSuccess is an operational attribute — must be named explicitly;
+		// it is NOT returned by a bare "*" wildcard search.
+		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "homeDirectory", "loginShell", "shadowExpire", "pwdLastSuccess"},
 		nil,
 	)
 
@@ -286,7 +290,15 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 // SetPassword changes a user's userPassword attribute.
 // The password is hashed with {CRYPT} $6$ SHA-512-crypt (100k rounds) before
 // being sent to slapd, so the plaintext never travels over the LDAP connection.
-func (c *ditClient) SetPassword(uid, password string) error {
+//
+// If forceChange is true, pwdReset is set to TRUE atomically with the
+// userPassword Replace, causing the ppolicy overlay to require the user to
+// change their password at next login. If forceChange is false, pwdReset is
+// deleted (tolerating NoSuchAttribute so the operation is idempotent).
+//
+// pwdChangedTime is intentionally NOT touched — it is NO-USER-MODIFICATION and
+// is managed entirely by the ppolicy overlay.
+func (c *ditClient) SetPassword(uid, password string, forceChange bool) error {
 	hashed, err := HashPasswordCrypt(password)
 	if err != nil {
 		return fmt.Errorf("ldap dit: hash password for %s: %w", uid, err)
@@ -302,7 +314,19 @@ func (c *ditClient) SetPassword(uid, password string) error {
 	modReq := goldap.NewModifyRequest(dn, nil)
 	modReq.Replace("userPassword", []string{hashed})
 
+	if forceChange {
+		modReq.Replace("pwdReset", []string{"TRUE"})
+	} else {
+		// Delete with empty value list removes the attribute. Tolerate
+		// NoSuchAttribute — the user may never have had pwdReset set.
+		modReq.Delete("pwdReset", []string{})
+	}
+
 	if err := conn.Modify(modReq); err != nil {
+		// If forceChange=false and pwdReset didn't exist, that's fine.
+		if !forceChange && goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+			return nil
+		}
 		return fmt.Errorf("ldap dit: set password for %s: %w", uid, err)
 	}
 	return nil
@@ -556,6 +580,14 @@ func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 	shadowExpire := entry.GetAttributeValue("shadowExpire")
 	if shadowExpire == "1" {
 		u.Locked = true
+	}
+
+	// pwdLastSuccess is a GeneralizedTime operational attribute written by the
+	// ppolicy overlay on every successful bind. Parse it if present.
+	if raw := entry.GetAttributeValue("pwdLastSuccess"); raw != "" {
+		if t, err := time.Parse("20060102150405Z", raw); err == nil {
+			u.LastLogin = &t
+		}
 	}
 
 	return u, nil
