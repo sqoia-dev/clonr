@@ -71,10 +71,11 @@ func New(cfg config.ServerConfig, database *db.DB) *Manager {
 	return m
 }
 
-// restoreInMemoryPasswords loads the service_bind_password from the DB on startup
-// so that health checks and DIT operations work without an Enable() call.
-// The admin password cannot be restored — DIT operations that require admin bind
-// will fail after a restart until Enable() is called again.
+// restoreInMemoryPasswords loads the service and admin bind passwords from the DB
+// on startup so that health checks and DIT operations work without an Enable() call.
+// Prior to migration 028, admin_passwd was empty for existing installs and the
+// "not in memory" error remained reachable until one re-Enable(); post-migration
+// it is populated on every Enable() and survives restarts.
 func (m *Manager) restoreInMemoryPasswords(ctx context.Context) {
 	row, err := m.db.LDAPGetConfig(ctx)
 	if err != nil {
@@ -83,6 +84,7 @@ func (m *Manager) restoreInMemoryPasswords(ctx context.Context) {
 	if row.Status == statusReady || row.Status == statusError {
 		m.mu.Lock()
 		m.servicePassword = row.ServiceBindPassword
+		m.adminPassword = row.AdminPasswd // may be "" on pre-028 rows; DIT() guards against this
 		m.mu.Unlock()
 	}
 }
@@ -366,6 +368,10 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		AdminPasswordHash:   string(adminHash),
 		ServiceBindDN:       serviceBindDN,
 		ServiceBindPassword: svcPasswd,
+		// AdminPasswd persists the plaintext DM password (migration 028).
+		// Same threat model as ServiceBindPassword — SQLite file-permission protected.
+		// Future hardening: encrypt both at rest in a coordinated pass.
+		AdminPasswd:         req.AdminPassword,
 		LastProvisionedAt:   time.Now(),
 	}
 
@@ -725,6 +731,38 @@ func (m *Manager) DIT(ctx context.Context) (*ditClient, error) {
 		serverURI:  "ldaps://127.0.0.1:636",
 		bindDN:     fmt.Sprintf("cn=Directory Manager,%s", row.BaseDN),
 		bindPasswd: adminPass,
+		baseDN:     row.BaseDN,
+		caCertPEM:  []byte(row.CACertPEM),
+	}, nil
+}
+
+// ReaderDIT constructs a ditClient that binds as the node-reader service account.
+// Use this for all read-only operations (ListUsers, ListGroups, GetUser, GetGroup,
+// group member fetches). The node-reader credentials are always persisted in the DB,
+// so this never hits the "password not in memory" class of error.
+func (m *Manager) ReaderDIT(ctx context.Context) (*ditClient, error) {
+	row, err := m.db.LDAPGetConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ldap: read config for reader DIT client: %w", err)
+	}
+	if !row.Enabled || row.Status != statusReady {
+		return nil, fmt.Errorf("ldap: module is not ready (status=%s)", row.Status)
+	}
+
+	m.mu.RLock()
+	svcPasswd := m.servicePassword
+	m.mu.RUnlock()
+
+	// Fall back to DB value if the in-memory copy is empty (defensive; should not
+	// happen post-restoreInMemoryPasswords, but guards against edge cases).
+	if svcPasswd == "" {
+		svcPasswd = row.ServiceBindPassword
+	}
+
+	return &ditClient{
+		serverURI:  "ldaps://127.0.0.1:636",
+		bindDN:     row.ServiceBindDN,
+		bindPasswd: svcPasswd,
 		baseDN:     row.BaseDN,
 		caCertPEM:  []byte(row.CACertPEM),
 	}, nil

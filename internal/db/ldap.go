@@ -24,6 +24,10 @@ type LDAPModuleConfig struct {
 	// ServiceBindPassword is stored plaintext in v1.
 	// V2 hardening: encrypt at rest. See migration comment in 027_ldap_module.sql.
 	ServiceBindPassword string
+	// AdminPasswd is the plaintext Directory Manager password, stored under the
+	// same threat model as ServiceBindPassword (file-permission protected SQLite).
+	// Added by migration 028. A future coordinated pass should encrypt both at rest.
+	AdminPasswd string
 	BaseDNLocked        bool
 	LastProvisionedAt   time.Time
 	LastCheckedAt       time.Time
@@ -39,7 +43,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			ca_cert_pem, ca_key_pem, ca_cert_fingerprint,
 			server_cert_pem, server_key_pem, server_cert_not_after,
 			admin_password_hash, service_bind_dn, service_bind_password,
-			base_dn_locked, last_provisioned_at, last_checked_at, last_check_error
+			base_dn_locked, last_provisioned_at, last_checked_at, last_check_error,
+			admin_passwd
 		FROM ldap_module_config WHERE id = 1
 	`)
 
@@ -54,6 +59,7 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		&cfg.ServerCertPEM, &cfg.ServerKeyPEM, &serverCertNotAfter,
 		&cfg.AdminPasswordHash, &cfg.ServiceBindDN, &cfg.ServiceBindPassword,
 		&cfg.BaseDNLocked, &lastProvisionedAt, &lastCheckedAt, &cfg.LastCheckError,
+		&cfg.AdminPasswd,
 	)
 	if err != nil {
 		return LDAPModuleConfig{}, err
@@ -106,14 +112,15 @@ func (db *DB) LDAPSaveConfig(ctx context.Context, cfg LDAPModuleConfig) error {
 			admin_password_hash = ?,
 			service_bind_dn = ?,
 			service_bind_password = ?,
-			last_provisioned_at = ?
+			last_provisioned_at = ?,
+			admin_passwd = ?
 		WHERE id = 1
 	`,
 		cfg.Enabled, cfg.Status, cfg.StatusDetail, cfg.BaseDN,
 		cfg.CACertPEM, cfg.CAKeyPEM, cfg.CACertFingerprint,
 		cfg.ServerCertPEM, cfg.ServerKeyPEM, notAfterStr,
 		cfg.AdminPasswordHash, cfg.ServiceBindDN, cfg.ServiceBindPassword,
-		lastProvStr,
+		lastProvStr, cfg.AdminPasswd,
 	)
 	if err != nil {
 		return fmt.Errorf("db: LDAPSaveConfig: %w", err)
@@ -162,6 +169,7 @@ func (db *DB) LDAPDisable(ctx context.Context) error {
 			admin_password_hash = '',
 			service_bind_dn = '',
 			service_bind_password = '',
+			admin_passwd = '',
 			base_dn_locked = 0,
 			last_provisioned_at = NULL,
 			last_checked_at = NULL,
@@ -170,6 +178,19 @@ func (db *DB) LDAPDisable(ctx context.Context) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("db: LDAPDisable: %w", err)
+	}
+	return nil
+}
+
+// LDAPSetAdminPasswd writes only the admin_passwd column atomically.
+// Called by Enable() after provisioning so the plaintext password survives restarts.
+func (db *DB) LDAPSetAdminPasswd(ctx context.Context, passwd string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE ldap_module_config SET admin_passwd = ? WHERE id = 1`,
+		passwd,
+	)
+	if err != nil {
+		return fmt.Errorf("db: LDAPSetAdminPasswd: %w", err)
 	}
 	return nil
 }

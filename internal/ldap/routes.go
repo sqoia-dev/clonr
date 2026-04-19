@@ -115,7 +115,9 @@ func (m *Manager) handleBackup(w http.ResponseWriter, r *http.Request) {
 // ─── Users ────────────────────────────────────────────────────────────────────
 
 func (m *Manager) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	dit, err := m.DIT(r.Context())
+	// Read-only: use node-reader bind so this page never hits the admin-password-cache
+	// class of error and the admin bind's blast radius is narrowed to writes only.
+	dit, err := m.ReaderDIT(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -248,7 +250,8 @@ func (m *Manager) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 // ─── Groups ───────────────────────────────────────────────────────────────────
 
 func (m *Manager) handleListGroups(w http.ResponseWriter, r *http.Request) {
-	dit, err := m.DIT(r.Context())
+	// Read-only: use node-reader bind (same rationale as handleListUsers above).
+	dit, err := m.ReaderDIT(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
