@@ -165,6 +165,15 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		}
 	}
 
+	// Read the existing config row so we can reuse the service bind password if
+	// one was already generated on a prior Enable() attempt (Part A of Code-49 fix).
+	existingRow, err := m.db.LDAPGetConfig(ctx)
+	if err != nil {
+		setError(fmt.Sprintf("read existing config: %v", err))
+		return
+	}
+	existingServicePasswd := existingRow.ServiceBindPassword
+
 	ldapCfg := m.cfg.LDAPConfigDir
 	pkiDir := m.cfg.LDAPPKIDir
 	ldapDataDir := m.cfg.LDAPDataDir
@@ -263,11 +272,17 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		return
 	}
 
-	// Generate service account password.
-	svcPasswd, err := generateRandomPassword(24)
-	if err != nil {
-		setError(fmt.Sprintf("generate service password: %v", err))
-		return
+	// Generate service account password — reuse the existing one if already persisted.
+	// On the first Enable() the column is empty and we generate a fresh password.
+	// On subsequent Enable() retries we keep the same value so the DB row and the
+	// LDAP entry's userPassword hash stay in sync (Part A of the Code-49 fix).
+	svcPasswd := existingServicePasswd
+	if svcPasswd == "" {
+		svcPasswd, err = generateRandomPassword(24)
+		if err != nil {
+			setError(fmt.Sprintf("generate service password: %v", err))
+			return
+		}
 	}
 
 	// Admin password bcrypt hash for DB audit field.
@@ -416,6 +431,11 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 	type seedEntry struct {
 		dn    string
 		attrs map[string][]string
+		// credentialed marks entries whose userPassword must be kept in sync with the
+		// DB on every seed run. On EntryAlreadyExists, a Modify REPLACE is issued
+		// instead of silently skipping, so repeated Enable() calls cannot leave the
+		// LDAP entry with a stale hash while the DB holds a newer plaintext password.
+		credentialed bool
 	}
 
 	entries := []seedEntry{
@@ -456,6 +476,7 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 				"description":  {"clonr node read-only service account (managed by clonr-serverd)"},
 				"userPassword": {hashedSvcPasswd},
 			},
+			credentialed: true,
 		},
 	}
 
@@ -466,7 +487,19 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 		}
 		if err := conn.Add(req); err != nil {
 			if goldap.IsErrorWithCode(err, goldap.LDAPResultEntryAlreadyExists) {
-				log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry already exists, skipping")
+				if e.credentialed {
+					// Self-heal: the entry exists but its userPassword hash may be from
+					// an earlier Enable() run. Issue a REPLACE to bring the LDAP entry's
+					// hash in line with the current DB password (Part B of Code-49 fix).
+					modReq := goldap.NewModifyRequest(e.dn, nil)
+					modReq.Replace("userPassword", []string{hashedSvcPasswd})
+					if modErr := conn.Modify(modReq); modErr != nil {
+						return fmt.Errorf("ldap: seed DIT: self-heal userPassword for %s: %w", e.dn, modErr)
+					}
+					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry exists — userPassword updated to match DB")
+				} else {
+					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry already exists, skipping")
+				}
 				continue
 			}
 			return fmt.Errorf("ldap: seed DIT: add %s: %w", e.dn, err)
