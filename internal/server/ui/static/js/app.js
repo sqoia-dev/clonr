@@ -393,20 +393,6 @@ const Pages = {
                         <div class="page-title">Dashboard</div>
                         <div class="page-subtitle">System overview and active deployments</div>
                     </div>
-                    <div class="flex gap-8">
-                        <button class="btn btn-secondary" onclick="Router.navigate('/logs')">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-                            </svg>
-                            View Logs
-                        </button>
-                        <button class="btn btn-primary" onclick="Router.navigate('/images')">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                            </svg>
-                            Pull Image
-                        </button>
-                    </div>
                 </div>
 
                 <div class="stats-grid">
