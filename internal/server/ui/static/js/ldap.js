@@ -842,25 +842,45 @@ const LDAPPages = {
         overlay.className = 'modal-overlay';
         overlay.id = 'ldap-create-group-modal';
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal modal-wide">
                 <div class="modal-header">
                     <span class="modal-title">Create LDAP Group</span>
                     <button class="modal-close" onclick="document.getElementById('ldap-create-group-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <div class="form-group" style="margin-bottom:12px;">
-                        <label>Group Name (CN)</label>
-                        <input id="lcg-cn" type="text" placeholder="hpc-users"
-                            style="font-family:var(--font-mono);">
-                        <div class="form-hint">POSIX group name. Used for membership lookups on nodes.</div>
-                        <div id="lcg-cn-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                    <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary);line-height:1.5;">
+                        POSIX groups give multiple users shared file ownership and access control on cluster nodes.
+                        Members can be added after the group is created.
+                    </p>
+
+                    <!-- Section: Identity -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Identity</div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Group Name (CN)</label>
+                            <input id="lcg-cn" type="text" placeholder="hpc-users"
+                                style="font-family:var(--font-mono);">
+                            <div class="form-hint">POSIX group name. Used for membership lookups on nodes. Permanent after creation.</div>
+                            <div id="lcg-cn-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>GID Number</label>
+                            <input id="lcg-gidnum" type="number" placeholder="10001" min="1000">
+                            <div class="form-hint">Numeric POSIX GID. Cluster convention: ≥10000 for user-defined groups.</div>
+                            <div id="lcg-gidnum-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        </div>
                     </div>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: Details -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Details</div>
                     <div class="form-group">
-                        <label>GID Number</label>
-                        <input id="lcg-gidnum" type="number" placeholder="10001" min="1000">
-                        <div class="form-hint">Numeric POSIX GID. Cluster convention: ≥10000 for user-defined groups.</div>
-                        <div id="lcg-gidnum-err" class="form-hint" style="color:var(--error);display:none;"></div>
+                        <label>Description <span style="font-weight:400;color:var(--text-secondary)">(optional)</span></label>
+                        <input id="lcg-description" type="text" placeholder="e.g. HPC cluster users with GPU access">
+                        <div class="form-hint">Optional description shown in the group listing.</div>
                     </div>
+
                     <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('ldap-create-group-modal').remove()">Cancel</button>
                         <button id="lcg-submit" class="btn btn-primary" onclick="LDAPPages._createGroupSubmit()">Create</button>
@@ -898,6 +918,8 @@ const LDAPPages = {
         if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
 
         try {
+            // description is collected but the backend posixGroup handler does not
+            // yet accept it — omit from the request body for now.
             await API.ldap.createGroup({ cn: cn.trim(), gid_number: gidNum });
             const modal = document.getElementById('ldap-create-group-modal');
             if (modal) modal.remove();
@@ -920,73 +942,153 @@ const LDAPPages = {
         }
     },
 
-    // _groupDetailModal shows group members with add/remove controls.
+    // _groupDetailModal opens the group edit / member management modal.
+    // Fetches users in parallel with rendering so the add-member picker is
+    // populated without a second round-trip after the modal opens.
     async _groupDetailModal(group) {
         const isAdmin = typeof Auth !== 'undefined' && Auth._role === 'admin';
         const existingModal = document.getElementById('ldap-group-detail-modal');
         if (existingModal) existingModal.remove();
 
-        const members = group.member_uids || [];
-
-        // Fetch user list for the UID picker.
-        let allUsers = [];
-        try {
-            const resp = await API.ldap.listUsers();
-            allUsers = (resp && resp.users) ? resp.users.map(u => u.uid) : [];
-        } catch (_) {}
-
-        const nonMembers = allUsers.filter(u => !members.includes(u));
-        const memberRows = members.length === 0
-            ? `<p style="color:var(--text-secondary);font-size:13px;">No members.</p>`
-            : members.map(uid => `
-                <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);">
-                    <span class="text-mono" style="flex:1;font-size:13px;">${escHtml(uid)}</span>
-                    <button class="btn btn-danger btn-sm" onclick="LDAPPages._removeMember('${escHtml(group.cn)}','${escHtml(uid)}')" ${!isAdmin ? 'disabled' : ''}>Remove</button>
-                </div>`).join('');
-
-        const addRow = isAdmin && nonMembers.length > 0 ? `
-            <div style="display:flex;gap:8px;margin-top:12px;">
-                <select id="lgd-adduid" class="form-input" style="flex:1;">
-                    <option value="">Select user…</option>
-                    ${nonMembers.map(u => `<option value="${escHtml(u)}">${escHtml(u)}</option>`).join('')}
-                </select>
-                <button class="btn btn-primary" onclick="LDAPPages._addMember('${escHtml(group.cn)}')">Add</button>
-            </div>` : '';
-
+        // Build the skeleton immediately so there is no perceived delay.
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.id = 'ldap-group-detail-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-height:80vh;display:flex;flex-direction:column;">
+            <div class="modal modal-wide" style="max-height:80vh;display:flex;flex-direction:column;">
                 <div class="modal-header">
                     <span class="modal-title">Group: ${escHtml(group.cn)}</span>
                     <button class="modal-close" onclick="document.getElementById('ldap-group-detail-modal').remove()">×</button>
                 </div>
-                <div class="modal-body" style="overflow-y:auto;">
-                    <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">GID Number: <span class="text-mono">${escHtml(String(group.gid_number || '—'))}</span></p>
-                    <div id="lgd-members">${memberRows}</div>
-                    ${addRow}
+                <div class="modal-body" style="overflow-y:auto;flex:1;">
+
+                    <!-- Section: Properties -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Properties</div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Group Name (CN)</label>
+                            <input type="text" value="${escHtml(group.cn)}" disabled
+                                style="font-family:var(--font-mono);opacity:0.6;">
+                            <div class="form-hint">CN cannot be changed after creation.</div>
+                        </div>
+                        <div class="form-group">
+                            <label>GID Number</label>
+                            <input type="text" value="${escHtml(String(group.gid_number || '—'))}" disabled
+                                style="font-family:var(--font-mono);opacity:0.6;">
+                            <div class="form-hint">Numeric POSIX GID. Read-only after creation.</div>
+                        </div>
+                    </div>
+
+                    <div class="divider"></div>
+
+                    <!-- Section: Members -->
+                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-secondary);margin-bottom:10px;">Members</div>
+                    <div id="lgd-members-wrap">
+                        <div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">Loading members…</div>
+                    </div>
+
+                    <!-- Add member row — populated after user list loads -->
+                    <div id="lgd-add-wrap" style="margin-top:12px;display:none;">
+                        <div style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:6px;">Add member</div>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input id="lgd-adduid" list="lgd-users-datalist" type="text"
+                                placeholder="Type a username…"
+                                style="flex:1;font-family:var(--font-mono);">
+                            <datalist id="lgd-users-datalist"></datalist>
+                            <button class="btn btn-primary" onclick="LDAPPages._addMember('${escHtml(group.cn)}')">Add</button>
+                        </div>
+                        <div id="lgd-add-err" class="form-hint" style="color:var(--error);display:none;margin-top:4px;"></div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" onclick="document.getElementById('ldap-group-detail-modal').remove()">Close</button>
+                    </div>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+
+        // Fetch users and render member list + picker in the background.
+        LDAPPages._lgdRefreshMembers(group.cn, group.member_uids || [], isAdmin);
+    },
+
+    // _lgdRefreshMembers re-fetches group state and re-populates the members
+    // section and add-member picker without closing the modal.
+    async _lgdRefreshMembers(cn, currentMembers, isAdmin) {
+        // Re-fetch the live group state so member list is fresh.
+        let members = currentMembers;
+        try {
+            const resp = await API.ldap.listGroups();
+            const groups = (resp && resp.groups) ? resp.groups : [];
+            const live = groups.find(g => g.cn === cn);
+            if (live) members = live.member_uids || [];
+        } catch (_) {}
+
+        // Fetch all users for the add-member picker.
+        let allUsers = [];
+        try {
+            const resp = await API.ldap.listUsers();
+            allUsers = (resp && resp.users) ? resp.users : [];
+        } catch (_) {}
+
+        // Render the member rows.
+        const membersWrap = document.getElementById('lgd-members-wrap');
+        if (!membersWrap) return; // modal was closed
+
+        if (members.length === 0) {
+            membersWrap.innerHTML = `<p style="color:var(--text-secondary);font-size:13px;margin:0;padding:4px 0;">No members yet. Add the first one below.</p>`;
+        } else {
+            membersWrap.innerHTML = members.map(uid => {
+                const userObj = allUsers.find(u => u.uid === uid);
+                const displayName = userObj && userObj.cn ? `<span style="color:var(--text-secondary);font-size:12px;margin-left:6px;">${escHtml(userObj.cn)}</span>` : '';
+                return `
+                <div class="lgd-member-row" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+                    <span class="text-mono" style="flex:1;font-size:13px;">${escHtml(uid)}${displayName}</span>
+                    ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="LDAPPages._removeMember('${escHtml(cn)}','${escHtml(uid)}')">Remove</button>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        // Populate the add-member picker (only users not already in the group).
+        if (isAdmin) {
+            const addWrap = document.getElementById('lgd-add-wrap');
+            const datalist = document.getElementById('lgd-users-datalist');
+            if (addWrap) addWrap.style.display = '';
+            if (datalist) {
+                const nonMembers = allUsers.filter(u => !members.includes(u.uid));
+                datalist.innerHTML = nonMembers
+                    .map(u => `<option value="${escHtml(u.uid)}">${escHtml(u.uid)}${u.cn ? ' — ' + escHtml(u.cn) : ''}</option>`)
+                    .join('');
+            }
+        }
     },
 
     async _addMember(cn) {
-        const uid = (document.getElementById('lgd-adduid') || {}).value || '';
-        if (!uid) { App.toast('Select a user to add', 'error'); return; }
+        const uidInput = document.getElementById('lgd-adduid');
+        const errEl    = document.getElementById('lgd-add-err');
+        const uid = (uidInput || {}).value || '';
+
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+        if (!uid.trim()) {
+            if (errEl) { errEl.textContent = 'Enter a username to add'; errEl.style.display = ''; }
+            return;
+        }
+
+        // Optimistically disable the button while the request is in flight.
+        // The add button is the btn-primary inside lgd-add-wrap (after the input + datalist).
+        const addWrap = document.getElementById('lgd-add-wrap');
+        const addBtn = addWrap ? addWrap.querySelector('button.btn-primary') : null;
+        if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Adding…'; }
+
         try {
-            await API.ldap.addMember(cn, uid);
-            App.toast('Added ' + uid + ' to ' + cn, 'success');
-            // Refresh the groups page and re-open the modal.
-            const modal = document.getElementById('ldap-group-detail-modal');
-            if (modal) modal.remove();
-            // Re-fetch group and reopen.
-            const resp = await API.ldap.listGroups();
-            const groups = (resp && resp.groups) ? resp.groups : [];
-            const updated = groups.find(g => g.cn === cn);
-            if (updated) LDAPPages._groupDetailModal(updated);
+            await API.ldap.addMember(cn, uid.trim());
+            if (uidInput) uidInput.value = '';
+            if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Add'; }
+            App.toast('Added ' + uid.trim() + ' to ' + cn, 'success');
+            // Refresh member list inline without closing the modal.
+            LDAPPages._lgdRefreshMembers(cn, [], true);
         } catch (err) {
-            App.toast('Add failed: ' + err.message, 'error');
+            if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Add'; }
+            if (errEl) { errEl.textContent = 'Add failed: ' + err.message; errEl.style.display = ''; }
         }
     },
 
@@ -994,12 +1096,8 @@ const LDAPPages = {
         try {
             await API.ldap.removeMember(cn, uid);
             App.toast('Removed ' + uid + ' from ' + cn, 'success');
-            const modal = document.getElementById('ldap-group-detail-modal');
-            if (modal) modal.remove();
-            const resp = await API.ldap.listGroups();
-            const groups = (resp && resp.groups) ? resp.groups : [];
-            const updated = groups.find(g => g.cn === cn);
-            if (updated) LDAPPages._groupDetailModal(updated);
+            // Refresh member list inline without closing the modal.
+            LDAPPages._lgdRefreshMembers(cn, [], true);
         } catch (err) {
             App.toast('Remove failed: ' + err.message, 'error');
         }
