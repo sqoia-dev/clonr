@@ -228,6 +228,10 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		}
 	}
 
+	// Stop any running slapd from a prior attempt so the fresh start picks up new certs.
+	log.Info().Msg("ldap: stopping any prior slapd instance")
+	StopSlapd(ctx)
+
 	// ── Step 1: Generate certificates ────────────────────────────────────────
 	log.Info().Msg("ldap: step 1/6: generating certificates")
 	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "generating certificates")
