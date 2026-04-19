@@ -24,6 +24,7 @@ olcArgsFile: /var/run/slapd/slapd.args
 # No StartTLS, no plain 389 listener.
 olcSecurity: tls=0
 olcLogLevel: stats
+olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
 olcTLSCACertificateFile: {{.CACertPath}}
 olcTLSCertificateFile: {{.ServerCertPath}}
 olcTLSCertificateKeyFile: {{.ServerKeyPath}}
@@ -50,7 +51,6 @@ objectClass: olcDatabaseConfig
 objectClass: olcFrontendConfig
 olcDatabase: {-1}frontend
 olcPasswordHash: {CRYPT}
-olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
 olcAccess: to * by * read
 
 # ── cn=config database (config backend) ───────────────────────────────────────
