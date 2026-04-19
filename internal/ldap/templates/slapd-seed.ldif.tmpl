@@ -23,11 +23,6 @@ olcArgsFile: /var/run/slapd/slapd.args
 # Require TLS for all connections. We bind ldaps:// only (port 636).
 # No StartTLS, no plain 389 listener.
 olcSecurity: tls=0
-# {CRYPT} with glibc $6$ SHA-512-crypt at 100k rounds.
-# Built into stock slapd — no external module required.
-# %.16s tells slapd to take 16 chars from its random salt for slapadd-time hashing.
-olcPasswordHash: {CRYPT}
-olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
 olcLogLevel: stats
 olcTLSCACertificateFile: {{.CACertPath}}
 olcTLSCertificateFile: {{.ServerCertPath}}
@@ -46,10 +41,16 @@ include: file:///etc/openldap/schema/inetorgperson.ldif
 include: file:///etc/openldap/schema/nis.ldif
 
 # ── Frontend database (cn=frontend) ───────────────────────────────────────────
+# olcPasswordHash lives here (slapd 2.6+ deprecated it on the global entry).
+# {CRYPT} with glibc $6$ SHA-512-crypt at 100k rounds.
+# Built into stock slapd — no external module required.
+# %.16s tells slapd to take 16 chars from its random salt for slapadd-time hashing.
 dn: olcDatabase={-1}frontend,cn=config
 objectClass: olcDatabaseConfig
 objectClass: olcFrontendConfig
 olcDatabase: {-1}frontend
+olcPasswordHash: {CRYPT}
+olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
 olcAccess: to * by * read
 
 # ── cn=config database (config backend) ───────────────────────────────────────
@@ -75,9 +76,7 @@ olcDbMaxSize: 1073741824
 # Checkpoint every 512KB written or every 5 minutes
 olcDbCheckpoint: 512 5
 olcLastMod: TRUE
-
 # ── Indices ────────────────────────────────────────────────────────────────────
-dn: olcDatabase={1}mdb,cn=config
 olcDbIndex: uid eq
 olcDbIndex: uidNumber eq
 olcDbIndex: gidNumber eq
@@ -85,7 +84,6 @@ olcDbIndex: memberUid eq
 olcDbIndex: cn eq,sub
 olcDbIndex: entryCSN eq
 olcDbIndex: entryUUID eq
-
 # ── ACLs ──────────────────────────────────────────────────────────────────────
 # Rule order matters: first match wins.
 #
@@ -94,7 +92,6 @@ olcDbIndex: entryUUID eq
 # 2. Service account (node-reader) has read-only access to ou=people and ou=groups.
 # 3. Authenticated users may read their own entry.
 # 4. Anonymous access denied everywhere (we're ldaps:// only, but belt-and-suspenders).
-dn: olcDatabase={1}mdb,cn=config
 olcAccess: to dn.subtree="ou=people,{{.BaseDN}}" attrs=userPassword
   by self write
   by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
