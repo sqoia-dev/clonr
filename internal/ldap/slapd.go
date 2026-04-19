@@ -12,8 +12,10 @@
 // when Enable() is called. Normal operation (health checks, DIT CRUD) does NOT
 // require root — those operations use the LDAP protocol over the network.
 //
-// Polkit rule at deploy/polkit/rules.d/50-clonr-slapd.rules grants the clonr
+// Polkit rule at internal/ldap/assets/50-clonr-slapd.rules grants the clonr
 // user start|stop|restart|reload on clonr-slapd.service only.
+// Both files are embedded into the binary and installed by EnsureSystemdUnit()
+// during Enable().
 
 package ldap
 
@@ -243,6 +245,84 @@ func MaskDistroSlapd(ctx context.Context) error {
 		log.Warn().Err(err).Str("output", string(out)).
 			Msg("ldap slapd: could not mask distro slapd.service (non-fatal — may not be installed)")
 	}
+	return nil
+}
+
+// EnsureSystemdUnit writes the embedded clonr-slapd.service and polkit rule to
+// their system paths, then runs daemon-reload if either file changed.
+//
+// Idempotent: if both files already exist with identical content, no writes
+// occur and daemon-reload is skipped.
+//
+// Must be called AFTER EnsureOpenLDAP (so the ldap user and slapd binary exist)
+// and AFTER MaskDistroSlapd (so the single daemon-reload picks up both our unit
+// and the masked distro unit at once).
+func EnsureSystemdUnit(ctx context.Context) error {
+	const (
+		unitDst   = "/etc/systemd/system/clonr-slapd.service"
+		polkitDst = "/etc/polkit-1/rules.d/50-clonr-slapd.rules"
+	)
+
+	unitSrc, err := assetFS.ReadFile("assets/clonr-slapd.service")
+	if err != nil {
+		return fmt.Errorf("ldap slapd: read embedded clonr-slapd.service: %w", err)
+	}
+
+	polkitSrc, err := assetFS.ReadFile("assets/50-clonr-slapd.rules")
+	if err != nil {
+		return fmt.Errorf("ldap slapd: read embedded 50-clonr-slapd.rules: %w", err)
+	}
+
+	changed := false
+
+	// Write unit file if missing or content differs.
+	unitExisting, readErr := os.ReadFile(unitDst)
+	if readErr != nil || !bytes.Equal(unitExisting, unitSrc) {
+		if err := os.MkdirAll(filepath.Dir(unitDst), 0o755); err != nil {
+			return fmt.Errorf("ldap slapd: mkdir /etc/systemd/system: %w", err)
+		}
+		if err := os.WriteFile(unitDst, unitSrc, 0o644); err != nil {
+			return fmt.Errorf("ldap slapd: write clonr-slapd.service: %w", err)
+		}
+		log.Info().Str("path", unitDst).Msg("ldap slapd: wrote clonr-slapd.service")
+		changed = true
+	} else {
+		log.Info().Str("path", unitDst).Msg("ldap slapd: clonr-slapd.service unchanged, skipping write")
+	}
+
+	// Write polkit rule if missing or content differs.
+	polkitExisting, readErr := os.ReadFile(polkitDst)
+	if readErr != nil || !bytes.Equal(polkitExisting, polkitSrc) {
+		if err := os.MkdirAll(filepath.Dir(polkitDst), 0o755); err != nil {
+			return fmt.Errorf("ldap slapd: mkdir /etc/polkit-1/rules.d: %w", err)
+		}
+		if err := os.WriteFile(polkitDst, polkitSrc, 0o644); err != nil {
+			return fmt.Errorf("ldap slapd: write 50-clonr-slapd.rules: %w", err)
+		}
+		log.Info().Str("path", polkitDst).Msg("ldap slapd: wrote 50-clonr-slapd.rules")
+		changed = true
+	} else {
+		log.Info().Str("path", polkitDst).Msg("ldap slapd: 50-clonr-slapd.rules unchanged, skipping write")
+	}
+
+	// Only daemon-reload if something changed.
+	if changed {
+		out, err := exec.CommandContext(ctx, "systemctl", "daemon-reload").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ldap slapd: systemctl daemon-reload: %w (output: %s)", err, string(out))
+		}
+		log.Info().Msg("ldap slapd: daemon-reload complete")
+	}
+
+	// Verify systemd sees the unit. `systemctl cat` exits non-zero if unknown.
+	if out, err := exec.CommandContext(ctx, "systemctl", "cat", "clonr-slapd.service").CombinedOutput(); err != nil {
+		return fmt.Errorf(
+			"ldap slapd: systemd unit clonr-slapd.service was written but systemd does not see it. "+
+				"Try: systemctl daemon-reload (cat output: %s)",
+			string(out),
+		)
+	}
+
 	return nil
 }
 
