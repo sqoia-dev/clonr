@@ -536,6 +536,48 @@ func (c *ditClient) RemoveGroupMember(groupCN, uid string) error {
 	return nil
 }
 
+// writeServiceAccountPassword issues a single atomic Modify on dn that:
+//   - Replace("userPassword", hashed)
+//   - Delete("pwdReset", [])           — tolerates NoSuchAttribute
+//   - Delete("pwdAccountLockedTime", []) — tolerates NoSuchAttribute
+//   - Delete("pwdFailureTime", [])     — tolerates NoSuchAttribute
+//
+// This guarantees that after any clonr-driven write to a service account's
+// password the entry is in a clean ppolicy state: no must-change wall, no
+// lockout, and no accumulated failure history.
+//
+// Background: ppolicy with pwdMustChange:TRUE auto-sets pwdReset:TRUE on any
+// entry whose userPassword is modified by the rootdn. Correct for human users
+// (force-change-after-admin-reset feature), but catastrophic for cn=node-reader
+// which is a non-interactive service account. Clearing the three attributes in
+// the same Modify ensures the net result is a clean entry.
+//
+// NoSuchAttribute errors from any of the three Delete operations are silently
+// tolerated so the call is idempotent regardless of prior ppolicy state.
+//
+// This function must NOT be used for regular human users — their pwdReset
+// handling is managed by SetPassword() based on the operator's force_change
+// checkbox per spec.
+func writeServiceAccountPassword(conn *goldap.Conn, dn, hashedPasswd string) error {
+	modReq := goldap.NewModifyRequest(dn, nil)
+	modReq.Replace("userPassword", []string{hashedPasswd})
+	modReq.Delete("pwdReset", []string{})
+	modReq.Delete("pwdAccountLockedTime", []string{})
+	modReq.Delete("pwdFailureTime", []string{})
+
+	if err := conn.Modify(modReq); err != nil {
+		// Tolerate NoSuchAttribute: if none of the ppolicy attributes were
+		// present, LDAP returns this code for the first Delete operation that
+		// finds nothing to remove. The userPassword Replace always succeeds
+		// before the Deletes are evaluated, so we can safely ignore this.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // HealthBind attempts an anonymous (unauthenticated) search to verify slapd is
 // reachable. Returns nil on success.
 func (c *ditClient) HealthBind() error {

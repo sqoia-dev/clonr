@@ -526,14 +526,14 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 			if goldap.IsErrorWithCode(err, goldap.LDAPResultEntryAlreadyExists) {
 				if e.credentialed {
 					// Self-heal: the entry exists but its userPassword hash may be from
-					// an earlier Enable() run. Issue a REPLACE to bring the LDAP entry's
-					// hash in line with the current DB password (Part B of Code-49 fix).
-					modReq := goldap.NewModifyRequest(e.dn, nil)
-					modReq.Replace("userPassword", []string{hashedSvcPasswd})
-					if modErr := conn.Modify(modReq); modErr != nil {
+					// an earlier Enable() run. Use writeServiceAccountPassword so that
+					// the single atomic Modify also clears any ppolicy state (pwdReset,
+					// pwdAccountLockedTime, pwdFailureTime) that ppolicy auto-set when
+					// the rootdn last touched this entry's userPassword.
+					if modErr := writeServiceAccountPassword(conn, e.dn, hashedSvcPasswd); modErr != nil {
 						return fmt.Errorf("ldap: seed DIT: self-heal userPassword for %s: %w", e.dn, modErr)
 					}
-					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry exists — userPassword updated to match DB")
+					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry exists — userPassword and ppolicy state updated")
 				} else {
 					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry already exists, skipping")
 				}
@@ -542,6 +542,17 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 			return fmt.Errorf("ldap: seed DIT: add %s: %w", e.dn, err)
 		}
 		log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry created")
+
+		// AddRequest cannot include Delete operations, so ppolicy's auto-set of
+		// pwdReset:TRUE (triggered by the rootdn writing userPassword on Add) must
+		// be cleared in a separate follow-up Modify. This is only needed for
+		// credentialed service account entries.
+		if e.credentialed {
+			if modErr := writeServiceAccountPassword(conn, e.dn, hashedSvcPasswd); modErr != nil {
+				return fmt.Errorf("ldap: seed DIT: post-add ppolicy cleanup for %s: %w", e.dn, modErr)
+			}
+			log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: post-add ppolicy state cleared for service account")
+		}
 	}
 
 	log.Info().Msg("ldap: data DIT seeded (base DN + OUs + node-reader account)")
@@ -1008,12 +1019,13 @@ func (m *Manager) AdminRepair(ctx context.Context, adminPassword string) (AdminR
 		return AdminRepairResult{}, fmt.Errorf("ldap: hash service password for repair: %w", err)
 	}
 
-	modReq := goldap.NewModifyRequest(nodeReaderDN, nil)
-	modReq.Replace("userPassword", []string{hashedSvcPasswd})
-	if err := conn.Modify(modReq); err != nil {
+	// Use writeServiceAccountPassword so the single atomic Modify also clears
+	// any ppolicy state (pwdReset, pwdAccountLockedTime, pwdFailureTime) that
+	// ppolicy auto-set when the rootdn last touched this entry's userPassword.
+	if err := writeServiceAccountPassword(conn, nodeReaderDN, hashedSvcPasswd); err != nil {
 		return AdminRepairResult{}, fmt.Errorf("ldap: Modify REPLACE on node-reader userPassword: %w", err)
 	}
-	log.Info().Str("dn", nodeReaderDN).Msg("ldap: repair: node-reader userPassword updated")
+	log.Info().Str("dn", nodeReaderDN).Msg("ldap: repair: node-reader userPassword and ppolicy state updated")
 
 	// Step 4: Verify repair by re-binding as the service account.
 	// Use a fresh connect() rather than HealthBind() so we actually test
