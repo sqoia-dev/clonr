@@ -789,8 +789,12 @@ const LDAPPages = {
             ? `<tr><td colspan="4" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP groups. Create the first one.</td></tr>`
             : groups.map(g => {
                 const members = (g.member_uids || []).length;
+                const desc = g.description || '';
+                const descPreview = desc
+                    ? `<div style="color:var(--text-secondary);font-size:12px;margin-top:2px;">${escHtml(desc.length > 60 ? desc.slice(0, 60) + '…' : desc)}</div>`
+                    : '';
                 return `<tr style="cursor:pointer;" onclick="LDAPPages._groupDetailModal(${JSON.stringify(g).replace(/"/g, '&quot;')})">
-                    <td class="text-mono text-sm">${escHtml(g.cn)}</td>
+                    <td class="text-mono text-sm"><div>${escHtml(g.cn)}</div>${descPreview}</td>
                     <td class="text-mono text-sm">${escHtml(String(g.gid_number || '—'))}</td>
                     <td>${members} member${members === 1 ? '' : 's'}</td>
                     <td>
@@ -917,10 +921,12 @@ const LDAPPages = {
         const submitBtn = document.getElementById('lcg-submit');
         if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
 
+        const description = ((document.getElementById('lcg-description') || {}).value || '').trim();
+
         try {
-            // description is collected but the backend posixGroup handler does not
-            // yet accept it — omit from the request body for now.
-            await API.ldap.createGroup({ cn: cn.trim(), gid_number: gidNum });
+            const body = { cn: cn.trim(), gid_number: gidNum };
+            if (description) body.description = description;
+            await API.ldap.createGroup(body);
             const modal = document.getElementById('ldap-create-group-modal');
             if (modal) modal.remove();
             App.toast('Group created: ' + cn.trim(), 'success');
@@ -978,6 +984,23 @@ const LDAPPages = {
                             <div class="form-hint">Numeric POSIX GID. Read-only after creation.</div>
                         </div>
                     </div>
+                    ${isAdmin ? `
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>Description <span style="font-weight:400;color:var(--text-secondary)">(optional)</span></label>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input id="lgd-description" type="text" maxlength="256"
+                                value="${escHtml(group.description || '')}"
+                                placeholder="e.g. HPC cluster users with GPU access"
+                                style="flex:1;">
+                            <button class="btn btn-secondary" onclick="LDAPPages._saveGroupDescription('${escHtml(group.cn)}')">Save</button>
+                        </div>
+                        <div class="form-hint">Shown as a preview in the group list. Clear and save to remove.</div>
+                        <div id="lgd-desc-err" class="form-hint" style="color:var(--error);display:none;margin-top:4px;"></div>
+                    </div>` : (group.description ? `
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>Description</label>
+                        <div style="font-size:13px;color:var(--text-secondary);padding:6px 0;">${escHtml(group.description)}</div>
+                    </div>` : '')}
 
                     <div class="divider"></div>
 
@@ -1100,6 +1123,25 @@ const LDAPPages = {
             LDAPPages._lgdRefreshMembers(cn, [], true);
         } catch (err) {
             App.toast('Remove failed: ' + err.message, 'error');
+        }
+    },
+
+    async _saveGroupDescription(cn) {
+        const errEl = document.getElementById('lgd-desc-err');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+
+        const description = ((document.getElementById('lgd-description') || {}).value || '').trim();
+        if (description.length > 256) {
+            if (errEl) { errEl.textContent = 'Description must be 256 characters or fewer'; errEl.style.display = ''; }
+            return;
+        }
+
+        try {
+            await API.ldap.updateGroup(cn, { description });
+            App.toast('Description updated', 'success');
+        } catch (err) {
+            if (errEl) { errEl.textContent = 'Save failed: ' + err.message; errEl.style.display = ''; }
+            App.toast('Save failed: ' + err.message, 'error');
         }
     },
 

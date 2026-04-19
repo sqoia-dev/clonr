@@ -290,6 +290,7 @@ const API = {
         // Groups
         listGroups()                    { return API.get('/ldap/groups'); },
         createGroup(body)               { return API.post('/ldap/groups', body); },
+        updateGroup(cn, body)           { return API.put(`/ldap/groups/${encodeURIComponent(cn)}`, body); },
         deleteGroup(cn)                 { return API.del(`/ldap/groups/${encodeURIComponent(cn)}`); },
         addMember(cn, uid)              { return API.post(`/ldap/groups/${encodeURIComponent(cn)}/members`, { uid }); },
         removeMember(cn, uid)           { return API.del(`/ldap/groups/${encodeURIComponent(cn)}/members/${encodeURIComponent(uid)}`); },

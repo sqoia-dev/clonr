@@ -36,6 +36,7 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	// Groups
 	r.Get("/ldap/groups", mgr.handleListGroups)
 	r.Post("/ldap/groups", mgr.handleCreateGroup)
+	r.Put("/ldap/groups/{cn}", mgr.handleUpdateGroup)
 	r.Delete("/ldap/groups/{cn}", mgr.handleDeleteGroup)
 	r.Post("/ldap/groups/{cn}/members", mgr.handleAddGroupMember)
 	r.Delete("/ldap/groups/{cn}/members/{uid}", mgr.handleRemoveGroupMember)
@@ -266,8 +267,9 @@ func (m *Manager) handleListGroups(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		CN        string `json:"cn"`
-		GIDNumber int    `json:"gid_number"`
+		CN          string `json:"cn"`
+		GIDNumber   int    `json:"gid_number"`
+		Description string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -277,17 +279,47 @@ func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "cn is required", http.StatusBadRequest)
 		return
 	}
+	if len(body.Description) > 256 {
+		jsonError(w, "description must be 256 characters or fewer", http.StatusBadRequest)
+		return
+	}
 
 	dit, err := m.DIT(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if err := dit.CreateGroup(body.CN, body.GIDNumber); err != nil {
+	if err := dit.CreateGroup(body.CN, body.GIDNumber, body.Description); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, LDAPGroup{CN: body.CN, GIDNumber: body.GIDNumber, MemberUIDs: []string{}}, http.StatusCreated)
+	jsonResponse(w, LDAPGroup{CN: body.CN, GIDNumber: body.GIDNumber, MemberUIDs: []string{}, Description: body.Description}, http.StatusCreated)
+}
+
+func (m *Manager) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
+	cn := chi.URLParam(r, "cn")
+	var body struct {
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Description) > 256 {
+		jsonError(w, "description must be 256 characters or fewer", http.StatusBadRequest)
+		return
+	}
+
+	dit, err := m.DIT(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err := dit.UpdateGroup(cn, body.Description); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
 func (m *Manager) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {

@@ -34,9 +34,10 @@ type LDAPUser struct {
 
 // LDAPGroup is the wire type for a POSIX group in the DIT.
 type LDAPGroup struct {
-	CN         string   `json:"cn"`
-	GIDNumber  int      `json:"gid_number"`
-	MemberUIDs []string `json:"member_uids"`
+	CN          string   `json:"cn"`
+	GIDNumber   int      `json:"gid_number"`
+	MemberUIDs  []string `json:"member_uids"`
+	Description string   `json:"description,omitempty"`
 }
 
 // CreateUserRequest holds the fields for creating a new POSIX user.
@@ -378,7 +379,7 @@ func (c *ditClient) ListGroups() ([]LDAPGroup, error) {
 		goldap.NeverDerefAliases,
 		0, 0, false,
 		"(objectClass=posixGroup)",
-		[]string{"cn", "gidNumber", "memberUid"},
+		[]string{"cn", "gidNumber", "memberUid", "description"},
 		nil,
 	)
 
@@ -390,8 +391,9 @@ func (c *ditClient) ListGroups() ([]LDAPGroup, error) {
 	groups := make([]LDAPGroup, 0, len(result.Entries))
 	for _, entry := range result.Entries {
 		g := LDAPGroup{
-			CN:         entry.GetAttributeValue("cn"),
-			MemberUIDs: entry.GetAttributeValues("memberUid"),
+			CN:          entry.GetAttributeValue("cn"),
+			MemberUIDs:  entry.GetAttributeValues("memberUid"),
+			Description: entry.GetAttributeValue("description"),
 		}
 		if n, err := strconv.Atoi(entry.GetAttributeValue("gidNumber")); err == nil {
 			g.GIDNumber = n
@@ -404,8 +406,9 @@ func (c *ditClient) ListGroups() ([]LDAPGroup, error) {
 	return groups, nil
 }
 
-// CreateGroup adds a new posixGroup entry.
-func (c *ditClient) CreateGroup(cn string, gidNumber int) error {
+// CreateGroup adds a new posixGroup entry. If description is non-empty it is
+// set as the description attribute on the entry.
+func (c *ditClient) CreateGroup(cn string, gidNumber int, description string) error {
 	conn, err := c.connect()
 	if err != nil {
 		return err
@@ -417,9 +420,43 @@ func (c *ditClient) CreateGroup(cn string, gidNumber int) error {
 	addReq.Attribute("objectClass", []string{"top", "posixGroup"})
 	addReq.Attribute("cn", []string{cn})
 	addReq.Attribute("gidNumber", []string{strconv.Itoa(gidNumber)})
+	if description != "" {
+		addReq.Attribute("description", []string{description})
+	}
 
 	if err := conn.Add(addReq); err != nil {
 		return fmt.Errorf("ldap dit: create group %s: %w", cn, err)
+	}
+	return nil
+}
+
+// UpdateGroup modifies an existing group entry. Currently only description is
+// mutable (CN and gidNumber are locked after creation per the schema policy).
+// Passing an empty description replaces the attribute with an empty value list,
+// which removes it from the entry — same pattern as UnlockUser on shadowExpire.
+func (c *ditClient) UpdateGroup(cn, description string) error {
+	conn, err := c.connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	dn := c.groupDN(cn)
+	modReq := goldap.NewModifyRequest(dn, nil)
+
+	if description != "" {
+		modReq.Replace("description", []string{description})
+	} else {
+		// DELETE with an empty value list removes the attribute entirely.
+		modReq.Delete("description", []string{})
+	}
+
+	if err := conn.Modify(modReq); err != nil {
+		// If the attribute didn't exist and we're trying to delete it, that's fine.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+			return nil
+		}
+		return fmt.Errorf("ldap dit: update group %s: %w", cn, err)
 	}
 	return nil
 }
