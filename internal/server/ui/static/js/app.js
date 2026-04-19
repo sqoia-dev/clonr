@@ -2739,15 +2739,35 @@ const Pages = {
     },
 
     // _togglePowerDropdown opens/closes the per-row power dropdown on the nodes list.
-    // Closes all other open power dropdowns first so only one is open at a time.
+    // Uses position:fixed to escape overflow:hidden/auto ancestors (card, table-wrap).
     _togglePowerDropdown(nodeId, event) {
         if (event) event.stopPropagation();
         // Close every other open power menu.
         document.querySelectorAll('.actions-dropdown-menu[id^="pwr-menu-"]').forEach(m => {
-            if (m.id !== `pwr-menu-${nodeId}`) m.classList.remove('open');
+            if (m.id !== `pwr-menu-${nodeId}`) {
+                m.classList.remove('open');
+                m.style.cssText = '';
+            }
         });
         const menu = document.getElementById(`pwr-menu-${nodeId}`);
-        if (menu) menu.classList.toggle('open');
+        if (!menu) return;
+        const isOpen = menu.classList.contains('open');
+        if (isOpen) {
+            menu.classList.remove('open');
+            menu.style.cssText = '';
+            return;
+        }
+        // Position the menu using fixed coords so it escapes any overflow container.
+        const btn = document.getElementById(`pwr-dd-${nodeId}`);
+        if (btn) {
+            const rect = btn.getBoundingClientRect();
+            menu.style.position = 'fixed';
+            menu.style.top = (rect.bottom + 4) + 'px';
+            menu.style.right = (window.innerWidth - rect.right) + 'px';
+            menu.style.left = 'auto';
+            menu.style.zIndex = '1000';
+        }
+        menu.classList.add('open');
     },
 
     // _closePowerDropdownsOnOutsideClick is bound as a document listener on the nodes
@@ -2756,7 +2776,7 @@ const Pages = {
     _closePowerDropdownsOnOutsideClick(e) {
         if (!e.target.closest('[id^="pwr-dd-"]')) {
             document.querySelectorAll('.actions-dropdown-menu[id^="pwr-menu-"]')
-                .forEach(m => m.classList.remove('open'));
+                .forEach(m => { m.classList.remove('open'); m.style.cssText = ''; });
         }
     },
 

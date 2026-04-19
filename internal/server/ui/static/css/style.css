@@ -259,7 +259,6 @@ a:hover {
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
     margin-bottom: 20px;
-    overflow: hidden;
 }
 
 .card-header {
