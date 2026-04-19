@@ -199,6 +199,24 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		return
 	}
 
+	// ── Step 0c: Ensure clonr parent dirs are world-traversable ──────────────
+	// /etc/clonr and /var/lib/clonr must be 0755 root:root so unprivileged
+	// daemons (slapd as uid ldap) can traverse into their subdirectories.
+	// A partial prior install may have left /etc/clonr at 0700 if MkdirAll
+	// inherited a tight umask; repair that every run before touching anything
+	// inside these trees.
+	log.Info().Msg("ldap: step 0c/6: ensuring parent dir permissions")
+	for _, d := range []string{"/etc/clonr", "/etc/clonr/ldap", "/var/lib/clonr"} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			setError(fmt.Sprintf("mkdir %s failed: %v", d, err))
+			return
+		}
+		if err := os.Chmod(d, 0o755); err != nil {
+			setError(fmt.Sprintf("chmod %s failed: %v", d, err))
+			return
+		}
+	}
+
 	// ── Step 1: Generate certificates ────────────────────────────────────────
 	log.Info().Msg("ldap: step 1/6: generating certificates")
 	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "generating certificates")
