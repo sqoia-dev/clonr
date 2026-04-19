@@ -37,11 +37,9 @@ import (
 // slapdSeedTemplate is the template for the cn=config seed LDIF.
 // Embedded at compile time from the templates directory.
 var slapdSeedTemplate *template.Template
-var ouSeedTemplate *template.Template
 
 func init() {
 	slapdSeedTemplate = template.Must(template.ParseFS(templateFS, "templates/slapd-seed.ldif.tmpl"))
-	ouSeedTemplate = template.Must(template.ParseFS(templateFS, "templates/ou-seed.ldif.tmpl"))
 }
 
 // slapdSeedData holds the values templated into the cn=config seed LDIF.
@@ -57,14 +55,6 @@ type slapdSeedData struct {
 	AdminPassword   string // plaintext; slapd hashes via olcPasswordHash: {CRYPT}
 	ServicePassword string // plaintext; slapd hashes via olcPasswordHash: {CRYPT}
 	SlapdUser       string // OS user that slapd runs as: "ldap" (EL) or "openldap" (Debian)
-}
-
-// ouSeedData holds values templated into the data DIT seed LDIF.
-type ouSeedData struct {
-	BaseDN          string
-	DC1             string
-	DC2             string
-	ServicePassword string // plaintext; slapd hashes on write
 }
 
 // parseDCComponents splits a baseDN like "dc=cluster,dc=local" into ["cluster", "local"].
@@ -89,15 +79,6 @@ func renderSlapdSeedLDIF(data slapdSeedData) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := slapdSeedTemplate.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("ldap slapd: render seed LDIF: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-// renderOUSeedLDIF renders the data DIT OU seed LDIF template.
-func renderOUSeedLDIF(data ouSeedData) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := ouSeedTemplate.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("ldap slapd: render OU seed LDIF: %w", err)
 	}
 	return buf.Bytes(), nil
 }

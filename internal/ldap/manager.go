@@ -13,12 +13,12 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 
+	goldap "github.com/go-ldap/ldap/v3"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
@@ -343,13 +343,7 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	log.Info().Msg("ldap: step 5/6: seeding DIT")
 	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "seeding DIT")
 
-	ouData := ouSeedData{
-		BaseDN:          req.BaseDN,
-		DC1:             dc1,
-		DC2:             dc2,
-		ServicePassword: svcPasswd,
-	}
-	if err := m.seedDIT(ctx, dit, ouData); err != nil {
+	if err := m.seedDIT(ctx, dit, req.BaseDN, svcPasswd); err != nil {
 		setError(fmt.Sprintf("DIT seed failed: %v", err))
 		return
 	}
@@ -389,59 +383,93 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	log.Info().Str("base_dn", req.BaseDN).Msg("ldap: module enabled and ready")
 }
 
-// seedDIT loads the OU seed LDIF into the running slapd via ldapadd.
-func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, data ouSeedData) error {
-	ldif, err := renderOUSeedLDIF(data)
+// seedDIT creates the base DN entry, standard OUs, and the node-reader service
+// account directly via go-ldap AddRequest calls. It is idempotent: entries that
+// already exist (ldap.ResultEntryAlreadyExists) are silently skipped, so
+// re-running Enable() does not fail.
+func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePassword string) error {
+	conn, err := dit.connect()
 	if err != nil {
-		return err
+		return fmt.Errorf("ldap: seed DIT: connect as admin: %w", err)
+	}
+	defer conn.Close()
+
+	// Parse DC components for the base DN entry.
+	dc1, _, err := parseDCComponents(baseDN)
+	if err != nil {
+		return fmt.Errorf("ldap: seed DIT: %w", err)
 	}
 
-	tmpLDIF, err := os.CreateTemp("", "clonr-ou-seed-*.ldif")
+	// Hash the service account password using the same {CRYPT} $6$ helper used
+	// for all other userPassword attributes in this package.
+	hashedSvcPasswd, err := HashPasswordCrypt(servicePassword)
 	if err != nil {
-		return fmt.Errorf("ldap: create temp OU LDIF: %w", err)
+		return fmt.Errorf("ldap: seed DIT: hash service password: %w", err)
 	}
-	defer os.Remove(tmpLDIF.Name())
 
-	if _, err := tmpLDIF.Write(ldif); err != nil {
-		tmpLDIF.Close()
-		return fmt.Errorf("ldap: write temp OU LDIF: %w", err)
+	type seedEntry struct {
+		dn    string
+		attrs map[string][]string
 	}
-	tmpLDIF.Close()
 
-	out, err := runLDAPAdd(ctx, dit.serverURI, dit.bindDN, dit.bindPasswd, dit.caCertPEM, tmpLDIF.Name())
-	if err != nil {
-		return fmt.Errorf("ldap: ldapadd OU seed: %w (output: %s)", err, string(out))
+	entries := []seedEntry{
+		{
+			dn: baseDN,
+			attrs: map[string][]string{
+				"objectClass": {"top", "dcObject", "organization"},
+				"dc":          {dc1},
+				"o":           {dc1},
+			},
+		},
+		{
+			dn: fmt.Sprintf("ou=people,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass": {"top", "organizationalUnit"},
+				"ou":          {"people"},
+			},
+		},
+		{
+			dn: fmt.Sprintf("ou=groups,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass": {"top", "organizationalUnit"},
+				"ou":          {"groups"},
+			},
+		},
+		{
+			dn: fmt.Sprintf("ou=services,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass": {"top", "organizationalUnit"},
+				"ou":          {"services"},
+			},
+		},
+		{
+			dn: fmt.Sprintf("cn=node-reader,ou=services,%s", baseDN),
+			attrs: map[string][]string{
+				"objectClass":  {"top", "simpleSecurityObject", "organizationalRole"},
+				"cn":           {"node-reader"},
+				"description":  {"clonr node read-only service account (managed by clonr-serverd)"},
+				"userPassword": {hashedSvcPasswd},
+			},
+		},
+	}
+
+	for _, e := range entries {
+		req := goldap.NewAddRequest(e.dn, nil)
+		for attr, vals := range e.attrs {
+			req.Attribute(attr, vals)
+		}
+		if err := conn.Add(req); err != nil {
+			if goldap.IsErrorWithCode(err, goldap.LDAPResultEntryAlreadyExists) {
+				log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry already exists, skipping")
+				continue
+			}
+			return fmt.Errorf("ldap: seed DIT: add %s: %w", e.dn, err)
+		}
+		log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry created")
 	}
 
 	log.Info().Msg("ldap: data DIT seeded (base DN + OUs + node-reader account)")
 	return nil
-}
-
-// runLDAPAdd runs ldapadd with the given credentials and LDIF file.
-// Writes the CA cert to a temp file for TLS verification.
-func runLDAPAdd(ctx context.Context, uri, bindDN, passwd string, caCertPEM []byte, ldifPath string) ([]byte, error) {
-	tmpCA, err := os.CreateTemp("", "clonr-ca-*.crt")
-	if err != nil {
-		return nil, fmt.Errorf("ldap: create temp CA cert for ldapadd: %w", err)
-	}
-	defer os.Remove(tmpCA.Name())
-
-	if _, err := tmpCA.Write(caCertPEM); err != nil {
-		tmpCA.Close()
-		return nil, err
-	}
-	tmpCA.Close()
-
-	cmd := exec.CommandContext(ctx,
-		"ldapadd",
-		"-x",
-		"-H", uri,
-		"-D", bindDN,
-		"-w", passwd,
-		"-f", ldifPath,
-	)
-	cmd.Env = append(os.Environ(), "LDAPTLS_CACERT="+tmpCA.Name())
-	return cmd.CombinedOutput()
 }
 
 // ─── Disable ──────────────────────────────────────────────────────────────────
