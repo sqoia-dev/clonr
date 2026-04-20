@@ -274,6 +274,18 @@ const API = {
         rebuildInitramfs()        { return API.post('/system/initramfs/rebuild', {}); },
         deleteInitramfsHistory(id){ return API.del(`/system/initramfs/history/${encodeURIComponent(id)}`); },
     },
+    sysaccounts: {
+        // Groups
+        listGroups()            { return API.get('/system/groups'); },
+        createGroup(body)       { return API.post('/system/groups', body); },
+        updateGroup(id, body)   { return API.put(`/system/groups/${encodeURIComponent(id)}`, body); },
+        deleteGroup(id)         { return API.del(`/system/groups/${encodeURIComponent(id)}`); },
+        // Accounts
+        listAccounts()          { return API.get('/system/accounts'); },
+        createAccount(body)     { return API.post('/system/accounts', body); },
+        updateAccount(id, body) { return API.put(`/system/accounts/${encodeURIComponent(id)}`, body); },
+        deleteAccount(id)       { return API.del(`/system/accounts/${encodeURIComponent(id)}`); },
+    },
     ldap: {
         status()                        { return API.get('/ldap/status'); },
         enable(body)                    { return API.post('/ldap/enable', body); },

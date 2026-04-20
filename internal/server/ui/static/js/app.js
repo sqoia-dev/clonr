@@ -153,6 +153,12 @@ const App = {
             else if (parts[2] === 'groups') LDAPPages.groups();
             else LDAPPages.settings();
         });
+        Router.register('/system/accounts', () => {
+            if (typeof SysAccountsPages !== 'undefined') SysAccountsPages.accounts();
+        });
+        Router.register('/system/groups',   () => {
+            if (typeof SysAccountsPages !== 'undefined') SysAccountsPages.groups();
+        });
     },
 
     render(html) {
@@ -7188,6 +7194,10 @@ const Auth = {
         // Bootstrap LDAP nav visibility. Non-fatal — missing nav section is safe.
         if (typeof LDAPPages !== 'undefined') {
             LDAPPages.bootstrapNav().catch(() => {});
+        }
+        // Bootstrap System Accounts nav visibility.
+        if (typeof SysAccountsPages !== 'undefined') {
+            SysAccountsPages.bootstrapNav().catch(() => {});
         }
         App.init();
     },
