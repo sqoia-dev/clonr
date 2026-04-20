@@ -61,17 +61,10 @@
                 <span>Logs</span>
             </a>
 
-            <!-- LDAP module nav — Settings always visible (admin role gate only); Users+Groups gated on enabled -->
+            <!-- LDAP module nav — Users+Groups gated on enabled; Settings always visible -->
             <div id="nav-ldap-section">
                 <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
                 <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-sidebar);opacity:0.5;padding:4px 12px 2px;">LDAP</div>
-                <a href="#/ldap" class="nav-item" id="nav-ldap">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                        <circle cx="12" cy="8" r="4"/><path d="M2 20c0-4 4-7 10-7s10 3 10 7"/>
-                    </svg>
-                    <span>Settings</span>
-                    <span id="nav-ldap-status-badge" class="badge badge-neutral badge-sm" style="display:none;margin-left:6px;">Disabled</span>
-                </a>
                 <div id="nav-ldap-managed" style="display:none;">
                     <a href="#/ldap/users" class="nav-item" id="nav-ldap-users">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -86,15 +79,14 @@
                         </svg>
                         <span>Groups</span>
                     </a>
-                    <a href="#/ldap/logs" class="nav-item" id="nav-ldap-logs">
-                        <!-- terminal icon (matches main Logs nav item) -->
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                            <polyline points="4 17 10 11 4 5"/>
-                            <line x1="12" y1="19" x2="20" y2="19"/>
-                        </svg>
-                        <span>Logs</span>
-                    </a>
                 </div>
+                <a href="#/ldap" class="nav-item" id="nav-ldap">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <circle cx="12" cy="8" r="4"/><path d="M2 20c0-4 4-7 10-7s10 3 10 7"/>
+                    </svg>
+                    <span>Settings</span>
+                    <span id="nav-ldap-status-badge" class="badge badge-neutral badge-sm" style="display:none;margin-left:6px;">Disabled</span>
+                </a>
             </div>
         </nav>
 

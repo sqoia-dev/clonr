@@ -45,6 +45,8 @@ const LDAPPages = {
         try {
             const st = await API.ldap.status();
             App.render(LDAPPages._settingsHtml(st));
+            // Load the service logs section embedded at the bottom of this page.
+            await LDAPPages._loadLogs();
         } catch (err) {
             App.render(alertBox('Failed to load LDAP status: ' + err.message));
         }
@@ -201,6 +203,22 @@ const LDAPPages = {
             </div>
             ${enableForm}
             ${repairForm}
+            <div class="card" style="margin-top:20px;" id="ldap-logs-card">
+                <div class="card-header" style="justify-content:space-between;">
+                    <span class="card-title">Service Logs</span>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <span class="follow-indicator" id="ldap-follow-ind"><span class="follow-dot"></span>static</span>
+                        <label class="toggle" style="margin:0;">
+                            <input type="checkbox" id="ldap-follow-toggle" onchange="LDAPPages.toggleFollow(this.checked)">
+                            Live
+                        </label>
+                        <button class="btn btn-secondary btn-sm" onclick="LDAPPages.clearLogs()">Clear</button>
+                    </div>
+                </div>
+                <div style="padding:0 0 4px;">
+                    <div id="ldap-log-viewer" class="log-viewer" style="height:360px;border-radius:0 0 var(--radius) var(--radius);"></div>
+                </div>
+            </div>
         `;
     },
 
@@ -1291,40 +1309,10 @@ const LDAPPages = {
         }
     },
 
-    // ── Logs page ─────────────────────────────────────────────────────────────
+    // ── Logs (embedded in Settings) ───────────────────────────────────────────
 
-    // _ldapLogStream holds the active EventSource for the LDAP log follow mode.
-    // Disconnected on page navigation via the Router teardown (App._logStream).
-    // We reuse App._logStream so the Router's existing disconnect-on-navigate
-    // hook cleans it up automatically without any extra wiring.
-
-    async logs() {
-        App.render(`
-            <div class="page-header">
-                <div>
-                    <div class="page-title">LDAP Logs</div>
-                    <div class="page-subtitle">Journal of clonr-slapd.service</div>
-                </div>
-            </div>
-
-            <div class="log-filter-bar">
-                <div class="follow-toggle-wrap">
-                    <label class="toggle">
-                        <input type="checkbox" id="ldap-follow-toggle" onchange="LDAPPages.toggleFollow(this.checked)">
-                        Live
-                    </label>
-                    <span class="follow-indicator" id="ldap-follow-ind">
-                        <span class="follow-dot"></span>static
-                    </span>
-                </div>
-                <button class="btn btn-secondary btn-sm" onclick="LDAPPages.clearLogs()">Clear</button>
-            </div>
-
-            <div id="ldap-log-viewer" class="log-viewer tall"></div>
-        `);
-
-        await LDAPPages._loadLogs();
-    },
+    // Logs are rendered as a section at the bottom of the Settings page.
+    // The standalone /ldap/logs route redirects to settings() for backward compat.
 
     async _loadLogs() {
         const viewer = document.getElementById('ldap-log-viewer');
