@@ -5329,6 +5329,17 @@ const Pages = {
                             <input type="text" id="ng-description" value="${escHtml(group ? (group.description || '') : '')}"
                                 placeholder="Standard CPU compute nodes">
                         </div>
+                        <div class="form-group">
+                            <label>Role</label>
+                            <select id="ng-role">
+                                <option value="" ${!(group && group.role) ? 'selected' : ''}>— None —</option>
+                                <option value="compute" ${(group && group.role === 'compute') ? 'selected' : ''}>compute</option>
+                                <option value="login" ${(group && group.role === 'login') ? 'selected' : ''}>login</option>
+                                <option value="storage" ${(group && group.role === 'storage') ? 'selected' : ''}>storage</option>
+                                <option value="gpu" ${(group && group.role === 'gpu') ? 'selected' : ''}>gpu</option>
+                                <option value="admin" ${(group && group.role === 'admin') ? 'selected' : ''}>admin</option>
+                            </select>
+                        </div>
                     </div>
 
                     <!-- Disk Layout Override -->
@@ -5677,6 +5688,7 @@ const Pages = {
 
         const name = (nameEl.value || '').trim();
         const desc = (descEl ? descEl.value : '').trim();
+        const role = (document.getElementById('ng-role')?.value || '').trim();
 
         if (!name) {
             if (resultEl) resultEl.innerHTML = `<div class="alert alert-error">Name is required</div>`;
@@ -5709,6 +5721,7 @@ const Pages = {
         const body = {
             name,
             description: desc,
+            role,
             disk_layout_override: diskLayoutOverride,
             extra_mounts: extraMounts,
         };
