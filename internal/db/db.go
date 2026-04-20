@@ -589,6 +589,21 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
 	       deploy_verify_timeout_at, last_seen_at, detected_firmware`
 
+// nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
+// the "nc" table alias and replaces group_id with a COALESCE that prefers the
+// authoritative node_group_memberships row (alias "m") over the denormalised
+// fast-path column on node_configs. Use this constant in any query that LEFT
+// JOINs node_group_memberships m ON m.node_id = nc.id.
+const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
+	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
+	       nc.groups, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
+	       nc.power_provider, nc.reimage_pending, nc.last_deploy_succeeded_at, nc.last_deploy_failed_at,
+	       nc.created_at, nc.updated_at,
+	       COALESCE(m.group_id, nc.group_id) AS group_id,
+	       nc.disk_layout_override, nc.extra_mounts,
+	       nc.deploy_completed_preboot_at, nc.deploy_verified_booted_at,
+	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware`
+
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
 	row := db.sql.QueryRowContext(ctx,
@@ -615,17 +630,27 @@ func (db *DB) HostnameExists(ctx context.Context, hostname string) (bool, error)
 }
 
 // ListNodeConfigs returns all NodeConfigs. If baseImageID is non-empty, filters by it.
+// group_id is resolved from node_group_memberships (the authoritative source) so that
+// the node list page shows the correct group even when the denormalised fast-path
+// column on node_configs is stale or NULL.
 func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error) {
 	var rows *sql.Rows
 	var err error
 
 	if baseImageID != "" {
 		rows, err = db.sql.QueryContext(ctx,
-			`SELECT `+nodeConfigCols+` FROM node_configs WHERE base_image_id = ? ORDER BY hostname ASC`,
+			`SELECT `+nodeConfigColsJoined+`
+			 FROM node_configs nc
+			 LEFT JOIN node_group_memberships m ON m.node_id = nc.id
+			 WHERE nc.base_image_id = ?
+			 ORDER BY nc.hostname ASC`,
 			baseImageID)
 	} else {
 		rows, err = db.sql.QueryContext(ctx,
-			`SELECT `+nodeConfigCols+` FROM node_configs ORDER BY hostname ASC`)
+			`SELECT `+nodeConfigColsJoined+`
+			 FROM node_configs nc
+			 LEFT JOIN node_group_memberships m ON m.node_id = nc.id
+			 ORDER BY nc.hostname ASC`)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("db: list node configs: %w", err)
