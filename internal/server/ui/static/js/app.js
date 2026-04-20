@@ -140,7 +140,6 @@ const App = {
             else if (parts[2] === 'groups') Pages.nodeGroups();
             else Pages.nodeDetail(parts[2]);
         });
-        Router.register('/logs',    ()    => Pages.logs());
         Router.register('/settings', ()   => Pages.settings());
         Router.register('/ldap',     (h)  => {
             const parts = h.split('/');
@@ -6524,129 +6523,6 @@ const Pages = {
         }
     },
 
-    // ── Logs ───────────────────────────────────────────────────────────────
-
-    async logs() {
-        App.render(`
-            <div class="page-header">
-                <div>
-                    <div class="page-title">Logs</div>
-                    <div class="page-subtitle">Server-wide log stream with filters</div>
-                </div>
-            </div>
-
-            <div class="log-filter-bar">
-                <input id="lf-mac"       type="text"   placeholder="MAC address"   style="width:155px">
-                <input id="lf-hostname"  type="text"   placeholder="Hostname"      style="width:130px">
-                <select id="lf-level" style="width:130px">
-                    <option value="">All levels</option>
-                    <option value="debug">debug</option>
-                    <option value="info">info</option>
-                    <option value="warn">warn</option>
-                    <option value="error">error</option>
-                </select>
-                <select id="lf-component" style="width:145px">
-                    <option value="">All components</option>
-                    <option value="hardware">hardware</option>
-                    <option value="deploy">deploy</option>
-                    <option value="chroot">chroot</option>
-                    <option value="ipmi">ipmi</option>
-                    <option value="efiboot">efiboot</option>
-                    <option value="network">network</option>
-                    <option value="rsync">rsync</option>
-                    <option value="raid">raid</option>
-                </select>
-                <input id="lf-since" type="datetime-local" title="Since (local time)" style="width:185px">
-                <button class="btn btn-secondary btn-sm" onclick="Pages.loadLogs()">Query</button>
-                <button class="btn btn-secondary btn-sm" onclick="Pages.clearLogs()">Clear</button>
-                <div class="follow-toggle-wrap">
-                    <label class="toggle">
-                        <input type="checkbox" id="follow-toggle" onchange="Pages.toggleFollow(this.checked)">
-                        Live
-                    </label>
-                    <span class="follow-indicator" id="follow-ind">
-                        <span class="follow-dot"></span>static
-                    </span>
-                </div>
-            </div>
-
-            <div id="log-viewer" class="log-viewer tall"></div>
-        `);
-
-        await Pages.loadLogs();
-    },
-
-    _logFilters() {
-        const mac       = (document.getElementById('lf-mac')       || {}).value || '';
-        const hostname  = (document.getElementById('lf-hostname')  || {}).value || '';
-        const level     = (document.getElementById('lf-level')     || {}).value || '';
-        const component = (document.getElementById('lf-component') || {}).value || '';
-        const sinceEl   = document.getElementById('lf-since');
-        let since = '';
-        if (sinceEl && sinceEl.value) {
-            since = new Date(sinceEl.value).toISOString();
-        }
-        return { mac, hostname, level, component, since, limit: '500' };
-    },
-
-    async loadLogs() {
-        const viewer = document.getElementById('log-viewer');
-        if (!viewer) return;
-
-        const followToggle = document.getElementById('follow-toggle');
-        if (App._logStream && followToggle && followToggle.checked) {
-            App._logStream.setFilters(this._logFilters());
-            return;
-        }
-
-        try {
-            const params  = this._logFilters();
-            const resp    = await API.logs.query(params);
-            const entries = resp.logs || [];
-
-            if (!App._logStream) {
-                App._logStream = new LogStream(viewer);
-            }
-            App._logStream.loadEntries(entries);
-
-            if (!entries.length) {
-                viewer.innerHTML = `<div class="empty-state" style="padding:30px">
-                    <div class="empty-state-text">No log entries match your filters</div>
-                </div>`;
-            }
-        } catch (e) {
-            if (viewer) viewer.innerHTML = `<div style="padding:12px;color:var(--error);font-size:12px;font-family:var(--font-mono)">Error: ${escHtml(e.message)}</div>`;
-        }
-    },
-
-    clearLogs() {
-        if (App._logStream) App._logStream.clear();
-    },
-
-    toggleFollow(enabled) {
-        const viewer = document.getElementById('log-viewer');
-        const ind    = document.getElementById('follow-ind');
-        if (!viewer) return;
-
-        if (enabled) {
-            if (!App._logStream) App._logStream = new LogStream(viewer);
-            App._logStream.setFilters(this._logFilters());
-            App._logStream.setAutoScroll(true);
-            App._logStream.onConnect(() => {
-                if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
-            });
-            App._logStream.onDisconnect(() => {
-                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
-            });
-            App._logStream.connect();
-        } else {
-            if (App._logStream) {
-                App._logStream.disconnect();
-                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
-            }
-        }
-    },
-
     // ── Settings ───────────────────────────────────────────────────────────
 
     _settingsTab: 'api-keys', // tracks active tab
@@ -6690,7 +6566,137 @@ const Pages = {
                 ${tabBar}
             </div>
             ${body}
+            <div class="card" style="margin-top:20px;" id="app-logs-card">
+                <div class="card-header" style="justify-content:space-between;">
+                    <span class="card-title">Application Logs</span>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <span class="follow-indicator" id="app-follow-ind"><span class="follow-dot"></span>static</span>
+                        <label class="toggle" style="margin:0;">
+                            <input type="checkbox" id="app-follow-toggle" onchange="Pages.toggleFollow(this.checked)">
+                            Live
+                        </label>
+                        <button class="btn btn-secondary btn-sm" onclick="Pages.clearLogs()">Clear</button>
+                    </div>
+                </div>
+                <div style="padding:8px 12px 4px;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);">
+                    <input id="lf-mac"       type="text"   placeholder="MAC address"   style="width:155px">
+                    <input id="lf-hostname"  type="text"   placeholder="Hostname"      style="width:130px">
+                    <select id="lf-level" style="width:130px">
+                        <option value="">All levels</option>
+                        <option value="debug">debug</option>
+                        <option value="info">info</option>
+                        <option value="warn">warn</option>
+                        <option value="error">error</option>
+                    </select>
+                    <select id="lf-component" style="width:145px">
+                        <option value="">All components</option>
+                        <option value="hardware">hardware</option>
+                        <option value="deploy">deploy</option>
+                        <option value="chroot">chroot</option>
+                        <option value="ipmi">ipmi</option>
+                        <option value="efiboot">efiboot</option>
+                        <option value="network">network</option>
+                        <option value="rsync">rsync</option>
+                        <option value="raid">raid</option>
+                    </select>
+                    <input id="lf-since" type="datetime-local" title="Since (local time)" style="width:185px">
+                    <button class="btn btn-secondary btn-sm" onclick="Pages.loadLogs()">Query</button>
+                </div>
+                <div style="padding:0 0 4px;">
+                    <div id="log-viewer" class="log-viewer" style="height:360px;border-radius:0 0 var(--radius) var(--radius);"></div>
+                </div>
+            </div>
         `);
+        // Populate the logs card now that the DOM is ready.
+        await Pages._loadAppLogs();
+    },
+
+    // _loadAppLogs populates the Application Logs card embedded in the settings page.
+    async _loadAppLogs() {
+        const viewer = document.getElementById('log-viewer');
+        if (!viewer) return;
+        try {
+            const resp    = await API.logs.query({ limit: '500' });
+            const entries = resp.logs || [];
+            if (!App._logStream) App._logStream = new LogStream(viewer);
+            App._logStream.loadEntries(entries);
+            if (!entries.length) {
+                viewer.innerHTML = `<div class="empty-state" style="padding:30px">
+                    <div class="empty-state-text">No log entries found</div>
+                </div>`;
+            }
+        } catch (e) {
+            if (viewer) viewer.innerHTML = `<div style="padding:12px;color:var(--error);font-size:12px;font-family:var(--font-mono)">Error: ${escHtml(e.message)}</div>`;
+        }
+    },
+
+    _appLogFilters() {
+        const mac       = (document.getElementById('lf-mac')       || {}).value || '';
+        const hostname  = (document.getElementById('lf-hostname')  || {}).value || '';
+        const level     = (document.getElementById('lf-level')     || {}).value || '';
+        const component = (document.getElementById('lf-component') || {}).value || '';
+        const sinceEl   = document.getElementById('lf-since');
+        let since = '';
+        if (sinceEl && sinceEl.value) {
+            since = new Date(sinceEl.value).toISOString();
+        }
+        return { mac, hostname, level, component, since, limit: '500' };
+    },
+
+    async loadLogs() {
+        const viewer = document.getElementById('log-viewer');
+        if (!viewer) return;
+
+        const followToggle = document.getElementById('app-follow-toggle');
+        if (App._logStream && followToggle && followToggle.checked) {
+            App._logStream.setFilters(this._appLogFilters());
+            return;
+        }
+
+        try {
+            const params  = this._appLogFilters();
+            const resp    = await API.logs.query(params);
+            const entries = resp.logs || [];
+
+            if (!App._logStream) App._logStream = new LogStream(viewer);
+            App._logStream.loadEntries(entries);
+
+            if (!entries.length) {
+                viewer.innerHTML = `<div class="empty-state" style="padding:30px">
+                    <div class="empty-state-text">No log entries match your filters</div>
+                </div>`;
+            }
+        } catch (e) {
+            if (viewer) viewer.innerHTML = `<div style="padding:12px;color:var(--error);font-size:12px;font-family:var(--font-mono)">Error: ${escHtml(e.message)}</div>`;
+        }
+    },
+
+    clearLogs() {
+        if (App._logStream) App._logStream.clear();
+    },
+
+    toggleFollow(enabled) {
+        const viewer = document.getElementById('log-viewer');
+        const ind    = document.getElementById('app-follow-ind');
+        if (!viewer) return;
+
+        if (enabled) {
+            if (!App._logStream) App._logStream = new LogStream(viewer);
+            App._logStream.setFilters(this._appLogFilters());
+            App._logStream.setAutoScroll(true);
+            App._logStream.onConnect(() => {
+                if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
+            });
+            App._logStream.onDisconnect(() => {
+                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>Reconnecting…'; }
+            });
+            App._logStream.connect();
+        } else {
+            if (App._logStream) {
+                App._logStream.disconnect();
+                if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
+            }
+        }
     },
 
     async _settingsAPIKeysTab() {
