@@ -52,6 +52,9 @@ type NodesHandler struct {
 	// RecordNodeLDAPConfigured, when non-nil, is called from DeployComplete to record
 	// that a node's LDAP client config was applied and to lock the base DN on first use.
 	RecordNodeLDAPConfigured func(ctx context.Context, nodeID, configHash string) error
+	// SystemAccountsConfig returns the current set of system accounts/groups for
+	// embed in the NodeConfig returned to the deploy agent. Returns nil if none defined.
+	SystemAccountsConfig func(ctx context.Context) (*api.SystemAccountsNodeConfig, error)
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -413,6 +416,16 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch LDAP config (non-fatal)")
 		} else {
 			nodeCfg.LDAPConfig = ldapCfg
+		}
+	}
+
+	// Populate system accounts config if any are defined. The deploy agent injects
+	// these into /etc/passwd, /etc/group, and /etc/shadow during finalization.
+	if h.SystemAccountsConfig != nil && action == "deploy" {
+		if saCfg, err := h.SystemAccountsConfig(r.Context()); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch system accounts config (non-fatal)")
+		} else {
+			nodeCfg.SystemAccounts = saCfg
 		}
 	}
 

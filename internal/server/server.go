@@ -26,6 +26,7 @@ import (
 	"github.com/sqoia-dev/clonr/internal/image"
 	ldapmodule "github.com/sqoia-dev/clonr/internal/ldap"
 	"github.com/sqoia-dev/clonr/internal/power"
+	"github.com/sqoia-dev/clonr/internal/sysaccounts"
 	ipmipower "github.com/sqoia-dev/clonr/internal/power/ipmi"
 	proxmoxpower "github.com/sqoia-dev/clonr/internal/power/proxmox"
 	"github.com/sqoia-dev/clonr/internal/reimage"
@@ -52,6 +53,7 @@ type Server struct {
 	powerRegistry       *power.Registry
 	reimageOrchestrator *reimage.Orchestrator
 	ldapMgr             *ldapmodule.Manager
+	sysAccountsMgr      *sysaccounts.Manager
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
 	http                *http.Server
@@ -110,6 +112,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	}
 
 	ldapMgr := ldapmodule.New(cfg, database)
+	sysAccountsMgr := sysaccounts.New(database)
 
 	s := &Server{
 		cfg:                 cfg,
@@ -122,6 +125,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		powerRegistry:       registry,
 		reimageOrchestrator: reimageOrch,
 		ldapMgr:             ldapMgr,
+		sysAccountsMgr:      sysAccountsMgr,
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -282,6 +286,9 @@ func (s *Server) buildRouter() chi.Router {
 		},
 		RecordNodeLDAPConfigured: func(ctx context.Context, nodeID, configHash string) error {
 			return s.ldapMgr.RecordNodeConfigured(ctx, nodeID, configHash)
+		},
+		SystemAccountsConfig: func(ctx context.Context) (*api.SystemAccountsNodeConfig, error) {
+			return s.sysAccountsMgr.NodeConfig(ctx)
 		},
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
@@ -536,6 +543,11 @@ func (s *Server) buildRouter() chi.Router {
 			// LDAP module — admin-only management routes.
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				ldapmodule.RegisterRoutes(r, s.ldapMgr)
+			})
+
+			// System Accounts module — admin-only management routes.
+			r.With(requireRole("admin")).Group(func(r chi.Router) {
+				sysaccounts.RegisterRoutes(r, s.sysAccountsMgr)
 			})
 		})
 	})

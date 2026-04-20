@@ -307,6 +307,39 @@ const (
 	NodeStateDeployVerifyTimeout NodeState = "deploy_verify_timeout"
 )
 
+// SystemGroup is a local POSIX group to be injected into every deployed node.
+type SystemGroup struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	GID         int       `json:"gid"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// SystemAccount is a local POSIX user account to be injected into every deployed node.
+type SystemAccount struct {
+	ID            string    `json:"id"`
+	Username      string    `json:"username"`
+	UID           int       `json:"uid"`
+	PrimaryGID    int       `json:"primary_gid"`
+	Shell         string    `json:"shell"`
+	HomeDir       string    `json:"home_dir"`
+	CreateHome    bool      `json:"create_home"`
+	SystemAccount bool      `json:"system_account"`
+	Comment       string    `json:"comment"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// SystemAccountsNodeConfig carries the full set of accounts and groups to inject
+// during finalization. Populated at reimage-request time; always reflects the
+// current DB state at the moment the deploy starts.
+type SystemAccountsNodeConfig struct {
+	Groups   []SystemGroup   `json:"groups"`
+	Accounts []SystemAccount `json:"accounts"`
+}
+
 // LDAPNodeConfig holds the read-only LDAP client configuration injected into
 // a node's deployed filesystem during finalization. It carries the service
 // account credentials — NEVER the Directory Manager (admin) credentials.
@@ -361,6 +394,10 @@ type NodeConfig struct {
 	// ServiceBindDN/ServiceBindPasswd carry the read-only node-reader account;
 	// the admin (Directory Manager) credentials are NEVER present here.
 	LDAPConfig *LDAPNodeConfig `json:"ldap_config,omitempty"`
+
+	// SystemAccounts, when non-nil and non-empty, causes finalization to inject
+	// local POSIX accounts and groups into /etc/passwd, /etc/group, and /etc/shadow.
+	SystemAccounts *SystemAccountsNodeConfig `json:"system_accounts,omitempty"`
 
 	// ExtraMounts holds additional /etc/fstab entries written during finalization.
 	// The effective list is group mounts merged with node mounts; use
