@@ -253,6 +253,7 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	grpReq.Attribute("objectClass", []string{"top", "posixGroup"})
 	grpReq.Attribute("cn", []string{req.UID})
 	grpReq.Attribute("gidNumber", []string{strconv.Itoa(req.GIDNumber)})
+	grpReq.Attribute("memberUid", []string{req.UID})
 	grpReq.Attribute("description", []string{fmt.Sprintf("User private group for %s", req.UID)})
 
 	if err := conn.Add(grpReq); err != nil {
