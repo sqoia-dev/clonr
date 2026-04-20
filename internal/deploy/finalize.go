@@ -1847,7 +1847,9 @@ ldap_tls_reqcert = demand
 ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clonr-ca.crt
 
 ldap_account_expire_policy = shadow
-ldap_access_order = expire
+ldap_access_order = ppolicy, expire
+ldap_use_ppolicy = true
+ldap_pwd_policy = none
 
 ldap_id_use_start_tls = false
 ldap_referrals = false
