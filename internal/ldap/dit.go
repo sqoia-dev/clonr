@@ -245,6 +245,23 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	if err := conn.Add(addReq); err != nil {
 		return fmt.Errorf("ldap dit: create user %s: %w", req.UID, err)
 	}
+
+	// Auto-create the User Private Group (UPG) — mirrors RHEL useradd behaviour.
+	// The group shares the user's uid as its CN and the same gidNumber.
+	upgDN := c.groupDN(req.UID)
+	grpReq := goldap.NewAddRequest(upgDN, nil)
+	grpReq.Attribute("objectClass", []string{"top", "posixGroup"})
+	grpReq.Attribute("cn", []string{req.UID})
+	grpReq.Attribute("gidNumber", []string{strconv.Itoa(req.GIDNumber)})
+	grpReq.Attribute("description", []string{fmt.Sprintf("User private group for %s", req.UID)})
+
+	if err := conn.Add(grpReq); err != nil {
+		// If the group already exists, silently continue — idempotent.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultEntryAlreadyExists) {
+			return nil
+		}
+		return fmt.Errorf("ldap dit: create user private group for %s: %w", req.UID, err)
+	}
 	return nil
 }
 
