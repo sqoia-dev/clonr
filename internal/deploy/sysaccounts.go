@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
