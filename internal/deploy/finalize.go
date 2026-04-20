@@ -1794,6 +1794,18 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 			Msg("finalize: systemctl enable oddjobd.service in chroot failed (non-fatal)")
 	}
 
+	// ── authselect: configure PAM and nsswitch.conf for sssd ─────────────────
+	// Runs `authselect select sssd with-mkhomedir --force` inside the chroot so
+	// that /etc/nsswitch.conf gets `passwd: sss files` / `group: sss files` and
+	// the PAM stack includes pam_sss.so + pam_mkhomedir for first-login home
+	// directory creation. Non-fatal — authselect may not be present in every image.
+	if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
+		"authselect", "select", "sssd", "with-mkhomedir", "--force",
+	).CombinedOutput(); err != nil {
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize: authselect in chroot failed (non-fatal) — PAM/nsswitch may need manual configuration")
+	}
+
 	return nil
 }
 
