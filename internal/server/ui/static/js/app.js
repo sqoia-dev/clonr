@@ -6816,10 +6816,10 @@ const Pages = {
             const buildTime = info.build_time || 'unknown';
             return `
                 <div class="card">
-                    <div class="card-header"><span class="card-title">About clonr</span></div>
+                    <div class="card-header"><span class="card-title">About clustr</span></div>
                     <div style="padding:16px 20px;">
                         <p style="margin:0 0 16px;color:var(--text-secondary);">
-                            clonr — open-source node cloning and image management for HPC clusters.
+                            clustr — open-source node cloning and image management for HPC clusters.
                         </p>
                         <table style="border-collapse:collapse;width:100%;max-width:480px;">
                             <tbody>
@@ -6842,10 +6842,10 @@ const Pages = {
         } catch (err) {
             return `
                 <div class="card">
-                    <div class="card-header"><span class="card-title">About clonr</span></div>
+                    <div class="card-header"><span class="card-title">About clustr</span></div>
                     <div style="padding:16px 20px;">
                         <p style="margin:0 0 16px;color:var(--text-secondary);">
-                            clonr — open-source node cloning and image management for HPC clusters.
+                            clustr — open-source node cloning and image management for HPC clusters.
                         </p>
                         ${alertBox('Could not load build info: ' + err.message)}
                     </div>
