@@ -140,6 +140,7 @@ LABEL="md_inc_end"
 //  5. Kernel args (GRUB)
 //  6. BMC / IPMI network and credentials (if cfg.BMC is set)
 //  7. InfiniBand / IPoIB config (if cfg.IBConfig is set)
+//  8. System accounts (groups then users, idempotent via getent check in chroot)
 func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) error {
 	log := logger()
 
@@ -225,6 +226,24 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 			log.Warn().Err(err).Msg("WARNING: finalize: LDAP config failed (non-fatal)")
 		} else {
 			log.Info().Msg("finalize: LDAP client configuration written")
+		}
+	}
+
+	// Step 8: System accounts — inject local POSIX accounts and groups into the
+	// deployed filesystem before first boot. Services (slurm, munge, nfs) start
+	// before sssd; accounts must exist locally.
+	if cfg.SystemAccounts != nil &&
+		(len(cfg.SystemAccounts.Groups) > 0 || len(cfg.SystemAccounts.Accounts) > 0) {
+		log.Info().
+			Int("groups", len(cfg.SystemAccounts.Groups)).
+			Int("accounts", len(cfg.SystemAccounts.Accounts)).
+			Msg("finalize: injecting system accounts")
+		if err := injectSystemAccounts(ctx, mountRoot, cfg.SystemAccounts); err != nil {
+			// Non-fatal: log prominently so operator can remediate without aborting
+			// the deploy. Node boots without the accounts; re-image to fix.
+			log.Warn().Err(err).Msg("WARNING: finalize: system accounts injection failed (non-fatal)")
+		} else {
+			log.Info().Msg("finalize: system accounts injected")
 		}
 	}
 
