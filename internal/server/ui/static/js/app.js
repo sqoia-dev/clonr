@@ -6550,22 +6550,7 @@ const Pages = {
         } else if (tab === 'users') {
             body = await Pages._settingsUsersTab();
         } else if (tab === 'server-info') {
-            body = `<div class="card"><div class="card-header"><span class="card-title">Server Info</span></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>`;
-        } else {
-            body = await Pages._settingsAboutTab();
-        }
-
-        App.render(`
-            <div class="page-header">
-                <div>
-                    <div class="page-title">Settings</div>
-                    <div class="page-subtitle">Server and API key management</div>
-                </div>
-            </div>
-            <div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
-                ${tabBar}
-            </div>
-            ${body}
+            body = `<div class="card"><div class="card-header"><span class="card-title">Server Info</span></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>
             <div class="card" style="margin-top:20px;" id="app-logs-card">
                 <div class="card-header" style="justify-content:space-between;">
                     <span class="card-title">Application Logs</span>
@@ -6605,7 +6590,22 @@ const Pages = {
                 <div style="padding:0 0 4px;">
                     <div id="log-viewer" class="log-viewer" style="height:360px;border-radius:0 0 var(--radius) var(--radius);"></div>
                 </div>
+            </div>`;
+        } else {
+            body = await Pages._settingsAboutTab();
+        }
+
+        App.render(`
+            <div class="page-header">
+                <div>
+                    <div class="page-title">Settings</div>
+                    <div class="page-subtitle">Server and API key management</div>
+                </div>
             </div>
+            <div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
+                ${tabBar}
+            </div>
+            ${body}
         `);
         // Populate the logs card now that the DOM is ready.
         await Pages._loadAppLogs();
