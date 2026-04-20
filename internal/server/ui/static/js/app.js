@@ -2087,6 +2087,73 @@ const Pages = {
     // _nodesImages caches the images list used for modal data across refresh cycles.
     _nodesImages: null,
 
+    // _nodesRoleOrder defines the display order and labels for role-based sections.
+    _nodesRoleOrder: [
+        { role: 'admin',   label: 'Admin Nodes' },
+        { role: 'login',   label: 'Login Nodes' },
+        { role: 'storage', label: 'Storage Nodes' },
+        { role: 'compute', label: 'Compute Nodes' },
+        { role: 'gpu',     label: 'GPU Compute Nodes' },
+        { role: '',        label: 'Unassigned' },
+    ],
+
+    // _nodesRoleSections renders role-bucketed collapsible sections for the nodes list.
+    _nodesRoleSections(nodes, imgMap, images, groupMap) {
+        // Bucket nodes by their group's role (or '' for unassigned/no role).
+        const buckets = {};
+        for (const def of Pages._nodesRoleOrder) buckets[def.role] = [];
+
+        for (const n of nodes) {
+            const grp = n.group_id ? groupMap[n.group_id] : null;
+            const role = (grp && grp.role) ? grp.role : '';
+            // Fall back to unassigned bucket if role is unrecognised.
+            if (role in buckets) {
+                buckets[role].push(n);
+            } else {
+                buckets[''].push(n);
+            }
+        }
+
+        const tableHeader = `<thead><tr>
+            <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Group</th><th>Updated</th><th>Actions</th>
+        </tr></thead>`;
+
+        return Pages._nodesRoleOrder.map(({ role, label }) => {
+            const roleNodes = buckets[role] || [];
+            if (!roleNodes.length) return ''; // hide empty sections
+
+            const safeRole = role || 'unassigned';
+            return `
+                <div class="card" style="margin-bottom:16px" id="nodes-section-${safeRole}">
+                    <div class="card-header" style="cursor:pointer;user-select:none"
+                         onclick="Pages._toggleNodesSection('${safeRole}')">
+                        <span class="card-title">${escHtml(label)}
+                            <span class="badge badge-neutral badge-sm" style="margin-left:8px;font-size:11px">${roleNodes.length}</span>
+                        </span>
+                        <span id="nodes-section-chevron-${safeRole}" style="font-size:12px;color:var(--text-secondary)">&#9650;</span>
+                    </div>
+                    <div id="nodes-section-body-${safeRole}">
+                        <div class="table-wrap"><table>
+                            ${tableHeader}
+                            <tbody id="nodes-tbody-${safeRole}">
+                                ${roleNodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
+                            </tbody>
+                        </table></div>
+                    </div>
+                </div>`;
+        }).join('');
+    },
+
+    // _toggleNodesSection collapses/expands a role section.
+    _toggleNodesSection(safeRole) {
+        const body    = document.getElementById(`nodes-section-body-${safeRole}`);
+        const chevron = document.getElementById(`nodes-section-chevron-${safeRole}`);
+        if (!body) return;
+        const collapsed = body.style.display === 'none';
+        body.style.display    = collapsed ? '' : 'none';
+        if (chevron) chevron.innerHTML = collapsed ? '&#9650;' : '&#9660;';
+    },
+
     async nodes() {
         App.render(loading('Loading nodes…'));
         try {
@@ -2129,6 +2196,11 @@ const Pages = {
                    </div>`
                 : '';
 
+            const sectionsHtml = filteredNodes.length
+                ? Pages._nodesRoleSections(filteredNodes, imgMap, images, groupMap)
+                : `<div class="card">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
+                    groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`;
+
             App.render(`
                 <div class="page-header">
                     <div>
@@ -2152,19 +2224,7 @@ const Pages = {
 
                 ${filterBanner}
 
-                ${cardWrap(`All Nodes`,
-                    filteredNodes.length
-                        ? `<div class="table-wrap"><table>
-                            <thead><tr>
-                                <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Group</th><th>Updated</th><th>Actions</th>
-                            </tr></thead>
-                            <tbody id="nodes-tbody">
-                            ${filteredNodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
-                            </tbody>
-                        </table></div>`
-                        : `<div id="nodes-empty">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
-                            groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`
-                )}
+                ${sectionsHtml}
             `);
 
             // Incremental auto-refresh — updates rows in-place without blowing away the DOM.
@@ -2252,8 +2312,9 @@ const Pages = {
     // nodesRefresh — called by the auto-refresh timer. Updates the nodes table
     // in-place without replacing the full page layout or showing a loading state.
     async nodesRefresh() {
-        const tbody = document.getElementById('nodes-tbody');
-        if (!tbody) return; // navigated away, or table was empty on initial render
+        // Check that at least one role-section tbody exists (navigated away if not).
+        const anyTbody = document.querySelector('[id^="nodes-tbody-"]');
+        if (!anyTbody) return;
 
         try {
             let nodes  = App._cacheGet('nodes');
@@ -2265,15 +2326,16 @@ const Pages = {
             if (!App._cacheGet('images')) fetches.push(API.images.list().then(r => { images = r.images || []; App._cacheSet('images', images); Pages._nodesImages = images; }));
             if (fetches.length) await Promise.all(fetches);
 
-            const imgMap = Object.fromEntries(images.map(i => [i.id, i]));
+            const imgMap   = Object.fromEntries(images.map(i => [i.id, i]));
+            const groupMap = Pages._nodesGroupMap || {};
 
             // Update subtitle.
             const subtitle = document.getElementById('nodes-subtitle');
             if (subtitle) subtitle.textContent = `${nodes.length} node${nodes.length !== 1 ? 's' : ''} total`;
 
-            // Diff the tbody rows.
+            // Build a unified map of all existing rows across all role tbodies.
             const existing = new Map();
-            tbody.querySelectorAll('[data-key]').forEach(el => existing.set(el.dataset.key, el));
+            document.querySelectorAll('[id^="nodes-tbody-"] [data-key]').forEach(el => existing.set(el.dataset.key, el));
 
             for (const n of nodes) {
                 const key = n.id;
@@ -2303,8 +2365,14 @@ const Pages = {
                     </div>`;
                     existing.delete(key);
                 } else {
-                    // New node appeared — insert a full row.
-                    tbody.insertAdjacentHTML('beforeend', Pages._nodeRow(n, imgMap, images));
+                    // New node appeared — insert into its role-appropriate tbody.
+                    const grp      = n.group_id ? groupMap[n.group_id] : null;
+                    const role     = (grp && grp.role) ? grp.role : '';
+                    const safeRole = role || 'unassigned';
+                    const tbody    = document.getElementById(`nodes-tbody-${safeRole}`);
+                    if (tbody) {
+                        tbody.insertAdjacentHTML('beforeend', Pages._nodeRow(n, imgMap, images));
+                    }
                 }
             }
 
