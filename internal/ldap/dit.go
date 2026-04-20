@@ -384,7 +384,14 @@ func (c *ditClient) UnlockUser(uid string) error {
 	return nil
 }
 
-// DeleteUser removes a user entry from the DIT.
+// DeleteUser removes a user entry from the DIT and auto-cleans up group
+// memberships. The operation order is:
+//  1. Delete the posixAccount entry.
+//  2. Search ou=groups for all groups carrying memberUid=<uid> and issue a
+//     Modify Delete for each. NoSuchAttribute is tolerated (race condition).
+//  3. Delete the user's UPG (cn=<uid>,ou=groups) if it exists and has no
+//     remaining members besides the deleted user. If other members remain the
+//     UPG is left untouched — it is a misconfiguration but not worth blocking.
 func (c *ditClient) DeleteUser(uid string) error {
 	conn, err := c.connect()
 	if err != nil {
@@ -392,10 +399,90 @@ func (c *ditClient) DeleteUser(uid string) error {
 	}
 	defer conn.Close()
 
+	// Step 1: delete the posixAccount entry.
 	dn := c.userDN(uid)
 	if err := conn.Del(goldap.NewDelRequest(dn, nil)); err != nil {
 		return fmt.Errorf("ldap dit: delete user %s: %w", uid, err)
 	}
+
+	// Step 2: remove this uid from every group that lists it as a memberUid.
+	groupBase := fmt.Sprintf("ou=groups,%s", c.baseDN)
+	searchReq := goldap.NewSearchRequest(
+		groupBase,
+		goldap.ScopeWholeSubtree,
+		goldap.NeverDerefAliases,
+		0, 0, false,
+		fmt.Sprintf("(&(objectClass=posixGroup)(memberUid=%s))", goldap.EscapeFilter(uid)),
+		[]string{"dn"},
+		nil,
+	)
+
+	result, err := conn.Search(searchReq)
+	if err != nil {
+		return fmt.Errorf("ldap dit: delete user %s: search group memberships: %w", uid, err)
+	}
+
+	for _, entry := range result.Entries {
+		modReq := goldap.NewModifyRequest(entry.DN, nil)
+		modReq.Delete("memberUid", []string{uid})
+		if err := conn.Modify(modReq); err != nil {
+			// Tolerate NoSuchAttribute — another process may have already removed it.
+			if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+				continue
+			}
+			return fmt.Errorf("ldap dit: delete user %s: remove memberUid from %s: %w", uid, entry.DN, err)
+		}
+	}
+
+	// Step 3: delete the UPG (cn=<uid>,ou=groups) if it exists and is empty.
+	upgDN := c.groupDN(uid)
+	upgSearch := goldap.NewSearchRequest(
+		upgDN,
+		goldap.ScopeBaseObject,
+		goldap.NeverDerefAliases,
+		1, 0, false,
+		"(objectClass=posixGroup)",
+		[]string{"memberUid"},
+		nil,
+	)
+
+	upgResult, err := conn.Search(upgSearch)
+	if err != nil {
+		// NoSuchObject means the UPG was never created — nothing to do.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchObject) {
+			return nil
+		}
+		return fmt.Errorf("ldap dit: delete user %s: search UPG: %w", uid, err)
+	}
+
+	if len(upgResult.Entries) == 0 {
+		// UPG does not exist; nothing to clean up.
+		return nil
+	}
+
+	// Collect remaining members (the deleted user's uid is already gone from the
+	// group after step 2, but be defensive and filter it out anyway).
+	remainingMembers := upgResult.Entries[0].GetAttributeValues("memberUid")
+	otherMembers := remainingMembers[:0]
+	for _, m := range remainingMembers {
+		if m != uid {
+			otherMembers = append(otherMembers, m)
+		}
+	}
+
+	if len(otherMembers) > 0 {
+		// Other users are still in the UPG — misconfiguration, but leave it alone.
+		return nil
+	}
+
+	if err := conn.Del(goldap.NewDelRequest(upgDN, nil)); err != nil {
+		// If it disappeared between our search and our delete, that's fine.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchObject) {
+			return nil
+		}
+		return fmt.Errorf("ldap dit: delete user %s: delete UPG: %w", uid, err)
+	}
+
 	return nil
 }
 
