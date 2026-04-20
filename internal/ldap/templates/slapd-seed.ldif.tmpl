@@ -115,6 +115,10 @@ olcAccess: to dn.subtree="ou=groups,{{.BaseDN}}"
   by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
   by dn.exact="cn=node-reader,ou=services,{{.BaseDN}}" read
   by * none
+olcAccess: to dn.subtree="ou=services,{{.BaseDN}}" attrs=userPassword
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by anonymous auth
+  by * none
 olcAccess: to dn.subtree="ou=services,{{.BaseDN}}"
   by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
   by * none
@@ -132,6 +136,6 @@ objectClass: olcOverlayConfig
 objectClass: olcPPolicyConfig
 olcOverlay: {0}ppolicy
 olcPPolicyDefault: cn=default,ou=policies,{{.BaseDN}}
-olcPPolicyHashCleartext: FALSE
+olcPPolicyHashCleartext: TRUE
 olcPPolicyUseLockout: TRUE
 olcPPolicyForwardUpdates: FALSE

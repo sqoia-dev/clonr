@@ -227,14 +227,10 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	addReq.Attribute("loginShell", []string{shell})
 	addReq.Attribute("uidNumber", []string{strconv.Itoa(req.UIDNumber)})
 	addReq.Attribute("gidNumber", []string{strconv.Itoa(req.GIDNumber)})
-	// Hash the password with {CRYPT} $6$ SHA-512-crypt (100k rounds) before sending.
-	// slapd stores the pre-hashed value verbatim; subsequent binds use crypt(3) to verify.
+	// Send the plaintext password; ppolicy (olcPPolicyHashCleartext: TRUE) will
+	// hash it using slapd's native crypt(3) (glibc), ensuring bind verification works.
 	if req.Password != "" {
-		hashed, err := HashPasswordCrypt(req.Password)
-		if err != nil {
-			return fmt.Errorf("ldap dit: hash password for %s: %w", req.UID, err)
-		}
-		addReq.Attribute("userPassword", []string{hashed})
+		addReq.Attribute("userPassword", []string{req.Password})
 	}
 	// shadowAccount attributes — set sensible defaults (no expiry, no aging).
 	addReq.Attribute("shadowLastChange", []string{"0"})
@@ -288,8 +284,9 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 }
 
 // SetPassword changes a user's userPassword attribute.
-// The password is hashed with {CRYPT} $6$ SHA-512-crypt (100k rounds) before
-// being sent to slapd, so the plaintext never travels over the LDAP connection.
+// The plaintext password is sent to slapd over ldaps://; ppolicy
+// (olcPPolicyHashCleartext: TRUE) hashes it using slapd's native crypt(3)
+// (glibc), ensuring bind verification works correctly.
 //
 // If forceChange is true, pwdReset is set to TRUE atomically with the
 // userPassword Replace, causing the ppolicy overlay to require the user to
@@ -299,11 +296,6 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 // pwdChangedTime is intentionally NOT touched — it is NO-USER-MODIFICATION and
 // is managed entirely by the ppolicy overlay.
 func (c *ditClient) SetPassword(uid, password string, forceChange bool) error {
-	hashed, err := HashPasswordCrypt(password)
-	if err != nil {
-		return fmt.Errorf("ldap dit: hash password for %s: %w", uid, err)
-	}
-
 	conn, err := c.connect()
 	if err != nil {
 		return err
@@ -312,7 +304,7 @@ func (c *ditClient) SetPassword(uid, password string, forceChange bool) error {
 
 	dn := c.userDN(uid)
 	modReq := goldap.NewModifyRequest(dn, nil)
-	modReq.Replace("userPassword", []string{hashed})
+	modReq.Replace("userPassword", []string{password})
 
 	if forceChange {
 		modReq.Replace("pwdReset", []string{"TRUE"})
@@ -537,7 +529,7 @@ func (c *ditClient) RemoveGroupMember(groupCN, uid string) error {
 }
 
 // writeServiceAccountPassword issues a single atomic Modify on dn that:
-//   - Replace("userPassword", hashed)
+//   - Replace("userPassword", passwd)    — plaintext; ppolicy hashes via glibc crypt(3)
 //   - Delete("pwdReset", [])             — tolerates NoSuchAttribute
 //   - Delete("pwdAccountLockedTime", []) — tolerates NoSuchAttribute
 //
@@ -563,9 +555,9 @@ func (c *ditClient) RemoveGroupMember(groupCN, uid string) error {
 // This function must NOT be used for regular human users — their pwdReset
 // handling is managed by SetPassword() based on the operator's force_change
 // checkbox per spec.
-func writeServiceAccountPassword(conn *goldap.Conn, dn, hashedPasswd string) error {
+func writeServiceAccountPassword(conn *goldap.Conn, dn, passwd string) error {
 	modReq := goldap.NewModifyRequest(dn, nil)
-	modReq.Replace("userPassword", []string{hashedPasswd})
+	modReq.Replace("userPassword", []string{passwd})
 	modReq.Delete("pwdReset", []string{})
 	modReq.Delete("pwdAccountLockedTime", []string{})
 

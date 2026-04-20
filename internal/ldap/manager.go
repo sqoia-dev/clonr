@@ -425,13 +425,6 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 		return fmt.Errorf("ldap: seed DIT: %w", err)
 	}
 
-	// Hash the service account password using the same {CRYPT} $6$ helper used
-	// for all other userPassword attributes in this package.
-	hashedSvcPasswd, err := HashPasswordCrypt(servicePassword)
-	if err != nil {
-		return fmt.Errorf("ldap: seed DIT: hash service password: %w", err)
-	}
-
 	type seedEntry struct {
 		dn    string
 		attrs map[string][]string
@@ -478,7 +471,7 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 				"objectClass":  {"top", "simpleSecurityObject", "organizationalRole"},
 				"cn":           {"node-reader"},
 				"description":  {"clonr node read-only service account (managed by clonr-serverd)"},
-				"userPassword": {hashedSvcPasswd},
+				"userPassword": {servicePassword},
 			},
 			credentialed: true,
 		},
@@ -534,7 +527,7 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 					// the single atomic Modify also clears any ppolicy state (pwdReset,
 					// pwdAccountLockedTime, pwdFailureTime) that ppolicy auto-set when
 					// the rootdn last touched this entry's userPassword.
-					if modErr := writeServiceAccountPassword(conn, e.dn, hashedSvcPasswd); modErr != nil {
+					if modErr := writeServiceAccountPassword(conn, e.dn, servicePassword); modErr != nil {
 						return fmt.Errorf("ldap: seed DIT: self-heal userPassword for %s: %w", e.dn, modErr)
 					}
 					log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: entry exists — userPassword and ppolicy state updated")
@@ -552,7 +545,7 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 		// be cleared in a separate follow-up Modify. This is only needed for
 		// credentialed service account entries.
 		if e.credentialed {
-			if modErr := writeServiceAccountPassword(conn, e.dn, hashedSvcPasswd); modErr != nil {
+			if modErr := writeServiceAccountPassword(conn, e.dn, servicePassword); modErr != nil {
 				return fmt.Errorf("ldap: seed DIT: post-add ppolicy cleanup for %s: %w", e.dn, modErr)
 			}
 			log.Debug().Str("dn", e.dn).Msg("ldap: seed DIT: post-add ppolicy state cleared for service account")
@@ -1017,16 +1010,11 @@ func (m *Manager) AdminRepair(ctx context.Context, adminPassword string) (AdminR
 	}
 	defer conn.Close()
 
-	// Hash the current service_bind_password using the same {CRYPT} helper.
-	hashedSvcPasswd, err := HashPasswordCrypt(row.ServiceBindPassword)
-	if err != nil {
-		return AdminRepairResult{}, fmt.Errorf("ldap: hash service password for repair: %w", err)
-	}
-
 	// Use writeServiceAccountPassword so the single atomic Modify also clears
 	// any ppolicy state (pwdReset, pwdAccountLockedTime, pwdFailureTime) that
 	// ppolicy auto-set when the rootdn last touched this entry's userPassword.
-	if err := writeServiceAccountPassword(conn, nodeReaderDN, hashedSvcPasswd); err != nil {
+	// Pass plaintext — ppolicy (olcPPolicyHashCleartext: TRUE) hashes via glibc crypt(3).
+	if err := writeServiceAccountPassword(conn, nodeReaderDN, row.ServiceBindPassword); err != nil {
 		return AdminRepairResult{}, fmt.Errorf("ldap: Modify REPLACE on node-reader userPassword: %w", err)
 	}
 	log.Info().Str("dn", nodeReaderDN).Msg("ldap: repair: node-reader userPassword and ppolicy state updated")
