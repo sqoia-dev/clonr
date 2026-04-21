@@ -70,10 +70,15 @@ func Open(dbPath string) (*DB, error) {
 }
 
 // Close stops the background flusher, flushes any pending last_used_at updates,
-// and closes the underlying database connection.
+// checkpoints the WAL (so the -wal/-shm side-files are removed), and closes
+// the underlying database connection.
 func (db *DB) Close() error {
 	close(db.lastUsedDone)
 	db.flushLastUsed()
+	// Checkpoint and truncate the WAL before closing so that the -wal and -shm
+	// side-files are removed. Without this, tests using t.TempDir() fail with
+	// "directory not empty" because those files outlive the connection.
+	_, _ = db.sql.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return db.sql.Close()
 }
 
