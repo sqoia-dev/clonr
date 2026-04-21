@@ -136,6 +136,56 @@ func (m *Manager) UpdateSwitch(ctx context.Context, id string, s api.NetworkSwit
 	return s, nil
 }
 
+// ConfirmSwitch transitions a "discovered" switch to "confirmed" status and
+// applies admin-supplied name and role. Validates the incoming fields.
+func (m *Manager) ConfirmSwitch(ctx context.Context, id string, s api.NetworkSwitch) (api.NetworkSwitch, error) {
+	if err := validateSwitch(s); err != nil {
+		return api.NetworkSwitch{}, err
+	}
+
+	existing, err := m.db.NetworkListSwitches(ctx)
+	if err != nil {
+		return api.NetworkSwitch{}, fmt.Errorf("network: confirm switch: list: %w", err)
+	}
+	var current *api.NetworkSwitch
+	for i, sw := range existing {
+		if sw.ID == id {
+			current = &existing[i]
+			break
+		}
+	}
+	if current == nil {
+		return api.NetworkSwitch{}, fmt.Errorf("switch %q not found", id)
+	}
+
+	// Check name uniqueness against other switches.
+	for _, sw := range existing {
+		if sw.ID == id {
+			continue
+		}
+		if sw.Name == s.Name {
+			return api.NetworkSwitch{}, fmt.Errorf("%w: switch name %q is already in use", ErrConflict, s.Name)
+		}
+	}
+
+	s.ID = id
+	s.CreatedAt = current.CreatedAt
+	s.UpdatedAt = time.Now().UTC()
+	s.Status = "confirmed"
+	s.MACAddress = current.MACAddress
+	s.DiscoveredAt = current.DiscoveredAt
+	if s.PortCount == 0 {
+		s.PortCount = current.PortCount
+	}
+
+	if err := m.db.NetworkUpdateSwitch(ctx, s); err != nil {
+		return api.NetworkSwitch{}, fmt.Errorf("network: confirm switch: %w", err)
+	}
+	log.Info().Str("id", id).Str("name", s.Name).Str("role", string(s.Role)).
+		Msg("network: discovered switch confirmed")
+	return s, nil
+}
+
 // DeleteSwitch removes a switch by ID. Always succeeds if the switch exists.
 func (m *Manager) DeleteSwitch(ctx context.Context, id string) error {
 	existing, err := m.db.NetworkListSwitches(ctx)
@@ -405,6 +455,74 @@ func (m *Manager) GetIBStatus(ctx context.Context) (IBStatus, error) {
 		OpenSMRequired:       hasUnmanaged,
 		OpenSMConfigured:     configured,
 	}, nil
+}
+
+// ─── Switch auto-discovery ────────────────────────────────────────────────────
+
+// HandleDiscoveredSwitch is called by the DHCP server when it detects a switch
+// fingerprint in Option 60. It creates a draft switch record with status
+// "discovered" if no switch with the same MAC or mgmt_ip already exists.
+// If a switch with a matching mgmt_ip is found and its vendor is empty, the
+// vendor is updated. This is non-fatal — errors are logged, not propagated.
+func (m *Manager) HandleDiscoveredSwitch(ctx context.Context, mac, vendor, ip string) error {
+	// Normalize the last 6 hex chars of the MAC for a readable default name.
+	cleanMAC := strings.ReplaceAll(mac, ":", "")
+	suffix := cleanMAC
+	if len(cleanMAC) >= 6 {
+		suffix = cleanMAC[len(cleanMAC)-6:]
+	}
+
+	existing, err := m.db.NetworkListSwitches(ctx)
+	if err != nil {
+		return fmt.Errorf("network: discover switch: list: %w", err)
+	}
+
+	// Check if we already know this switch by MAC or by mgmt_ip.
+	for i := range existing {
+		sw := &existing[i]
+		if sw.MACAddress == mac {
+			log.Debug().Str("mac", mac).Str("name", sw.Name).
+				Msg("network: discovered switch already in DB by MAC — skipping")
+			return nil
+		}
+		if ip != "" && sw.MgmtIP == ip {
+			// Update vendor if it was blank.
+			if sw.Vendor == "" && vendor != "" {
+				sw.Vendor = vendor
+				sw.UpdatedAt = time.Now().UTC()
+				if err := m.db.NetworkUpdateSwitch(ctx, *sw); err != nil {
+					log.Warn().Err(err).Str("id", sw.ID).Msg("network: could not update vendor on discovered switch")
+				}
+			}
+			log.Debug().Str("ip", ip).Str("name", sw.Name).
+				Msg("network: discovered switch already in DB by mgmt_ip — skipping")
+			return nil
+		}
+	}
+
+	// Create a new draft switch.
+	now := time.Now().UTC()
+	s := api.NetworkSwitch{
+		ID:          uuid.New().String(),
+		Name:        "discovered-" + suffix,
+		Role:        "unknown", // placeholder until admin confirms
+		Vendor:      vendor,
+		MgmtIP:      ip,
+		MACAddress:  mac,
+		Status:      "discovered",
+		DiscoveredAt: &now,
+		IsManaged:   true,
+		PortCount:   48,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := m.db.NetworkCreateSwitch(ctx, s); err != nil {
+		return fmt.Errorf("network: discover switch: create: %w", err)
+	}
+	log.Info().Str("mac", mac).Str("vendor", vendor).Str("ip", ip).
+		Str("name", s.Name).Msg("network: auto-discovered switch created")
+	return nil
 }
 
 // ─── Deploy pipeline ──────────────────────────────────────────────────────────

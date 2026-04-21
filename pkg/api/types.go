@@ -1262,16 +1262,27 @@ const (
 // NetworkSwitch is an inventory record for a physical switch in the cluster fabric.
 // clonr does not program switches in v1; this is documentation + SM-detection input.
 type NetworkSwitch struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Role      NetworkSwitchRole `json:"role"`
-	Vendor    string            `json:"vendor,omitempty"`
-	Model     string            `json:"model,omitempty"`
-	MgmtIP    string            `json:"mgmt_ip,omitempty"`
-	Notes     string            `json:"notes,omitempty"`
-	IsManaged bool              `json:"is_managed"` // for IB: false = no built-in SM
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Role        NetworkSwitchRole `json:"role"`
+	Vendor      string            `json:"vendor,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	MgmtIP      string            `json:"mgmt_ip,omitempty"`
+	Notes       string            `json:"notes,omitempty"`
+	IsManaged   bool              `json:"is_managed"` // for IB: false = no built-in SM
+	// MACAddress is the MAC seen in the DHCP discover that triggered auto-discovery.
+	// Empty for manually created switches.
+	MACAddress  string            `json:"mac_address,omitempty"`
+	// Status is "confirmed" (admin-created or admin-confirmed) or "discovered" (auto-detected via DHCP).
+	Status      string            `json:"status,omitempty"`
+	// DiscoveredAt is set when auto-discovery created this record.
+	DiscoveredAt *time.Time       `json:"discovered_at,omitempty"`
+	// PortCount is the total number of switchports; used by the cabling plan generator.
+	PortCount   int               `json:"port_count,omitempty"`
+	// UplinkPorts is a comma-separated list of uplink port numbers excluded from node assignment.
+	UplinkPorts string            `json:"uplink_ports,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // BondMember identifies a NIC to be enslaved to a bond.

@@ -15,7 +15,9 @@ import (
 // NetworkListSwitches returns all switches ordered by name.
 func (db *DB) NetworkListSwitches(ctx context.Context) ([]api.NetworkSwitch, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, name, role, vendor, model, mgmt_ip, notes, is_managed, created_at, updated_at
+		SELECT id, name, role, vendor, model, mgmt_ip, notes, is_managed,
+		       mac_address, status, discovered_at, port_count, uplink_ports,
+		       created_at, updated_at
 		FROM network_switches
 		ORDER BY name ASC
 	`)
@@ -29,15 +31,25 @@ func (db *DB) NetworkListSwitches(ctx context.Context) ([]api.NetworkSwitch, err
 		var s api.NetworkSwitch
 		var isManaged int
 		var createdAt, updatedAt int64
+		var discoveredAt sql.NullInt64
 		if err := rows.Scan(
 			&s.ID, &s.Name, &s.Role, &s.Vendor, &s.Model,
-			&s.MgmtIP, &s.Notes, &isManaged, &createdAt, &updatedAt,
+			&s.MgmtIP, &s.Notes, &isManaged,
+			&s.MACAddress, &s.Status, &discoveredAt, &s.PortCount, &s.UplinkPorts,
+			&createdAt, &updatedAt,
 		); err != nil {
 			return nil, err
 		}
 		s.IsManaged = isManaged != 0
 		s.CreatedAt = time.Unix(createdAt, 0).UTC()
 		s.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		if discoveredAt.Valid {
+			t := time.Unix(discoveredAt.Int64, 0).UTC()
+			s.DiscoveredAt = &t
+		}
+		if s.Status == "" {
+			s.Status = "confirmed"
+		}
 		switches = append(switches, s)
 	}
 	return switches, rows.Err()
@@ -49,12 +61,27 @@ func (db *DB) NetworkCreateSwitch(ctx context.Context, s api.NetworkSwitch) erro
 	if !s.IsManaged {
 		isManaged = 0
 	}
+	status := s.Status
+	if status == "" {
+		status = "confirmed"
+	}
+	var discoveredAt interface{}
+	if s.DiscoveredAt != nil {
+		discoveredAt = s.DiscoveredAt.Unix()
+	}
+	portCount := s.PortCount
+	if portCount == 0 {
+		portCount = 48
+	}
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO network_switches
-		    (id, name, role, vendor, model, mgmt_ip, notes, is_managed, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    (id, name, role, vendor, model, mgmt_ip, notes, is_managed,
+		     mac_address, status, discovered_at, port_count, uplink_ports,
+		     created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, s.ID, s.Name, string(s.Role), s.Vendor, s.Model, s.MgmtIP, s.Notes,
-		isManaged, s.CreatedAt.Unix(), s.UpdatedAt.Unix())
+		isManaged, s.MACAddress, status, discoveredAt, portCount, s.UplinkPorts,
+		s.CreatedAt.Unix(), s.UpdatedAt.Unix())
 	return err
 }
 
@@ -64,12 +91,27 @@ func (db *DB) NetworkUpdateSwitch(ctx context.Context, s api.NetworkSwitch) erro
 	if !s.IsManaged {
 		isManaged = 0
 	}
+	status := s.Status
+	if status == "" {
+		status = "confirmed"
+	}
+	var discoveredAt interface{}
+	if s.DiscoveredAt != nil {
+		discoveredAt = s.DiscoveredAt.Unix()
+	}
+	portCount := s.PortCount
+	if portCount == 0 {
+		portCount = 48
+	}
 	_, err := db.sql.ExecContext(ctx, `
 		UPDATE network_switches
-		SET name=?, role=?, vendor=?, model=?, mgmt_ip=?, notes=?, is_managed=?, updated_at=?
+		SET name=?, role=?, vendor=?, model=?, mgmt_ip=?, notes=?, is_managed=?,
+		    mac_address=?, status=?, discovered_at=?, port_count=?, uplink_ports=?,
+		    updated_at=?
 		WHERE id=?
 	`, s.Name, string(s.Role), s.Vendor, s.Model, s.MgmtIP, s.Notes,
-		isManaged, s.UpdatedAt.Unix(), s.ID)
+		isManaged, s.MACAddress, status, discoveredAt, portCount, s.UplinkPorts,
+		s.UpdatedAt.Unix(), s.ID)
 	return err
 }
 
@@ -77,6 +119,48 @@ func (db *DB) NetworkUpdateSwitch(ctx context.Context, s api.NetworkSwitch) erro
 func (db *DB) NetworkDeleteSwitch(ctx context.Context, id string) error {
 	_, err := db.sql.ExecContext(ctx, `DELETE FROM network_switches WHERE id=?`, id)
 	return err
+}
+
+// NetworkFindSwitchByMgmtIP returns the switch with the given mgmt_ip, or nil if not found.
+func (db *DB) NetworkFindSwitchByMgmtIP(ctx context.Context, mgmtIP string) (*api.NetworkSwitch, error) {
+	switches, err := db.NetworkListSwitches(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range switches {
+		if switches[i].MgmtIP == mgmtIP {
+			return &switches[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// NetworkFindSwitchByMAC returns the switch with the given mac_address, or nil if not found.
+func (db *DB) NetworkFindSwitchByMAC(ctx context.Context, mac string) (*api.NetworkSwitch, error) {
+	switches, err := db.NetworkListSwitches(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range switches {
+		if switches[i].MACAddress == mac {
+			return &switches[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// NetworkGetSwitchByID returns a switch by ID, or an error if not found.
+func (db *DB) NetworkGetSwitchByID(ctx context.Context, id string) (*api.NetworkSwitch, error) {
+	switches, err := db.NetworkListSwitches(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range switches {
+		if switches[i].ID == id {
+			return &switches[i], nil
+		}
+	}
+	return nil, fmt.Errorf("switch %q not found", id)
 }
 
 // ─── Profiles ─────────────────────────────────────────────────────────────────

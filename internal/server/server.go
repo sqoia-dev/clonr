@@ -141,6 +141,12 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	return s
 }
 
+// NetworkManager returns the server's network module manager.
+// Used by main to wire external callbacks (e.g. DHCP switch auto-discovery).
+func (s *Server) NetworkManager() *networkmodule.Manager {
+	return s.networkMgr
+}
+
 // StartBackgroundWorkers starts long-running background goroutines.
 // Call this after New() and before ListenAndServe().
 func (s *Server) StartBackgroundWorkers(ctx context.Context) {

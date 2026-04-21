@@ -43,6 +43,34 @@ type DHCPServer struct {
 	pool   []net.IP              // pre-built list of IPs in range
 
 	server *server4.Server
+
+	// OnSwitchDiscovered is called after a lease is issued to a client whose
+	// Option 60 vendor class identifies it as a known switch vendor.
+	// Arguments: mac (hardware address string), vendor (lowercase identifier),
+	// ip (the leased IP string). May be nil — if so, detection is skipped.
+	OnSwitchDiscovered func(mac, vendor, ip string)
+}
+
+// detectSwitch inspects a DHCP Option 60 vendor class string and returns
+// (true, vendor) when the fingerprint matches a known switch vendor.
+// Matching is case-insensitive on the known prefix/substring patterns.
+func detectSwitch(vendorClass string) (bool, string) {
+	vc := strings.ToLower(vendorClass)
+	switch {
+	case strings.Contains(vc, "arista"):
+		return true, "arista"
+	case strings.Contains(vc, "dell emc") || strings.Contains(vc, "dell force10") || strings.Contains(vc, "dell"):
+		return true, "dell"
+	case strings.Contains(vc, "juniper"):
+		return true, "juniper"
+	case strings.Contains(vc, "cisco"):
+		return true, "cisco"
+	case strings.Contains(vc, "mellanox"):
+		return true, "mellanox"
+	case strings.Contains(vc, "aruba") || strings.Contains(vc, "arubaap"):
+		return true, "hpe-aruba"
+	}
+	return false, ""
 }
 
 // newDHCPServer creates a DHCPServer from config. It does not start listening.
@@ -191,10 +219,22 @@ func (d *DHCPServer) handleRequest(conn net.PacketConn, peer net.Addr, req *dhcp
 	resp.UpdateOption(dhcpv4.OptMessageType(dhcpv4.MessageTypeAck))
 	d.populateBootOptions(resp, req, ip, isIPXE)
 
-	log.Info().Str("mac", req.ClientHWAddr.String()).Str("ip", ip.String()).Msg("DHCP ACK")
+	mac := req.ClientHWAddr.String()
+	log.Info().Str("mac", mac).Str("ip", ip.String()).Msg("DHCP ACK")
 
 	if _, err := conn.WriteTo(resp.ToBytes(), peer); err != nil {
 		log.Error().Err(err).Msg("DHCP: send ack")
+		return
+	}
+
+	// After successfully ACK-ing, check if this is a switch and fire the callback.
+	if d.OnSwitchDiscovered != nil {
+		vendorClass := req.ClassIdentifier()
+		if isSwitch, vendor := detectSwitch(vendorClass); isSwitch {
+			log.Info().Str("mac", mac).Str("vendor", vendor).Str("ip", ip.String()).
+				Msg("DHCP: switch vendor fingerprint detected — notifying network manager")
+			go d.OnSwitchDiscovered(mac, vendor, ip.String())
+		}
 	}
 }
 

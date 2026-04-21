@@ -21,11 +21,19 @@ import (
 // group. All routes require admin role — the caller is responsible for applying
 // the requireRole("admin") middleware before calling this function.
 func RegisterRoutes(r chi.Router, mgr *Manager) {
-	// Switches — fully implemented in Phase 1.
+	// Switches — fully implemented in Phase 1; discovery + config gen in v1.
 	r.Get("/network/switches", mgr.handleListSwitches)
 	r.Post("/network/switches", mgr.handleCreateSwitch)
 	r.Put("/network/switches/{id}", mgr.handleUpdateSwitch)
 	r.Delete("/network/switches/{id}", mgr.handleDeleteSwitch)
+	r.Post("/network/switches/{id}/confirm", mgr.handleConfirmSwitch)
+	r.Post("/network/switches/{id}/generate-config", mgr.handleGenerateSwitchConfig)
+
+	// Network lint warnings.
+	r.Get("/network/lint", mgr.handleLintNetwork)
+
+	// Cabling plan.
+	r.Get("/network/cabling-plan", mgr.handleCablingPlan)
 
 	// Profiles — Phase 2.
 	r.Get("/network/profiles", mgr.handleListProfiles)
@@ -117,6 +125,30 @@ func (m *Manager) handleDeleteSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (m *Manager) handleConfirmSwitch(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var s api.NetworkSwitch
+	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	confirmed, err := m.ConfirmSwitch(r.Context(), id, s)
+	if err != nil {
+		if errors.Is(err, ErrConflict) {
+			jsonErrorCode(w, err.Error(), "conflict", http.StatusConflict)
+			return
+		}
+		if isNotFound(err) {
+			jsonError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		jsonErrorCode(w, err.Error(), "validation_error", http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, confirmed, http.StatusOK)
 }
 
 // ─── Profile handlers ─────────────────────────────────────────────────────────

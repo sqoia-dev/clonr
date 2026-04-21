@@ -213,21 +213,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cfg.PXE.HTTPPort = "8080" // safe fallback
 	}
 
-	// Start PXE server if enabled.
+	// pxeSrv is created before the HTTP server but wired with the switch-discovery
+	// callback after srv is constructed (networkMgr lives inside srv).
+	var pxeSrv *pxe.Server
 	if cfg.PXE.Enabled {
-		pxeSrv, err := pxe.New(cfg.PXE)
+		var err error
+		pxeSrv, err = pxe.New(cfg.PXE)
 		if err != nil {
 			return fmt.Errorf("failed to init PXE server: %w", err)
 		}
-		go func() {
-			if err := pxeSrv.Start(ctx); err != nil {
-				log.Error().Err(err).Msg("PXE server error")
-			}
-		}()
-		log.Info().
-			Str("interface", cfg.PXE.Interface).
-			Str("range", cfg.PXE.IPRange).
-			Msg("PXE server enabled")
 	}
 
 	// Bootstrap first-run user account (ADR-0007). Must run before BootstrapAdminKey
@@ -252,6 +246,26 @@ func runServer(cmd *cobra.Command, args []string) error {
 		CommitSHA: commitSHA,
 		BuildTime: buildTime,
 	})
+
+	// Wire PXE switch-discovery callback now that the network manager is available.
+	if pxeSrv != nil {
+		netMgr := srv.NetworkManager()
+		pxeSrv.DHCPServer.OnSwitchDiscovered = func(mac, vendor, ip string) {
+			if err := netMgr.HandleDiscoveredSwitch(context.Background(), mac, vendor, ip); err != nil {
+				log.Error().Err(err).Str("mac", mac).Str("vendor", vendor).
+					Msg("DHCP: switch auto-discovery failed")
+			}
+		}
+		go func() {
+			if err := pxeSrv.Start(ctx); err != nil {
+				log.Error().Err(err).Msg("PXE server error")
+			}
+		}()
+		log.Info().
+			Str("interface", cfg.PXE.Interface).
+			Str("range", cfg.PXE.IPRange).
+			Msg("PXE server enabled")
+	}
 
 	// Startup firmware/layout consistency audit.
 	// Log warnings for any image whose declared firmware contradicts its stored
