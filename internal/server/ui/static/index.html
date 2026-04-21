@@ -72,6 +72,25 @@
                 </a>
             </div>
 
+            <!-- Network module nav — gated on admin access -->
+            <div id="nav-network-section" style="display:none;">
+                <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
+                <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-sidebar);opacity:0.5;padding:4px 12px 2px;">NETWORK</div>
+                <a href="#/network/switches" class="nav-item" id="nav-network-switches">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <rect x="2" y="6" width="20" height="12" rx="2"/>
+                        <line x1="6" y1="12" x2="6.01" y2="12"/><line x1="10" y1="12" x2="10.01" y2="12"/><line x1="18" y1="9" x2="18" y2="15"/>
+                    </svg>
+                    <span>Switches</span>
+                </a>
+                <a href="#/network/profiles" class="nav-item" id="nav-network-profiles">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>
+                    </svg>
+                    <span>Profiles</span>
+                </a>
+            </div>
+
             <!-- LDAP module nav — Users+Groups gated on enabled; Settings always visible -->
             <div id="nav-ldap-section">
                 <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
@@ -136,6 +155,7 @@
 <script src="/ui/js/logs.js"></script>
 <script src="/ui/js/ldap.js"></script>
 <script src="/ui/js/sysaccounts.js"></script>
+<script src="/ui/js/network.js"></script>
 <script src="/ui/js/app.js"></script>
 </body>
 </html>

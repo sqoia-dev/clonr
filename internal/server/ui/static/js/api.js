@@ -326,4 +326,26 @@ const API = {
             return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
         },
     },
+    network: {
+        // Switches
+        listSwitches()                      { return API.get('/network/switches'); },
+        createSwitch(data)                  { return API.post('/network/switches', data); },
+        updateSwitch(id, data)              { return API.put(`/network/switches/${encodeURIComponent(id)}`, data); },
+        deleteSwitch(id)                    { return API.del(`/network/switches/${encodeURIComponent(id)}`); },
+        // Profiles
+        listProfiles()                      { return API.get('/network/profiles'); },
+        getProfile(id)                      { return API.get(`/network/profiles/${encodeURIComponent(id)}`); },
+        createProfile(data)                 { return API.post('/network/profiles', data); },
+        updateProfile(id, data)             { return API.put(`/network/profiles/${encodeURIComponent(id)}`, data); },
+        deleteProfile(id)                   { return API.del(`/network/profiles/${encodeURIComponent(id)}`); },
+        // Group assignments
+        getGroupProfile(groupId)            { return API.get(`/node-groups/${encodeURIComponent(groupId)}/network-profile`); },
+        assignProfileToGroup(groupId, profileId) { return API.put(`/node-groups/${encodeURIComponent(groupId)}/network-profile`, { profile_id: profileId }); },
+        unassignProfileFromGroup(groupId)   { return API.del(`/node-groups/${encodeURIComponent(groupId)}/network-profile`); },
+        // OpenSM
+        getOpenSM()                         { return API.get('/network/opensm'); },
+        setOpenSM(data)                     { return API.put('/network/opensm', data); },
+        // IB status
+        getIBStatus()                       { return API.get('/network/ib-status'); },
+    },
 };

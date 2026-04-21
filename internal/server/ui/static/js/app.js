@@ -159,6 +159,12 @@ const App = {
         Router.register('/system/groups',   () => {
             if (typeof SysAccountsPages !== 'undefined') SysAccountsPages.groups();
         });
+        Router.register('/network/switches', () => {
+            if (typeof NetworkPages !== 'undefined') NetworkPages.switches();
+        });
+        Router.register('/network/profiles', () => {
+            if (typeof NetworkPages !== 'undefined') NetworkPages.profiles();
+        });
     },
 
     render(html) {
@@ -7279,6 +7285,10 @@ const Auth = {
         // Bootstrap System Accounts nav visibility.
         if (typeof SysAccountsPages !== 'undefined') {
             SysAccountsPages.bootstrapNav().catch(() => {});
+        }
+        // Bootstrap Network nav visibility.
+        if (typeof NetworkPages !== 'undefined') {
+            NetworkPages.bootstrapNav().catch(() => {});
         }
         App.init();
     },
