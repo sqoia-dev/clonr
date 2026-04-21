@@ -399,6 +399,12 @@ type NodeConfig struct {
 	// local POSIX accounts and groups into /etc/passwd, /etc/group, and /etc/shadow.
 	SystemAccounts *SystemAccountsNodeConfig `json:"system_accounts,omitempty"`
 
+	// NetworkConfig, when non-nil, causes finalization to write NetworkManager
+	// keyfiles for bond interfaces and IPoIB, and optionally inject opensm.conf.
+	// This is additive to Interfaces: both are written; Interfaces handles simple
+	// static IPs, NetworkConfig handles bonds, VLANs, and IPoIB.
+	NetworkConfig *NetworkNodeConfig `json:"network_config,omitempty"`
+
 	// ExtraMounts holds additional /etc/fstab entries written during finalization.
 	// The effective list is group mounts merged with node mounts; use
 	// EffectiveExtraMounts to resolve. Stored as node-level on NodeConfig only
@@ -1208,4 +1214,108 @@ type BuildEvent struct {
 	BytesDone  int64  `json:"bytes_done,omitempty"`
 	ElapsedMS  int64  `json:"elapsed_ms,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// ── Network module types ──────────────────────────────────────────────────────
+
+// NetworkSwitchRole enumerates the valid roles for a switch in the fabric.
+type NetworkSwitchRole string
+
+const (
+	NetworkSwitchRoleManagement NetworkSwitchRole = "management" // IPMI/BMC access
+	NetworkSwitchRoleData       NetworkSwitchRole = "data"       // compute traffic
+	NetworkSwitchRoleInfiniBand NetworkSwitchRole = "infiniband" // IB fabric
+)
+
+// NetworkSwitch is an inventory record for a physical switch in the cluster fabric.
+// clonr does not program switches in v1; this is documentation + SM-detection input.
+type NetworkSwitch struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Role      NetworkSwitchRole `json:"role"`
+	Vendor    string            `json:"vendor,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	MgmtIP    string            `json:"mgmt_ip,omitempty"`
+	Notes     string            `json:"notes,omitempty"`
+	IsManaged bool              `json:"is_managed"` // for IB: false = no built-in SM
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
+
+// BondMember identifies a NIC to be enslaved to a bond.
+type BondMember struct {
+	ID        string `json:"id"`
+	BondID    string `json:"bond_id"`
+	MatchMAC  string `json:"match_mac,omitempty"`
+	MatchName string `json:"match_name,omitempty"`
+	SortOrder int    `json:"sort_order"`
+}
+
+// BondConfig describes one bond interface within a NetworkProfile.
+type BondConfig struct {
+	ID             string       `json:"id"`
+	ProfileID      string       `json:"profile_id"`
+	BondName       string       `json:"bond_name"`              // "bond0"
+	Mode           string       `json:"mode"`                   // "802.3ad", "active-backup", etc.
+	MTU            int          `json:"mtu"`
+	VLANID         int          `json:"vlan_id"`                // 0 = no VLAN
+	IPMethod       string       `json:"ip_method"`              // "static", "dhcp", "none"
+	IPCIDR         string       `json:"ip_cidr,omitempty"`
+	LACPRate       string       `json:"lacp_rate,omitempty"`
+	XmitHashPolicy string       `json:"xmit_hash_policy,omitempty"`
+	SortOrder      int          `json:"sort_order"`
+	Members        []BondMember `json:"members"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+// IBProfile holds InfiniBand / IPoIB configuration for a NetworkProfile.
+type IBProfile struct {
+	ID          string    `json:"id"`
+	ProfileID   string    `json:"profile_id"`
+	IPoIBMode   string    `json:"ipoib_mode"`             // "connected" or "datagram"
+	IPoIBMTU    int       `json:"ipoib_mtu"`              // 65520 for connected, 2044 for datagram
+	IPMethod    string    `json:"ip_method"`              // "static", "dhcp", "none"
+	PKeys       []string  `json:"pkeys"`                  // ["0x7fff", "0x8001"]
+	DeviceMatch string    `json:"device_match,omitempty"` // "mlx5_" or "hfi1_"
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// NetworkProfile is the top-level network configuration entity assigned to a NodeGroup.
+type NetworkProfile struct {
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description,omitempty"`
+	Bonds       []BondConfig `json:"bonds,omitempty"`
+	IB          *IBProfile   `json:"ib,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+}
+
+// OpenSMConfig holds the cluster-wide OpenSM configuration.
+// Only one instance exists per clonr install. When Enabled=false, no OpenSM
+// config is injected anywhere.
+type OpenSMConfig struct {
+	ID                string    `json:"id"`
+	Enabled           bool      `json:"enabled"`
+	HeadNodeProfileID string    `json:"head_node_profile_id"`
+	ConfContent       string    `json:"conf_content"`   // full opensm.conf text
+	LogPrefix         string    `json:"log_prefix"`
+	SMPriority        int       `json:"sm_priority"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// NetworkNodeConfig carries the resolved per-node network configuration
+// injected into NodeConfig during the deploy pipeline.
+type NetworkNodeConfig struct {
+	// Bonds is the list of bond interfaces to create. Each entry produces
+	// a set of NM keyfiles in the deployed rootfs.
+	Bonds []BondConfig `json:"bonds,omitempty"`
+	// IB, when non-nil, produces an IPoIB NM keyfile in the deployed rootfs.
+	IB *IBProfile `json:"ib,omitempty"`
+	// OpenSMConf, when non-empty, is written to /etc/opensm/opensm.conf
+	// and opensm.service is enabled. Only set on the designated head node group.
+	OpenSMConf string `json:"opensm_conf,omitempty"`
 }

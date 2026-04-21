@@ -25,6 +25,7 @@ import (
 	"github.com/sqoia-dev/clonr/internal/db"
 	"github.com/sqoia-dev/clonr/internal/image"
 	ldapmodule "github.com/sqoia-dev/clonr/internal/ldap"
+	networkmodule "github.com/sqoia-dev/clonr/internal/network"
 	"github.com/sqoia-dev/clonr/internal/power"
 	"github.com/sqoia-dev/clonr/internal/sysaccounts"
 	ipmipower "github.com/sqoia-dev/clonr/internal/power/ipmi"
@@ -54,6 +55,7 @@ type Server struct {
 	reimageOrchestrator *reimage.Orchestrator
 	ldapMgr             *ldapmodule.Manager
 	sysAccountsMgr      *sysaccounts.Manager
+	networkMgr          *networkmodule.Manager
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
 	http                *http.Server
@@ -113,6 +115,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 
 	ldapMgr := ldapmodule.New(cfg, database)
 	sysAccountsMgr := sysaccounts.New(database)
+	networkMgr := networkmodule.New(database)
 
 	s := &Server{
 		cfg:                 cfg,
@@ -126,6 +129,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		reimageOrchestrator: reimageOrch,
 		ldapMgr:             ldapMgr,
 		sysAccountsMgr:      sysAccountsMgr,
+		networkMgr:          networkMgr,
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -548,6 +552,11 @@ func (s *Server) buildRouter() chi.Router {
 			// System Accounts module — admin-only management routes.
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				sysaccounts.RegisterRoutes(r, s.sysAccountsMgr)
+			})
+
+			// Network module — admin-only management routes.
+			r.With(requireRole("admin")).Group(func(r chi.Router) {
+				networkmodule.RegisterRoutes(r, s.networkMgr)
 			})
 		})
 	})
