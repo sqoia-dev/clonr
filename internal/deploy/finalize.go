@@ -141,6 +141,7 @@ LABEL="md_inc_end"
 //  6. BMC / IPMI network and credentials (if cfg.BMC is set)
 //  7. InfiniBand / IPoIB config (if cfg.IBConfig is set)
 //  8. System accounts (groups then users, idempotent via getent check in chroot)
+//  9. Network config (bond NM keyfiles, IPoIB keyfile, opensm.conf if head node)
 func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) error {
 	log := logger()
 
@@ -244,6 +245,23 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 			log.Warn().Err(err).Msg("WARNING: finalize: system accounts injection failed (non-fatal)")
 		} else {
 			log.Info().Msg("finalize: system accounts injected")
+		}
+	}
+
+	// Step 9: Network config — write NM keyfiles for bonds, VLANs, and IPoIB;
+	// optionally inject opensm.conf and enable opensm.service.
+	if cfg.NetworkConfig != nil {
+		log.Info().
+			Int("bonds", len(cfg.NetworkConfig.Bonds)).
+			Bool("ib", cfg.NetworkConfig.IB != nil).
+			Bool("opensm", cfg.NetworkConfig.OpenSMConf != "").
+			Msg("finalize: injecting network config")
+		if err := injectNetworkConfig(ctx, mountRoot, cfg.NetworkConfig); err != nil {
+			// Non-fatal: node boots with whatever NM keyfiles the image already
+			// has. Admin can reimage to fix.
+			log.Warn().Err(err).Msg("WARNING: finalize: network config injection failed (non-fatal)")
+		} else {
+			log.Info().Msg("finalize: network config injected")
 		}
 	}
 

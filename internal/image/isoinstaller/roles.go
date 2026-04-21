@@ -44,6 +44,9 @@ var HPCRoles = []Role{
 				"rsync", "wget", "curl", "git",
 				"firewalld", "fail2ban",
 				"chrony", "dnf-automatic",
+				// InfiniBand — head node runs OpenSM when no managed IB switch is present.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
+				"opensm", "opensm-libs",
 			},
 			DistroAlmaLinux: {
 				"slurm", "slurm-slurmctld", "slurm-slurmdbd", "mariadb-server",
@@ -53,6 +56,9 @@ var HPCRoles = []Role{
 				"rsync", "wget", "curl", "git",
 				"firewalld", "fail2ban",
 				"chrony", "dnf-automatic",
+				// InfiniBand — head node runs OpenSM when no managed IB switch is present.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
+				"opensm", "opensm-libs",
 			},
 			DistroUbuntu: {
 				"slurm-wlm", "slurmctld", "slurmdbd", "mariadb-server",
@@ -60,6 +66,9 @@ var HPCRoles = []Role{
 				"nfs-kernel-server",
 				"vim", "tmux", "screen", "htop", "tree",
 				"rsync", "wget", "curl", "git",
+				// InfiniBand — head node runs OpenSM when no managed IB switch is present.
+				"rdma-core", "ibverbs-utils", "infiniband-diags", "perftest",
+				"opensm",
 			},
 		},
 		Services: map[Distro][]string{
@@ -84,6 +93,8 @@ var HPCRoles = []Role{
 				"bash-completion", "vim-minimal", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for MPI over IB and fabric diagnostics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroAlmaLinux: {
 				"slurm", "slurm-slurmd", "slurm-pmi",
@@ -96,6 +107,8 @@ var HPCRoles = []Role{
 				"bash-completion", "vim-minimal", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for MPI over IB and fabric diagnostics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroUbuntu: {
 				"slurmd", "slurm-client",
@@ -107,6 +120,8 @@ var HPCRoles = []Role{
 				"build-essential", "gfortran", "cmake",
 				"vim", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
+				// InfiniBand — RDMA stack for MPI over IB and fabric diagnostics.
+				"rdma-core", "ibverbs-utils", "infiniband-diags", "perftest",
 			},
 		},
 		Services: map[Distro][]string{
@@ -133,6 +148,8 @@ var HPCRoles = []Role{
 				"bash-completion", "vim-minimal", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for GPU-direct RDMA and fabric diagnostics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroAlmaLinux: {
 				"slurm", "slurm-slurmd", "slurm-pmi",
@@ -146,6 +163,8 @@ var HPCRoles = []Role{
 				"bash-completion", "vim-minimal", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for GPU-direct RDMA and fabric diagnostics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroUbuntu: {
 				"slurmd", "slurm-client",
@@ -158,6 +177,8 @@ var HPCRoles = []Role{
 				"pciutils", "lshw",
 				"vim", "htop", "tmux",
 				"rsync", "wget", "curl", "git",
+				// InfiniBand — RDMA stack for GPU-direct RDMA and fabric diagnostics.
+				"rdma-core", "ibverbs-utils", "infiniband-diags", "perftest",
 			},
 		},
 		Services: map[Distro][]string{
@@ -179,6 +200,8 @@ var HPCRoles = []Role{
 				"smartmontools", "lvm2", "mdadm",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for high-throughput storage over IB fabrics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils",
 			},
 			DistroAlmaLinux: {
 				"nfs-utils", "rpcbind", "samba",
@@ -187,6 +210,8 @@ var HPCRoles = []Role{
 				"smartmontools", "lvm2", "mdadm",
 				"rsync", "wget", "curl", "git",
 				"chrony",
+				// InfiniBand — RDMA stack for high-throughput storage over IB fabrics.
+				"rdma-core", "infiniband-diags", "libibverbs-utils",
 			},
 		},
 		Services: map[Distro][]string{

@@ -121,6 +121,7 @@ type ksTemplateData struct {
 	NeedsNVIDIA    bool
 	NeedsLustre    bool
 	NeedsBeeGFS    bool
+	NeedsOpenSM    bool
 	// HasDefaultUser is true when a non-root user should be created.
 	HasDefaultUser bool
 	// Firmware is the firmware mode: "uefi" or "bios".
@@ -217,6 +218,12 @@ dnf install -y lustre-client --nogpgcheck || true
 # ── BeeGFS (storage role) ─────────────────────────────────────────────────
 wget -q https://www.beegfs.io/release/beegfs_7.4/dists/beegfs-rhel9.repo -O /etc/yum.repos.d/beegfs-rhel9.repo || true
 dnf install -y beegfs-storage beegfs-meta --nogpgcheck || true
+{{end -}}
+{{- if .NeedsOpenSM}}
+# ── OpenSM (InfiniBand Subnet Manager, head node only) ────────────────────
+# opensm.conf is injected by clonr finalize for clusters with unmanaged IB switches.
+# Enable the service here so it starts on first boot if opensm.conf is present.
+systemctl enable opensm || true
 {{end}}
 # ── Enable SSH password authentication ────────────────────────────────────
 # RHEL 10 / Rocky 10 changed the OpenSSH compiled-in default to
@@ -291,6 +298,12 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		NeedsNVIDIA:     hasRole(opts.RoleIDs, "gpu-compute"),
 		NeedsLustre:     hasRole(opts.RoleIDs, "storage"),
 		NeedsBeeGFS:     hasRole(opts.RoleIDs, "storage"),
+		// NeedsOpenSM: head-node role ships with the opensm package and the service
+		// must be enabled unconditionally so it starts on first boot when
+		// opensm.conf is injected by clonr finalize. Operators without IB hardware
+		// can disable opensm.service manually; it exits cleanly when no IB ports
+		// are found.
+		NeedsOpenSM:     hasRole(opts.RoleIDs, "head-node"),
 		HasDefaultUser:  opts.DefaultUsername != "",
 		Firmware:        firmware,
 		SELinuxMode:     selinuxMode,
