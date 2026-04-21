@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-
-	"github.com/rs/zerolog/log"
 )
 
 // LLDPResult holds the outcome of an LLDP topology validation check.
