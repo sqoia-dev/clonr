@@ -354,6 +354,56 @@ func (m *Manager) handleGetIBStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, status, http.StatusOK)
 }
 
+// ─── Config generation handler ────────────────────────────────────────────────
+
+func (m *Manager) handleGenerateSwitchConfig(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var data SwitchConfigData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := m.GenerateSwitchConfig(r.Context(), id, data)
+	if err != nil {
+		if isNotFound(err) {
+			jsonError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		log.Error().Err(err).Str("switch_id", id).Msg("network: generate switch config")
+		jsonError(w, "failed to generate switch config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"config": cfg}, http.StatusOK)
+}
+
+// ─── Cabling plan handler ──────────────────────────────────────────────────────
+
+func (m *Manager) handleCablingPlan(w http.ResponseWriter, r *http.Request) {
+	plan, err := m.GenerateCablingPlan(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("network: generate cabling plan")
+		jsonError(w, "failed to generate cabling plan", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, plan, http.StatusOK)
+}
+
+// ─── Lint handler ─────────────────────────────────────────────────────────────
+
+func (m *Manager) handleLintNetwork(w http.ResponseWriter, r *http.Request) {
+	warnings, err := m.LintNetworkConfig(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("network: lint")
+		jsonError(w, "failed to run network lint", http.StatusInternalServerError)
+		return
+	}
+	if warnings == nil {
+		warnings = []LintWarning{}
+	}
+	jsonResponse(w, map[string]interface{}{"warnings": warnings, "total": len(warnings)}, http.StatusOK)
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func jsonResponse(w http.ResponseWriter, body interface{}, code int) {
