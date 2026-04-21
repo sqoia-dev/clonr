@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -80,6 +81,9 @@ func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptio
 	}
 
 	// Drain stdout and stderr in the background, forwarding to callbacks.
+	// stderr is also collected into a capped buffer (last 4 KB) so that when
+	// the subprocess exits non-zero we can include the actual error message in
+	// the returned error rather than only surfacing it via the progress store.
 	drain := func(r io.Reader, cb func(string)) {
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
@@ -88,13 +92,34 @@ func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptio
 			}
 		}
 	}
+
+	const maxStderrBytes = 4 * 1024
+	var stderrMu sync.Mutex
+	var stderrBuf bytes.Buffer
 	go drain(stdoutPipe, onStdout)
-	go drain(stderrPipe, onStderr)
+	go drain(stderrPipe, func(line string) {
+		stderrMu.Lock()
+		stderrBuf.WriteString(line)
+		stderrBuf.WriteByte('\n')
+		// Keep only the last maxStderrBytes to bound memory usage.
+		if stderrBuf.Len() > maxStderrBytes {
+			excess := stderrBuf.Len() - maxStderrBytes
+			stderrBuf.Next(excess)
+		}
+		stderrMu.Unlock()
+		if onStderr != nil {
+			onStderr(line)
+		}
+	})
 
 	waitErr := cmd.Wait()
 	if waitErr == nil {
 		return nil
 	}
+
+	stderrMu.Lock()
+	capturedStderr := stderrBuf.String()
+	stderrMu.Unlock()
 
 	// Classify exit errors the same way the QEMU wrapper does.
 	exitErr, ok := waitErr.(*exec.ExitError)
@@ -105,7 +130,7 @@ func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptio
 		if status.Signaled() {
 			return fmt.Errorf("extract subprocess killed by signal %v (check dmesg for OOM)", status.Signal())
 		}
-		return fmt.Errorf("extract subprocess exited with code %d", status.ExitStatus())
+		return fmt.Errorf("extract subprocess exited with code %d: %s", status.ExitStatus(), capturedStderr)
 	}
 	return fmt.Errorf("extract subprocess: %w", waitErr)
 }
