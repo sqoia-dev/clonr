@@ -130,6 +130,9 @@ type ksTemplateData struct {
 	// SELinuxMode is the SELinux enforcement directive: "disabled", "permissive",
 	// or "enforcing". Defaults to "disabled" for HPC compatibility.
 	SELinuxMode string
+	// BaseEnvironment is the comps @^<id> environment group to install.
+	// Defaults to "minimal-environment".
+	BaseEnvironment string
 }
 
 // joinStrings is the template func for joining slices — kept here so the
@@ -171,7 +174,7 @@ part /boot     --fstype=xfs     --size=1024 --ondisk={{.TargetDisk}} --label=boo
 part /         --fstype=xfs     --size=1    --grow      --ondisk={{.TargetDisk}} --label=root
 
 %packages --ignoremissing
-@^minimal-environment
+@^{{.BaseEnvironment}}
 openssh-server
 # Boot packages — both firmware modes so a single image works for BIOS and UEFI.
 # Content-only images (ADR-0009) must ship with all boot dependencies; runtime
@@ -273,19 +276,25 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		return nil, fmt.Errorf("isoinstaller: unknown selinux_mode %q -- accepted values are disabled, permissive, enforcing", selinuxMode)
 	}
 
+	baseEnv := opts.BaseEnvironment
+	if baseEnv == "" {
+		baseEnv = "minimal-environment"
+	}
+
 	d := ksTemplateData{
-		templateData:   data,
-		Distro:         distro.FamilyName(),
-		RoleIDs:        roleIDs,
-		Packages:       packages,
-		Services:       services,
-		InstallUpdates: opts.InstallUpdates,
-		NeedsNVIDIA:    hasRole(opts.RoleIDs, "gpu-compute"),
-		NeedsLustre:    hasRole(opts.RoleIDs, "storage"),
-		NeedsBeeGFS:    hasRole(opts.RoleIDs, "storage"),
-		HasDefaultUser: opts.DefaultUsername != "",
-		Firmware:       firmware,
-		SELinuxMode:    selinuxMode,
+		templateData:    data,
+		Distro:          distro.FamilyName(),
+		RoleIDs:         roleIDs,
+		Packages:        packages,
+		Services:        services,
+		InstallUpdates:  opts.InstallUpdates,
+		NeedsNVIDIA:     hasRole(opts.RoleIDs, "gpu-compute"),
+		NeedsLustre:     hasRole(opts.RoleIDs, "storage"),
+		NeedsBeeGFS:     hasRole(opts.RoleIDs, "storage"),
+		HasDefaultUser:  opts.DefaultUsername != "",
+		Firmware:        firmware,
+		SELinuxMode:     selinuxMode,
+		BaseEnvironment: baseEnv,
 	}
 
 	var buf bytes.Buffer

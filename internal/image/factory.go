@@ -23,9 +23,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/internal/db"
 	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
+	"github.com/sqoia-dev/clonr/internal/image/isoinstaller/comps"
+	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
 // CaptureRequest describes a live-node SSH+rsync capture operation.
@@ -1568,11 +1569,12 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
 		Firmware:        req.Firmware,
 		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
-		BuildID:         imageID, // used to name the systemd-run scope unit
+		BaseEnvironment: req.BaseEnvironment, // empty → kickstart.go defaults to "minimal-environment"
+		BuildID:         imageID,             // used to name the systemd-run scope unit
 		// Progress callbacks — feed events into the build handle.
-		OnPhase:       ph.SetPhase,
-		OnSerialLine:  ph.AddSerialLine,
-		OnStderrLine:  ph.AddStderrLine,
+		OnPhase:      ph.SetPhase,
+		OnSerialLine: ph.AddSerialLine,
+		OnStderrLine: ph.AddStderrLine,
 	}
 
 	result, err := isoinstaller.Build(ctx, buildOpts)
@@ -1672,6 +1674,124 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		Msg("factory: ISO build complete — image is ready")
 }
 
+// isoMetaSidecar is the JSON structure persisted as <sha256(url)>.iso.meta.json
+// alongside the cached ISO. It caches the result of a probe so subsequent calls
+// return immediately without re-extracting the ISO.
+type isoMetaSidecar struct {
+	ISOURL       string                 `json:"iso_url"`
+	ProbedAt     time.Time              `json:"probed_at"`
+	Distro       string                 `json:"distro,omitempty"`
+	VolumeLabel  string                 `json:"volume_label,omitempty"`
+	Environments []api.ISOEnvironmentGroup `json:"environments"`
+	NoComps      bool                   `json:"no_comps,omitempty"`
+}
+
+// ProbeISO downloads (or cache-hits) an ISO, parses its comps XML, and
+// returns available environment groups. If the ISO has no comps data
+// (Ubuntu, Debian, minimal ISOs), environments is nil and noComps is true.
+//
+// Results are cached alongside the ISO as <sha256(url)>.iso.meta.json.
+// Subsequent calls with the same URL return immediately from cache.
+func (f *Factory) ProbeISO(ctx context.Context, rawURL string) (environments []api.ISOEnvironmentGroup, distro string, volumeLabel string, noComps bool, err error) {
+	// Resolve paths.
+	isoPath, partialPath, err := f.isoCachePath(rawURL)
+	if err != nil {
+		return nil, "", "", false, fmt.Errorf("probe iso: resolve cache path: %w", err)
+	}
+	sidecarPath := isoPath + ".meta.json"
+
+	// Cache hit: read sidecar if it exists and matches the URL.
+	if data, readErr := os.ReadFile(sidecarPath); readErr == nil {
+		var meta isoMetaSidecar
+		if jsonErr := json.Unmarshal(data, &meta); jsonErr == nil && meta.ISOURL == rawURL {
+			envs := meta.Environments
+			if envs == nil {
+				envs = []api.ISOEnvironmentGroup{}
+			}
+			return envs, meta.Distro, meta.VolumeLabel, meta.NoComps, nil
+		}
+	}
+
+	// Download the ISO if not cached.
+	if fi, statErr := os.Stat(isoPath); statErr != nil || fi.Size() == 0 {
+		var resumeOffset int64
+		if pfi, pErr := os.Stat(partialPath); pErr == nil && pfi.Size() > 0 {
+			resumeOffset = pfi.Size()
+			f.Logger.Info().Str("url", rawURL).Int64("resume_from", resumeOffset).
+				Msg("factory probe: resuming partial ISO download")
+		}
+
+		isoFile, openErr := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			return nil, "", "", false, fmt.Errorf("probe iso: open partial file: %w", openErr)
+		}
+		if resumeOffset > 0 {
+			if _, seekErr := isoFile.Seek(0, io.SeekEnd); seekErr != nil {
+				isoFile.Close()
+				return nil, "", "", false, fmt.Errorf("probe iso: seek partial file: %w", seekErr)
+			}
+		}
+
+		dlErr := downloadURLWithResume(ctx, rawURL, isoFile, resumeOffset, nil)
+		isoFile.Close()
+		if dlErr != nil {
+			return nil, "", "", false, fmt.Errorf("probe iso: download ISO: %w", dlErr)
+		}
+		if renameErr := os.Rename(partialPath, isoPath); renameErr != nil {
+			return nil, "", "", false, fmt.Errorf("probe iso: finalize ISO cache: %w", renameErr)
+		}
+		f.Logger.Info().Str("url", rawURL).Str("path", isoPath).
+			Msg("factory probe: ISO download complete, cached")
+	}
+
+	// Detect distro and volume label.
+	detectedDistro, _ := isoinstaller.DetectDistro(rawURL, isoPath)
+	var label string
+	if lbl, lblErr := isoinstaller.ReadISOVolumeLabel(isoPath); lblErr == nil {
+		label = lbl
+	}
+	distroStr := string(detectedDistro)
+
+	// Parse comps XML from the ISO.
+	envGroups, compsErr := comps.ProbeComps(isoPath)
+	if compsErr != nil {
+		return nil, "", "", false, fmt.Errorf("probe iso: parse comps: %w", compsErr)
+	}
+
+	// Convert comps.EnvironmentGroup → api.ISOEnvironmentGroup.
+	apiEnvs := make([]api.ISOEnvironmentGroup, 0, len(envGroups))
+	for _, eg := range envGroups {
+		apiEnvs = append(apiEnvs, api.ISOEnvironmentGroup{
+			ID:           eg.ID,
+			Name:         eg.Name,
+			Description:  eg.Description,
+			DisplayOrder: eg.DisplayOrder,
+			IsDefault:    eg.IsDefault,
+		})
+	}
+
+	noComps = envGroups == nil
+	if apiEnvs == nil {
+		apiEnvs = []api.ISOEnvironmentGroup{}
+	}
+
+	// Write sidecar cache.
+	meta := isoMetaSidecar{
+		ISOURL:       rawURL,
+		ProbedAt:     time.Now().UTC(),
+		Distro:       distroStr,
+		VolumeLabel:  label,
+		Environments: apiEnvs,
+		NoComps:      noComps,
+	}
+	if metaBytes, jsonErr := json.MarshalIndent(meta, "", "  "); jsonErr == nil {
+		// Best-effort: failure to write sidecar is non-fatal.
+		_ = os.WriteFile(sidecarPath, metaBytes, 0o644)
+	}
+
+	return apiEnvs, distroStr, label, noComps, nil
+}
+
 // buildFromISOFile is called from pullAndExtract when PullImage downloads an
 // .iso URL. It hands off to the full installer pipeline using the already-
 // downloaded temp file, avoiding a second download.
@@ -1736,6 +1856,7 @@ func (f *Factory) buildFromISOFile(
 		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
 		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
 		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
+		BaseEnvironment: req.BaseEnvironment, // empty → kickstart.go defaults to "minimal-environment"
 	}
 
 	result, err := isoinstaller.Build(ctx, buildOpts)

@@ -119,6 +119,35 @@ func TestGenerateKickstart_CustomKickstart(t *testing.T) {
 	}
 }
 
+// TestGenerateKickstart_BaseEnvironment_Default verifies that an empty
+// BaseEnvironment defaults to "minimal-environment" for backward compat.
+func TestGenerateKickstart_BaseEnvironment_Default(t *testing.T) {
+	opts := BuildOptions{Firmware: "uefi"} // BaseEnvironment intentionally empty
+	cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+	if err != nil {
+		t.Fatalf("generateKickstart error: %v", err)
+	}
+	if !strings.Contains(cfg.KickstartContent, "@^minimal-environment") {
+		t.Errorf("expected @^minimal-environment default, got kickstart:\n%s", cfg.KickstartContent)
+	}
+}
+
+// TestGenerateKickstart_BaseEnvironment_Custom verifies that a non-empty
+// BaseEnvironment is used verbatim in the %%packages stanza.
+func TestGenerateKickstart_BaseEnvironment_Custom(t *testing.T) {
+	opts := BuildOptions{Firmware: "uefi", BaseEnvironment: "server-product-environment"}
+	cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+	if err != nil {
+		t.Fatalf("generateKickstart error: %v", err)
+	}
+	if !strings.Contains(cfg.KickstartContent, "@^server-product-environment") {
+		t.Errorf("expected @^server-product-environment, got kickstart:\n%s", cfg.KickstartContent)
+	}
+	if strings.Contains(cfg.KickstartContent, "@^minimal-environment") {
+		t.Errorf("unexpected @^minimal-environment when BaseEnvironment=server-product-environment:\n%s", cfg.KickstartContent)
+	}
+}
+
 // TestGenerateKickstart_BootPackages verifies that both BIOS and UEFI boot
 // packages are always present in the %packages section, regardless of the
 // firmware mode. This implements ADR-0009 (content-only images): a single image

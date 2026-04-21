@@ -220,6 +220,49 @@ func (h *FactoryHandler) ImportPath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, img)
 }
 
+// ProbeISO handles POST /api/v1/factory/probe-iso.
+//
+// Downloads (or cache-hits) an ISO and returns available environment groups
+// parsed from the ISO's comps XML. For non-RHEL ISOs or minimal ISOs without
+// comps data, returns no_comps=true and an empty environments list.
+//
+// This is a synchronous, potentially long-running request. The client should
+// use a long HTTP timeout (recommended: 600s). On a cache hit the response
+// arrives in <5s; on a cold cache it waits for the full ISO download.
+func (h *FactoryHandler) ProbeISO(w http.ResponseWriter, r *http.Request) {
+	var req api.ProbeISORequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.URL == "" {
+		writeValidationError(w, "url is required")
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(strings.Split(req.URL, "?")[0]), ".iso") {
+		writeValidationError(w, "url must point to an installer ISO (.iso extension)")
+		return
+	}
+
+	environments, distro, volumeLabel, noComps, err := h.Factory.ProbeISO(r.Context(), req.URL)
+	if err != nil {
+		log.Error().Err(err).Str("url", req.URL).Msg("factory probe-iso")
+		writeError(w, err)
+		return
+	}
+	if environments == nil {
+		environments = []api.ISOEnvironmentGroup{}
+	}
+
+	writeJSON(w, http.StatusOK, api.ProbeISOResponse{
+		URL:          req.URL,
+		Distro:       distro,
+		VolumeLabel:  volumeLabel,
+		Environments: environments,
+		NoComps:      noComps,
+	})
+}
+
 // BuildFromISO handles POST /api/v1/factory/build-from-iso
 //
 // Downloads an installer ISO from a URL, runs it in a temporary QEMU VM with

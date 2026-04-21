@@ -38,7 +38,7 @@ type KernelBootFiles struct {
 // required. p7zip is a single build-time dependency already available on
 // RHEL/Rocky (epel) and Debian/Ubuntu (p7zip-full).
 func PrepareKernelBoot(isoPath, workDir string, log zerolog.Logger) (*KernelBootFiles, error) {
-	label, err := readISOVolumeLabel(isoPath)
+	label, err := ReadISOVolumeLabel(isoPath)
 	if err != nil {
 		return nil, fmt.Errorf("kernelboot: read ISO volume label: %w", err)
 	}
@@ -67,9 +67,9 @@ func PrepareKernelBoot(isoPath, workDir string, log zerolog.Logger) (*KernelBoot
 	}, nil
 }
 
-// readISOVolumeLabel returns the ISO 9660 volume label using isoinfo or blkid.
+// ReadISOVolumeLabel returns the ISO 9660 volume label using isoinfo or blkid.
 // This is the same label Anaconda uses for inst.stage2=hd:LABEL=<label>.
-func readISOVolumeLabel(isoPath string) (string, error) {
+func ReadISOVolumeLabel(isoPath string) (string, error) {
 	// Try isoinfo first (part of genisoimage / cdrtools — already a clonr dep).
 	if path, err := exec.LookPath("isoinfo"); err == nil {
 		out, err := exec.Command(path, "-d", "-i", isoPath).CombinedOutput()

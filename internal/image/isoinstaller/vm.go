@@ -110,6 +110,11 @@ type BuildOptions struct {
 	// Allowed values: "disabled", "permissive", "enforcing".
 	// Default (empty): "disabled" — correct for most HPC clusters.
 	SELinuxMode string
+
+	// BaseEnvironment is the comps @^<id> group to install in the kickstart
+	// %packages section. Only used for RHEL-family kickstart builds.
+	// When empty, "minimal-environment" is used as the backward-compatible default.
+	BaseEnvironment string
 }
 
 // BuildResult is returned by a successful Build call.

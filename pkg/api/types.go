@@ -932,6 +932,32 @@ type ImportISORequest struct {
 	Version string `json:"version"`
 }
 
+// ISOEnvironmentGroup describes one installable environment group from an
+// ISO's comps XML, as returned by POST /api/v1/factory/probe-iso.
+type ISOEnvironmentGroup struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	DisplayOrder int    `json:"display_order,omitempty"`
+	IsDefault    bool   `json:"is_default"`
+}
+
+// ProbeISORequest is the body for POST /api/v1/factory/probe-iso.
+type ProbeISORequest struct {
+	URL string `json:"url"`
+}
+
+// ProbeISOResponse is returned by POST /api/v1/factory/probe-iso.
+type ProbeISOResponse struct {
+	URL         string                `json:"url"`
+	Distro      string                `json:"distro"`
+	VolumeLabel string                `json:"volume_label,omitempty"`
+	Environments []ISOEnvironmentGroup `json:"environments"`
+	// NoComps is true when the ISO does not contain comps XML (Ubuntu, Debian,
+	// minimal ISOs without group data). The UI should suppress the picker.
+	NoComps bool `json:"no_comps,omitempty"`
+}
+
 // CaptureRequest is the body for POST /api/v1/factory/capture.
 type CaptureRequest struct {
 	// SourceHost is the SSH-reachable hostname or IP of the node to capture.
@@ -1037,6 +1063,12 @@ type BuildFromISORequest struct {
 
 	// Notes is a free-text description stored on the resulting image.
 	Notes string `json:"notes,omitempty"`
+
+	// BaseEnvironment is the comps environment group to install, e.g.
+	// "minimal-environment" or "server-product-environment". Only applies to
+	// RHEL-family kickstart builds. When empty, "minimal-environment" is used.
+	// Obtain valid values from POST /api/v1/factory/probe-iso before building.
+	BaseEnvironment string `json:"base_environment,omitempty"`
 }
 
 // ImageRoleResponse is the wire type for a single HPC role preset returned by
