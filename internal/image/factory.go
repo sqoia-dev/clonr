@@ -1547,9 +1547,9 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 	ph.SetPhase("creating_disk")
 
 	// Extend the install timeout when OS updates are requested.
-	installTimeout := 30 * time.Minute
+	installTimeout := 45 * time.Minute
 	if req.InstallUpdates {
-		installTimeout = 60 * time.Minute
+		installTimeout = 90 * time.Minute
 	}
 
 	buildOpts := isoinstaller.BuildOptions{
