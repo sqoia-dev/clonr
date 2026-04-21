@@ -294,6 +294,9 @@ func (s *Server) buildRouter() chi.Router {
 		SystemAccountsConfig: func(ctx context.Context) (*api.SystemAccountsNodeConfig, error) {
 			return s.sysAccountsMgr.NodeConfig(ctx)
 		},
+		NetworkConfig: func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error) {
+			return s.networkMgr.NodeNetworkConfig(ctx, groupID)
+		},
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
@@ -458,6 +461,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/factory/import-path", factory.ImportPath)
 			r.Post("/factory/import-iso", factory.ImportPath) // alias used by the web UI
 			r.Post("/factory/capture", factory.Capture)
+			r.Post("/factory/probe-iso", factory.ProbeISO)
 			r.Post("/factory/build-from-iso", factory.BuildFromISO)
 
 			// ISO build observability — stream must come before plain snapshot route.

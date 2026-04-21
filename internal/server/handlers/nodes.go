@@ -55,6 +55,9 @@ type NodesHandler struct {
 	// SystemAccountsConfig returns the current set of system accounts/groups for
 	// embed in the NodeConfig returned to the deploy agent. Returns nil if none defined.
 	SystemAccountsConfig func(ctx context.Context) (*api.SystemAccountsNodeConfig, error)
+	// NetworkConfig, when non-nil, is called during RegisterNode to resolve the
+	// network profile for the node's group. Returns nil if no profile is assigned.
+	NetworkConfig func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error)
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -426,6 +429,16 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch system accounts config (non-fatal)")
 		} else {
 			nodeCfg.SystemAccounts = saCfg
+		}
+	}
+
+	// Populate network config if the node's group has a network profile assigned.
+	// The deploy agent writes NM keyfiles for bonds, VLANs, and IPoIB during finalization.
+	if h.NetworkConfig != nil && action == "deploy" && nodeCfg.GroupID != "" {
+		if netCfg, err := h.NetworkConfig(r.Context(), nodeCfg.GroupID); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch network config (non-fatal)")
+		} else {
+			nodeCfg.NetworkConfig = netCfg
 		}
 	}
 
