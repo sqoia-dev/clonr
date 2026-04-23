@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clonr/internal/bootassets"
 	"github.com/sqoia-dev/clonr/internal/config"
 )
 
@@ -29,6 +31,17 @@ func New(cfg config.PXEConfig) (*Server, error) {
 	// Ensure TFTP directory exists.
 	if err := os.MkdirAll(cfg.TFTPDir, 0o755); err != nil {
 		return nil, fmt.Errorf("pxe: create tftp dir %s: %w", cfg.TFTPDir, err)
+	}
+	// Auto-populate ipxe.efi from the embedded binary if not already present.
+	// This ensures the TFTP server can serve ipxe.efi to legacy BIOS PXE clients
+	// immediately after install, without requiring a manual file placement step.
+	ipxeEFIPath := filepath.Join(cfg.TFTPDir, "ipxe.efi")
+	if _, statErr := os.Stat(ipxeEFIPath); os.IsNotExist(statErr) {
+		if writeErr := os.WriteFile(ipxeEFIPath, bootassets.IPXEEFI, 0o644); writeErr != nil {
+			log.Warn().Err(writeErr).Str("path", ipxeEFIPath).Msg("pxe: failed to auto-populate ipxe.efi in TFTP dir")
+		} else {
+			log.Info().Str("path", ipxeEFIPath).Int("bytes", len(bootassets.IPXEEFI)).Msg("pxe: auto-populated ipxe.efi from embedded assets")
+		}
 	}
 	// Ensure boot directory exists.
 	if err := os.MkdirAll(cfg.BootDir, 0o755); err != nil {

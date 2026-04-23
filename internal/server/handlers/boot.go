@@ -3,16 +3,19 @@ package handlers
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
 	"github.com/sqoia-dev/clonr/internal/bootassets"
 	"github.com/sqoia-dev/clonr/internal/db"
 	"github.com/sqoia-dev/clonr/internal/pxe"
+	"github.com/sqoia-dev/clonr/pkg/api"
 )
 
 // BootHandler serves boot assets and dynamic iPXE scripts over HTTP.
@@ -223,15 +226,54 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(script)
 			return
 		}
-		// Unknown MAC (ErrNotFound): node will self-register on boot. Serve script
-		// without a token — the node has no ID yet and will register first, then
-		// receive a token on its next PXE boot (triggered by the reimage flow).
+		// Unknown MAC (ErrNotFound): auto-register the node so it receives a token
+		// immediately rather than booting without one and stalling in the initramfs.
+		if errors.Is(err, api.ErrNotFound) {
+			// Derive a deterministic-looking hostname from the last 6 hex digits of
+			// the MAC. e.g. "bc:24:11:da:58:6a" → "node-da586a".
+			macClean := strings.ReplaceAll(mac, ":", "")
+			shortMAC := macClean
+			if len(macClean) >= 6 {
+				shortMAC = macClean[len(macClean)-6:]
+			}
+			hostname := fmt.Sprintf("node-%s", shortMAC)
+			nodeID := uuid.New().String()
+
+			newNode := api.NodeConfig{
+				ID:           nodeID,
+				Hostname:     hostname,
+				HostnameAuto: true,
+				PrimaryMAC:   mac,
+			}
+			created, upsertErr := h.DB.UpsertNodeByMAC(r.Context(), newNode)
+			if upsertErr != nil {
+				log.Error().Err(upsertErr).Str("mac", mac).Msg("boot: auto-register: UpsertNodeByMAC failed")
+				// Fall through to tokenless script on error.
+			} else {
+				log.Info().
+					Str("mac", mac).
+					Str("hostname", created.Hostname).
+					Str("node_id", created.ID).
+					Msg("boot: auto-registered unknown MAC — serving boot script with fresh token")
+				token := h.mintToken(r, created.ID)
+				autoScript, genErr := pxe.GenerateBootScript(h.ServerURL, "clonr-node-"+token)
+				if genErr != nil {
+					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script for auto-registered node")
+					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(autoScript)
+				return
+			}
+		}
 	} else if mac == "" {
 		log.Warn().Msg("boot: iPXE script requested without ?mac= -- returning full boot script")
 	}
 
 	// Default: return the full clonr initramfs boot script with no token.
-	// Covers: unknown MACs and requests without a MAC parameter.
+	// Covers: requests without a MAC parameter, or auto-register failures.
 	script, err := pxe.GenerateBootScript(h.ServerURL, "")
 	if err != nil {
 		log.Error().Err(err).Msg("boot: generate iPXE script")

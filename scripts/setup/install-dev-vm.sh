@@ -310,6 +310,32 @@ install_autodeploy() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 7b: PXE provisioning network (eth1 static IP)
+# ---------------------------------------------------------------------------
+setup_pxe_network() {
+    info "Configuring eth1 as PXE provisioning NIC (10.99.0.1/24)"
+
+    if ! ip link show eth1 &>/dev/null; then
+        warn "eth1 not found — skipping PXE network config (run again after NIC is attached)"
+        return
+    fi
+
+    # Create the NetworkManager connection profile for eth1 if not already present.
+    if ! nmcli con show pxe-net &>/dev/null; then
+        nmcli con add type ethernet con-name pxe-net ifname eth1 \
+            ipv4.method manual ipv4.addresses 10.99.0.1/24
+        log "Created NetworkManager profile 'pxe-net' for eth1"
+    else
+        log "NetworkManager profile 'pxe-net' already exists"
+    fi
+
+    # Bring the connection up (idempotent).
+    nmcli con up pxe-net || warn "nmcli con up pxe-net failed — interface may already be configured"
+
+    step_done "PXE provisioning NIC (eth1 = 10.99.0.1/24)"
+}
+
+# ---------------------------------------------------------------------------
 # Step 8: Firewall
 # ---------------------------------------------------------------------------
 configure_firewall() {
@@ -334,16 +360,19 @@ configure_firewall() {
         --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=8080 protocol=tcp accept' \
         --permanent
 
-    # Provisioning network (10.99.0.0/24): TFTP + HTTP API + DHCP
+    # Provisioning network (10.99.0.0/24): TFTP + HTTP API
     firewall-cmd --zone=drop \
         --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=69 protocol=udp accept' \
         --permanent
     firewall-cmd --zone=drop \
         --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=8080 protocol=tcp accept' \
         --permanent
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=67 protocol=udp accept' \
-        --permanent
+
+    # DHCP (UDP 67): PXE clients send DHCPDISCOVER from 0.0.0.0 (before they have
+    # an IP), so source-address rich rules will never match. Use a direct iptables
+    # rule scoped to eth1 to accept DHCP on the provisioning interface only.
+    firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 \
+        -i eth1 -p udp --dport 67 -j ACCEPT
 
     firewall-cmd --reload
     step_done "firewalld"
@@ -459,6 +488,7 @@ setup_repo
 build_binaries
 install_service
 install_autodeploy
+setup_pxe_network
 configure_firewall
 harden_ssh
 install_udev_rules
