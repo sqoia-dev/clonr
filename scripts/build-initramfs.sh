@@ -106,8 +106,32 @@ elif [[ -f /usr/lib/busybox/busybox-static ]]; then
     chmod 755 "$WORKDIR/bin/busybox"
     echo "  [+] Using /usr/lib/busybox/busybox-static"
 else
-    echo "ERROR: cannot obtain a static busybox binary" >&2
-    exit 1
+    echo "  [*] Busybox not found — attempting package manager install..."
+    if command -v dnf &>/dev/null; then
+        dnf install -y busybox 2>&1 | tail -3
+    elif command -v yum &>/dev/null; then
+        yum install -y busybox 2>&1 | tail -3
+    elif command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y busybox-static 2>&1 | tail -3
+    elif command -v zypper &>/dev/null; then
+        zypper install -y busybox-static 2>&1 | tail -3
+    elif command -v pacman &>/dev/null; then
+        pacman -S --noconfirm busybox 2>&1 | tail -3
+    fi
+
+    # Re-check after install attempt
+    if command -v busybox &>/dev/null; then
+        cp "$(command -v busybox)" "$WORKDIR/bin/busybox"
+        chmod 755 "$WORKDIR/bin/busybox"
+        echo "  [+] Installed and using system busybox: $(command -v busybox)"
+    elif [[ -f /usr/sbin/busybox ]]; then
+        cp /usr/sbin/busybox "$WORKDIR/bin/busybox"
+        chmod 755 "$WORKDIR/bin/busybox"
+        echo "  [+] Installed and using system busybox: /usr/sbin/busybox"
+    else
+        echo "ERROR: cannot obtain a static busybox binary — install busybox manually" >&2
+        exit 1
+    fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
