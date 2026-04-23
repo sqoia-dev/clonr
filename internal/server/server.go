@@ -303,6 +303,7 @@ func (s *Server) buildRouter() chi.Router {
 		NetworkConfig: func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error) {
 			return s.networkMgr.NodeNetworkConfig(ctx, groupID)
 		},
+		ServerIP: s.cfg.PXE.ServerIP,
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}

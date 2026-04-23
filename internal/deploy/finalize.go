@@ -151,6 +151,17 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 	}
 	log.Info().Str("hostname", cfg.Hostname).Msg("finalize: wrote /etc/hostname")
 
+	if len(cfg.ClusterHosts) > 0 {
+		log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: writing cluster hosts to /etc/hosts")
+		if err := writeClusterHosts(mountRoot, cfg.ClusterHosts); err != nil {
+			// Non-fatal: LDAP and other services may still work via broadcast or
+			// manual /etc/hosts. Log prominently so the operator knows to investigate.
+			log.Warn().Err(err).Msg("WARNING: finalize: cluster hosts write failed (non-fatal)")
+		} else {
+			log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: wrote cluster hosts to /etc/hosts")
+		}
+	}
+
 	log.Info().Int("interfaces", len(cfg.Interfaces)).Msg("finalize: writing NetworkManager connection profiles")
 	if err := writeNetworkConfig(mountRoot, cfg.Interfaces); err != nil {
 		return fmt.Errorf("finalize: network: %w", err)
@@ -432,6 +443,67 @@ func writeHostname(mountRoot, hostname, fqdn string) error {
 		content += "\n"
 	}
 	return os.WriteFile(hostsFile, []byte(content), 0o644)
+}
+
+const (
+	clusterHostsBegin = "# --- clonr cluster hosts (auto-generated) ---"
+	clusterHostsEnd   = "# --- end clonr cluster hosts ---"
+)
+
+// writeClusterHosts writes a clearly delimited block of cluster host entries
+// into the deployed filesystem's /etc/hosts. The block is idempotent: if a
+// clonr cluster block already exists (from a previous deploy), it is replaced.
+// Standard localhost entries are preserved; only the cluster block is managed.
+func writeClusterHosts(mountRoot string, hosts []api.HostEntry) error {
+	hostsFile := filepath.Join(mountRoot, "etc", "hosts")
+	existing, err := os.ReadFile(hostsFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read /etc/hosts: %w", err)
+	}
+
+	// Rebuild the file: keep all lines that are NOT inside an existing cluster block,
+	// then append the new cluster block at the end.
+	var kept []string
+	inBlock := false
+	for _, line := range strings.Split(string(existing), "\n") {
+		if line == clusterHostsBegin {
+			inBlock = true
+			continue
+		}
+		if line == clusterHostsEnd {
+			inBlock = false
+			continue
+		}
+		if !inBlock {
+			kept = append(kept, line)
+		}
+	}
+
+	// Strip trailing blank lines before appending the new block, then ensure
+	// exactly one blank line separates the existing content from the block.
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
+
+	var sb strings.Builder
+	if len(kept) > 0 {
+		sb.WriteString(strings.Join(kept, "\n"))
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString(clusterHostsBegin)
+	sb.WriteString("\n")
+	for _, h := range hosts {
+		if h.FQDN != "" && h.FQDN != h.Hostname {
+			fmt.Fprintf(&sb, "%-15s %s %s\n", h.IP, h.FQDN, h.Hostname)
+		} else {
+			fmt.Fprintf(&sb, "%-15s %s\n", h.IP, h.Hostname)
+		}
+	}
+	sb.WriteString(clusterHostsEnd)
+	sb.WriteString("\n")
+
+	return os.WriteFile(hostsFile, []byte(sb.String()), 0o644)
 }
 
 // writeNetworkConfig writes NetworkManager keyfile connections for each interface.

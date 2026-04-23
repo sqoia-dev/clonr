@@ -362,6 +362,14 @@ type LDAPNodeConfig struct {
 	CACertPEM string `json:"ca_cert_pem"`
 }
 
+// HostEntry represents a single /etc/hosts entry for a cluster node.
+// Populated transiently at registration time; never stored in the database.
+type HostEntry struct {
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname"`
+	FQDN     string `json:"fqdn,omitempty"`
+}
+
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
@@ -404,6 +412,12 @@ type NodeConfig struct {
 	// This is additive to Interfaces: both are written; Interfaces handles simple
 	// static IPs, NetworkConfig handles bonds, VLANs, and IPoIB.
 	NetworkConfig *NetworkNodeConfig `json:"network_config,omitempty"`
+
+	// ClusterHosts is the full cluster host roster injected at registration time.
+	// Finalization writes these into /etc/hosts so nodes can resolve each other
+	// and the clonr server before DNS/LDAP is available.
+	// Transient: populated at registration, never stored in the database.
+	ClusterHosts []HostEntry `json:"cluster_hosts,omitempty"`
 
 	// ExtraMounts holds additional /etc/fstab entries written during finalization.
 	// The effective list is group mounts merged with node mounts; use
