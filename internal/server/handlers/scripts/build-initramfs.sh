@@ -35,6 +35,40 @@ else
     LOCAL_MODE=0
 fi
 
+# Binary → package mapping for auto-install of missing tools.
+# Format: TOOL_PACKAGES[binary_name]="rpm_pkg:deb_pkg"
+declare -A TOOL_PACKAGES=(
+    [mdadm]="mdadm:mdadm"
+    [sgdisk]="gdisk:gdisk"
+    [mkfs.xfs]="xfsprogs:xfsprogs"
+    [mkfs.ext4]="e2fsprogs:e2fsprogs"
+    [mkfs.vfat]="dosfstools:dosfstools"
+    [partprobe]="parted:parted"
+    [partx]="util-linux:util-linux"
+    [wipefs]="util-linux:util-linux"
+    [blockdev]="util-linux:util-linux"
+    [mkswap]="util-linux:util-linux"
+    [blkid]="util-linux:util-linux"
+    [grub2-install]="grub2-tools:grub2-common"
+    [grub2-mkconfig]="grub2-tools:grub2-common"
+    [fsfreeze]="util-linux:util-linux"
+    [efibootmgr]="efibootmgr:efibootmgr"
+    [mount]="util-linux:util-linux"
+    [umount]="util-linux:util-linux"
+    [tar]="tar:tar"
+    [gzip]="gzip:gzip"
+    [pigz]="pigz:pigz"
+    [zstd]="zstd:zstd"
+    [rsync]="rsync:rsync"
+    [udevadm]="systemd:udev"
+    [curl]="curl:curl"
+    [lsblk]="util-linux:util-linux"
+    [cpio]="cpio:cpio"
+    [file]="file:file"
+    [sshpass]="sshpass:sshpass"
+    [busybox]="busybox:busybox-static"
+)
+
 # Remote execution / copy helpers — use local commands when on the same host.
 remote_exec() {
     if [[ "$LOCAL_MODE" -eq 1 ]]; then
@@ -65,6 +99,45 @@ remote_copy_r() {
     fi
 }
 
+# ensure_tool_installed <binary_name>
+# If the binary isn't found on the host (local mode) or remote server,
+# attempt to install the package that provides it.
+ensure_tool_installed() {
+    local bin_name="$1"
+
+    # Check if already available
+    if remote_exec "command -v ${bin_name} >/dev/null 2>&1"; then
+        return 0
+    fi
+
+    local pkg_spec="${TOOL_PACKAGES[$bin_name]:-}"
+    if [[ -z "$pkg_spec" ]]; then
+        echo "      WARNING: ${bin_name} not found and no package mapping exists" >&2
+        return 1
+    fi
+
+    local rpm_pkg="${pkg_spec%%:*}"
+    local deb_pkg="${pkg_spec##*:}"
+
+    echo "      [*] ${bin_name} not found — installing..."
+    if remote_exec "command -v dnf >/dev/null 2>&1"; then
+        remote_exec "dnf install -y ${rpm_pkg} 2>&1 | tail -3" || true
+    elif remote_exec "command -v yum >/dev/null 2>&1"; then
+        remote_exec "yum install -y ${rpm_pkg} 2>&1 | tail -3" || true
+    elif remote_exec "command -v apt-get >/dev/null 2>&1"; then
+        remote_exec "apt-get update -qq && apt-get install -y ${deb_pkg} 2>&1 | tail -3" || true
+    fi
+
+    # Verify it's now available
+    if remote_exec "command -v ${bin_name} >/dev/null 2>&1"; then
+        echo "      [+] Installed ${bin_name} via package manager"
+        return 0
+    else
+        echo "      WARNING: ${bin_name} still not found after install attempt" >&2
+        return 1
+    fi
+}
+
 # Verify the binary exists and is executable.
 if [[ ! -f "$CLONR_BIN" ]]; then
     echo "ERROR: clonr binary not found: $CLONR_BIN" >&2
@@ -72,14 +145,31 @@ if [[ ! -f "$CLONR_BIN" ]]; then
 fi
 
 # Check required tools (sshpass only needed in remote mode).
+# Auto-install any missing tools using the system package manager.
 REQUIRED_TOOLS=(cpio gzip)
 if [[ "$LOCAL_MODE" -eq 0 ]]; then
     REQUIRED_TOOLS+=(sshpass)
 fi
 for tool in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$tool" &>/dev/null; then
-        echo "ERROR: required tool not found: $tool" >&2
-        exit 1
+        echo "  [*] Required tool not found: ${tool} — attempting auto-install..."
+        pkg_spec="${TOOL_PACKAGES[$tool]:-}"
+        if [[ -n "$pkg_spec" ]]; then
+            rpm_pkg="${pkg_spec%%:*}"
+            deb_pkg="${pkg_spec##*:}"
+            if command -v dnf &>/dev/null; then
+                dnf install -y "$rpm_pkg" 2>&1 | tail -3
+            elif command -v yum &>/dev/null; then
+                yum install -y "$rpm_pkg" 2>&1 | tail -3
+            elif command -v apt-get &>/dev/null; then
+                apt-get update -qq && apt-get install -y "$deb_pkg" 2>&1 | tail -3
+            fi
+        fi
+        if ! command -v "$tool" &>/dev/null; then
+            echo "ERROR: required tool not found and could not be installed: $tool" >&2
+            exit 1
+        fi
+        echo "  [+] Installed required tool: ${tool}"
     fi
 done
 
@@ -137,17 +227,7 @@ elif [[ -f /usr/lib/busybox/busybox-static ]]; then
     echo "  [+] Using /usr/lib/busybox/busybox-static"
 else
     echo "  [*] Busybox not found — attempting package manager install..."
-    if command -v dnf &>/dev/null; then
-        dnf install -y busybox 2>&1 | tail -3
-    elif command -v yum &>/dev/null; then
-        yum install -y busybox 2>&1 | tail -3
-    elif command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y busybox-static 2>&1 | tail -3
-    elif command -v zypper &>/dev/null; then
-        zypper install -y busybox-static 2>&1 | tail -3
-    elif command -v pacman &>/dev/null; then
-        pacman -S --noconfirm busybox 2>&1 | tail -3
-    fi
+    ensure_tool_installed busybox || true
 
     # Re-check after install attempt
     if command -v busybox &>/dev/null; then
@@ -254,6 +334,18 @@ else
             fi
         fi
     done
+
+    # Last resort: attempt to install lsblk via package manager on the target host.
+    if [[ "$LSBLK_INSTALLED" == "false" ]]; then
+        echo "      lsblk not available locally — attempting auto-install on ${CLONR_SERVER_HOST}..."
+        if ensure_tool_installed lsblk; then
+            if remote_copy "/usr/bin/lsblk" "$LSBLK_DEST"; then
+                chmod 755 "$LSBLK_DEST"
+                echo "      fetched lsblk after auto-install"
+                LSBLK_INSTALLED=true
+            fi
+        fi
+    fi
 fi
 
 if [[ "$LSBLK_INSTALLED" == "true" ]]; then
@@ -381,8 +473,12 @@ ${transitive}"
         local remote_path
         remote_path=$(remote_exec "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" || echo "")
         if [[ -z "$remote_path" ]]; then
-            echo "      WARNING: ${bin_name} not found on ${CLONR_SERVER_HOST}" >&2
-            return 1
+            ensure_tool_installed "$bin_name" || return 1
+            remote_path=$(remote_exec "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" || echo "")
+            if [[ -z "$remote_path" ]]; then
+                echo "      WARNING: ${bin_name} not found on ${CLONR_SERVER_HOST}" >&2
+                return 1
+            fi
         fi
         install_server_binary "$remote_path" "$dest_dir"
     }
