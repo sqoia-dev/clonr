@@ -1326,8 +1326,9 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 		req.CPUs = 2
 	}
 
-	// Pre-flight: check required host binaries before creating the DB record.
-	missing := isoinstaller.CheckDependencies()
+	// Pre-flight: ensure required host binaries are present, auto-installing
+	// any missing packages before creating the DB record.
+	missing := isoinstaller.EnsureDependencies()
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("factory: ISO build requires missing host tools: %s — "+
 			"install them on the clonr-server host (e.g. dnf install qemu-kvm qemu-img genisoimage)",

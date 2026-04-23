@@ -90,6 +90,12 @@ install_packages() {
         xz \
         binutils \
         sshpass \
+        qemu-kvm \
+        qemu-img \
+        genisoimage \
+        xorriso \
+        p7zip \
+        p7zip-plugins \
         2>&1 | tail -5
     step_done "system packages"
 }

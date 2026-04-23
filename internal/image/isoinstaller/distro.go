@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Distro identifies the Linux distribution family of an installer ISO.
@@ -236,35 +238,81 @@ func FindQEMU() (string, bool) {
 	return "", false
 }
 
-// CheckDependencies returns a list of missing host binaries required to run
-// the ISO installer. Callers should surface these as actionable errors before
-// attempting a build rather than failing deep in the goroutine.
-func CheckDependencies() []string {
+// EnsureDependencies checks for required host binaries needed by the ISO
+// installer. When a tool is missing it attempts to install the appropriate
+// package via the system package manager (dnf/yum/apt-get). Only tools that
+// are still absent after the install attempt are returned as missing.
+//
+// Callers should surface a non-empty return value as an actionable error
+// before attempting a build rather than failing deep in a goroutine.
+func EnsureDependencies() []string {
 	var missing []string
 
 	// qemu: check via FindQEMU which handles RHEL vs Debian binary paths.
 	if _, ok := FindQEMU(); !ok {
-		missing = append(missing, "qemu-system-x86_64 (or /usr/libexec/qemu-kvm on RHEL/Rocky)")
+		tryInstallPackage("qemu-kvm", "qemu-system-x86")
+		if _, ok := FindQEMU(); !ok {
+			missing = append(missing, "qemu-system-x86_64 (or /usr/libexec/qemu-kvm on RHEL/Rocky)")
+		}
 	}
 
 	// qemu-img is always in $PATH even on RHEL.
 	if _, err := exec.LookPath("qemu-img"); err != nil {
-		missing = append(missing, "qemu-img")
+		tryInstallPackage("qemu-img", "qemu-utils")
+		if _, err := exec.LookPath("qemu-img"); err != nil {
+			missing = append(missing, "qemu-img")
+		}
 	}
 
 	// Either genisoimage or xorriso must be present (for building the seed ISO).
-	geiso := false
-	for _, bin := range []string{"genisoimage", "xorriso"} {
-		if _, err := exec.LookPath(bin); err == nil {
-			geiso = true
-			break
+	hasISO := func() bool {
+		for _, bin := range []string{"genisoimage", "xorriso"} {
+			if _, err := exec.LookPath(bin); err == nil {
+				return true
+			}
 		}
+		return false
 	}
-	if !geiso {
-		missing = append(missing, "genisoimage or xorriso")
+	if !hasISO() {
+		tryInstallPackage("genisoimage", "genisoimage")
+		if !hasISO() {
+			missing = append(missing, "genisoimage or xorriso")
+		}
 	}
 
 	return missing
+}
+
+// tryInstallPackage attempts to install a package using the system package
+// manager. rpmPkg is used for dnf/yum systems; debPkg for apt-get systems.
+// Errors are logged but not returned — the caller re-checks after the attempt.
+func tryInstallPackage(rpmPkg, debPkg string) {
+	type pm struct {
+		cmd     string
+		install string
+	}
+	managers := []pm{
+		{"dnf", "dnf install -y " + rpmPkg},
+		{"yum", "yum install -y " + rpmPkg},
+		{"apt-get", "apt-get update -qq && apt-get install -y " + debPkg},
+	}
+	for _, m := range managers {
+		if _, err := exec.LookPath(m.cmd); err != nil {
+			continue
+		}
+		log.Info().Str("package_manager", m.cmd).Str("package", rpmPkg).
+			Msgf("[isoinstaller] auto-installing missing package: %s", m.install)
+		cmd := exec.Command("bash", "-c", m.install)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Warn().Err(err).Str("command", m.install).
+				Msg("[isoinstaller] package install failed")
+		}
+		return
+	}
+	log.Warn().Str("rpm_package", rpmPkg).Str("deb_package", debPkg).
+		Msg("[isoinstaller] no supported package manager found; cannot auto-install")
 }
 
 // HasKVM returns true when /dev/kvm is accessible. When false the VM will
