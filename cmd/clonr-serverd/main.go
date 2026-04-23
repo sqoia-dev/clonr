@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/rs/zerolog"
@@ -247,7 +248,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		BuildTime: buildTime,
 	})
 
-	// Wire PXE switch-discovery callback now that the network manager is available.
+	// Wire PXE callbacks now that the network manager and database are available.
 	if pxeSrv != nil {
 		netMgr := srv.NetworkManager()
 		pxeSrv.DHCPServer.OnSwitchDiscovered = func(mac, vendor, ip string) {
@@ -255,6 +256,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 				log.Error().Err(err).Str("mac", mac).Str("vendor", vendor).
 					Msg("DHCP: switch auto-discovery failed")
 			}
+		}
+		// Wire DHCP MAC→IP reservation lookup so nodes with a static IP configured
+		// on their InterfaceConfig are always offered that IP rather than a pool address.
+		pxeSrv.DHCPServer.ResolveReservedIP = func(mac string) net.IP {
+			nodeCfg, err := database.GetNodeConfigByMAC(context.Background(), strings.ToLower(mac))
+			if err != nil {
+				// Node not registered — fall through to pool allocation.
+				return nil
+			}
+			for _, iface := range nodeCfg.Interfaces {
+				if iface.IPAddress != "" {
+					ip, _, parseErr := net.ParseCIDR(iface.IPAddress)
+					if parseErr == nil {
+						return ip
+					}
+				}
+			}
+			// Registered node but no IP configured — fall through to pool allocation.
+			return nil
 		}
 		go func() {
 			if err := pxeSrv.Start(ctx); err != nil {

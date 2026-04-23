@@ -49,6 +49,13 @@ type DHCPServer struct {
 	// Arguments: mac (hardware address string), vendor (lowercase identifier),
 	// ip (the leased IP string). May be nil — if so, detection is skipped.
 	OnSwitchDiscovered func(mac, vendor, ip string)
+
+	// ResolveReservedIP returns the static IP assigned to a registered node by
+	// its MAC address. When non-nil and the lookup returns a non-nil IP, the
+	// DHCP server serves that IP instead of allocating from the pool. This
+	// implements DHCP reservations for nodes that have a static IP configured
+	// in their InterfaceConfig. May be nil — if so, reservation lookup is skipped.
+	ResolveReservedIP func(mac string) net.IP
 }
 
 // detectSwitch inspects a DHCP Option 60 vendor class string and returns
@@ -307,18 +314,46 @@ func bootFilename(req *dhcpv4.DHCPv4, isIPXE bool, serverIP net.IP, httpPort str
 }
 
 // acquireOrAssignIP finds an existing lease or assigns a new IP from the pool.
+// If ResolveReservedIP is set and returns a non-nil IP for this MAC, that
+// reserved IP is served instead of a pool address (DHCP reservation).
 func (d *DHCPServer) acquireOrAssignIP(mac string) net.IP {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	now := time.Now()
 
-	// Check existing (non-expired) lease.
+	// Check existing (non-expired) lease first — covers both reserved and pool IPs.
 	if lease, ok := d.leases[mac]; ok && lease.ExpiresAt.After(now) {
 		return lease.IP
 	}
 
-	// Collect IPs currently in use by non-expired leases.
+	// Check for a static IP reservation before falling back to the pool.
+	// ResolveReservedIP is called outside the lock window for the DB query, but
+	// the lock is held here for the lease-map write — that is safe because the
+	// callback must not call back into DHCPServer.
+	if d.ResolveReservedIP != nil {
+		// Release lock briefly while calling the potentially-blocking DB lookup.
+		d.mu.Unlock()
+		reservedIP := d.ResolveReservedIP(mac)
+		d.mu.Lock()
+
+		if reservedIP != nil {
+			// Re-check the lease map in case another goroutine wrote one while
+			// we had the lock released.
+			if lease, ok := d.leases[mac]; ok && lease.ExpiresAt.After(now) {
+				return lease.IP
+			}
+			d.leases[mac] = leaseEntry{
+				IP:        cloneIP(reservedIP.To4()),
+				ExpiresAt: now.Add(d.leaseDur),
+			}
+			log.Info().Str("mac", mac).Str("ip", reservedIP.String()).
+				Msg("DHCP: serving reserved static IP for registered node")
+			return d.leases[mac].IP
+		}
+	}
+
+	// No reservation — collect IPs currently in use by non-expired leases.
 	inUse := make(map[string]bool, len(d.leases))
 	for _, l := range d.leases {
 		if l.ExpiresAt.After(now) {
@@ -333,6 +368,8 @@ func (d *DHCPServer) acquireOrAssignIP(mac string) net.IP {
 				IP:        ip,
 				ExpiresAt: now.Add(d.leaseDur),
 			}
+			log.Info().Str("mac", mac).Str("ip", ip.String()).
+				Msg("DHCP: serving pool IP for unregistered or unconfigured node")
 			return ip
 		}
 	}
