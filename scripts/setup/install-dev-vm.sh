@@ -73,6 +73,16 @@ install_packages() {
         gdisk \
         firewalld \
         xfsprogs \
+        e2fsprogs \
+        dosfstools \
+        parted \
+        mdadm \
+        grub2-tools \
+        grub2-efi-x64-modules \
+        efibootmgr \
+        pigz \
+        zstd \
+        rsync \
         util-linux \
         busybox \
         cpio \

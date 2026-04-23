@@ -28,14 +28,55 @@ CLONR_SERVER_HOST="${CLONR_SERVER_HOST:-192.168.1.151}"
 CLONR_SERVER_USER="${CLONR_SERVER_USER:-clonr}"
 CLONR_SERVER_PASS="${CLONR_SERVER_PASS:-clonr}"
 
+# Detect local mode — skip SSH when building on the server itself.
+if [[ "$CLONR_SERVER_HOST" == "127.0.0.1" || "$CLONR_SERVER_HOST" == "localhost" || "$CLONR_SERVER_HOST" == "::1" ]]; then
+    LOCAL_MODE=1
+else
+    LOCAL_MODE=0
+fi
+
+# Remote execution / copy helpers — use local commands when on the same host.
+remote_exec() {
+    if [[ "$LOCAL_MODE" -eq 1 ]]; then
+        bash -c "$1" 2>/dev/null
+    else
+        sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "$1" 2>/dev/null
+    fi
+}
+
+remote_copy() {
+    local src="$1" dst="$2"
+    if [[ "$LOCAL_MODE" -eq 1 ]]; then
+        cp -f "$src" "$dst" 2>/dev/null
+    else
+        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
+    fi
+}
+
+remote_copy_r() {
+    local src="$1" dst="$2"
+    if [[ "$LOCAL_MODE" -eq 1 ]]; then
+        cp -rf "$src" "$dst" 2>/dev/null
+    else
+        sshpass -p "$CLONR_SERVER_PASS" scp -r -o StrictHostKeyChecking=no \
+            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
+    fi
+}
+
 # Verify the binary exists and is executable.
 if [[ ! -f "$CLONR_BIN" ]]; then
     echo "ERROR: clonr binary not found: $CLONR_BIN" >&2
     exit 1
 fi
 
-# Check required tools.
-for tool in cpio gzip sshpass; do
+# Check required tools (sshpass only needed in remote mode).
+REQUIRED_TOOLS=(cpio gzip)
+if [[ "$LOCAL_MODE" -eq 0 ]]; then
+    REQUIRED_TOOLS+=(sshpass)
+fi
+for tool in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$tool" &>/dev/null; then
         echo "ERROR: required tool not found: $tool" >&2
         exit 1
@@ -145,16 +186,14 @@ LSBLK_DEST="$WORKDIR/usr/bin/lsblk"
 
 # Helper: try to fetch lsblk from the clonr-server.
 fetch_lsblk_from_server() {
-    if ! command -v sshpass &>/dev/null; then
+    if [[ "$LOCAL_MODE" -eq 0 ]] && ! command -v sshpass &>/dev/null; then
         echo "      sshpass not found — cannot fetch lsblk from server" >&2
         return 1
     fi
 
     # Copy the binary.
-    if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-        "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:/usr/bin/lsblk" \
-        "$LSBLK_DEST" 2>/dev/null; then
-        echo "      failed to scp lsblk from ${CLONR_SERVER_HOST}" >&2
+    if ! remote_copy "/usr/bin/lsblk" "$LSBLK_DEST"; then
+        echo "      failed to copy lsblk from ${CLONR_SERVER_HOST}" >&2
         return 1
     fi
     chmod 755 "$LSBLK_DEST"
@@ -168,8 +207,7 @@ fetch_lsblk_from_server() {
 
     # Dynamically linked — copy required shared libraries from the server.
     echo "      lsblk is dynamically linked — fetching required libs..."
-    NEEDED_LIBS=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-        "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "ldd /usr/bin/lsblk 2>/dev/null" | \
+    NEEDED_LIBS=$(remote_exec "ldd /usr/bin/lsblk 2>/dev/null" | \
         grep -oP '/[^ ]+\.so[^ ]*' | sort -u 2>/dev/null || true)
 
     if [[ -z "$NEEDED_LIBS" ]]; then
@@ -180,22 +218,16 @@ fetch_lsblk_from_server() {
     for lib in $NEEDED_LIBS; do
         lib_dir="$WORKDIR$(dirname "$lib")"
         mkdir -p "$lib_dir"
-        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${lib}" \
-            "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
+        remote_copy "${lib}" "${lib_dir}/$(basename "$lib")" || \
             echo "      WARNING: could not fetch lib $lib" >&2
     done
 
     # Set up /lib64/ld-linux-x86-64.so.2 symlink if needed (glibc dynamic linker).
     if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
-        LINKER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-            "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
+        LINKER=$(remote_exec "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" || echo "")
         if [[ -n "$LINKER" ]]; then
             mkdir -p "$WORKDIR/lib64"
-            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${LINKER}" \
-                "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
+            remote_copy "${LINKER}" "$WORKDIR/lib64/ld-linux-x86-64.so.2" || true
         fi
     fi
 
@@ -255,7 +287,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 echo "  [+] Installing deployment tools from ${CLONR_SERVER_HOST}..."
 
-if ! command -v sshpass &>/dev/null; then
+if [[ "$LOCAL_MODE" -eq 0 ]] && ! command -v sshpass &>/dev/null; then
     echo "  [!] WARNING: sshpass not found — cannot fetch deployment tools from server" >&2
 else
     # ── Shared library helper ─────────────────────────────────────────────────────
@@ -268,18 +300,14 @@ else
         local remote_path="$1"
         # First-order libs
         local first_order
-        first_order=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-            "ldd ${remote_path} 2>/dev/null" 2>/dev/null | \
+        first_order=$(remote_exec "ldd ${remote_path} 2>/dev/null" | \
             grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
 
         # Collect unique libs across binary + transitive layer
         local all_libs="$first_order"
         for lib in $first_order; do
             local transitive
-            transitive=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-                "ldd ${lib} 2>/dev/null" 2>/dev/null | \
+            transitive=$(remote_exec "ldd ${lib} 2>/dev/null" | \
                 grep -oP '/[^ ]+\.so[^ ]*' | sort -u || true)
             all_libs="${all_libs}
 ${transitive}"
@@ -298,9 +326,7 @@ ${transitive}"
 
         # Copy the binary.
         mkdir -p "$dest_dir"
-        if ! sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${remote_path}" \
-            "${dest_dir}/${bin_name}" 2>/dev/null; then
+        if ! remote_copy "${remote_path}" "${dest_dir}/${bin_name}"; then
             echo "      WARNING: could not fetch ${remote_path}" >&2
             return 1
         fi
@@ -324,30 +350,22 @@ ${transitive}"
             local lib_dir
             lib_dir="$WORKDIR$(dirname "$lib")"
             mkdir -p "$lib_dir"
-            # scp the real file (resolving symlinks on the server side).
+            # Copy the real file (resolving symlinks on the server side).
             # We need the soname symlink too so the dynamic linker finds it by
             # the name embedded in the binary's NEEDED entries.
             local real_lib
-            real_lib=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-                "readlink -f ${lib} 2>/dev/null || echo ${lib}" 2>/dev/null || echo "$lib")
-            sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${real_lib}" \
-                "${lib_dir}/$(basename "$lib")" 2>/dev/null || \
+            real_lib=$(remote_exec "readlink -f ${lib} 2>/dev/null || echo ${lib}" || echo "$lib")
+            remote_copy "${real_lib}" "${lib_dir}/$(basename "$lib")" || \
                 echo "      WARNING: could not fetch lib ${lib}" >&2
         done
 
         # Ensure the dynamic linker itself is present under /lib64/
         if [[ ! -e "$WORKDIR/lib64/ld-linux-x86-64.so.2" ]]; then
             local linker
-            linker=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-                "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-                "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" 2>/dev/null || echo "")
+            linker=$(remote_exec "readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null" || echo "")
             if [[ -n "$linker" ]]; then
                 mkdir -p "$WORKDIR/lib64"
-                sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-                    "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${linker}" \
-                    "$WORKDIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || true
+                remote_copy "${linker}" "$WORKDIR/lib64/ld-linux-x86-64.so.2" || true
             fi
         fi
 
@@ -361,9 +379,7 @@ ${transitive}"
         local bin_name="$1"
         local dest_dir="${2:-$WORKDIR/usr/sbin}"
         local remote_path
-        remote_path=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" \
-            "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" 2>/dev/null || echo "")
+        remote_path=$(remote_exec "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" || echo "")
         if [[ -z "$remote_path" ]]; then
             echo "      WARNING: ${bin_name} not found on ${CLONR_SERVER_HOST}" >&2
             return 1
@@ -453,9 +469,7 @@ ${transitive}"
         # Parent dir inside initramfs (e.g. $WORKDIR/usr/lib for /usr/lib/grub)
         local_parent="$WORKDIR$(dirname "$grub_dir")"
         mkdir -p "$local_parent"
-        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no -r \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${grub_dir}" \
-            "${local_parent}/" 2>/dev/null; then
+        if remote_copy_r "${grub_dir}" "${local_parent}/"; then
             echo "      fetched ${grub_dir} ($(du -sh "${local_parent}/$(basename "$grub_dir")" 2>/dev/null | cut -f1))"
         else
             echo "      WARNING: could not fetch ${grub_dir}" >&2
@@ -499,8 +513,7 @@ echo "  [+] Installed busybox and symlinks"
 echo "  [+] Fetching kernel modules from clonr-server ${CLONR_SERVER_HOST}..."
 
 # Discover the kernel version from the server.
-KVER=$(sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-    "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "uname -r" 2>/dev/null)
+KVER=$(remote_exec "uname -r" 2>/dev/null)
 
 if [[ -z "$KVER" ]]; then
     echo "WARNING: cannot reach clonr-server — skipping kernel modules." >&2
@@ -578,9 +591,7 @@ else
         LOCAL_KO="${LOCAL_KO_XZ%.xz}"
         mkdir -p "$(dirname "$LOCAL_KO_XZ")"
 
-        if sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${REMOTE_PATH}" \
-            "$LOCAL_KO_XZ" 2>/dev/null; then
+        if remote_copy "${REMOTE_PATH}" "$LOCAL_KO_XZ"; then
             # Decompress in place: failover.ko.xz → failover.ko
             if xz -d "$LOCAL_KO_XZ" 2>/dev/null; then
                 echo "      fetched+decompressed: $(basename "$LOCAL_KO")"
