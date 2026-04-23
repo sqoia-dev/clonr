@@ -74,6 +74,12 @@ install_packages() {
         firewalld \
         xfsprogs \
         util-linux \
+        busybox \
+        cpio \
+        file \
+        xz \
+        binutils \
+        sshpass \
         2>&1 | tail -5
     step_done "system packages"
 }
