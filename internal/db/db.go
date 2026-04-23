@@ -442,6 +442,7 @@ func (db *DB) UpdateDiskLayout(ctx context.Context, id string, layout api.DiskLa
 
 // CreateNodeConfig inserts a new NodeConfig record.
 func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
+	cfg.PrimaryMAC = strings.ToLower(cfg.PrimaryMAC)
 	interfaces, err := json.Marshal(cfg.Interfaces)
 	if err != nil {
 		return fmt.Errorf("db: marshal interfaces: %w", err)
@@ -510,6 +511,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 // hardware_profile and hostname of the existing record if one already exists.
 // Returns the resulting NodeConfig (created or updated).
 func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.NodeConfig, error) {
+	cfg.PrimaryMAC = strings.ToLower(cfg.PrimaryMAC)
 	hwProfile, err := json.Marshal(cfg.HardwareProfile)
 	if err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: marshal hardware_profile: %w", err)
@@ -618,6 +620,7 @@ func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, err
 
 // GetNodeConfigByMAC retrieves the NodeConfig whose primary_mac matches mac.
 func (db *DB) GetNodeConfigByMAC(ctx context.Context, mac string) (api.NodeConfig, error) {
+	mac = strings.ToLower(mac)
 	row := db.sql.QueryRowContext(ctx,
 		`SELECT `+nodeConfigCols+` FROM node_configs WHERE primary_mac = ?`, mac)
 	return scanNodeConfig(row)
@@ -675,6 +678,7 @@ func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.No
 
 // UpdateNodeConfig replaces the mutable fields of a NodeConfig.
 func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
+	cfg.PrimaryMAC = strings.ToLower(cfg.PrimaryMAC)
 	interfaces, err := json.Marshal(cfg.Interfaces)
 	if err != nil {
 		return fmt.Errorf("db: marshal interfaces: %w", err)

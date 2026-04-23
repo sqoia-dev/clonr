@@ -116,6 +116,7 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, "base_image_id is required")
 		return
 	}
+	req.PrimaryMAC = strings.ToLower(req.PrimaryMAC)
 
 	now := time.Now().UTC()
 	cfg := api.NodeConfig{
@@ -183,6 +184,7 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, "primary_mac is required")
 		return
 	}
+	req.PrimaryMAC = strings.ToLower(req.PrimaryMAC)
 
 	// Fetch to confirm existence.
 	existing, err := h.DB.GetNodeConfig(r.Context(), id)

@@ -82,7 +82,7 @@ type BootHandler struct {
 // calls are needed for normal boot routing. PXE must be first in the BIOS boot
 // order, set once during rack/stack and never changed.
 func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
-	mac := r.URL.Query().Get("mac")
+	mac := strings.ToLower(r.URL.Query().Get("mac"))
 	forceReimage := r.URL.Query().Get("force_reimage") == "1"
 
 	// If we have a MAC and a DB, look up the node state and route the boot.
