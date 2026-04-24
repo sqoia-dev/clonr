@@ -225,6 +225,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "config_push":
 		c.handleConfigPush(msg)
 
+	case "slurm_config_push":
+		c.handleSlurmConfigPush(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
@@ -255,6 +258,83 @@ func (c *Client) handleConfigPush(msg ServerMessage) {
 	log.Info().Str("target", payload.Target).Str("msg_id", msg.MsgID).
 		Msg("clientd: config push applied successfully")
 	c.sendAck(msg.MsgID, true, "")
+}
+
+// handleSlurmConfigPush parses a slurm_config_push payload, applies all config
+// files atomically, runs the apply action, and sends a structured ack back.
+func (c *Client) handleSlurmConfigPush(msg ServerMessage) {
+	var payload SlurmConfigPushPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed slurm_config_push payload")
+		c.sendAck(msg.MsgID, false, "malformed slurm_config_push payload: "+err.Error())
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("push_op_id", payload.PushOpID).
+		Int("files", len(payload.Files)).
+		Str("apply_action", payload.ApplyAction).
+		Msg("clientd: applying slurm config push")
+
+	result := applySlurmConfig(payload)
+
+	// Re-use the generic ack channel so the server's ack registry can deliver
+	// the ack to the waiting push orchestrator goroutine.
+	c.sendSlurmAck(msg.MsgID, result)
+
+	if result.OK {
+		log.Info().Str("push_op_id", payload.PushOpID).Msg("clientd: slurm config push applied successfully")
+	} else {
+		log.Error().Str("push_op_id", payload.PushOpID).Str("error", result.Error).
+			Msg("clientd: slurm config push apply failed")
+	}
+}
+
+// sendSlurmAck sends an "ack" message carrying a SlurmConfigAckPayload in the Error field
+// and a JSON-encoded structured payload. The server ack registry receives an AckPayload;
+// the Slurm manager reads the raw payload from the registered ack channel.
+//
+// Protocol: we embed the SlurmConfigAckPayload as JSON inside AckPayload.Error.
+// The server-side push orchestrator reads the AckPayload.Error as a JSON string
+// and unmarshals it to get the full SlurmConfigAckPayload. This re-uses the
+// existing ack delivery infrastructure without protocol changes.
+func (c *Client) sendSlurmAck(refMsgID string, result SlurmConfigAckPayload) {
+	// Encode the full result as JSON for the server to parse.
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm ack result")
+		c.sendAck(refMsgID, false, "failed to marshal slurm ack result")
+		return
+	}
+
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       result.OK,
+		Error:    string(resultJSON), // server decodes this as SlurmConfigAckPayload JSON
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm ack payload")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "ack",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(ackPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm ack message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", refMsgID).
+			Msg("clientd: slurm ack dropped — send buffer full")
+	}
 }
 
 // sendAck enqueues an ack message referencing the given server message ID.

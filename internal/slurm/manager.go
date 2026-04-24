@@ -48,6 +48,10 @@ type ClientdHubIface interface {
 	Send(nodeID string, msg clientd.ServerMessage) error
 	ConnectedNodes() []string
 	IsConnected(nodeID string) bool
+	// Ack registry — same mechanism used by the generic config_push handler.
+	RegisterAck(msgID string) <-chan clientd.AckPayload
+	UnregisterAck(msgID string)
+	DeliverAck(msgID string, payload clientd.AckPayload) bool
 }
 
 // Manager owns the Slurm module lifecycle and provides the API surface for
@@ -427,35 +431,98 @@ func pushOpRowToAPI(row *db.SlurmPushOperationRow) *api.SlurmPushOperation {
 	return op
 }
 
-// CreatePlaceholderPushOp creates a push operation record with pending status.
-// Full push orchestration is implemented in Sprint 6 (push.go).
-func (m *Manager) CreatePlaceholderPushOp(ctx context.Context, filenames []string, applyAction, initiatedBy string, nodeCount int) (*api.SlurmPushOperation, error) {
-	now := time.Now().Unix()
-	id := uuid.New().String()
+// StartPush creates a push operation record immediately (so the caller gets an
+// op ID to poll), then runs the actual fan-out in a background goroutine.
+// Use GetPushOp to poll the status.
+func (m *Manager) StartPush(ctx context.Context, req PushRequest, initiatedBy string) (*api.SlurmPushOperation, error) {
+	// Validate module state before spawning goroutine.
+	m.mu.RLock()
+	cfg := m.cfg
+	m.mu.RUnlock()
+	if cfg == nil || !cfg.Enabled {
+		return nil, fmt.Errorf("slurm: module is not enabled")
+	}
 
-	// Build file versions map.
+	// Create the push op record with "pending" status so the caller has an ID.
+	op, err := m.createPendingPushOp(ctx, req, initiatedBy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Run the orchestration in a background goroutine with a server-lifetime context
+	// so the HTTP request context cancellation does not abort in-flight node pushes.
+	go func() {
+		bgCtx := context.Background()
+		if err := m.runPushBackground(bgCtx, op.ID, req, initiatedBy); err != nil {
+			log.Error().Err(err).Str("op_id", op.ID).Msg("slurm: background push failed")
+		}
+	}()
+
+	return op, nil
+}
+
+// createPendingPushOp creates a push operation DB record with status "pending"
+// and returns its API representation.
+func (m *Manager) createPendingPushOp(ctx context.Context, req PushRequest, initiatedBy string) (*api.SlurmPushOperation, error) {
+	m.mu.RLock()
+	cfg := m.cfg
+	m.mu.RUnlock()
+
+	managedFiles := req.Filenames
+	if len(managedFiles) == 0 && cfg != nil {
+		managedFiles = cfg.ManagedFiles
+	}
+
 	fileVersions := make(map[string]int)
-	for _, fn := range filenames {
+	for _, fn := range managedFiles {
 		row, err := m.db.SlurmGetCurrentConfig(ctx, fn)
 		if err == nil && row != nil {
 			fileVersions[fn] = row.Version
 		}
 	}
 
-	op := db.SlurmPushOperationRow{
+	// Estimate node count from target nodes or connected nodes.
+	nodeCount := 0
+	if len(req.TargetNodes) > 0 {
+		nodeCount = len(req.TargetNodes)
+	} else if m.hub != nil {
+		nodeCount = len(m.hub.ConnectedNodes())
+	}
+
+	id := newUUID()
+	now := time.Now().Unix()
+	opRow := db.SlurmPushOperationRow{
 		ID:           id,
-		Filenames:    filenames,
+		Filenames:    managedFiles,
 		FileVersions: fileVersions,
 		InitiatedBy:  initiatedBy,
-		ApplyAction:  applyAction,
+		ApplyAction:  req.ApplyAction,
 		Status:       "pending",
 		NodeCount:    nodeCount,
 		StartedAt:    now,
 	}
-	if err := m.db.SlurmCreatePushOp(ctx, op); err != nil {
+	if err := m.db.SlurmCreatePushOp(ctx, opRow); err != nil {
 		return nil, fmt.Errorf("slurm: create push op: %w", err)
 	}
-	return pushOpRowToAPI(&op), nil
+	return pushOpRowToAPI(&opRow), nil
+}
+
+// runPushBackground runs the push orchestration in the background.
+// The push op record already exists with status "pending"; executePushWithID
+// transitions it to "in_progress" and then to the final status.
+func (m *Manager) runPushBackground(ctx context.Context, opID string, req PushRequest, initiatedBy string) error {
+	_, err := m.executePushWithID(ctx, opID, req, initiatedBy)
+	return err
+}
+
+// Push is a synchronous push for internal use and tests. Prefer StartPush for HTTP handlers.
+func (m *Manager) Push(ctx context.Context, req PushRequest, initiatedBy string) (*api.SlurmPushOperation, error) {
+	return m.executePush(ctx, req, initiatedBy)
+}
+
+// newUUID returns a new random UUID string.
+func newUUID() string {
+	return uuid.New().String()
 }
 
 // ─── Background workers ───────────────────────────────────────────────────────

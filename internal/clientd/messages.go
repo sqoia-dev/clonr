@@ -88,3 +88,51 @@ type LogPullStartPayload struct {
 	Since string `json:"since,omitempty"`
 }
 
+// SlurmConfigPushPayload is the payload for the "slurm_config_push" server→node message.
+// The server sends this to push one or more Slurm config files to the node atomically.
+type SlurmConfigPushPayload struct {
+	// PushOpID is the push operation UUID (for ack correlation and state updates).
+	PushOpID string `json:"push_op_id"`
+	// Files is the list of config files to write. Each file has content + checksum.
+	Files []SlurmFilePush `json:"files"`
+	// ApplyAction is "reconfigure" (scontrol reconfigure) or "restart" (systemctl restart slurmd).
+	ApplyAction string `json:"apply_action"`
+}
+
+// SlurmFilePush is one file within a SlurmConfigPushPayload.
+type SlurmFilePush struct {
+	// Filename is the logical name (e.g. "slurm.conf").
+	Filename string `json:"filename"`
+	// Content is the full rendered file content.
+	Content string `json:"content"`
+	// Checksum is "sha256:<hex>" computed by the server over Content.
+	Checksum string `json:"checksum"`
+	// DestPath is the absolute destination path (e.g. "/etc/slurm/slurm.conf").
+	DestPath string `json:"dest_path"`
+}
+
+// SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
+// It carries per-file results and the apply action result.
+// The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.
+type SlurmConfigAckPayload struct {
+	// PushOpID is the push operation UUID from the original SlurmConfigPushPayload.
+	PushOpID string `json:"push_op_id"`
+	// OK is true when all files were written and the apply action succeeded.
+	OK bool `json:"ok"`
+	// Error is a human-readable summary of the failure, if any.
+	Error string `json:"error,omitempty"`
+	// FileResults holds per-file write outcomes.
+	FileResults []SlurmFileApplyResult `json:"file_results"`
+	// ApplyOutput is the stdout/stderr of the apply action command (truncated to 2 KB).
+	ApplyOutput string `json:"apply_output,omitempty"`
+	// ApplyExitCode is the exit code of the apply action command.
+	ApplyExitCode int `json:"apply_exit_code"`
+}
+
+// SlurmFileApplyResult is the per-file result within a SlurmConfigAckPayload.
+type SlurmFileApplyResult struct {
+	Filename string `json:"filename"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+}
+

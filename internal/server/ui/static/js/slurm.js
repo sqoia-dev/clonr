@@ -346,6 +346,255 @@ const SlurmPages = {
         `);
     },
 
+    // ── Push panel page ────────────────────────────────────────────────────
+
+    async push() {
+        App.render(loading('Loading Slurm push panel…'));
+        try {
+            const [status, configs] = await Promise.all([
+                API.slurm.status(),
+                API.slurm.listConfigs(),
+            ]);
+            App.render(SlurmPages._pushHtml(status, configs.configs || []));
+            SlurmPages._bindPushEvents();
+        } catch (err) {
+            App.render(alertBox('Failed to load push panel: ' + err.message));
+        }
+    },
+
+    _pushHtml(status, configs) {
+        const managedFiles = configs.map(c => c.filename);
+        const fileCheckboxes = managedFiles.map(fn => `
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px;">
+                <input type="checkbox" name="push-file" value="${escHtml(fn)}" checked style="width:14px;height:14px;">
+                <span style="font-family:monospace;">${escHtml(fn)}</span>
+            </label>
+        `).join('');
+
+        const connectedNodes = status.connected_nodes || [];
+        const nodeOptions = connectedNodes.map(n =>
+            `<option value="${escHtml(n)}">${escHtml(n)}</option>`
+        ).join('');
+
+        return cardWrap('Push Slurm Configs', `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;max-width:900px;">
+                <!-- Files -->
+                <div>
+                    <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;color:var(--text-secondary);">FILES TO PUSH</h3>
+                    <div style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg);">
+                        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+                            <input type="checkbox" id="push-all-files" checked style="width:14px;height:14px;">
+                            <span style="font-weight:600;">All files</span>
+                        </label>
+                        <div id="push-file-list">${fileCheckboxes}</div>
+                    </div>
+                </div>
+                <!-- Options -->
+                <div>
+                    <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;color:var(--text-secondary);">OPTIONS</h3>
+                    <div style="display:flex;flex-direction:column;gap:14px;">
+                        <div>
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">Apply Action</label>
+                            <select id="push-apply-action" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text-primary);font-size:13px;">
+                                <option value="reconfigure">Reconfigure — scontrol reconfigure (no job disruption)</option>
+                                <option value="restart">Restart — systemctl restart slurmd/slurmctld</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">
+                                Target Nodes
+                                <span style="font-weight:400;color:var(--text-secondary);">(${connectedNodes.length} connected)</span>
+                            </label>
+                            ${connectedNodes.length > 0 ? `
+                                <select id="push-target-nodes" multiple
+                                    style="width:100%;height:100px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text-primary);font-size:13px;">
+                                    ${nodeOptions}
+                                </select>
+                                <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Leave all unselected to push to all nodes</div>
+                            ` : `
+                                <div style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text-secondary);">
+                                    No nodes connected — push will record offline failures
+                                </div>
+                            `}
+                        </div>
+                        <button id="push-btn" class="btn btn-primary" style="padding:10px 20px;font-size:14px;">
+                            Push Configs
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Push operation status -->
+            <div id="push-status-area" style="margin-top:24px;display:none;">
+                <h3 style="font-size:13px;font-weight:600;margin:0 0 12px;color:var(--text-secondary);">PUSH OPERATION STATUS</h3>
+                <div id="push-op-detail"></div>
+            </div>
+        `);
+    },
+
+    _bindPushEvents() {
+        // "All files" checkbox toggles individual checkboxes.
+        const allChk = document.getElementById('push-all-files');
+        if (allChk) {
+            allChk.addEventListener('change', () => {
+                document.querySelectorAll('input[name="push-file"]').forEach(chk => {
+                    chk.checked = allChk.checked;
+                });
+            });
+            document.querySelectorAll('input[name="push-file"]').forEach(chk => {
+                chk.addEventListener('change', () => {
+                    const all = document.querySelectorAll('input[name="push-file"]');
+                    const checked = document.querySelectorAll('input[name="push-file"]:checked');
+                    allChk.checked = all.length === checked.length;
+                    allChk.indeterminate = checked.length > 0 && checked.length < all.length;
+                });
+            });
+        }
+
+        const pushBtn = document.getElementById('push-btn');
+        if (!pushBtn) return;
+
+        pushBtn.addEventListener('click', async () => {
+            const filenames = Array.from(
+                document.querySelectorAll('input[name="push-file"]:checked')
+            ).map(chk => chk.value);
+
+            const applyAction = document.getElementById('push-apply-action')?.value || 'reconfigure';
+
+            const nodeSelect = document.getElementById('push-target-nodes');
+            const nodeIds = nodeSelect
+                ? Array.from(nodeSelect.selectedOptions).map(o => o.value)
+                : [];
+
+            const body = { filenames, apply_action: applyAction };
+            if (nodeIds.length > 0) body.node_ids = nodeIds;
+
+            pushBtn.disabled = true;
+            pushBtn.textContent = 'Pushing…';
+
+            const statusArea = document.getElementById('push-status-area');
+            const opDetail = document.getElementById('push-op-detail');
+            statusArea.style.display = '';
+            opDetail.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">Starting push operation…</div>';
+
+            try {
+                const op = await API.slurm.push(body);
+                opDetail.innerHTML = SlurmPages._pushOpDetailHtml(op);
+                App.toast('Push operation started: ' + op.id.slice(0, 8));
+
+                // Poll until terminal status.
+                SlurmPages._pollPushOp(op.id, opDetail);
+            } catch (err) {
+                opDetail.innerHTML = alertBox('Push failed: ' + err.message);
+                App.toast('Push failed: ' + err.message, 'error');
+            } finally {
+                pushBtn.disabled = false;
+                pushBtn.textContent = 'Push Configs';
+            }
+        });
+    },
+
+    async _pollPushOp(opId, container) {
+        const terminalStatuses = new Set(['completed', 'partial', 'failed']);
+        let attempts = 0;
+        const maxAttempts = 90; // 90 × 2s = 3min polling window
+
+        const poll = async () => {
+            if (attempts++ >= maxAttempts) {
+                container.innerHTML = alertBox('Push operation polling timed out. Check status manually.');
+                return;
+            }
+            try {
+                const op = await API.slurm.pushOpStatus(opId);
+                container.innerHTML = SlurmPages._pushOpDetailHtml(op);
+                if (!terminalStatuses.has(op.status)) {
+                    setTimeout(poll, 2000);
+                }
+            } catch (err) {
+                container.innerHTML = alertBox('Failed to poll push status: ' + err.message);
+            }
+        };
+
+        setTimeout(poll, 2000);
+    },
+
+    _pushOpDetailHtml(op) {
+        const statusColors = {
+            completed: 'badge-ready',
+            partial:   'badge-warning',
+            failed:    'badge-error',
+            in_progress: 'badge-neutral',
+            pending:   'badge-neutral',
+        };
+
+        const spinning = (op.status === 'in_progress' || op.status === 'pending')
+            ? ' <span style="font-size:12px;color:var(--text-secondary);">polling…</span>'
+            : '';
+
+        let html = `
+            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+                    <span style="font-size:13px;font-family:monospace;color:var(--text-secondary);">Op ID: ${escHtml(op.id)}</span>
+                    <span class="badge ${statusColors[op.status] || 'badge-neutral'}">${escHtml(op.status)}</span>
+                    ${spinning}
+                </div>
+                <div style="display:flex;gap:24px;font-size:13px;margin-bottom:12px;flex-wrap:wrap;">
+                    <div><span style="color:var(--text-secondary);">Files: </span>${(op.filenames || []).map(escHtml).join(', ')}</div>
+                    <div><span style="color:var(--text-secondary);">Action: </span>${escHtml(op.apply_action)}</div>
+                    <div><span style="color:var(--text-secondary);">Nodes: </span>${op.node_count}</div>
+                    <div><span style="color:var(--text-secondary);color:#16a34a;">Success: </span><strong style="color:#16a34a;">${op.success_count}</strong></div>
+                    <div><span style="color:var(--text-secondary);">Failed: </span><strong style="${op.failure_count > 0 ? 'color:#dc2626;' : ''}">${op.failure_count}</strong></div>
+                </div>
+        `;
+
+        // Per-node results table.
+        const results = op.node_results || {};
+        const nodeIds = Object.keys(results);
+        if (nodeIds.length > 0) {
+            const rows = nodeIds.map(nodeId => {
+                const r = results[nodeId];
+                const statusBadge = r.ok
+                    ? '<span class="badge badge-ready">success</span>'
+                    : '<span class="badge badge-error">failed</span>';
+                const errText = r.error ? `<div style="font-size:12px;color:#dc2626;margin-top:4px;">${escHtml(r.error)}</div>` : '';
+                const fileRow = (r.file_results || []).map(fr =>
+                    `<span style="font-family:monospace;font-size:12px;color:${fr.ok ? '#16a34a' : '#dc2626'};">${escHtml(fr.filename)}</span>`
+                ).join(' ');
+                const applyRow = r.apply_result && r.apply_result.output
+                    ? `<details style="margin-top:4px;"><summary style="font-size:12px;cursor:pointer;color:var(--text-secondary);">Apply output</summary><pre style="font-size:11px;margin:4px 0;white-space:pre-wrap;max-height:120px;overflow-y:auto;">${escHtml(r.apply_result.output)}</pre></details>`
+                    : '';
+
+                return `
+                    <tr>
+                        <td style="padding:8px 12px;font-family:monospace;font-size:12px;">${escHtml(nodeId)}</td>
+                        <td style="padding:8px 12px;">${statusBadge}</td>
+                        <td style="padding:8px 12px;font-size:13px;">${fileRow}</td>
+                        <td style="padding:8px 12px;">${errText}${applyRow}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            html += `
+                <table style="width:100%;border-collapse:collapse;margin-top:8px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border);">
+                            <th style="text-align:left;padding:6px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Node</th>
+                            <th style="text-align:left;padding:6px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                            <th style="text-align:left;padding:6px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Files</th>
+                            <th style="text-align:left;padding:6px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            `;
+        } else if (op.status === 'in_progress' || op.status === 'pending') {
+            html += `<div style="font-size:13px;color:var(--text-secondary);margin-top:8px;">Waiting for node results…</div>`;
+        }
+
+        html += '</div>';
+        return html;
+    },
+
     // ── Sync status page ───────────────────────────────────────────────────
 
     async syncStatus() {

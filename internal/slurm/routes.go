@@ -294,30 +294,29 @@ func (m *Manager) handlePush(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if len(body.Filenames) == 0 {
-		jsonError(w, "filenames is required", http.StatusBadRequest)
-		return
-	}
+	// filenames may be empty — executePush will default to all managed files.
 	if body.ApplyAction == "" {
 		body.ApplyAction = "reconfigure"
+	}
+	if body.ApplyAction != "reconfigure" && body.ApplyAction != "restart" {
+		jsonError(w, "apply_action must be 'reconfigure' or 'restart'", http.StatusBadRequest)
+		return
 	}
 
 	initiatedBy := keyLabelFromContext(r)
 
-	// Use connected nodes if no specific node_ids provided.
-	nodeCount := 0
-	if m.hub != nil {
-		nodeCount = len(m.hub.ConnectedNodes())
-	}
-	if len(body.NodeIDs) > 0 {
-		nodeCount = len(body.NodeIDs)
+	req := PushRequest{
+		Filenames:   body.Filenames,
+		ApplyAction: body.ApplyAction,
+		TargetNodes: body.NodeIDs,
 	}
 
-	// Create placeholder push op — full orchestration in Sprint 6.
-	op, err := m.CreatePlaceholderPushOp(r.Context(), body.Filenames, body.ApplyAction, initiatedBy, nodeCount)
+	// Create the push op record immediately so we can return an op ID to the caller.
+	// The actual fan-out runs in a background goroutine; the caller polls GET /slurm/push-ops/{op_id}.
+	op, err := m.StartPush(r.Context(), req, initiatedBy)
 	if err != nil {
-		log.Error().Err(err).Msg("slurm: create push op failed")
-		jsonError(w, "failed to create push operation", http.StatusInternalServerError)
+		log.Error().Err(err).Msg("slurm: push failed to start")
+		jsonError(w, "push failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
