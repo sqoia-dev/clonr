@@ -241,6 +241,17 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		}
 	}
 
+	// Sudoers drop-in — write /etc/sudoers.d/<group_cn> so LDAP group members
+	// can run sudo on the deployed node. SSSD resolves group membership at sudo time.
+	// Only written when both LDAPConfig and SudoersConfig are present.
+	if cfg.LDAPConfig != nil && cfg.SudoersConfig != nil {
+		if err := writeSudoersDropin(mountRoot, cfg.SudoersConfig); err != nil {
+			log.Warn().Err(err).Msg("WARNING: finalize: sudoers drop-in failed (non-fatal)")
+		} else {
+			log.Info().Str("group", cfg.SudoersConfig.GroupCN).Msg("finalize: sudoers drop-in written")
+		}
+	}
+
 	// Slurm module — write slurm.conf, gres.conf, etc., enable Slurm/munge services.
 	if cfg.SlurmConfig != nil {
 		log.Info().Str("cluster", cfg.SlurmConfig.ClusterName).
@@ -2280,4 +2291,28 @@ func ldapDomainFromBaseDN(baseDN string) string {
 		}
 	}
 	return "cluster"
+}
+
+// writeSudoersDropin writes a sudoers drop-in file to
+// <mountRoot>/etc/sudoers.d/<group_cn> granting sudo access to the named LDAP group.
+// The file is written with mode 0440 as required by sudo.
+// When cfg.NoPasswd is true, the rule uses NOPASSWD:ALL.
+func writeSudoersDropin(mountRoot string, cfg *api.SudoersNodeConfig) error {
+	dir := filepath.Join(mountRoot, "etc", "sudoers.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir sudoers.d: %w", err)
+	}
+
+	var content string
+	if cfg.NoPasswd {
+		content = fmt.Sprintf("%%%s ALL=(ALL) NOPASSWD:ALL\n", cfg.GroupCN)
+	} else {
+		content = fmt.Sprintf("%%%s ALL=(ALL) ALL\n", cfg.GroupCN)
+	}
+
+	path := filepath.Join(dir, cfg.GroupCN)
+	if err := os.WriteFile(path, []byte(content), 0o440); err != nil {
+		return fmt.Errorf("write sudoers drop-in: %w", err)
+	}
+	return nil
 }

@@ -47,6 +47,10 @@ const LDAPPages = {
             App.render(LDAPPages._settingsHtml(st));
             // Load the service logs section embedded at the bottom of this page.
             await LDAPPages._loadLogs();
+            // Load the sudoers card state if LDAP is ready.
+            if (st && st.enabled && st.status === 'ready') {
+                await LDAPPages._loadSudoersCard();
+            }
         } catch (err) {
             App.render(alertBox('Failed to load LDAP status: ' + err.message));
         }
@@ -203,6 +207,40 @@ const LDAPPages = {
             </div>
             ${enableForm}
             ${repairForm}
+            ${st.enabled && st.status === 'ready' ? `<div class="card" style="margin-top:20px;" id="ldap-sudoers-card">
+                <div class="card-header">
+                    <span class="card-title">Sudoers Management</span>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <span id="ldap-sudoers-status-badge" class="badge badge-neutral" style="font-size:12px;">Loading…</span>
+                        <button class="btn btn-secondary btn-sm" id="ldap-sudoers-push-btn"
+                            onclick="LDAPPages._sudoersPush()" style="display:none;" ${!isAdmin ? 'disabled' : ''}>Push to Nodes</button>
+                    </div>
+                </div>
+                <div style="padding:16px 20px;" id="ldap-sudoers-body">
+                    <p style="margin:0;color:var(--text-secondary);font-size:13px;">
+                        Grant LDAP users sudo access on all deployed nodes via the <code>clonr-admins</code> posixGroup.
+                        SSSD resolves group membership at sudo time — no per-user file push needed.
+                    </p>
+                    <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+                        <button class="btn btn-primary btn-sm" id="ldap-sudoers-enable-btn"
+                            onclick="LDAPPages._sudoersEnable()" ${!isAdmin ? 'disabled' : ''}>Enable Sudoers</button>
+                        <button class="btn btn-danger btn-sm" id="ldap-sudoers-disable-btn"
+                            onclick="LDAPPages._sudoersDisable()" style="display:none;" ${!isAdmin ? 'disabled' : ''}>Disable Sudoers</button>
+                    </div>
+                    <div id="ldap-sudoers-members-section" style="margin-top:16px;display:none;">
+                        <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-secondary);margin-bottom:8px;">
+                            Sudo Members (<span id="ldap-sudoers-member-count">0</span>)
+                        </div>
+                        <div id="ldap-sudoers-member-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;"></div>
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <input id="ldap-sudoers-grant-uid" class="form-input" type="text"
+                                placeholder="uid to grant sudo" style="max-width:220px;font-family:var(--font-mono);"
+                                onkeydown="if(event.key==='Enter')LDAPPages._sudoersGrant()">
+                            <button class="btn btn-secondary btn-sm" onclick="LDAPPages._sudoersGrant()" ${!isAdmin ? 'disabled' : ''}>Grant Sudo</button>
+                        </div>
+                    </div>
+                </div>
+            </div>` : ''}
             <div class="card" style="margin-top:20px;" id="ldap-logs-card">
                 <div class="card-header" style="justify-content:space-between;">
                     <span class="card-title">Service Logs</span>
@@ -385,19 +423,27 @@ const LDAPPages = {
     async users() {
         App.render(loading('Loading LDAP users…'));
         try {
-            const resp = await API.ldap.listUsers();
-            const users = (resp && resp.users) ? resp.users : [];
-            App.render(LDAPPages._usersHtml(users));
+            // Fetch users and sudoers status in parallel so the sudo toggle can be rendered inline.
+            const [resp, sudoSt] = await Promise.allSettled([
+                API.ldap.listUsers(),
+                API.ldap.sudoersStatus(),
+            ]);
+            const users   = (resp.status === 'fulfilled' && resp.value && resp.value.users) ? resp.value.users : [];
+            const sudoers = (sudoSt.status === 'fulfilled' && sudoSt.value) ? sudoSt.value : null;
+            if (resp.status === 'rejected') throw resp.reason;
+            App.render(LDAPPages._usersHtml(users, sudoers));
         } catch (err) {
             App.render(alertBox('Failed to load users: ' + err.message));
         }
     },
 
-    _usersHtml(users) {
+    _usersHtml(users, sudoers) {
         const isAdmin = typeof Auth !== 'undefined' && Auth._role === 'admin';
+        const sudoEnabled = !!(sudoers && sudoers.enabled);
+        const sudoMembers = sudoEnabled && Array.isArray(sudoers.members) ? sudoers.members : [];
 
         const rows = users.length === 0
-            ? `<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
+            ? `<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:24px">No LDAP users. Create the first one.</td></tr>`
             : users.map(u => {
                 const lockedBadge = u.locked
                     ? `<span class="badge" style="background:#fee2e2;color:#dc2626;margin-left:6px;font-size:11px;padding:1px 6px;border-radius:4px;font-weight:600;vertical-align:middle;">Locked</span>` : '';
@@ -409,6 +455,15 @@ const LDAPPages = {
                     ? `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._unlockUser('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Unlock</button>`
                     : `<button class="btn btn-secondary btn-sm" onclick="LDAPPages._lockConfirm('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Lock</button>`;
                 const lastLoginCell = LDAPPages._fmtLastLogin(u.last_login);
+                const hasSudo = sudoMembers.includes(u.uid);
+                const sudoCell = sudoEnabled
+                    ? `<td title="${hasSudo ? 'Has sudo access' : 'No sudo access'}">
+                        <label class="toggle" style="margin:0;" title="Toggle sudo access">
+                            <input type="checkbox" ${hasSudo ? 'checked' : ''} ${!isAdmin ? 'disabled' : ''}
+                                onchange="LDAPPages._sudoersToggleForUser('${escHtml(u.uid)}', this.checked).then(()=>LDAPPages.users())">
+                        </label>
+                       </td>`
+                    : `<td style="color:var(--text-secondary);font-size:12px;">—</td>`;
                 return `<tr${rowStyle}>
                     <td class="text-mono text-sm">${escHtml(u.uid)}${lockedBadge}</td>
                     <td>${escHtml(u.cn || '—')}</td>
@@ -416,6 +471,7 @@ const LDAPPages = {
                     <td class="text-mono text-sm">${escHtml(String(u.gid_number || '—'))}</td>
                     <td style="color:var(--text-secondary);font-size:13px;">${lastLoginCell}</td>
                     <td>${escHtml(u.login_shell || '/bin/bash')}</td>
+                    ${sudoCell}
                     <td>
                         <div style="display:flex;gap:6px;flex-wrap:wrap;">
                             <button class="btn btn-secondary btn-sm" onclick="LDAPPages._resetPasswordModal('${escHtml(u.uid)}')" ${!isAdmin ? 'disabled' : ''}>Reset Password</button>
@@ -441,7 +497,7 @@ const LDAPPages = {
                 <table class="table">
                     <thead>
                         <tr>
-                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th>Actions</th>
+                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th title="Sudo access via clonr-admins LDAP group">Sudo</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -1313,6 +1369,130 @@ const LDAPPages = {
 
     // Logs are rendered as a section at the bottom of the Settings page.
     // The standalone /ldap/logs route redirects to settings() for backward compat.
+
+    // ─── Sudoers ─────────────────────────────────────────────────────────────────
+
+    async _loadSudoersCard() {
+        const badge   = document.getElementById('ldap-sudoers-status-badge');
+        const pushBtn = document.getElementById('ldap-sudoers-push-btn');
+        const enableBtn  = document.getElementById('ldap-sudoers-enable-btn');
+        const disableBtn = document.getElementById('ldap-sudoers-disable-btn');
+        const membersSection = document.getElementById('ldap-sudoers-members-section');
+        const memberList     = document.getElementById('ldap-sudoers-member-list');
+        const memberCount    = document.getElementById('ldap-sudoers-member-count');
+
+        if (!badge) return; // card not rendered (LDAP not ready)
+
+        try {
+            const st = await API.ldap.sudoersStatus();
+            const enabled  = !!(st && st.enabled);
+            const groupCN  = (st && st.group_cn) || 'clonr-admins';
+            const members  = (st && Array.isArray(st.members)) ? st.members : [];
+            const isAdmin  = typeof Auth !== 'undefined' && Auth._role === 'admin';
+
+            if (badge) {
+                badge.textContent = enabled ? 'Enabled' : 'Disabled';
+                badge.className   = 'badge ' + (enabled ? 'badge-ready' : 'badge-neutral');
+                badge.style.fontSize = '12px';
+            }
+            if (pushBtn)    pushBtn.style.display    = enabled ? '' : 'none';
+            if (enableBtn)  enableBtn.style.display  = enabled ? 'none' : '';
+            if (disableBtn) disableBtn.style.display = enabled ? '' : 'none';
+
+            if (membersSection) membersSection.style.display = enabled ? '' : 'none';
+
+            if (enabled && memberList) {
+                if (memberCount) memberCount.textContent = members.length;
+                memberList.innerHTML = members.length === 0
+                    ? `<span style="color:var(--text-secondary);font-size:13px;">No members yet.</span>`
+                    : members.map(uid =>
+                        `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;font-family:var(--font-mono);">
+                            ${escHtml(uid)}
+                            ${isAdmin ? `<button onclick="LDAPPages._sudoersRevoke('${escHtml(uid)}')"
+                                style="background:none;border:none;cursor:pointer;color:var(--error);font-size:14px;padding:0 2px;line-height:1;" title="Revoke sudo">×</button>` : ''}
+                        </span>`
+                    ).join('');
+            }
+        } catch (e) {
+            if (badge) { badge.textContent = 'Error'; badge.className = 'badge badge-error'; badge.style.fontSize = '12px'; }
+        }
+    },
+
+    async _sudoersEnable() {
+        try {
+            await API.ldap.sudoersEnable();
+            App.toast('Sudoers group enabled — clonr-admins created in LDAP', 'success');
+            await LDAPPages._loadSudoersCard();
+        } catch (e) {
+            App.toast('Enable failed: ' + e.message, 'error');
+        }
+    },
+
+    async _sudoersDisable() {
+        if (!confirm('Disable sudoers? The LDAP group is preserved but nodes will no longer receive the drop-in on reimage.')) return;
+        try {
+            await API.ldap.sudoersDisable();
+            App.toast('Sudoers disabled', 'info');
+            await LDAPPages._loadSudoersCard();
+        } catch (e) {
+            App.toast('Disable failed: ' + e.message, 'error');
+        }
+    },
+
+    async _sudoersPush() {
+        const btn = document.getElementById('ldap-sudoers-push-btn');
+        if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+        try {
+            const res = await API.ldap.sudoersPush();
+            const ok  = res && res.success_count !== undefined ? res.success_count : '?';
+            const tot = res && res.node_count     !== undefined ? res.node_count     : '?';
+            App.toast(`Sudoers pushed: ${ok}/${tot} nodes OK`, (res && res.ok) ? 'success' : 'error');
+        } catch (e) {
+            App.toast('Push failed: ' + e.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Push to Nodes'; }
+        }
+    },
+
+    async _sudoersGrant() {
+        const input = document.getElementById('ldap-sudoers-grant-uid');
+        const uid   = (input && input.value) ? input.value.trim() : '';
+        if (!uid) { App.toast('Enter a uid first', 'error'); return; }
+        try {
+            await API.ldap.sudoersGrant(uid);
+            App.toast(`Sudo granted to ${uid}`, 'success');
+            if (input) input.value = '';
+            await LDAPPages._loadSudoersCard();
+        } catch (e) {
+            App.toast('Grant failed: ' + e.message, 'error');
+        }
+    },
+
+    async _sudoersRevoke(uid) {
+        if (!confirm(`Revoke sudo for ${uid}?`)) return;
+        try {
+            await API.ldap.sudoersRevoke(uid);
+            App.toast(`Sudo revoked for ${uid}`, 'info');
+            await LDAPPages._loadSudoersCard();
+        } catch (e) {
+            App.toast('Revoke failed: ' + e.message, 'error');
+        }
+    },
+
+    // _sudoersToggleForUser toggles sudo for a given user (called from the user table).
+    async _sudoersToggleForUser(uid, grant) {
+        try {
+            if (grant) {
+                await API.ldap.sudoersGrant(uid);
+                App.toast(`Sudo granted to ${uid}`, 'success');
+            } else {
+                await API.ldap.sudoersRevoke(uid);
+                App.toast(`Sudo revoked for ${uid}`, 'info');
+            }
+        } catch (e) {
+            App.toast((grant ? 'Grant' : 'Revoke') + ' failed: ' + e.message, 'error');
+        }
+    },
 
     async _loadLogs() {
         const viewer = document.getElementById('ldap-log-viewer');

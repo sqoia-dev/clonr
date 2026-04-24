@@ -41,6 +41,14 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Delete("/ldap/groups/{cn}", mgr.handleDeleteGroup)
 	r.Post("/ldap/groups/{cn}/members", mgr.handleAddGroupMember)
 	r.Delete("/ldap/groups/{cn}/members/{uid}", mgr.handleRemoveGroupMember)
+
+	// Sudoers
+	r.Get("/ldap/sudoers/status", handleSudoersStatus(mgr))
+	r.Post("/ldap/sudoers/enable", handleEnableSudoers(mgr))
+	r.Post("/ldap/sudoers/disable", handleDisableSudoers(mgr))
+	r.Get("/ldap/sudoers/members", handleSudoersMembers(mgr))
+	r.Post("/ldap/sudoers/members", handleGrantSudo(mgr))
+	r.Delete("/ldap/sudoers/members/{uid}", handleRevokeSudo(mgr))
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -401,6 +409,93 @@ func (m *Manager) handleRemoveGroupMember(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── Sudoers ──────────────────────────────────────────────────────────────────
+
+func handleSudoersStatus(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		enabled, groupCN, members, err := mgr.SudoersStatus(r.Context())
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{
+			"enabled":      enabled,
+			"group_cn":     groupCN,
+			"members":      members,
+			"member_count": len(members),
+		}, http.StatusOK)
+	}
+}
+
+func handleEnableSudoers(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.EnableSudoers(r.Context()); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, map[string]string{"status": "enabled"}, http.StatusOK)
+	}
+}
+
+func handleDisableSudoers(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.DisableSudoers(r.Context()); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"status": "disabled"}, http.StatusOK)
+	}
+}
+
+func handleSudoersMembers(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, _, members, err := mgr.SudoersStatus(r.Context())
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if members == nil {
+			members = []string{}
+		}
+		jsonResponse(w, map[string]interface{}{
+			"members": members,
+			"total":   len(members),
+		}, http.StatusOK)
+	}
+}
+
+func handleGrantSudo(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UID string `json:"uid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UID == "" {
+			jsonError(w, "uid is required", http.StatusBadRequest)
+			return
+		}
+		if err := mgr.GrantSudo(r.Context(), body.UID); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]string{"status": "ok", "uid": body.UID}, http.StatusOK)
+	}
+}
+
+func handleRevokeSudo(mgr *Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := chi.URLParam(r, "uid")
+		if uid == "" {
+			jsonError(w, "uid is required", http.StatusBadRequest)
+			return
+		}
+		if err := mgr.RevokeSudo(r.Context(), uid); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

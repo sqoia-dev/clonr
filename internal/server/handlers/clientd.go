@@ -57,6 +57,9 @@ type ClientdHandler struct {
 	Broker LogBroker // publishes log entries to SSE subscribers; nil = no fan-out
 	// ServerCtx is used for DB writes so a node disconnect does not abort in-flight transactions.
 	ServerCtx context.Context
+	// SudoersNodeConfig, when non-nil, is called by HandleSudoersPush to fetch the
+	// current sudoers drop-in content for broadcast to connected nodes.
+	SudoersNodeConfig func(ctx context.Context) (*api.SudoersNodeConfig, error)
 }
 
 // HandleClientdWS upgrades the connection to WebSocket and runs the clientd protocol.
@@ -442,6 +445,117 @@ func (h *ClientdHandler) handleExecResult(nodeID string, msg clientd.ClientMessa
 type execRequest struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
+}
+
+// HandleSudoersPush renders the sudoers drop-in content and broadcasts it as a
+// config_push to every connected node. Returns per-node results with 30s timeout.
+// Route: POST /api/v1/ldap/sudoers/push (admin-only)
+func (h *ClientdHandler) HandleSudoersPush(w http.ResponseWriter, r *http.Request) {
+	if h.SudoersNodeConfig == nil {
+		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+			Error: "sudoers config function not wired",
+			Code:  "not_configured",
+		})
+		return
+	}
+
+	sudoersCfg, err := h.SudoersNodeConfig(r.Context())
+	if err != nil {
+		writeError(w, fmt.Errorf("fetch sudoers config: %w", err))
+		return
+	}
+	if sudoersCfg == nil {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Error: "sudoers is not enabled or LDAP module is not ready",
+			Code:  "sudoers_disabled",
+		})
+		return
+	}
+
+	var content string
+	if sudoersCfg.NoPasswd {
+		content = fmt.Sprintf("%%%s ALL=(ALL) NOPASSWD:ALL\n", sudoersCfg.GroupCN)
+	} else {
+		content = fmt.Sprintf("%%%s ALL=(ALL) ALL\n", sudoersCfg.GroupCN)
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	checksum := fmt.Sprintf("sha256:%x", sum)
+
+	nodeIDs := h.Hub.ConnectedNodes()
+	if len(nodeIDs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":      true,
+			"message": "no nodes currently connected",
+			"results": map[string]interface{}{},
+		})
+		return
+	}
+
+	type nodeResult struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	results := make(map[string]nodeResult, len(nodeIDs))
+
+	for _, nodeID := range nodeIDs {
+		msgID := uuid.New().String()
+		payload, err := json.Marshal(clientd.ConfigPushPayload{
+			Target:   "sudoers",
+			Content:  content,
+			Checksum: checksum,
+		})
+		if err != nil {
+			results[nodeID] = nodeResult{OK: false, Error: "marshal payload: " + err.Error()}
+			continue
+		}
+
+		serverMsg := clientd.ServerMessage{
+			Type:    "config_push",
+			MsgID:   msgID,
+			Payload: json.RawMessage(payload),
+		}
+
+		ackCh := h.Hub.RegisterAck(msgID)
+		if err := h.Hub.Send(nodeID, serverMsg); err != nil {
+			h.Hub.UnregisterAck(msgID)
+			results[nodeID] = nodeResult{OK: false, Error: "send failed: " + err.Error()}
+			continue
+		}
+
+		select {
+		case ack := <-ackCh:
+			h.Hub.UnregisterAck(msgID)
+			if ack.OK {
+				results[nodeID] = nodeResult{OK: true}
+			} else {
+				results[nodeID] = nodeResult{OK: false, Error: ack.Error}
+			}
+		case <-time.After(30 * time.Second):
+			h.Hub.UnregisterAck(msgID)
+			results[nodeID] = nodeResult{OK: false, Error: "ack timeout (30s)"}
+		}
+	}
+
+	okCount := 0
+	for _, r := range results {
+		if r.OK {
+			okCount++
+		}
+	}
+
+	log.Info().
+		Int("nodes", len(nodeIDs)).
+		Int("ok", okCount).
+		Msg("clientd: sudoers push complete")
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":           okCount == len(nodeIDs),
+		"node_count":   len(nodeIDs),
+		"success_count": okCount,
+		"failure_count": len(nodeIDs) - okCount,
+		"results":      results,
+	})
 }
 
 // ExecOnNode sends an exec_request to a connected node and waits for the result.

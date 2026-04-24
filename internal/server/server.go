@@ -340,6 +340,9 @@ func (s *Server) buildRouter() chi.Router {
 		SlurmNodeConfig: func(ctx context.Context, nodeID string) (*api.SlurmNodeConfig, error) {
 			return s.slurmMgr.NodeConfig(ctx, nodeID)
 		},
+		SudoersNodeConfig: func(ctx context.Context) (*api.SudoersNodeConfig, error) {
+			return s.ldapMgr.SudoersNodeConfig(ctx)
+		},
 		LookupDHCPLease: s.lookupDHCPLease,
 		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
 		ServerIP:        s.cfg.PXE.ServerIP,
@@ -470,7 +473,14 @@ func (s *Server) buildRouter() chi.Router {
 
 		// clonr-clientd WebSocket endpoint — node-scoped key required; the key's
 		// bound node_id must match the {id} URL parameter (same as verify-boot).
-		clientdH := &handlers.ClientdHandler{DB: s.db, Hub: s.clientdHub, Broker: s.broker}
+		clientdH := &handlers.ClientdHandler{
+			DB:     s.db,
+			Hub:    s.clientdHub,
+			Broker: s.broker,
+			SudoersNodeConfig: func(ctx context.Context) (*api.SudoersNodeConfig, error) {
+				return s.ldapMgr.SudoersNodeConfig(ctx)
+			},
+		}
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/clientd/ws", clientdH.HandleClientdWS)
 
 		// Image fetch routes accessible by node-scoped keys (deploy agent reads its assigned image).
@@ -618,6 +628,8 @@ func (s *Server) buildRouter() chi.Router {
 			// LDAP module — admin-only management routes.
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				ldapmodule.RegisterRoutes(r, s.ldapMgr)
+				// Sudoers push — broadcasts the sudoers drop-in to all connected nodes.
+				r.Post("/ldap/sudoers/push", clientdH.HandleSudoersPush)
 			})
 
 			// System Accounts module — admin-only management routes.

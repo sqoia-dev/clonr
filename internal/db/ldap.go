@@ -32,6 +32,12 @@ type LDAPModuleConfig struct {
 	LastProvisionedAt   time.Time
 	LastCheckedAt       time.Time
 	LastCheckError      string
+	// SudoersEnabled indicates whether the clonr-admins LDAP group sudoers feature is active.
+	// Added by migration 036.
+	SudoersEnabled bool
+	// SudoersGroupCN is the CN of the LDAP group written into /etc/sudoers.d on deployed nodes.
+	// Default: "clonr-admins". Added by migration 036.
+	SudoersGroupCN string
 }
 
 // LDAPGetConfig reads the singleton LDAP module config row.
@@ -44,7 +50,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			server_cert_pem, server_key_pem, server_cert_not_after,
 			admin_password_hash, service_bind_dn, service_bind_password,
 			base_dn_locked, last_provisioned_at, last_checked_at, last_check_error,
-			admin_passwd
+			admin_passwd,
+			sudoers_enabled, sudoers_group_cn
 		FROM ldap_module_config WHERE id = 1
 	`)
 
@@ -60,6 +67,7 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		&cfg.AdminPasswordHash, &cfg.ServiceBindDN, &cfg.ServiceBindPassword,
 		&cfg.BaseDNLocked, &lastProvisionedAt, &lastCheckedAt, &cfg.LastCheckError,
 		&cfg.AdminPasswd,
+		&cfg.SudoersEnabled, &cfg.SudoersGroupCN,
 	)
 	if err != nil {
 		return LDAPModuleConfig{}, err
@@ -247,6 +255,29 @@ func (db *DB) LDAPLockBaseDN(ctx context.Context) error {
 		`UPDATE ldap_module_config SET base_dn_locked = 1 WHERE id = 1`)
 	if err != nil {
 		return fmt.Errorf("db: LDAPLockBaseDN: %w", err)
+	}
+	return nil
+}
+
+// LDAPSetSudoersEnabled updates the sudoers_enabled and sudoers_group_cn columns.
+// Pass enabled=true and the desired group CN to activate; enabled=false to deactivate.
+// When disabling, groupCN is ignored (the existing value is preserved for re-enable).
+func (db *DB) LDAPSetSudoersEnabled(ctx context.Context, enabled bool, groupCN string) error {
+	if enabled {
+		_, err := db.sql.ExecContext(ctx,
+			`UPDATE ldap_module_config SET sudoers_enabled = 1, sudoers_group_cn = ? WHERE id = 1`,
+			groupCN,
+		)
+		if err != nil {
+			return fmt.Errorf("db: LDAPSetSudoersEnabled(true): %w", err)
+		}
+	} else {
+		_, err := db.sql.ExecContext(ctx,
+			`UPDATE ldap_module_config SET sudoers_enabled = 0 WHERE id = 1`,
+		)
+		if err != nil {
+			return fmt.Errorf("db: LDAPSetSudoersEnabled(false): %w", err)
+		}
 	}
 	return nil
 }

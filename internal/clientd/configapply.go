@@ -21,11 +21,13 @@ type configTarget struct {
 // configTargets is the whitelist of supported config push targets.
 // Only targets listed here may be written by a config_push message.
 var configTargets = map[string]configTarget{
-	"hosts":  {path: "/etc/hosts", mode: 0644, applyAction: nil},
-	"sssd":   {path: "/etc/sssd/sssd.conf", mode: 0600, applyAction: restartService("sssd")},
-	"chrony": {path: "/etc/chrony.conf", mode: 0644, applyAction: restartService("chronyd")},
-	"ntp":    {path: "/etc/ntp.conf", mode: 0644, applyAction: restartService("ntpd")},
-	"resolv": {path: "/etc/resolv.conf", mode: 0644, applyAction: nil},
+	"hosts":   {path: "/etc/hosts", mode: 0644, applyAction: nil},
+	"sssd":    {path: "/etc/sssd/sssd.conf", mode: 0600, applyAction: restartService("sssd")},
+	"chrony":  {path: "/etc/chrony.conf", mode: 0644, applyAction: restartService("chronyd")},
+	"ntp":     {path: "/etc/ntp.conf", mode: 0644, applyAction: restartService("ntpd")},
+	"resolv":  {path: "/etc/resolv.conf", mode: 0644, applyAction: nil},
+	// sudoers: sudo re-reads drop-ins on every invocation — no restart needed.
+	"sudoers": {path: "/etc/sudoers.d/clonr-admins", mode: 0440, applyAction: nil},
 }
 
 const maxConfigSizeBytes = 1 << 20 // 1 MB

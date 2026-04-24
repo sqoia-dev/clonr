@@ -311,6 +311,14 @@ const API = {
         logs(params = {})               { return API.get('/ldap/logs', params); },
         // Admin repair — verifies the admin password and self-heals node-reader bind.
         repairAdminBind(body)           { return API.post('/ldap/admin/repair', body); },
+        // Sudoers — LDAP group-based sudo management.
+        sudoersStatus()                 { return API.get('/ldap/sudoers/status'); },
+        sudoersEnable()                 { return API.post('/ldap/sudoers/enable', {}); },
+        sudoersDisable()                { return API.post('/ldap/sudoers/disable', {}); },
+        sudoersMembers()                { return API.get('/ldap/sudoers/members'); },
+        sudoersGrant(uid)               { return API.post('/ldap/sudoers/members', { uid }); },
+        sudoersRevoke(uid)              { return API.del(`/ldap/sudoers/members/${encodeURIComponent(uid)}`); },
+        sudoersPush()                   { return API.post('/ldap/sudoers/push', {}); },
     },
     resume: {
         // resume — POST to resume an interrupted image build.

@@ -362,6 +362,19 @@ type LDAPNodeConfig struct {
 	CACertPEM string `json:"ca_cert_pem"`
 }
 
+// SudoersNodeConfig holds the LDAP group-based sudoers configuration injected
+// into a node's deployed filesystem during finalization. When non-nil, a sudoers
+// drop-in file is written to /etc/sudoers.d/<group_cn> so members of the LDAP
+// group can run sudo on the deployed node. SSSD resolves membership at sudo time;
+// no per-user file push is required.
+type SudoersNodeConfig struct {
+	// GroupCN is the CN of the LDAP posixGroup whose members receive sudo access.
+	// E.g. "clonr-admins". The drop-in file is named after this CN.
+	GroupCN  string `json:"group_cn"`
+	// NoPasswd, when true, writes NOPASSWD:ALL so members can sudo without a password.
+	NoPasswd bool   `json:"no_passwd"`
+}
+
 // HostEntry represents a single /etc/hosts entry for a cluster node.
 // Populated transiently at registration time; never stored in the database.
 type HostEntry struct {
@@ -420,6 +433,11 @@ type NodeConfig struct {
 	// to /etc/slurm/ on the deployed node. Nil when the Slurm module is disabled
 	// or not yet enabled.
 	SlurmConfig *SlurmNodeConfig `json:"slurm_config,omitempty"`
+
+	// SudoersConfig, when non-nil, causes finalization to write a sudoers drop-in
+	// to /etc/sudoers.d/<group_cn> so LDAP group members can run sudo on the node.
+	// Requires LDAPConfig to also be set — SSSD resolves group membership at sudo time.
+	SudoersConfig *SudoersNodeConfig `json:"sudoers_config,omitempty"`
 
 	// ClusterHosts is the full cluster host roster injected at registration time.
 	// Finalization writes these into /etc/hosts so nodes can resolve each other
