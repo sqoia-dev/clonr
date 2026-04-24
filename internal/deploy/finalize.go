@@ -568,11 +568,16 @@ func writeClusterHosts(mountRoot string, hosts []api.HostEntry) error {
 	sb.WriteString(clusterHostsBegin)
 	sb.WriteString("\n")
 	for _, h := range hosts {
+		var line string
 		if h.FQDN != "" && h.FQDN != h.Hostname {
-			fmt.Fprintf(&sb, "%-15s %s %s\n", h.IP, h.FQDN, h.Hostname)
+			line = fmt.Sprintf("%-15s %s %s", h.IP, h.FQDN, h.Hostname)
 		} else {
-			fmt.Fprintf(&sb, "%-15s %s\n", h.IP, h.Hostname)
+			line = fmt.Sprintf("%-15s %s", h.IP, h.Hostname)
 		}
+		if len(h.Aliases) > 0 {
+			line += " " + strings.Join(h.Aliases, " ")
+		}
+		sb.WriteString(line + "\n")
 	}
 	sb.WriteString(clusterHostsEnd)
 	sb.WriteString("\n")

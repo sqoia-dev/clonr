@@ -513,13 +513,17 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 				}
 				clusterHosts = append(clusterHosts, entry)
 			}
-			// Add the clonr server itself so nodes can resolve "clonr" without DNS.
+			// Add the clonr server itself so nodes can resolve "clonr" and
+			// "clonr-server" without DNS. "clonr-server" is required for LDAP
+			// resolution: sssd.conf contains ldap_uri = ldaps://clonr-server:636
+			// (derived from os.Hostname() on the server host).
 			if h.ServerIP != "" {
 				domain := defaultDomain()
 				clusterHosts = append(clusterHosts, api.HostEntry{
 					IP:       h.ServerIP,
 					Hostname: "clonr",
 					FQDN:     "clonr." + domain,
+					Aliases:  []string{"clonr-server"},
 				})
 			}
 			if len(clusterHosts) > 0 {

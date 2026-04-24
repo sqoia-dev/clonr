@@ -365,9 +365,12 @@ type LDAPNodeConfig struct {
 // HostEntry represents a single /etc/hosts entry for a cluster node.
 // Populated transiently at registration time; never stored in the database.
 type HostEntry struct {
-	IP       string `json:"ip"`
-	Hostname string `json:"hostname"`
-	FQDN     string `json:"fqdn,omitempty"`
+	IP       string   `json:"ip"`
+	Hostname string   `json:"hostname"`
+	FQDN     string   `json:"fqdn,omitempty"`
+	// Aliases holds additional hostnames written after Hostname on the same line.
+	// Used to add service-specific aliases (e.g. "clonr-server" for LDAP resolution).
+	Aliases  []string `json:"aliases,omitempty"`
 }
 
 // NodeConfig holds everything that makes a deployed image specific to one
