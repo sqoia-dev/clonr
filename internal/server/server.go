@@ -26,6 +26,7 @@ import (
 	"github.com/sqoia-dev/clonr/internal/image"
 	ldapmodule "github.com/sqoia-dev/clonr/internal/ldap"
 	networkmodule "github.com/sqoia-dev/clonr/internal/network"
+	slurmmodule "github.com/sqoia-dev/clonr/internal/slurm"
 	"github.com/sqoia-dev/clonr/internal/power"
 	"github.com/sqoia-dev/clonr/internal/sysaccounts"
 	ipmipower "github.com/sqoia-dev/clonr/internal/power/ipmi"
@@ -56,6 +57,7 @@ type Server struct {
 	ldapMgr             *ldapmodule.Manager
 	sysAccountsMgr      *sysaccounts.Manager
 	networkMgr          *networkmodule.Manager
+	slurmMgr            *slurmmodule.Manager
 	clientdHub          *ClientdHub
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
@@ -123,6 +125,11 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	sysAccountsMgr := sysaccounts.New(database)
 	networkMgr := networkmodule.New(database)
 
+	// clientdHub must be created before SlurmManager so the hub reference is valid.
+	hub := NewClientdHub()
+
+	slurmMgr := slurmmodule.New(database, hub)
+
 	s := &Server{
 		cfg:                 cfg,
 		db:                  database,
@@ -136,7 +143,8 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		ldapMgr:             ldapMgr,
 		sysAccountsMgr:      sysAccountsMgr,
 		networkMgr:          networkMgr,
-		clientdHub:          NewClientdHub(),
+		slurmMgr:            slurmMgr,
+		clientdHub:          hub,
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -189,6 +197,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	go s.runVerifyTimeoutScanner(ctx)
 	// LDAP module health checker.
 	s.ldapMgr.StartBackgroundWorkers(ctx)
+	// Slurm module health checker.
+	s.slurmMgr.StartBackgroundWorkers(ctx)
 }
 
 // runVerifyTimeoutScanner ticks every 60 seconds and marks as timed-out any node
@@ -607,6 +617,11 @@ func (s *Server) buildRouter() chi.Router {
 			// Network module — admin-only management routes.
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				networkmodule.RegisterRoutes(r, s.networkMgr)
+			})
+
+			// Slurm module — admin-only management routes.
+			r.With(requireRole("admin")).Group(func(r chi.Router) {
+				slurmmodule.RegisterRoutes(r, s.slurmMgr)
 			})
 		})
 	})

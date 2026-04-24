@@ -326,6 +326,39 @@ const API = {
             return tok ? `${base}?token=${encodeURIComponent(tok)}` : base;
         },
     },
+    slurm: {
+        status()                            { return API.get('/slurm/status'); },
+        enable(body)                        { return API.post('/slurm/enable', body); },
+        disable()                           { return API.post('/slurm/disable', {}); },
+        // Config files
+        listConfigs()                       { return API.get('/slurm/configs'); },
+        getConfig(filename)                 { return API.get(`/slurm/configs/${encodeURIComponent(filename)}`); },
+        saveConfig(filename, body)          { return API.put(`/slurm/configs/${encodeURIComponent(filename)}`, body); },
+        configHistory(filename)             { return API.get(`/slurm/configs/${encodeURIComponent(filename)}/history`); },
+        // Sync / drift
+        syncStatus()                        { return API.get('/slurm/sync-status'); },
+        nodeSyncStatus(nodeId)              { return API.get(`/nodes/${encodeURIComponent(nodeId)}/slurm/sync-status`); },
+        // Push operations
+        push(body)                          { return API.post('/slurm/push', body); },
+        pushOpStatus(opId)                  { return API.get(`/slurm/push-ops/${encodeURIComponent(opId)}`); },
+        // Node roles
+        getNodeRole(nodeId)                 { return API.get(`/nodes/${encodeURIComponent(nodeId)}/slurm/role`); },
+        setNodeRole(nodeId, body)           { return API.put(`/nodes/${encodeURIComponent(nodeId)}/slurm/role`, body); },
+        nodesByRole(role)                   { return API.get(`/slurm/nodes/by-role/${encodeURIComponent(role)}`); },
+        rolesSummary()                      { return API.get('/slurm/roles/summary'); },
+        // Node overrides
+        getNodeOverrides(nodeId)            { return API.get(`/nodes/${encodeURIComponent(nodeId)}/slurm/overrides`); },
+        setNodeOverrides(nodeId, body)      { return API.put(`/nodes/${encodeURIComponent(nodeId)}/slurm/overrides`, body); },
+        // Scripts
+        getScript(scriptType)               { return API.get(`/slurm/scripts/${encodeURIComponent(scriptType)}`); },
+        saveScript(scriptType, body)        { return API.put(`/slurm/scripts/${encodeURIComponent(scriptType)}`, body); },
+        scriptHistory(scriptType)           { return API.get(`/slurm/scripts/${encodeURIComponent(scriptType)}/history`); },
+        listScriptConfigs()                 { return API.get('/slurm/scripts/configs'); },
+        setScriptConfig(scriptType, body)   { return API.put(`/slurm/scripts/${encodeURIComponent(scriptType)}/config`, body); },
+        // Builds
+        listBuilds()                        { return API.get('/slurm/builds'); },
+        getBuild(buildId)                   { return API.get(`/slurm/builds/${encodeURIComponent(buildId)}`); },
+    },
     network: {
         // Switches
         listSwitches()                      { return API.get('/network/switches'); },

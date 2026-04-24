@@ -165,6 +165,27 @@ const App = {
         Router.register('/network/profiles', () => {
             if (typeof NetworkPages !== 'undefined') NetworkPages.profiles();
         });
+        Router.register('/slurm',    ()   => {
+            if (typeof SlurmPages !== 'undefined') SlurmPages.settings();
+        });
+        Router.register('/slurm/*',  (h)  => {
+            if (typeof SlurmPages === 'undefined') return;
+            // h = /slurm/configs/slurm.conf/history → parts = ['','slurm','configs','slurm.conf','history']
+            const parts = h.split('/');
+            if (parts[2] === 'configs') {
+                if (parts[3] && parts[4] === 'history') {
+                    SlurmPages.configHistory(decodeURIComponent(parts[3]));
+                } else if (parts[3]) {
+                    SlurmPages.configEditor(decodeURIComponent(parts[3]));
+                } else {
+                    SlurmPages.configs();
+                }
+            } else if (parts[2] === 'sync') {
+                SlurmPages.syncStatus();
+            } else {
+                SlurmPages.settings();
+            }
+        });
     },
 
     render(html) {
@@ -7517,6 +7538,10 @@ const Auth = {
         // Bootstrap Network nav visibility.
         if (typeof NetworkPages !== 'undefined') {
             NetworkPages.bootstrapNav().catch(() => {});
+        }
+        // Bootstrap Slurm nav visibility.
+        if (typeof SlurmPages !== 'undefined') {
+            SlurmPages.bootstrapNav().catch(() => {});
         }
         App.init();
     },

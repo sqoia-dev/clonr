@@ -416,6 +416,11 @@ type NodeConfig struct {
 	// static IPs, NetworkConfig handles bonds, VLANs, and IPoIB.
 	NetworkConfig *NetworkNodeConfig `json:"network_config,omitempty"`
 
+	// SlurmConfig, when non-nil, causes finalization to write Slurm config files
+	// to /etc/slurm/ on the deployed node. Nil when the Slurm module is disabled
+	// or not yet enabled.
+	SlurmConfig *SlurmNodeConfig `json:"slurm_config,omitempty"`
+
 	// ClusterHosts is the full cluster host roster injected at registration time.
 	// Finalization writes these into /etc/hosts so nodes can resolve each other
 	// and the clonr server before DNS/LDAP is available.
@@ -1365,6 +1370,90 @@ type OpenSMConfig struct {
 	SMPriority        int       `json:"sm_priority"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// ── Slurm module types ────────────────────────────────────────────────────────
+
+// SlurmModuleConfig is the module state returned by GET /api/v1/slurm/status.
+type SlurmModuleConfig struct {
+	Enabled      bool     `json:"enabled"`
+	Status       string   `json:"status"`        // not_configured|ready|disabled|error
+	ClusterName  string   `json:"cluster_name"`
+	ManagedFiles []string `json:"managed_files"`
+}
+
+// SlurmNodeConfig is the read-only projection embedded in NodeConfig.
+// Nil means the Slurm module is not active; finalize.go skips writeSlurmConfig().
+// Non-nil means the module is enabled and this node should receive Slurm configs.
+type SlurmNodeConfig struct {
+	ClusterName string            `json:"cluster_name"`
+	Configs     []SlurmConfigFile `json:"configs"`      // rendered content per file, ready to write
+	Scripts     []SlurmScriptFile `json:"scripts,omitempty"`
+}
+
+// SlurmConfigFile is a rendered config file, ready for delivery to a node.
+type SlurmConfigFile struct {
+	Filename string `json:"filename"`  // e.g. "slurm.conf"
+	Path     string `json:"path"`      // e.g. "/etc/slurm/slurm.conf"
+	Content  string `json:"content"`   // rendered, node-specific plain text
+	Checksum string `json:"checksum"`  // sha256 of Content
+	FileMode string `json:"file_mode"` // e.g. "0644"
+	Owner    string `json:"owner"`     // e.g. "slurm:slurm"
+	Version  int    `json:"version"`   // version number from slurm_config_files
+}
+
+// SlurmScriptFile is a rendered Slurm hook script ready for delivery to a node.
+type SlurmScriptFile struct {
+	ScriptType string `json:"script_type"` // e.g. "Prolog"
+	DestPath   string `json:"dest_path"`   // e.g. "/etc/slurm/prolog.sh"
+	Content    string `json:"content"`
+	Checksum   string `json:"checksum"`
+	Version    int    `json:"version"`
+}
+
+// SlurmNodeOverride holds per-node hardware parameters and GRES data.
+type SlurmNodeOverride struct {
+	NodeID    string            `json:"node_id"`
+	Params    map[string]string `json:"params"`     // keyed by override_key
+	UpdatedAt int64             `json:"updated_at"`
+}
+
+// SlurmPushOperation is the push operation status returned by the push endpoints.
+type SlurmPushOperation struct {
+	ID           string                     `json:"id"`
+	Filenames    []string                   `json:"filenames"`
+	FileVersions map[string]int             `json:"file_versions"`
+	ApplyAction  string                     `json:"apply_action"`
+	Status       string                     `json:"status"`
+	NodeCount    int                        `json:"node_count"`
+	SuccessCount int                        `json:"success_count"`
+	FailureCount int                        `json:"failure_count"`
+	StartedAt    int64                      `json:"started_at"`
+	CompletedAt  *int64                     `json:"completed_at,omitempty"`
+	NodeResults  map[string]SlurmNodeResult `json:"node_results,omitempty"`
+}
+
+// SlurmNodeResult is the per-node push result included in SlurmPushOperation.
+type SlurmNodeResult struct {
+	OK          bool              `json:"ok"`
+	Error       string            `json:"error,omitempty"`
+	FileResults []SlurmFileResult `json:"file_results"`
+	ApplyResult SlurmApplyResult  `json:"apply_result"`
+}
+
+// SlurmFileResult is the per-file result within a SlurmNodeResult.
+type SlurmFileResult struct {
+	Filename string `json:"filename"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+}
+
+// SlurmApplyResult describes the outcome of the apply action (reconfigure/restart).
+type SlurmApplyResult struct {
+	Action   string `json:"action"`
+	OK       bool   `json:"ok"`
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output,omitempty"`
 }
 
 // NetworkNodeConfig carries the resolved per-node network configuration

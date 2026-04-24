@@ -1,0 +1,353 @@
+// slurm.js — Slurm module webui: settings and config file management.
+// Conventions mirror app.js and ldap.js: hash-based routing, App.render(),
+// App.toast(), cardWrap(), escHtml(), fmtDate(), API.slurm.* (api.js).
+
+// ─── SlurmPages namespace ──────────────────────────────────────────────────
+
+const SlurmPages = {
+
+    // ── Nav bootstrap ──────────────────────────────────────────────────────
+
+    // bootstrapNav fetches /api/v1/slurm/status and updates Slurm nav visibility.
+    // Called once on app boot and re-called after enable/disable.
+    async bootstrapNav() {
+        const section = document.getElementById('nav-slurm-section');
+        if (!section) return;
+        try {
+            const st = await API.slurm.status();
+            const enabled = !!(st && st.enabled && st.status === 'ready');
+
+            section.style.display = '';
+
+            const badge   = document.getElementById('nav-slurm-status-badge');
+            const managed = document.getElementById('nav-slurm-managed');
+            if (badge) {
+                badge.textContent  = enabled ? '' : (st.status === 'not_configured' ? 'Not configured' : 'Disabled');
+                badge.style.display = enabled ? 'none' : '';
+            }
+            if (managed) managed.style.display = enabled ? '' : 'none';
+        } catch (_) {
+            // Non-admin (403) or unreachable — hide entire section.
+            section.style.display = 'none';
+        }
+    },
+
+    // ── Settings page ──────────────────────────────────────────────────────
+
+    async settings() {
+        App.render(loading('Loading Slurm settings…'));
+        try {
+            const st = await API.slurm.status();
+            App.render(SlurmPages._settingsHtml(st));
+            SlurmPages._bindSettingsEvents(st);
+        } catch (err) {
+            App.render(alertBox('Failed to load Slurm status: ' + err.message));
+        }
+    },
+
+    _settingsHtml(st) {
+        const isAdmin = typeof Auth !== 'undefined' && Auth._role === 'admin';
+
+        const statusColors = {
+            ready:          'badge-ready',
+            disabled:       'badge-neutral',
+            error:          'badge-error',
+            not_configured: 'badge-neutral',
+        };
+        const statusBadge = `<span class="badge ${statusColors[st.status] || 'badge-neutral'}">${escHtml(st.status)}</span>`;
+
+        const driftHtml = st.drift_summary
+            ? `<tr>
+                <td style="color:var(--text-secondary);padding:6px 16px 6px 0;font-size:13px;">Drift</td>
+                <td style="padding:6px 0;font-size:13px;">
+                    ${st.drift_summary.out_of_sync > 0
+                        ? `<span style="color:#dc2626;">${st.drift_summary.out_of_sync} node(s) out of sync</span>`
+                        : `<span style="color:#16a34a;">All ${st.drift_summary.in_sync_nodes} node(s) in sync</span>`}
+                </td>
+               </tr>`
+            : '';
+
+        const connectedHtml = `<tr>
+            <td style="color:var(--text-secondary);padding:6px 16px 6px 0;font-size:13px;">Connected Nodes</td>
+            <td style="padding:6px 0;font-size:13px;">${st.connected_nodes ? st.connected_nodes.length : 0}</td>
+            </tr>`;
+
+        const enableForm = (!st.enabled || st.status === 'not_configured' || st.status === 'disabled') && isAdmin ? `
+            <div style="margin-top:20px;">
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 12px;">Enable Slurm Module</h3>
+                <form id="slurm-enable-form" style="display:flex;flex-direction:column;gap:10px;max-width:400px;">
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">Cluster Name</label>
+                        <input type="text" id="slurm-cluster-name" placeholder="e.g. hpc-prod"
+                               style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg-input,#fff);color:var(--text);"
+                               value="${st.cluster_name ? escHtml(st.cluster_name) : ''}">
+                    </div>
+                    <div>
+                        <button type="submit" class="btn btn-primary" style="font-size:13px;padding:6px 16px;">
+                            Enable
+                        </button>
+                    </div>
+                </form>
+            </div>` : '';
+
+        const disableBtn = st.enabled && isAdmin ? `
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);">
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 8px;color:var(--text-secondary);">Danger Zone</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">
+                    Disabling the Slurm module stops clonr from managing Slurm configs. It does <strong>not</strong> remove configs from deployed nodes.
+                </p>
+                <button id="slurm-disable-btn" class="btn btn-danger" style="font-size:13px;padding:6px 16px;">
+                    Disable Module
+                </button>
+            </div>` : '';
+
+        return cardWrap('Slurm', `
+            <table style="border-collapse:collapse;width:100%;max-width:540px;margin-bottom:8px;">
+                <tbody>
+                    <tr>
+                        <td style="color:var(--text-secondary);padding:6px 16px 6px 0;font-size:13px;">Status</td>
+                        <td style="padding:6px 0;">${statusBadge}</td>
+                    </tr>
+                    <tr>
+                        <td style="color:var(--text-secondary);padding:6px 16px 6px 0;font-size:13px;">Cluster Name</td>
+                        <td style="padding:6px 0;font-family:monospace;font-size:13px;">${st.cluster_name ? escHtml(st.cluster_name) : '<span style="color:var(--text-secondary)">—</span>'}</td>
+                    </tr>
+                    <tr>
+                        <td style="color:var(--text-secondary);padding:6px 16px 6px 0;font-size:13px;">Managed Files</td>
+                        <td style="padding:6px 0;font-size:13px;">${st.managed_files && st.managed_files.length ? st.managed_files.map(f => `<code style="font-size:12px;background:var(--bg-code,#f1f5f9);padding:1px 4px;border-radius:3px;">${escHtml(f)}</code>`).join(' ') : '—'}</td>
+                    </tr>
+                    ${connectedHtml}
+                    ${driftHtml}
+                </tbody>
+            </table>
+            ${enableForm}
+            ${disableBtn}
+        `);
+    },
+
+    _bindSettingsEvents(st) {
+        const form = document.getElementById('slurm-enable-form');
+        if (form) {
+            form.addEventListener('submit', async e => {
+                e.preventDefault();
+                const clusterName = document.getElementById('slurm-cluster-name').value.trim();
+                if (!clusterName) { App.toast('Cluster name is required', 'error'); return; }
+                try {
+                    await API.slurm.enable({ cluster_name: clusterName });
+                    App.toast('Slurm module enabled', 'success');
+                    await SlurmPages.bootstrapNav();
+                    SlurmPages.settings();
+                } catch (err) {
+                    App.toast('Enable failed: ' + err.message, 'error');
+                }
+            });
+        }
+
+        const disableBtn = document.getElementById('slurm-disable-btn');
+        if (disableBtn) {
+            disableBtn.addEventListener('click', async () => {
+                if (!confirm('Disable the Slurm module? Configs will remain on deployed nodes.')) return;
+                try {
+                    await API.slurm.disable();
+                    App.toast('Slurm module disabled', 'success');
+                    await SlurmPages.bootstrapNav();
+                    SlurmPages.settings();
+                } catch (err) {
+                    App.toast('Disable failed: ' + err.message, 'error');
+                }
+            });
+        }
+    },
+
+    // ── Config files page ──────────────────────────────────────────────────
+
+    async configs() {
+        App.render(loading('Loading Slurm config files…'));
+        try {
+            const data = await API.slurm.listConfigs();
+            App.render(SlurmPages._configsHtml(data.configs || []));
+        } catch (err) {
+            App.render(alertBox('Failed to load configs: ' + err.message));
+        }
+    },
+
+    _configsHtml(configs) {
+        if (!configs.length) {
+            return cardWrap('Slurm Config Files', emptyState('No config files found. Enable the Slurm module to seed defaults.'));
+        }
+
+        const rows = configs.map(c => `
+            <tr>
+                <td style="padding:10px 12px;font-family:monospace;font-size:13px;">
+                    <a href="#/slurm/configs/${encodeURIComponent(c.filename)}" style="color:var(--accent);">${escHtml(c.filename)}</a>
+                </td>
+                <td style="padding:10px 12px;font-size:13px;">v${c.version}</td>
+                <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);font-family:monospace;">${c.checksum ? c.checksum.substring(0, 12) + '…' : '—'}</td>
+                <td style="padding:10px 12px;">
+                    <a href="#/slurm/configs/${encodeURIComponent(c.filename)}" class="btn btn-sm" style="font-size:12px;padding:3px 10px;">Edit</a>
+                </td>
+            </tr>
+        `).join('');
+
+        return cardWrap('Slurm Config Files', `
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">File</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Checksum</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;"></th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
+    },
+
+    // ── Config file editor ─────────────────────────────────────────────────
+
+    async configEditor(filename) {
+        App.render(loading('Loading ' + escHtml(filename) + '…'));
+        try {
+            const config = await API.slurm.getConfig(filename);
+            App.render(SlurmPages._configEditorHtml(config));
+            SlurmPages._bindEditorEvents(filename);
+        } catch (err) {
+            App.render(alertBox('Failed to load config: ' + err.message));
+        }
+    },
+
+    _configEditorHtml(config) {
+        return cardWrap(`Edit: ${escHtml(config.filename)}`, `
+            <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;">
+                <span style="font-size:13px;color:var(--text-secondary);">Current version: <strong>v${config.version}</strong></span>
+                <a href="#/slurm/configs/${encodeURIComponent(config.filename)}/history" style="font-size:13px;color:var(--accent);">View history</a>
+                <a href="#/slurm/configs" style="font-size:13px;color:var(--accent);margin-left:auto;">Back to list</a>
+            </div>
+            <textarea id="slurm-config-content"
+                style="width:100%;min-height:400px;font-family:monospace;font-size:13px;padding:10px;
+                       border:1px solid var(--border);border-radius:6px;background:var(--bg-code,#f8fafc);
+                       color:var(--text);resize:vertical;box-sizing:border-box;">${escHtml(config.content)}</textarea>
+            <div style="margin-top:10px;display:flex;align-items:center;gap:10px;">
+                <input type="text" id="slurm-config-message" placeholder="Version message (optional)"
+                    style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;
+                           background:var(--bg-input,#fff);color:var(--text);">
+                <button id="slurm-save-config-btn" class="btn btn-primary" style="font-size:13px;padding:6px 16px;">Save New Version</button>
+            </div>
+        `);
+    },
+
+    _bindEditorEvents(filename) {
+        const btn = document.getElementById('slurm-save-config-btn');
+        if (!btn) return;
+        btn.addEventListener('click', async () => {
+            const content = document.getElementById('slurm-config-content').value;
+            const message = document.getElementById('slurm-config-message').value.trim();
+            if (!content.trim()) { App.toast('Content cannot be empty', 'error'); return; }
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Saving…';
+                const result = await API.slurm.saveConfig(filename, { content, message });
+                App.toast(`Saved as version ${result.version}`, 'success');
+                SlurmPages.configEditor(filename);
+            } catch (err) {
+                App.toast('Save failed: ' + err.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Save New Version';
+            }
+        });
+    },
+
+    // ── Config history page ────────────────────────────────────────────────
+
+    async configHistory(filename) {
+        App.render(loading('Loading history for ' + escHtml(filename) + '…'));
+        try {
+            const data = await API.slurm.configHistory(filename);
+            App.render(SlurmPages._historyHtml(filename, data.history || []));
+        } catch (err) {
+            App.render(alertBox('Failed to load history: ' + err.message));
+        }
+    },
+
+    _historyHtml(filename, history) {
+        if (!history.length) {
+            return cardWrap(`History: ${escHtml(filename)}`, emptyState('No versions found.'));
+        }
+
+        const rows = history.map(h => `
+            <tr>
+                <td style="padding:10px 12px;font-size:13px;">v${h.version}</td>
+                <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${h.authored_by ? escHtml(h.authored_by) : '—'}</td>
+                <td style="padding:10px 12px;font-size:13px;">${h.message ? escHtml(h.message) : '—'}</td>
+                <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${h.created_at ? new Date(h.created_at * 1000).toLocaleString() : '—'}</td>
+                <td style="padding:10px 12px;font-family:monospace;font-size:12px;">${h.checksum ? h.checksum.substring(0, 12) + '…' : '—'}</td>
+            </tr>
+        `).join('');
+
+        return cardWrap(`History: ${escHtml(filename)}`, `
+            <div style="margin-bottom:12px;">
+                <a href="#/slurm/configs/${encodeURIComponent(filename)}" style="font-size:13px;color:var(--accent);">Back to editor</a>
+            </div>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Author</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Message</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Created</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Checksum</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
+    },
+
+    // ── Sync status page ───────────────────────────────────────────────────
+
+    async syncStatus() {
+        App.render(loading('Loading sync status…'));
+        try {
+            const data = await API.slurm.syncStatus();
+            App.render(SlurmPages._syncStatusHtml(data.drift || []));
+        } catch (err) {
+            App.render(alertBox('Failed to load sync status: ' + err.message));
+        }
+    },
+
+    _syncStatusHtml(drift) {
+        if (!drift.length) {
+            return cardWrap('Slurm Sync Status', emptyState('No sync data yet. Push configs to nodes to start tracking.'));
+        }
+
+        const rows = drift.map(d => `
+            <tr>
+                <td style="padding:10px 12px;font-size:13px;font-family:monospace;">${escHtml(d.node_id)}</td>
+                <td style="padding:10px 12px;font-size:13px;font-family:monospace;">${escHtml(d.filename)}</td>
+                <td style="padding:10px 12px;font-size:13px;">v${d.current_version}</td>
+                <td style="padding:10px 12px;font-size:13px;">v${d.deployed_version || 0}</td>
+                <td style="padding:10px 12px;">
+                    <span class="badge ${d.in_sync ? 'badge-ready' : 'badge-error'}">${d.in_sync ? 'In Sync' : 'Out of Sync'}</span>
+                </td>
+            </tr>
+        `).join('');
+
+        return cardWrap('Slurm Sync Status', `
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Node</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">File</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Current</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Deployed</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
+    },
+
+};

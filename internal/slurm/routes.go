@@ -1,0 +1,621 @@
+// routes.go — HTTP route handlers for the Slurm module API.
+// All routes are registered under /api/v1/slurm/ and require admin role.
+// Follows the same pattern as internal/ldap/routes.go.
+package slurm
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog/log"
+
+	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clonr/pkg/api"
+)
+
+// RegisterRoutes wires all Slurm API endpoints into the given chi router group.
+// All routes require admin role — the caller is responsible for applying the
+// requireRole("admin") middleware before calling this function.
+func RegisterRoutes(r chi.Router, m *Manager) {
+	// Module lifecycle.
+	r.Get("/slurm/status", m.handleStatus)
+	r.Post("/slurm/enable", m.handleEnable)
+	r.Post("/slurm/disable", m.handleDisable)
+
+	// Config file management.
+	r.Get("/slurm/configs", m.handleListConfigs)
+	r.Get("/slurm/configs/{filename}", m.handleGetConfig)
+	r.Put("/slurm/configs/{filename}", m.handleSaveConfig)
+	r.Get("/slurm/configs/{filename}/history", m.handleConfigHistory)
+
+	// Sync / drift status.
+	r.Get("/slurm/sync-status", m.handleSyncStatus)
+
+	// Push operations.
+	r.Post("/slurm/push", m.handlePush)
+	r.Get("/slurm/push-ops/{op_id}", m.handlePushOpStatus)
+
+	// Per-node overrides.
+	r.Get("/nodes/{node_id}/slurm/overrides", m.handleGetOverrides)
+	r.Put("/nodes/{node_id}/slurm/overrides", m.handleSaveOverrides)
+
+	// Per-node roles.
+	r.Get("/nodes/{node_id}/slurm/role", m.handleGetRole)
+	r.Put("/nodes/{node_id}/slurm/role", m.handleSetRole)
+	r.Get("/nodes/{node_id}/slurm/sync-status", m.handleNodeSyncStatus)
+
+	// Role summary and lookup.
+	r.Get("/slurm/nodes/by-role/{role}", m.handleNodesByRole)
+	r.Get("/slurm/roles/summary", m.handleRoleSummary)
+
+	// Script management (basic CRUD — full push is Sprint 7).
+	r.Get("/slurm/scripts/{script_type}", m.handleGetScript)
+	r.Put("/slurm/scripts/{script_type}", m.handleSaveScript)
+	r.Get("/slurm/scripts/{script_type}/history", m.handleScriptHistory)
+	r.Get("/slurm/scripts/configs", m.handleListScriptConfigs)
+	r.Put("/slurm/scripts/{script_type}/config", m.handleUpsertScriptConfig)
+
+	// Build management (basic CRUD — full pipeline is Sprint 8).
+	r.Get("/slurm/builds", m.handleListBuilds)
+	r.Get("/slurm/builds/{build_id}", m.handleGetBuild)
+}
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+
+func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := m.Status(r.Context())
+	if err != nil {
+		jsonError(w, "failed to read Slurm status", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, status, http.StatusOK)
+}
+
+// ─── Enable / Disable ─────────────────────────────────────────────────────────
+
+func (m *Manager) handleEnable(w http.ResponseWriter, r *http.Request) {
+	var req EnableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := m.Enable(r.Context(), req); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jsonResponse(w, map[string]string{"status": "ready"}, http.StatusOK)
+}
+
+func (m *Manager) handleDisable(w http.ResponseWriter, r *http.Request) {
+	if err := m.Disable(r.Context()); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "disabled"}, http.StatusOK)
+}
+
+// ─── Config file management ───────────────────────────────────────────────────
+
+func (m *Manager) handleListConfigs(w http.ResponseWriter, r *http.Request) {
+	rows, err := m.db.SlurmListCurrentConfigs(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: list configs failed")
+		jsonError(w, "failed to list configs", http.StatusInternalServerError)
+		return
+	}
+	files := make([]api.SlurmConfigFile, 0, len(rows))
+	for _, row := range rows {
+		files = append(files, configRowToAPI(row))
+	}
+	jsonResponse(w, map[string]interface{}{"configs": files, "total": len(files)}, http.StatusOK)
+}
+
+func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+
+	// Optional ?version= query param for fetching a specific version.
+	if vStr := r.URL.Query().Get("version"); vStr != "" {
+		ver, err := strconv.Atoi(vStr)
+		if err != nil {
+			jsonError(w, "invalid version parameter", http.StatusBadRequest)
+			return
+		}
+		row, err := m.db.SlurmGetConfigVersion(r.Context(), filename, ver)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				jsonError(w, "config version not found", http.StatusNotFound)
+				return
+			}
+			jsonError(w, "failed to fetch config version", http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, configRowToAPI(*row), http.StatusOK)
+		return
+	}
+
+	row, err := m.db.SlurmGetCurrentConfig(r.Context(), filename)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "config file not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch config", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, configRowToAPI(*row), http.StatusOK)
+}
+
+func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+
+	var body struct {
+		Content string `json:"content"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Content == "" {
+		jsonError(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	authoredBy := keyLabelFromContext(r)
+	ver, err := m.db.SlurmSaveConfigVersion(r.Context(), filename, body.Content, authoredBy, body.Message)
+	if err != nil {
+		log.Error().Err(err).Str("filename", filename).Msg("slurm: save config version failed")
+		jsonError(w, "failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{"filename": filename, "version": ver}, http.StatusOK)
+}
+
+func (m *Manager) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+	rows, err := m.db.SlurmListConfigHistory(r.Context(), filename)
+	if err != nil {
+		jsonError(w, "failed to fetch history", http.StatusInternalServerError)
+		return
+	}
+	files := make([]api.SlurmConfigFile, 0, len(rows))
+	for _, row := range rows {
+		files = append(files, configRowToAPI(row))
+	}
+	jsonResponse(w, map[string]interface{}{"filename": filename, "history": files, "total": len(files)}, http.StatusOK)
+}
+
+// ─── Sync / drift status ──────────────────────────────────────────────────────
+
+func (m *Manager) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	driftRows, err := m.db.SlurmDriftQuery(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: drift query failed")
+		jsonError(w, "failed to compute sync status", http.StatusInternalServerError)
+		return
+	}
+
+	type driftEntry struct {
+		NodeID          string `json:"node_id"`
+		Filename        string `json:"filename"`
+		CurrentVersion  int    `json:"current_version"`
+		DeployedVersion int    `json:"deployed_version"`
+		InSync          bool   `json:"in_sync"`
+	}
+
+	entries := make([]driftEntry, 0, len(driftRows))
+	for _, d := range driftRows {
+		entries = append(entries, driftEntry{
+			NodeID:          d.NodeID,
+			Filename:        d.Filename,
+			CurrentVersion:  d.CurrentVersion,
+			DeployedVersion: d.DeployedVersion,
+			InSync:          d.InSync,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"drift": entries, "total": len(entries)}, http.StatusOK)
+}
+
+func (m *Manager) handleNodeSyncStatus(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	stateRows, err := m.db.SlurmGetNodeConfigState(r.Context(), nodeID)
+	if err != nil {
+		jsonError(w, "failed to fetch node sync status", http.StatusInternalServerError)
+		return
+	}
+
+	type stateEntry struct {
+		Filename        string `json:"filename"`
+		DeployedVersion int    `json:"deployed_version"`
+		ContentHash     string `json:"content_hash"`
+		DeployedAt      int64  `json:"deployed_at"`
+		PushOpID        string `json:"push_op_id,omitempty"`
+	}
+
+	entries := make([]stateEntry, 0, len(stateRows))
+	for _, s := range stateRows {
+		entries = append(entries, stateEntry{
+			Filename:        s.Filename,
+			DeployedVersion: s.DeployedVersion,
+			ContentHash:     s.ContentHash,
+			DeployedAt:      s.DeployedAt,
+			PushOpID:        s.PushOpID,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"node_id": nodeID, "state": entries}, http.StatusOK)
+}
+
+// ─── Push operations ──────────────────────────────────────────────────────────
+
+func (m *Manager) handlePush(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Filenames   []string `json:"filenames"`
+		ApplyAction string   `json:"apply_action"` // "reconfigure" or "restart"
+		NodeIDs     []string `json:"node_ids,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Filenames) == 0 {
+		jsonError(w, "filenames is required", http.StatusBadRequest)
+		return
+	}
+	if body.ApplyAction == "" {
+		body.ApplyAction = "reconfigure"
+	}
+
+	initiatedBy := keyLabelFromContext(r)
+
+	// Use connected nodes if no specific node_ids provided.
+	nodeCount := 0
+	if m.hub != nil {
+		nodeCount = len(m.hub.ConnectedNodes())
+	}
+	if len(body.NodeIDs) > 0 {
+		nodeCount = len(body.NodeIDs)
+	}
+
+	// Create placeholder push op — full orchestration in Sprint 6.
+	op, err := m.CreatePlaceholderPushOp(r.Context(), body.Filenames, body.ApplyAction, initiatedBy, nodeCount)
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: create push op failed")
+		jsonError(w, "failed to create push operation", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, op, http.StatusAccepted)
+}
+
+func (m *Manager) handlePushOpStatus(w http.ResponseWriter, r *http.Request) {
+	opID := chi.URLParam(r, "op_id")
+	op, err := m.GetPushOp(r.Context(), opID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "push operation not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch push operation", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, op, http.StatusOK)
+}
+
+// ─── Node overrides ───────────────────────────────────────────────────────────
+
+func (m *Manager) handleGetOverrides(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	overrides, err := m.db.SlurmGetNodeOverrides(r.Context(), nodeID)
+	if err != nil {
+		jsonError(w, "failed to fetch overrides", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, api.SlurmNodeOverride{
+		NodeID: nodeID,
+		Params: overrides,
+	}, http.StatusOK)
+}
+
+func (m *Manager) handleSaveOverrides(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+
+	var body struct {
+		Params map[string]string `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Params == nil {
+		jsonError(w, "params is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := m.db.SlurmSaveNodeOverrides(r.Context(), nodeID, body.Params); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("slurm: save overrides failed")
+		jsonError(w, "failed to save overrides", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+}
+
+// ─── Node roles ───────────────────────────────────────────────────────────────
+
+func (m *Manager) handleGetRole(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	roles, err := m.db.SlurmGetNodeRoles(r.Context(), nodeID)
+	if err != nil {
+		jsonError(w, "failed to fetch roles", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"node_id": nodeID, "roles": roles}, http.StatusOK)
+}
+
+func (m *Manager) handleSetRole(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+
+	var body struct {
+		Roles      []string `json:"roles"`
+		AutoDetect bool     `json:"auto_detect"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := m.db.SlurmSetNodeRoles(r.Context(), nodeID, body.Roles, body.AutoDetect); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("slurm: set roles failed")
+		jsonError(w, "failed to set roles", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+}
+
+func (m *Manager) handleNodesByRole(w http.ResponseWriter, r *http.Request) {
+	role := chi.URLParam(r, "role")
+	nodeIDs, err := m.db.SlurmListNodesByRole(r.Context(), role)
+	if err != nil {
+		jsonError(w, "failed to list nodes by role", http.StatusInternalServerError)
+		return
+	}
+	if nodeIDs == nil {
+		nodeIDs = []string{}
+	}
+	jsonResponse(w, map[string]interface{}{"role": role, "node_ids": nodeIDs, "total": len(nodeIDs)}, http.StatusOK)
+}
+
+func (m *Manager) handleRoleSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := m.db.SlurmRoleSummary(r.Context())
+	if err != nil {
+		jsonError(w, "failed to fetch role summary", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"summary": summary}, http.StatusOK)
+}
+
+// ─── Scripts ──────────────────────────────────────────────────────────────────
+
+func (m *Manager) handleGetScript(w http.ResponseWriter, r *http.Request) {
+	scriptType := chi.URLParam(r, "script_type")
+	row, err := m.db.SlurmGetCurrentScript(r.Context(), scriptType)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "script not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch script", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, scriptRowToAPI(*row), http.StatusOK)
+}
+
+func (m *Manager) handleSaveScript(w http.ResponseWriter, r *http.Request) {
+	scriptType := chi.URLParam(r, "script_type")
+
+	var body struct {
+		Content  string `json:"content"`
+		DestPath string `json:"dest_path"`
+		Message  string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Content == "" || body.DestPath == "" {
+		jsonError(w, "content and dest_path are required", http.StatusBadRequest)
+		return
+	}
+
+	authoredBy := keyLabelFromContext(r)
+	ver, err := m.db.SlurmSaveScriptVersion(r.Context(), scriptType, body.DestPath, body.Content, authoredBy, body.Message)
+	if err != nil {
+		log.Error().Err(err).Str("script_type", scriptType).Msg("slurm: save script version failed")
+		jsonError(w, "failed to save script", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"script_type": scriptType, "version": ver}, http.StatusOK)
+}
+
+func (m *Manager) handleScriptHistory(w http.ResponseWriter, r *http.Request) {
+	scriptType := chi.URLParam(r, "script_type")
+	rows, err := m.db.SlurmListScriptHistory(r.Context(), scriptType)
+	if err != nil {
+		jsonError(w, "failed to fetch script history", http.StatusInternalServerError)
+		return
+	}
+	scripts := make([]api.SlurmScriptFile, 0, len(rows))
+	for _, row := range rows {
+		scripts = append(scripts, scriptRowToAPI(row))
+	}
+	jsonResponse(w, map[string]interface{}{"script_type": scriptType, "history": scripts, "total": len(scripts)}, http.StatusOK)
+}
+
+func (m *Manager) handleListScriptConfigs(w http.ResponseWriter, r *http.Request) {
+	rows, err := m.db.SlurmListScriptConfigs(r.Context())
+	if err != nil {
+		jsonError(w, "failed to list script configs", http.StatusInternalServerError)
+		return
+	}
+
+	type scriptConfigResp struct {
+		ScriptType string `json:"script_type"`
+		DestPath   string `json:"dest_path"`
+		Enabled    bool   `json:"enabled"`
+		UpdatedAt  int64  `json:"updated_at"`
+	}
+
+	out := make([]scriptConfigResp, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, scriptConfigResp{
+			ScriptType: row.ScriptType,
+			DestPath:   row.DestPath,
+			Enabled:    row.Enabled,
+			UpdatedAt:  row.UpdatedAt,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"configs": out, "total": len(out)}, http.StatusOK)
+}
+
+func (m *Manager) handleUpsertScriptConfig(w http.ResponseWriter, r *http.Request) {
+	scriptType := chi.URLParam(r, "script_type")
+
+	var body struct {
+		DestPath string `json:"dest_path"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.DestPath == "" {
+		jsonError(w, "dest_path is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := m.db.SlurmUpsertScriptConfig(r.Context(), db.SlurmScriptConfigRow{
+		ScriptType: scriptType,
+		DestPath:   body.DestPath,
+		Enabled:    body.Enabled,
+	}); err != nil {
+		jsonError(w, "failed to save script config", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
+}
+
+// ─── Builds ───────────────────────────────────────────────────────────────────
+
+func (m *Manager) handleListBuilds(w http.ResponseWriter, r *http.Request) {
+	rows, err := m.db.SlurmListBuilds(r.Context())
+	if err != nil {
+		jsonError(w, "failed to list builds", http.StatusInternalServerError)
+		return
+	}
+
+	type buildResp struct {
+		ID                string   `json:"id"`
+		Version           string   `json:"version"`
+		Arch              string   `json:"arch"`
+		Status            string   `json:"status"`
+		ConfigureFlags    []string `json:"configure_flags,omitempty"`
+		ArtifactPath      string   `json:"artifact_path,omitempty"`
+		ArtifactChecksum  string   `json:"artifact_checksum,omitempty"`
+		ArtifactSizeBytes int64    `json:"artifact_size_bytes,omitempty"`
+		InitiatedBy       string   `json:"initiated_by,omitempty"`
+		StartedAt         int64    `json:"started_at"`
+		CompletedAt       *int64   `json:"completed_at,omitempty"`
+		ErrorMessage      string   `json:"error_message,omitempty"`
+	}
+
+	out := make([]buildResp, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, buildResp{
+			ID:                row.ID,
+			Version:           row.Version,
+			Arch:              row.Arch,
+			Status:            row.Status,
+			ConfigureFlags:    row.ConfigureFlags,
+			ArtifactPath:      row.ArtifactPath,
+			ArtifactChecksum:  row.ArtifactChecksum,
+			ArtifactSizeBytes: row.ArtifactSizeBytes,
+			InitiatedBy:       row.InitiatedBy,
+			StartedAt:         row.StartedAt,
+			CompletedAt:       row.CompletedAt,
+			ErrorMessage:      row.ErrorMessage,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"builds": out, "total": len(out)}, http.StatusOK)
+}
+
+func (m *Manager) handleGetBuild(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+	row, err := m.db.SlurmGetBuild(r.Context(), buildID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "build not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch build", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, row, http.StatusOK)
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// configRowToAPI converts a DB config file row to the API type.
+func configRowToAPI(row db.SlurmConfigFileRow) api.SlurmConfigFile {
+	return api.SlurmConfigFile{
+		Filename: row.Filename,
+		Path:     "/etc/slurm/" + row.Filename,
+		Content:  row.Content,
+		Checksum: row.Checksum,
+		FileMode: "0644",
+		Owner:    "slurm:slurm",
+		Version:  row.Version,
+	}
+}
+
+// scriptRowToAPI converts a DB script row to the API type.
+func scriptRowToAPI(row db.SlurmScriptRow) api.SlurmScriptFile {
+	return api.SlurmScriptFile{
+		ScriptType: row.ScriptType,
+		DestPath:   row.DestPath,
+		Content:    row.Content,
+		Checksum:   row.Checksum,
+		Version:    row.Version,
+	}
+}
+
+// keyLabelFromContext extracts an API key label from the request context.
+// Falls back to "unknown" when no label is set.
+func keyLabelFromContext(r *http.Request) string {
+	type keyLabelKey struct{}
+	if v := r.Context().Value(keyLabelKey{}); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return "unknown"
+}
+
+func jsonResponse(w http.ResponseWriter, body interface{}, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Error().Err(err).Msg("slurm routes: encode response failed")
+	}
+}
+
+func jsonError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
