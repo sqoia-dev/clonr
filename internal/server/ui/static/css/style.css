@@ -8,7 +8,7 @@
     --bg-sidebar-active: #3b82f6;
     --bg-input: #ffffff;
     --text-primary: #1e293b;
-    --text-secondary: #64748b;
+    --text-secondary: #475569;
     --text-sidebar: #cbd5e1;
     --text-sidebar-active: #ffffff;
     --accent: #3b82f6;
@@ -641,7 +641,7 @@ td.dim {
 .form-group textarea:focus {
     outline: none;
     border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.25);
 }
 
 .form-group textarea {
@@ -708,7 +708,7 @@ td.dim {
 .log-line-error { border-left-color: var(--error); background: #fff5f5; }
 
 .log-ts {
-    color: #94a3b8;
+    color: #64748b;
     flex-shrink: 0;
     font-size: 11px;
     min-width: 64px;
@@ -1564,7 +1564,7 @@ details[open] summary {
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-sidebar);
-    opacity: 0.5;
+    opacity: 0.65;
     background: transparent;
     border-radius: var(--radius-sm);
 }
@@ -1905,4 +1905,81 @@ details[open] summary {
     border: 1px solid #fde68a;
     border-radius: var(--radius-sm);
     padding: 10px 14px;
+}
+
+/* ─── Skip to content (WCAG 2.1 AA) ────────────────────────────────────────── */
+
+.skip-to-content {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    background: var(--accent);
+    color: #fff;
+    padding: 8px 16px;
+    z-index: 1000;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 0 0 var(--radius-sm) 0;
+    transition: top 0.15s ease;
+    text-decoration: none;
+}
+
+.skip-to-content:focus {
+    top: 0;
+    outline: 2px solid #fff;
+    outline-offset: -2px;
+    text-decoration: none;
+    color: #fff;
+}
+
+/* ─── Focus indicators (WCAG 2.1 AA) ───────────────────────────────────────── */
+
+/* Global visible focus ring for keyboard navigation */
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Remove default outline for mouse clicks */
+:focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* Sidebar nav items — light focus ring on dark background */
+.nav-item:focus-visible {
+    outline: 2px solid #93c5fd;
+    outline-offset: -2px;
+}
+
+/* Buttons — enhance existing focus */
+.btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(59,130,246,0.2);
+}
+
+/* Form inputs — keep existing border-focus but add outline */
+.form-group input:focus-visible,
+.form-group select:focus-visible,
+.form-group textarea:focus-visible {
+    outline: 2px solid var(--border-focus);
+    outline-offset: -1px;
+}
+
+/* Toggle switch */
+.toggle input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Modal close button */
+.modal-close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Tab focus */
+.tab:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }

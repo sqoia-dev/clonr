@@ -124,7 +124,7 @@ const LDAPPages = {
         const enableCardTitle = st.status === 'error' ? 'Retry Provisioning' : 'Enable LDAP Module';
         const enableForm = showEnableForm ? `
             <div class="card" style="margin-top:20px;">
-                <div class="card-header"><span class="card-title">${enableCardTitle}</span></div>
+                <div class="card-header"><h2 class="card-title">${enableCardTitle}</h2></div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;max-width:480px;">
                     <p style="margin:0;color:var(--text-secondary);font-size:14px;">
                         Enabling the LDAP module will start a self-hosted OpenLDAP instance on this server and configure new nodes to authenticate via it on reimage.
@@ -164,7 +164,7 @@ const LDAPPages = {
         // bind divergence without a full Disable/Re-enable cycle).
         const repairForm = st.enabled ? `
             <div class="card" style="margin-top:20px;">
-                <div class="card-header"><span class="card-title">Admin password</span></div>
+                <div class="card-header"><h2 class="card-title">Admin password</h2></div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;max-width:480px;">
                     <p style="margin:0;color:var(--text-secondary);font-size:14px;">
                         Re-enter the admin password you set on Enable. Persists it across restarts
@@ -191,14 +191,14 @@ const LDAPPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">LDAP</div>
+                    <h1 class="page-title">LDAP</h1>
                     <div class="page-subtitle">Self-hosted OpenLDAP module — opt-in directory for node authentication</div>
                 </div>
             </div>
             ${expiryBanner}
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">Module Status</span>
+                    <h2 class="card-title">Module Status</h2>
                     ${actionButtons}
                 </div>
                 <div style="padding:16px 20px;">
@@ -209,7 +209,7 @@ const LDAPPages = {
             ${repairForm}
             ${st.enabled && st.status === 'ready' ? `<div class="card" style="margin-top:20px;" id="ldap-sudoers-card">
                 <div class="card-header">
-                    <span class="card-title">Sudoers Management</span>
+                    <h2 class="card-title">Sudoers Management</h2>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <span id="ldap-sudoers-status-badge" class="badge badge-neutral" style="font-size:12px;">Loading…</span>
                         <button class="btn btn-secondary btn-sm" id="ldap-sudoers-push-btn"
@@ -243,7 +243,7 @@ const LDAPPages = {
             </div>` : ''}
             <div class="card" style="margin-top:20px;" id="ldap-logs-card">
                 <div class="card-header" style="justify-content:space-between;">
-                    <span class="card-title">Service Logs</span>
+                    <h2 class="card-title">Service Logs</h2>
                     <div style="display:flex;align-items:center;gap:10px;">
                         <span class="follow-indicator" id="ldap-follow-ind"><span class="follow-dot"></span>static</span>
                         <label class="toggle" style="margin:0;">
@@ -303,12 +303,14 @@ const LDAPPages = {
         const needsAck = nodeCount > 0;
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-disable-modal';
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal" aria-labelledby="modal-title-1">
                 <div class="modal-header">
-                    <span class="modal-title">Disable LDAP Module</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-disable-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-1">Disable LDAP Module</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-disable-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     ${needsAck ? `<div class="alert alert-warning" style="margin-bottom:16px;">
@@ -486,7 +488,7 @@ const LDAPPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">LDAP Users</div>
+                    <h1 class="page-title">LDAP Users</h1>
                     <div class="page-subtitle">posixAccount entries in ou=people</div>
                 </div>
                 <div style="display:flex;gap:8px;">
@@ -494,7 +496,7 @@ const LDAPPages = {
                 </div>
             </div>
             <div class="card">
-                <table class="table">
+                <table class="table" aria-label="LDAP Users">
                     <thead>
                         <tr>
                             <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th title="Sudo access via clonr-admins LDAP group">Sudo</th><th>Actions</th>
@@ -547,12 +549,14 @@ const LDAPPages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-create-user-modal';
         overlay.innerHTML = `
-            <div class="modal modal-wide">
+            <div class="modal modal-wide" aria-labelledby="modal-title-11">
                 <div class="modal-header">
-                    <span class="modal-title">Create LDAP User</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-create-user-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-11">Create LDAP User</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-create-user-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
 
@@ -741,12 +745,14 @@ const LDAPPages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-edit-user-modal';
         overlay.innerHTML = `
-            <div class="modal modal-wide">
+            <div class="modal modal-wide" aria-labelledby="modal-title-12">
                 <div class="modal-header">
-                    <span class="modal-title">Edit User: ${escHtml(user.uid)}</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-edit-user-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-12">Edit User: ${escHtml(user.uid)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-edit-user-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
 
@@ -842,12 +848,14 @@ const LDAPPages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-reset-pw-modal';
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal" aria-labelledby="modal-title-2">
                 <div class="modal-header">
-                    <span class="modal-title">Reset Password: ${escHtml(uid)}</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-reset-pw-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-2">Reset Password: ${escHtml(uid)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-reset-pw-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <div class="form-group" style="margin-bottom:12px;">
@@ -937,12 +945,14 @@ const LDAPPages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-lock-confirm-modal';
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal" aria-labelledby="modal-title-3">
                 <div class="modal-header">
-                    <span class="modal-title">Lock user account?</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-lock-confirm-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-3">Lock user account?</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-lock-confirm-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 16px;font-size:14px;">
@@ -1029,7 +1039,7 @@ const LDAPPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">LDAP Groups</div>
+                    <h1 class="page-title">LDAP Groups</h1>
                     <div class="page-subtitle">posixGroup entries in ou=groups</div>
                 </div>
                 <div style="display:flex;gap:8px;">
@@ -1037,7 +1047,7 @@ const LDAPPages = {
                 </div>
             </div>
             <div class="card">
-                <table class="table">
+                <table class="table" aria-label="LDAP Groups">
                     <thead>
                         <tr><th>CN</th><th>GID Number</th><th>Members</th><th>Actions</th></tr>
                     </thead>
@@ -1064,12 +1074,14 @@ const LDAPPages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-create-group-modal';
         overlay.innerHTML = `
-            <div class="modal modal-wide">
+            <div class="modal modal-wide" aria-labelledby="modal-title-13">
                 <div class="modal-header">
-                    <span class="modal-title">Create LDAP Group</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-create-group-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-13">Create LDAP Group</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-create-group-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary);line-height:1.5;">
@@ -1179,12 +1191,14 @@ const LDAPPages = {
         // Build the skeleton immediately so there is no perceived delay.
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'ldap-group-detail-modal';
         overlay.innerHTML = `
-            <div class="modal modal-wide" style="max-height:80vh;display:flex;flex-direction:column;">
+            <div class="modal modal-wide" style="max-height:80vh;display:flex;flex-direction:column;" aria-labelledby="modal-title-14">
                 <div class="modal-header">
-                    <span class="modal-title">Group: ${escHtml(group.cn)}</span>
-                    <button class="modal-close" onclick="document.getElementById('ldap-group-detail-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-14">Group: ${escHtml(group.cn)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('ldap-group-detail-modal').remove()">×</button>
                 </div>
                 <div class="modal-body" style="overflow-y:auto;flex:1;">
 

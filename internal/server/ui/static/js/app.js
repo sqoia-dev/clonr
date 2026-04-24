@@ -98,8 +98,11 @@ const App = {
             info:    { bg: '#3b82f6', icon: 'ℹ' },
         };
         const c = colors[kind] || colors.info;
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
         toast.style.cssText = `background:${c.bg};color:white;padding:12px 16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:14px;font-weight:500;min-width:280px;max-width:420px;display:flex;align-items:center;gap:10px;pointer-events:auto;animation:toastIn 0.2s ease-out`;
-        toast.innerHTML = `<span style="font-size:18px;font-weight:bold">${c.icon}</span><span style="flex:1">${escHtml(message)}</span><span style="cursor:pointer;opacity:0.7;padding:0 4px" onclick="this.parentElement.remove()">×</span>`;
+        toast.innerHTML = `<span style="font-size:18px;font-weight:bold" aria-hidden="true">${c.icon}</span><span style="flex:1">${escHtml(message)}</span><button style="cursor:pointer;opacity:0.7;padding:0 4px;background:none;border:none;color:white;font-size:16px;line-height:1" aria-label="Dismiss notification" onclick="this.parentElement.remove()">×</button>`;
         container.appendChild(toast);
         setTimeout(() => {
             toast.style.animation = 'toastOut 0.2s ease-in forwards';
@@ -329,7 +332,7 @@ function cardWrap(title, body, actions = '') {
     return `
         <div class="card">
             <div class="card-header">
-                <span class="card-title">${title}</span>
+                <h2 class="card-title">${title}</h2>
                 <div class="flex gap-8">${actions}</div>
             </div>
             <div>${body}</div>
@@ -438,7 +441,7 @@ const Pages = {
             App.render(`
                 <div class="page-header">
                     <div>
-                        <div class="page-title">Dashboard</div>
+                        <h1 class="page-title">Dashboard</h1>
                         <div class="page-subtitle">System overview and active deployments</div>
                     </div>
                 </div>
@@ -711,7 +714,7 @@ const Pages = {
 
         if (!entries.length) return emptyState('No active deployments');
 
-        return `<div class="table-wrap"><table>
+        return `<div class="table-wrap"><table aria-label="Active deployments">
             <thead><tr>
                 <th>Node</th><th>Phase</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Updated</th>
             </tr></thead>
@@ -801,7 +804,7 @@ const Pages = {
 
     _imagesTable(images) {
         if (!images.length) return emptyState('No images yet', 'Pull an image from the Images page');
-        return `<div class="table-wrap"><table>
+        return `<div class="table-wrap"><table aria-label="Images">
             <thead><tr>
                 <th>Name</th><th>OS / Arch</th><th>Status</th><th>Size</th>
             </tr></thead>
@@ -826,7 +829,7 @@ const Pages = {
 
     _nodesTable(nodes) {
         if (!nodes.length) return emptyState('No nodes configured', 'Add a node from the Nodes page');
-        return `<div class="table-wrap"><table>
+        return `<div class="table-wrap"><table aria-label="Nodes">
             <thead><tr>
                 <th>Host</th><th>Status</th><th>Updated</th>
             </tr></thead>
@@ -860,7 +863,7 @@ const Pages = {
             App.render(`
                 <div class="page-header">
                     <div>
-                        <div class="page-title">Images</div>
+                        <h1 class="page-title">Images</h1>
                         <div class="page-subtitle">${images.length} image${images.length !== 1 ? 's' : ''} total</div>
                     </div>
                     <div class="flex gap-8">
@@ -949,7 +952,7 @@ const Pages = {
 
         return `<div class="card" style="margin-bottom:20px;border-left:3px solid var(--accent)">
             <div class="card-header">
-                <span class="card-title">System Initramfs</span>
+                <h2 class="card-title">System Initramfs</h2>
                 <div class="flex gap-8">
                     <button class="btn btn-secondary btn-sm" onclick="Pages.showRebuildInitramfsModal()">
                         Rebuild
@@ -990,12 +993,14 @@ const Pages = {
     showRebuildInitramfsModal() {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'rebuild-initramfs-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-width:480px">
+            <div class="modal" style="max-width:480px" aria-labelledby="modal-title-1">
                 <div class="modal-header">
-                    <span class="modal-title">Rebuild System Initramfs</span>
-                    <button class="modal-close" onclick="document.getElementById('rebuild-initramfs-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-1">Rebuild System Initramfs</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('rebuild-initramfs-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="color:var(--text-secondary);margin-bottom:16px">
@@ -1124,12 +1129,14 @@ const Pages = {
     showPullModal() {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'pull-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-width:600px">
+            <div class="modal" style="max-width:600px" aria-labelledby="modal-title-2">
                 <div class="modal-header">
-                    <span class="modal-title">Pull Image</span>
-                    <button class="modal-close" onclick="document.getElementById('pull-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-2">Pull Image</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('pull-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <form id="pull-form" onsubmit="Pages.submitPull(event)">
@@ -1342,12 +1349,14 @@ const Pages = {
     showImportISOModal() {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'iso-modal';
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal" aria-labelledby="modal-title-3">
                 <div class="modal-header">
-                    <span class="modal-title">Upload Image File</span>
-                    <button class="modal-close" onclick="document.getElementById('iso-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-3">Upload Image File</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('iso-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <form id="iso-form" onsubmit="Pages.submitImportISO(event)">
@@ -1593,12 +1602,14 @@ const Pages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'delete-image-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-width:480px">
+            <div class="modal" style="max-width:480px" aria-labelledby="modal-title-4">
                 <div class="modal-header">
-                    <span class="modal-title">Delete Image</span>
-                    <button class="modal-close" onclick="document.getElementById('delete-image-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-4">Delete Image</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('delete-image-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 4px;font-weight:600">${escHtml(name)}</p>
@@ -1636,12 +1647,14 @@ const Pages = {
     showCaptureModal(prefillHost = '', prefillName = '') {
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'capture-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-width:560px">
+            <div class="modal" style="max-width:560px" aria-labelledby="modal-title-5">
                 <div class="modal-header">
-                    <span class="modal-title">Capture from Host</span>
-                    <button class="modal-close" onclick="document.getElementById('capture-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-5">Capture from Host</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('capture-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <div class="alert alert-info" style="margin-bottom:16px;font-size:12px">
@@ -1814,7 +1827,7 @@ const Pages = {
                             Back
                         </button>
                         <div>
-                            <div class="page-title">${escHtml(img.name)}</div>
+                            <h1 class="page-title">${escHtml(img.name)}</h1>
                             <div class="page-subtitle">${escHtml(img.id)}</div>
                         </div>
                         ${badge(img.status)}
@@ -1966,6 +1979,9 @@ const Pages = {
         const overlay = document.createElement('div');
         overlay.className = 'shell-modal-overlay';
         overlay.id = 'shell-modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-labelledby', 'shell-modal-title');
         overlay.innerHTML = `
             <div class="shell-modal">
                 <div class="shell-modal-header">
@@ -1975,7 +1991,7 @@ const Pages = {
                             <div class="shell-modal-dot yellow"></div>
                             <div class="shell-modal-dot green"></div>
                         </div>
-                        <span class="shell-modal-title">shell &mdash; ${escHtml(imageId)}</span>
+                        <span class="shell-modal-title" id="shell-modal-title">shell &mdash; ${escHtml(imageId)}</span>
                     </div>
                     <button class="shell-modal-close" onclick="Pages.closeShellTerminal()" title="Close terminal">&times;</button>
                 </div>
@@ -2172,13 +2188,13 @@ const Pages = {
                 <div class="card" style="margin-bottom:16px" id="nodes-section-${safeRole}">
                     <div class="card-header" style="cursor:pointer;user-select:none"
                          onclick="Pages._toggleNodesSection('${safeRole}')">
-                        <span class="card-title">${escHtml(label)}
+                        <h2 class="card-title">${escHtml(label)}
                             <span class="badge badge-neutral badge-sm" style="margin-left:8px;font-size:11px">${roleNodes.length}</span>
-                        </span>
+                        </h2>
                         <span id="nodes-section-chevron-${safeRole}" style="font-size:12px;color:var(--text-secondary)">&#9650;</span>
                     </div>
                     <div id="nodes-section-body-${safeRole}">
-                        <div class="table-wrap"><table>
+                        <div class="table-wrap"><table aria-label="Nodes — ${escHtml(label)}">
                             ${tableHeader}
                             <tbody id="nodes-tbody-${safeRole}">
                                 ${roleNodes.map(n => Pages._nodeRow(n, imgMap, images)).join('')}
@@ -2249,7 +2265,7 @@ const Pages = {
             App.render(`
                 <div class="page-header">
                     <div>
-                        <div class="page-title">Nodes</div>
+                        <h1 class="page-title">Nodes</h1>
                         <div class="page-subtitle" id="nodes-subtitle">${filteredNodes.length}${groupFilter ? ' (filtered)' : ''} of ${nodes.length} node${nodes.length !== 1 ? 's' : ''}</div>
                     </div>
                     <div class="flex gap-8">
@@ -2446,6 +2462,8 @@ const Pages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'node-modal';
 
         const imgOptions = images
@@ -2454,10 +2472,10 @@ const Pages = {
             .join('');
 
         overlay.innerHTML = `
-            <div class="modal">
+            <div class="modal" aria-labelledby="modal-title-6">
                 <div class="modal-header">
-                    <span class="modal-title">${isEdit ? 'Edit Node' : 'Add Node'}</span>
-                    <button class="modal-close" onclick="document.getElementById('node-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-6">${isEdit ? 'Edit Node' : 'Add Node'}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('node-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <form id="node-form" onsubmit="Pages.submitNode(event, ${isEdit ? `'${node.id}'` : 'null'})">
@@ -3042,12 +3060,12 @@ const Pages = {
                             Back
                         </button>
                         <div>
-                            <div class="page-title" style="display:flex;align-items:center;gap:8px">
+                            <h1 class="page-title" style="display:flex;align-items:center;gap:8px">
                                 ${(node.hostname && node.hostname !== '(none)')
                                     ? escHtml(node.hostname)
                                     : `<span class="text-dim" style="font-style:italic">Unassigned</span>`}
                                 ${node.hostname_auto ? `<span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>` : ''}
-                            </div>
+                            </h1>
                             <div class="page-subtitle text-mono">${escHtml(node.primary_mac)}</div>
                         </div>
                         ${nodeBadge(node)}
@@ -3893,11 +3911,13 @@ const Pages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'unsaved-changes-modal';
         overlay.innerHTML = `
-            <div class="modal" style="max-width:440px">
+            <div class="modal" style="max-width:440px" aria-labelledby="modal-title-7">
                 <div class="modal-header">
-                    <span class="modal-title">Unsaved Changes</span>
+                    <span class="modal-title" id="modal-title-7">Unsaved Changes</span>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 16px;color:var(--text-secondary);font-size:13px">
@@ -5228,6 +5248,8 @@ const Pages = {
         const overlay = document.createElement('div');
         overlay.id = 'layout-editor-modal';
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.innerHTML = `
             <div class="modal" style="max-width:720px;width:95vw">
                 <div class="modal-header"><h2>Edit Disk Layout Override</h2></div>
@@ -5726,7 +5748,7 @@ const Pages = {
             App.render(`
                 <div class="page-header">
                     <div>
-                        <div class="page-title">Node Groups</div>
+                        <h1 class="page-title">Node Groups</h1>
                         <div class="page-subtitle">${groups.length} group${groups.length !== 1 ? 's' : ''} defined</div>
                     </div>
                     <button class="btn btn-primary" onclick="Pages.showNodeGroupModal(null)">
@@ -5827,7 +5849,7 @@ const Pages = {
                 </div>
                 <div class="page-header">
                     <div>
-                        <div class="page-title">${escHtml(group.name)}${group.role ? ` <span class="badge badge-neutral" style="font-size:12px;vertical-align:middle">${escHtml(group.role)}</span>` : ''}</div>
+                        <h1 class="page-title">${escHtml(group.name)}${group.role ? ` <span class="badge badge-neutral" style="font-size:12px;vertical-align:middle">${escHtml(group.role)}</span>` : ''}</h1>
                         ${group.description ? `<div class="page-subtitle">${escHtml(group.description)}</div>` : ''}
                     </div>
                     <div class="flex gap-8">
@@ -5871,6 +5893,8 @@ const Pages = {
         const overlay = document.createElement('div');
         overlay.id = 'node-group-modal';
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
 
         // Store state for the layout editor.
         overlay._layoutState = hasLayout
@@ -5878,10 +5902,10 @@ const Pages = {
             : { partitions: [] };
 
         overlay.innerHTML = `
-            <div class="modal" style="max-width:760px;width:96vw;max-height:90vh;overflow-y:auto">
+            <div class="modal" style="max-width:760px;width:96vw;max-height:90vh;overflow-y:auto" aria-labelledby="modal-title-8">
                 <div class="modal-header">
-                    <span class="modal-title">${isEdit ? 'Edit Group' : 'Create Node Group'}</span>
-                    <button class="modal-close" onclick="document.getElementById('node-group-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-8">${isEdit ? 'Edit Group' : 'Create Node Group'}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('node-group-modal').remove()">×</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="ng-form-result" style="margin-bottom:10px"></div>
@@ -6372,11 +6396,13 @@ const Pages = {
         const overlay = document.createElement('div');
         overlay.id = 'group-reimage-modal';
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.innerHTML = `
-            <div class="modal" style="max-width:480px;width:96vw">
+            <div class="modal" style="max-width:480px;width:96vw" aria-labelledby="modal-title-9">
                 <div class="modal-header">
-                    <span class="modal-title">Reimage Group: ${escHtml(groupName)}</span>
-                    <button class="modal-close" onclick="document.getElementById('group-reimage-modal').remove()">&#215;</button>
+                    <span class="modal-title" id="modal-title-9">Reimage Group: ${escHtml(groupName)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('group-reimage-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="grm-result" style="margin-bottom:10px"></div>
@@ -6504,11 +6530,13 @@ const Pages = {
         const overlay = document.createElement('div');
         overlay.id = 'add-member-modal';
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.innerHTML = `
-            <div class="modal" style="max-width:400px;width:96vw">
+            <div class="modal" style="max-width:400px;width:96vw" aria-labelledby="modal-title-10">
                 <div class="modal-header">
-                    <span class="modal-title">Add Node to Group</span>
-                    <button class="modal-close" onclick="document.getElementById('add-member-modal').remove()">&#215;</button>
+                    <span class="modal-title" id="modal-title-10">Add Node to Group</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('add-member-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="amm-result" style="margin-bottom:10px"></div>
@@ -6619,6 +6647,8 @@ const Pages = {
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
         overlay.id = 'build-iso-modal';
 
         const rolesHtml = roles.length
@@ -6641,10 +6671,10 @@ const Pages = {
         overlay._roles = roles;
 
         overlay.innerHTML = `
-            <div class="modal modal-wide">
+            <div class="modal modal-wide" aria-labelledby="modal-title-11">
                 <div class="modal-header">
-                    <span class="modal-title">Build Image from ISO</span>
-                    <button class="modal-close" onclick="document.getElementById('build-iso-modal').remove()">×</button>
+                    <span class="modal-title" id="modal-title-11">Build Image from ISO</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('build-iso-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <form id="build-iso-form" onsubmit="Pages.submitBuildFromISO(event)">
@@ -6900,7 +6930,7 @@ const Pages = {
         return `
             <div class="card iso-build-panel" style="margin-bottom:16px" id="iso-build-card">
                 <div class="card-header">
-                    <span class="card-title">Building ${escHtml(img.name)} from ISO</span>
+                    <h2 class="card-title">Building ${escHtml(img.name)} from ISO</h2>
                     <span class="badge badge-building" id="iso-build-badge">building</span>
                 </div>
                 <div class="card-body">
@@ -7210,10 +7240,10 @@ const Pages = {
         } else if (tab === 'users') {
             body = await Pages._settingsUsersTab();
         } else if (tab === 'server-info') {
-            body = `<div class="card"><div class="card-header"><span class="card-title">Server Info</span></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>
+            body = `<div class="card"><div class="card-header"><h2 class="card-title">Server Info</h2></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>
             <div class="card" style="margin-top:20px;" id="app-logs-card">
                 <div class="card-header" style="justify-content:space-between;">
-                    <span class="card-title">Application Logs</span>
+                    <h2 class="card-title">Application Logs</h2>
                     <div style="display:flex;align-items:center;gap:10px;">
                         <span class="follow-indicator" id="app-follow-ind"><span class="follow-dot"></span>static</span>
                         <label class="toggle" style="margin:0;">
@@ -7258,7 +7288,7 @@ const Pages = {
         App.render(`
             <div class="page-header">
                 <div>
-                    <div class="page-title">Settings</div>
+                    <h1 class="page-title">Settings</h1>
                     <div class="page-subtitle">Server and API key management</div>
                 </div>
             </div>
@@ -7392,7 +7422,7 @@ const Pages = {
             return `
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">API Keys</span>
+                        <h2 class="card-title">API Keys</h2>
                         <button class="btn btn-primary btn-sm" onclick="Pages._settingsCreateKeyModal()">+ Create Key</button>
                     </div>
                     <table class="table">
@@ -7451,7 +7481,7 @@ const Pages = {
             return `
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">Users</span>
+                        <h2 class="card-title">Users</h2>
                         <button class="btn btn-primary btn-sm" onclick="Pages._settingsCreateUserModal()">+ Create User</button>
                     </div>
                     <table class="table">
@@ -7476,7 +7506,7 @@ const Pages = {
             const buildTime = info.build_time || 'unknown';
             return `
                 <div class="card">
-                    <div class="card-header"><span class="card-title">About clustr</span></div>
+                    <div class="card-header"><h2 class="card-title">About clustr</h2></div>
                     <div style="padding:16px 20px;">
                         <p style="margin:0 0 16px;color:var(--text-secondary);">
                             clustr — open-source node cloning and image management for HPC clusters.
@@ -7502,7 +7532,7 @@ const Pages = {
         } catch (err) {
             return `
                 <div class="card">
-                    <div class="card-header"><span class="card-title">About clustr</span></div>
+                    <div class="card-header"><h2 class="card-title">About clustr</h2></div>
                     <div style="padding:16px 20px;">
                         <p style="margin:0 0 16px;color:var(--text-secondary);">
                             clustr — open-source node cloning and image management for HPC clusters.
@@ -7520,7 +7550,7 @@ const Pages = {
         modal.innerHTML = `
             <div class="card" style="width:480px;max-width:95vw;">
                 <div class="card-header">
-                    <span class="card-title">Create User</span>
+                    <h2 class="card-title">Create User</h2>
                     <button class="btn btn-ghost btn-sm" onclick="document.getElementById('create-user-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
@@ -7621,7 +7651,7 @@ const Pages = {
         modal.innerHTML = `
             <div class="card" style="width:480px;max-width:95vw;">
                 <div class="card-header">
-                    <span class="card-title">Create API Key</span>
+                    <h2 class="card-title">Create API Key</h2>
                     <button class="btn btn-ghost btn-sm" onclick="document.getElementById('create-key-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
@@ -7706,7 +7736,7 @@ const Pages = {
         modal.innerHTML = `
             <div class="card" style="width:560px;max-width:95vw;">
                 <div class="card-header">
-                    <span class="card-title">${escHtml(title)}</span>
+                    <h2 class="card-title">${escHtml(title)}</h2>
                 </div>
                 <div style="padding:16px;">
                     <div class="alert alert-warning" style="margin-bottom:12px;">

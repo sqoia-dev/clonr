@@ -71,7 +71,7 @@ const SysAccountsPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">System Accounts</div>
+                    <h1 class="page-title">System Accounts</h1>
                     <div class="page-subtitle">Local POSIX accounts injected into every deployed node at reimage time. Changes take effect on next reimage.</div>
                 </div>
                 <div style="display:flex;gap:8px;">
@@ -129,7 +129,7 @@ const SysAccountsPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">System Groups</div>
+                    <h1 class="page-title">System Groups</h1>
                     <div class="page-subtitle">Local POSIX groups injected into every deployed node at reimage time. Changes take effect on next reimage.</div>
                 </div>
                 <div style="display:flex;gap:8px;">

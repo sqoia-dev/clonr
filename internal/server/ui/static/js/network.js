@@ -71,7 +71,7 @@ const NetworkPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">Switches</div>
+                    <h1 class="page-title">Switches</h1>
                     <div class="page-subtitle">Switch inventory for the cluster fabric. Inventory-only in v1 &mdash; clonr does not program switches via SNMP.</div>
                 </div>
                 <div style="display:flex;gap:8px;">
@@ -312,7 +312,7 @@ const NetworkPages = {
         return `
             <div class="page-header">
                 <div>
-                    <div class="page-title">Network Profiles</div>
+                    <h1 class="page-title">Network Profiles</h1>
                     <div class="page-subtitle">Bond and IPoIB configurations assigned to node groups. Changes take effect on next reimage.</div>
                 </div>
                 <div style="display:flex;gap:8px;">
@@ -365,7 +365,7 @@ const NetworkPages = {
         return `
             <div class="card">
                 <div class="card-header">
-                    <span class="card-title">OpenSM Settings</span>
+                    <h2 class="card-title">OpenSM Settings</h2>
                 </div>
                 <div style="padding:16px;">
                     ${statusCards}
