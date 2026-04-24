@@ -3649,6 +3649,24 @@ const Pages = {
                             </div>
                         </div>
                     `)}
+                    ${cardWrap('Sync Status', `
+                        <div class="card-body" style="padding:16px">
+                            <div id="slurm-node-sync-status">Loading…</div>
+                            <div style="margin-top:12px;">
+                                <button class="btn btn-primary btn-sm" onclick="Pages._pushToSingleNode('${escHtml(node.id)}')">Push to This Node</button>
+                                <a href="#/slurm/sync" style="font-size:13px;color:var(--accent);margin-left:12px;">View all sync status</a>
+                            </div>
+                        </div>
+                    `)}
+                    ${cardWrap('Node Overrides', `
+                        <div class="card-body" style="padding:16px">
+                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                                Override Slurm node parameters for this specific node. These values are injected
+                                into the config template during rendering, overriding cluster defaults.
+                            </p>
+                            <div id="slurm-node-overrides">Loading…</div>
+                        </div>
+                    `)}
                 </div>
 
                 <!-- Diagnostics tab — only rendered when node is Live -->
@@ -4668,15 +4686,14 @@ const Pages = {
     // appropriate checkboxes. Called once when the Slurm tab is first opened.
     async _onSlurmTabOpen(nodeId) {
         const currentEl = document.getElementById('slurm-role-current');
+        // Load roles.
         try {
             const data = await API.slurm.getNodeRole(nodeId);
             const roles = data.roles || [];
-            // Update checkboxes.
             ['controller', 'compute', 'login', 'dbd'].forEach(r => {
                 const cb = document.getElementById(`slurm-role-${r}`);
                 if (cb) cb.checked = roles.includes(r);
             });
-            // Show current role badges.
             if (currentEl) {
                 if (roles.length === 0) {
                     currentEl.innerHTML = '<span class="badge badge-neutral">No role assigned</span>';
@@ -4688,6 +4705,24 @@ const Pages = {
             }
         } catch (err) {
             if (currentEl) currentEl.textContent = 'Failed to load role: ' + err.message;
+        }
+        // Load overrides and sync status in parallel (via SlurmPages helpers).
+        if (typeof SlurmPages !== 'undefined') {
+            const syncEl     = document.getElementById('slurm-node-sync-status');
+            const overrideEl = document.getElementById('slurm-node-overrides');
+            if (syncEl)     SlurmPages.renderNodeSyncStatus(nodeId, syncEl);
+            if (overrideEl) SlurmPages.renderNodeOverrideEditor(nodeId, overrideEl);
+        }
+    },
+
+    // _pushToSingleNode initiates a push to a single node and shows toast feedback.
+    async _pushToSingleNode(nodeId) {
+        if (!confirm('Push all Slurm configs to this node?')) return;
+        try {
+            const op = await API.slurm.push({ filenames: [], node_ids: [nodeId], apply_action: 'reconfigure' });
+            App.toast('Push started (op: ' + (op.id || '?').slice(0,8) + ')', 'info');
+        } catch (err) {
+            App.toast('Push failed: ' + err.message, 'error');
         }
     },
 
