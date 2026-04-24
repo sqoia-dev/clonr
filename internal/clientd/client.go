@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,15 @@ type Client struct {
 
 	// send is the outbound message channel. The writeLoop drains it.
 	send chan []byte
+
+	// journalMu guards the active JournalStreamer.
+	journalMu      sync.Mutex
+	journalStreamer *JournalStreamer
+
+	// nodeMAC is read from the token file path context; populated lazily.
+	// For journal entries we need a MAC address to stamp on each LogEntry.
+	// We derive it from /etc/clonr/node-mac if present, falling back to empty string.
+	nodeMAC string
 }
 
 // New creates a Client. serverURL is the full ws:// or wss:// URL for the
@@ -54,12 +64,20 @@ func New(serverURL, tokenPath, version string) (*Client, error) {
 		return nil, fmt.Errorf("clientd: could not extract node ID from URL %q: %w", serverURL, err)
 	}
 
+	// Read node MAC from /etc/clonr/node-mac if present.
+	// Not fatal — missing MAC means journal entries omit node_mac until server fills it in.
+	var nodeMAC string
+	if data, err := os.ReadFile("/etc/clonr/node-mac"); err == nil {
+		nodeMAC = strings.TrimSpace(string(data))
+	}
+
 	return &Client{
 		serverURL: serverURL,
 		tokenPath: tokenPath,
 		nodeID:    nodeID,
 		version:   version,
 		send:      make(chan []byte, 64),
+		nodeMAC:   nodeMAC,
 	}, nil
 }
 
@@ -194,13 +212,101 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	switch msg.Type {
 	case "ack":
-		// Server acknowledged a client message — no action needed in Sprint 1.
+		// Server acknowledged a client message — no action needed.
 		log.Debug().Str("ref_msg_id", msg.MsgID).Msg("clientd: received ack from server")
+
+	case "log_pull_start":
+		c.handleLogPullStart(msg)
+
+	case "log_pull_stop":
+		c.stopJournalStreamer()
+		log.Info().Msg("clientd: journal streaming stopped by server request")
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
 	}
 }
+
+// handleLogPullStart parses the log_pull_start payload and starts a JournalStreamer.
+func (c *Client) handleLogPullStart(msg ServerMessage) {
+	var payload LogPullStartPayload
+	if len(msg.Payload) > 0 {
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Warn().Err(err).Msg("clientd: malformed log_pull_start payload")
+			return
+		}
+	}
+
+	// Stop any existing streamer before starting a new one.
+	c.stopJournalStreamer()
+
+	log.Info().
+		Strs("units", payload.Units).
+		Int("priority", payload.Priority).
+		Str("since", payload.Since).
+		Msg("clientd: starting journal streaming")
+
+	streamer := NewJournalStreamer(payload.Units, payload.Priority, payload.Since, c.nodeMAC)
+	if err := streamer.Start(context.Background(), payload.Units, payload.Priority, payload.Since); err != nil {
+		log.Error().Err(err).Msg("clientd: failed to start journalctl — is journalctl available?")
+		return
+	}
+
+	c.journalMu.Lock()
+	c.journalStreamer = streamer
+	c.journalMu.Unlock()
+
+	// Forward batches as log_batch messages to the server.
+	go c.forwardJournalBatches(streamer)
+}
+
+// forwardJournalBatches reads batches from the streamer and sends them as log_batch messages.
+func (c *Client) forwardJournalBatches(streamer *JournalStreamer) {
+	for batch := range streamer.Batches() {
+		if len(batch) == 0 {
+			continue
+		}
+
+		payload, err := json.Marshal(batch)
+		if err != nil {
+			log.Warn().Err(err).Msg("clientd: failed to marshal log batch")
+			continue
+		}
+
+		msg := ClientMessage{
+			Type:    "log_batch",
+			MsgID:   uuid.New().String(),
+			Payload: json.RawMessage(payload),
+		}
+		data, err := json.Marshal(msg)
+		if err != nil {
+			log.Warn().Err(err).Msg("clientd: failed to marshal log_batch message")
+			continue
+		}
+
+		select {
+		case c.send <- data:
+			log.Debug().Int("count", len(batch)).Msg("clientd: sent log_batch to server")
+		default:
+			log.Warn().Int("count", len(batch)).
+				Msg("clientd: log_batch dropped — send buffer full")
+		}
+	}
+}
+
+// stopJournalStreamer stops the active JournalStreamer if one is running.
+func (c *Client) stopJournalStreamer() {
+	c.journalMu.Lock()
+	s := c.journalStreamer
+	c.journalStreamer = nil
+	c.journalMu.Unlock()
+
+	if s != nil {
+		s.Stop()
+	}
+}
+
 
 // writeLoop sends messages from the c.send channel and fires the heartbeat ticker.
 // Returns when ctx is cancelled or a write fails.

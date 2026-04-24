@@ -7,10 +7,59 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clonr/internal/clientd"
+	"github.com/sqoia-dev/clonr/pkg/api"
 )
+
+const (
+	// journalRingSize is the maximum number of recent journal log entries buffered
+	// per node. When a new SSE subscriber connects, the buffer is replayed so the
+	// Logs tab shows recent entries immediately rather than waiting for the next batch.
+	journalRingSize = 500
+)
+
+// journalRingBuffer is a fixed-capacity ring buffer for api.LogEntry values.
+// Not safe for concurrent use — callers must hold the hub mutex.
+type journalRingBuffer struct {
+	buf  []api.LogEntry
+	head int // index of the next write position
+	full bool
+}
+
+func newJournalRingBuffer() *journalRingBuffer {
+	return &journalRingBuffer{buf: make([]api.LogEntry, journalRingSize)}
+}
+
+// push appends an entry to the ring, overwriting the oldest when full.
+func (r *journalRingBuffer) push(e api.LogEntry) {
+	r.buf[r.head] = e
+	r.head = (r.head + 1) % journalRingSize
+	if r.head == 0 {
+		r.full = true
+	}
+}
+
+// snapshot returns all stored entries in chronological order.
+func (r *journalRingBuffer) snapshot() []api.LogEntry {
+	if !r.full {
+		out := make([]api.LogEntry, r.head)
+		copy(out, r.buf[:r.head])
+		return out
+	}
+	out := make([]api.LogEntry, journalRingSize)
+	copy(out, r.buf[r.head:])
+	copy(out[journalRingSize-r.head:], r.buf[:r.head])
+	return out
+}
+
+// nodeJournalState holds per-node journal streaming state in the hub.
+type nodeJournalState struct {
+	subCount int                // number of active SSE subscribers for node-journal
+	ring     *journalRingBuffer // recent log entries for fast replay on new subscriber
+}
 
 // ClientdHub tracks all active clonr-clientd WebSocket connections, keyed by node ID.
 // It is safe for concurrent use.
@@ -20,6 +69,11 @@ import (
 type ClientdHub struct {
 	mu    sync.RWMutex
 	conns map[string]*clientdConn
+
+	// journalMu guards journalState (separate from conns lock to avoid deadlocks
+	// when Publish is called from the log handler while holding journalMu but not mu).
+	journalMu    sync.Mutex
+	journalState map[string]*nodeJournalState // nodeID → state
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -33,7 +87,8 @@ type clientdConn struct {
 // NewClientdHub returns an initialised hub with no connections.
 func NewClientdHub() *ClientdHub {
 	return &ClientdHub{
-		conns: make(map[string]*clientdConn),
+		conns:        make(map[string]*clientdConn),
+		journalState: make(map[string]*nodeJournalState),
 	}
 }
 
@@ -119,5 +174,107 @@ func runSendLoop(conn *websocket.Conn, ch <-chan []byte) {
 			log.Warn().Err(err).Msg("clientd hub: send loop write error")
 			return
 		}
+	}
+}
+
+// IncrementLogSubscribers records that a new SSE subscriber is watching node-journal
+// logs for nodeID. When the count goes from 0→1 it sends log_pull_start to the node.
+// Returns the new subscriber count.
+func (h *ClientdHub) IncrementLogSubscribers(nodeID string) int {
+	h.journalMu.Lock()
+	state := h.journalStateFor(nodeID)
+	state.subCount++
+	count := state.subCount
+	h.journalMu.Unlock()
+
+	if count == 1 {
+		// First subscriber — instruct the node to begin streaming.
+		h.sendLogPullStart(nodeID)
+	}
+	return count
+}
+
+// DecrementLogSubscribers records that an SSE subscriber has disconnected.
+// When the count reaches 0 it sends log_pull_stop to the node.
+// Returns the new subscriber count (never goes below 0).
+func (h *ClientdHub) DecrementLogSubscribers(nodeID string) int {
+	h.journalMu.Lock()
+	state := h.journalStateFor(nodeID)
+	if state.subCount > 0 {
+		state.subCount--
+	}
+	count := state.subCount
+	h.journalMu.Unlock()
+
+	if count == 0 {
+		h.sendLogPullStop(nodeID)
+	}
+	return count
+}
+
+// JournalSnapshot returns a point-in-time copy of the recent journal entries
+// buffered for nodeID. Used to replay recent entries to a new SSE subscriber.
+func (h *ClientdHub) JournalSnapshot(nodeID string) []api.LogEntry {
+	h.journalMu.Lock()
+	defer h.journalMu.Unlock()
+	state, ok := h.journalState[nodeID]
+	if !ok || state.ring == nil {
+		return nil
+	}
+	return state.ring.snapshot()
+}
+
+// AppendJournalEntries adds entries to the per-node ring buffer.
+// Called by the clientd handler when a log_batch arrives from the node.
+func (h *ClientdHub) AppendJournalEntries(nodeID string, entries []api.LogEntry) {
+	h.journalMu.Lock()
+	defer h.journalMu.Unlock()
+	state := h.journalStateFor(nodeID)
+	for _, e := range entries {
+		state.ring.push(e)
+	}
+}
+
+// journalStateFor returns (and creates if needed) the journalState for nodeID.
+// Must be called with journalMu held.
+func (h *ClientdHub) journalStateFor(nodeID string) *nodeJournalState {
+	if s, ok := h.journalState[nodeID]; ok {
+		return s
+	}
+	s := &nodeJournalState{ring: newJournalRingBuffer()}
+	h.journalState[nodeID] = s
+	return s
+}
+
+// sendLogPullStart sends a log_pull_start message to the node. Best-effort: if
+// the node is not connected the error is logged and ignored.
+func (h *ClientdHub) sendLogPullStart(nodeID string) {
+	payload, _ := json.Marshal(clientd.LogPullStartPayload{
+		Priority: -1, // no priority filter — include everything
+	})
+	msg := clientd.ServerMessage{
+		Type:    "log_pull_start",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(payload),
+	}
+	if err := h.Send(nodeID, msg); err != nil {
+		log.Debug().Err(err).Str("node_id", nodeID).
+			Msg("clientd hub: could not send log_pull_start (node may not be connected)")
+	} else {
+		log.Info().Str("node_id", nodeID).Msg("clientd hub: sent log_pull_start to node")
+	}
+}
+
+// sendLogPullStop sends a log_pull_stop message to the node. Best-effort.
+func (h *ClientdHub) sendLogPullStop(nodeID string) {
+	msg := clientd.ServerMessage{
+		Type:  "log_pull_stop",
+		MsgID: uuid.New().String(),
+	}
+	if err := h.Send(nodeID, msg); err != nil {
+		log.Debug().Err(err).Str("node_id", nodeID).
+			Msg("clientd hub: could not send log_pull_stop (node may not be connected)")
+	} else {
+		log.Info().Str("node_id", nodeID).Msg("clientd hub: sent log_pull_stop to node")
 	}
 }

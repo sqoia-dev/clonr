@@ -61,3 +61,18 @@ type AckPayload struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 }
+
+// LogPullStartPayload is the payload for the "log_pull_start" server→node message.
+// It instructs the node to begin streaming journal entries back as "log_batch" messages.
+type LogPullStartPayload struct {
+	// Units is an optional list of systemd unit names to filter on.
+	// Empty means all units.
+	Units []string `json:"units,omitempty"`
+	// Priority is the maximum syslog severity to include (0=emerg, 7=debug).
+	// -1 means no filter (include everything).
+	Priority int `json:"priority"`
+	// Since is an optional journalctl --since argument (e.g. "2 minutes ago").
+	// Empty means start from now (follow mode, no history).
+	Since string `json:"since,omitempty"`
+}
+

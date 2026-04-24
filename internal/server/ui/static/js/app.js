@@ -3519,8 +3519,16 @@ const Pages = {
                 <!-- Logs tab -->
                 <div id="tab-logs" class="tab-panel">
                     ${cardWrap(`Logs — ${escHtml(node.hostname || node.primary_mac)}`, `
-                        <div class="log-filter-bar" style="border:none;box-shadow:none;border-bottom:1px solid var(--border);border-radius:0;padding:12px 16px">
-                            <label class="toggle">
+                        <div class="log-filter-bar" style="border:none;box-shadow:none;border-bottom:1px solid var(--border);border-radius:0;padding:12px 16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span class="text-dim" style="font-size:12px;white-space:nowrap">Source:</span>
+                                <select id="node-log-source" class="select" style="font-size:12px;padding:2px 6px;height:28px"
+                                    onchange="Pages.onNodeLogSourceChange(this.value, '${escHtml(node.primary_mac)}')">
+                                    <option value="deploy">Deploy Logs</option>
+                                    <option value="journal">Live Journal</option>
+                                </select>
+                            </div>
+                            <label class="toggle" id="node-follow-label">
                                 <input type="checkbox" id="node-follow-toggle" onchange="Pages.toggleNodeLogs(this.checked, '${escHtml(node.primary_mac)}')">
                                 Live
                             </label>
@@ -3529,7 +3537,7 @@ const Pages = {
                             </span>
                         </div>
                         <div id="node-log-viewer" class="log-viewer tall"></div>`,
-                        `<button class="btn btn-secondary btn-sm" onclick="Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Refresh</button>`)}
+                        `<button class="btn btn-secondary btn-sm" id="node-log-refresh" onclick="Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Refresh</button>`)}
                 </div>
             `);
 
@@ -4271,6 +4279,68 @@ const Pages = {
                 App._nodeLogStream.disconnect();
                 if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
             }
+        }
+    },
+
+    // onNodeLogSourceChange handles switching between "Deploy Logs" and "Live Journal".
+    // "Live Journal" uses component=node-journal which triggers log_pull_start on the node.
+    onNodeLogSourceChange(source, mac) {
+        const viewer     = document.getElementById('node-log-viewer');
+        const toggle     = document.getElementById('node-follow-toggle');
+        const ind        = document.getElementById('node-follow-ind');
+        const refreshBtn = document.getElementById('node-log-refresh');
+        if (!viewer) return;
+
+        // Stop any active stream when switching sources.
+        if (App._nodeLogStream) {
+            App._nodeLogStream.disconnect();
+            App._nodeLogStream = null;
+        }
+        if (toggle) toggle.checked = false;
+        if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
+        viewer.innerHTML = '';
+
+        if (source === 'journal') {
+            // Live Journal: hide Refresh button (journal is always live), show Live toggle.
+            if (refreshBtn) refreshBtn.style.display = 'none';
+
+            // Auto-connect with component filter so the server drives log_pull_start.
+            const stream = new LogStream(viewer);
+            stream.setFilters({ mac, component: 'node-journal' });
+            stream.setAutoScroll(true);
+            stream.onConnect(() => {
+                if (ind) { ind.className = 'follow-indicator live'; ind.innerHTML = '<span class="follow-dot"></span>Live'; }
+                if (toggle) toggle.checked = true;
+            });
+            stream.onDisconnect((permanent) => {
+                if (ind) {
+                    ind.className = 'follow-indicator';
+                    ind.innerHTML = permanent
+                        ? '<span class="follow-dot"></span>unavailable'
+                        : '<span class="follow-dot"></span>Reconnecting…';
+                }
+                if (toggle) toggle.checked = false;
+            });
+            // Override toggle: reconnect/disconnect the journal stream.
+            if (toggle) {
+                toggle.onchange = (e) => {
+                    if (e.target.checked) {
+                        stream.connect();
+                    } else {
+                        stream.disconnect();
+                        if (ind) { ind.className = 'follow-indicator'; ind.innerHTML = '<span class="follow-dot"></span>static'; }
+                    }
+                };
+            }
+            App._nodeLogStream = stream;
+            stream.connect();
+        } else {
+            // Deploy Logs: restore the default toggle and refresh button behaviour.
+            if (refreshBtn) refreshBtn.style.display = '';
+            if (toggle) {
+                toggle.onchange = (e) => Pages.toggleNodeLogs(e.target.checked, mac);
+            }
+            Pages.loadNodeLogs(mac);
         }
     },
 

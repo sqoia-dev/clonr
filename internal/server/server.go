@@ -372,7 +372,7 @@ func (s *Server) buildRouter() chi.Router {
 	// live-entry guard in DeleteInitramfsHistory simply skips the check until
 	// the first successful rebuild.
 	initramfsH.InitLiveSHA256()
-	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker}
+	logs := &handlers.LogsHandler{DB: s.db, Broker: s.broker, Hub: s.clientdHub}
 	s.logsHandler = logs
 	progress := &handlers.ProgressHandler{Store: s.progress}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
@@ -451,7 +451,7 @@ func (s *Server) buildRouter() chi.Router {
 
 		// clonr-clientd WebSocket endpoint — node-scoped key required; the key's
 		// bound node_id must match the {id} URL parameter (same as verify-boot).
-		clientdH := &handlers.ClientdHandler{DB: s.db, Hub: s.clientdHub}
+		clientdH := &handlers.ClientdHandler{DB: s.db, Hub: s.clientdHub, Broker: s.broker}
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/clientd/ws", clientdH.HandleClientdWS)
 
 		// Image fetch routes accessible by node-scoped keys (deploy agent reads its assigned image).

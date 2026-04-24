@@ -54,10 +54,21 @@ type LogBroker interface {
 	Publish(entries []api.LogEntry)
 }
 
+// LogsHubIface exposes the hub methods the logs handler needs for node-journal
+// subscriber tracking. Declared here to avoid an import cycle.
+type LogsHubIface interface {
+	IncrementLogSubscribers(nodeID string) int
+	DecrementLogSubscribers(nodeID string) int
+	JournalSnapshot(nodeID string) []api.LogEntry
+}
+
 // LogsHandler handles all /api/v1/logs routes.
 type LogsHandler struct {
 	DB         *db.DB
 	Broker     LogBroker
+	// Hub is optional. When set, StreamLogs tracks node-journal SSE subscribers
+	// and drives log_pull_start / log_pull_stop on the connected node.
+	Hub        LogsHubIface
 	// ServerCtx is a server-lifetime context used for DB writes so that a
 	// client disconnect (r.Context() cancellation) does not abort an in-flight
 	// SQLite transaction and silently drop a log batch.
@@ -199,6 +210,9 @@ func (h *LogsHandler) QueryLogs(w http.ResponseWriter, r *http.Request) {
 // StreamLogs handles GET /api/v1/logs/stream
 // Streams new log entries as Server-Sent Events.
 // Optional query params: mac, hostname, level, component
+//
+// When component=node-journal and mac= are both set, this handler tracks the
+// SSE subscriber count in the hub so the node is told to start/stop journal streaming.
 func (h *LogsHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Verify the client supports SSE.
 	flusher, ok := w.(http.Flusher)
@@ -215,6 +229,24 @@ func (h *LogsHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 		Component: q.Get("component"),
 	}
 
+	// If this is a node-journal stream with a MAC filter, track the subscription
+	// in the hub so the node knows to start/stop journal streaming.
+	var nodeID string
+	var replayEntries []api.LogEntry
+	if filter.Component == "node-journal" && filter.NodeMAC != "" && h.Hub != nil {
+		// Resolve MAC → nodeID via the DB.
+		if node, err := h.DB.GetNodeConfigByMAC(r.Context(), filter.NodeMAC); err == nil {
+			nodeID = node.ID
+			// Collect buffered entries for immediate replay before live stream begins.
+			replayEntries = h.Hub.JournalSnapshot(nodeID)
+			h.Hub.IncrementLogSubscribers(nodeID)
+			defer h.Hub.DecrementLogSubscribers(nodeID)
+		} else {
+			log.Debug().Err(err).Str("mac", filter.NodeMAC).
+				Msg("stream logs: could not resolve MAC to node ID — hub tracking skipped")
+		}
+	}
+
 	_, ch, cancel := h.Broker.Subscribe(filter)
 	defer cancel()
 
@@ -228,6 +260,18 @@ func (h *LogsHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Send a comment to establish the stream before any data arrives.
 	fmt.Fprintf(w, ": connected\n\n")
 	flusher.Flush()
+
+	// Replay buffered journal entries so the Logs tab shows recent output immediately.
+	for _, entry := range replayEntries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	if len(replayEntries) > 0 {
+		flusher.Flush()
+	}
 
 	ctx := r.Context()
 	for {
