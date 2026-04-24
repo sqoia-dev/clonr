@@ -538,6 +538,9 @@ func (s *Server) buildRouter() chi.Router {
 			// clientd heartbeat — admin read of latest heartbeat data.
 			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
 
+			// Config push — push a whitelisted config file to a live node.
+			r.Put("/nodes/{id}/config-push", clientdH.ConfigPush)
+
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.
 			r.Get("/nodes/{id}/layout-recommendation", layoutH.GetLayoutRecommendation)

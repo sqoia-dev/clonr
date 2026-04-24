@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -35,7 +38,12 @@ type ClientdHubIface interface {
 	Unregister(nodeID string)
 	ConnectedNodes() []string
 	IsConnected(nodeID string) bool
+	Send(nodeID string, msg clientd.ServerMessage) error
 	AppendJournalEntries(nodeID string, entries []api.LogEntry)
+	// Ack registry — used for config_push round-trips.
+	RegisterAck(msgID string) <-chan clientd.AckPayload
+	UnregisterAck(msgID string)
+	DeliverAck(msgID string, payload clientd.AckPayload) bool
 }
 
 // ClientdHandler handles the clonr-clientd WebSocket endpoint and related REST queries.
@@ -137,10 +145,31 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 	case "log_batch":
 		h.handleLogBatch(ctx, nodeID, msg)
 
+	case "ack":
+		h.handleAck(nodeID, msg)
+
 	default:
 		log.Debug().Str("node_id", nodeID).Str("type", msg.Type).
 			Msg("clientd ws: unknown message type (ignored)")
 	}
+}
+
+// handleAck processes an "ack" message from the node, routing it to the waiting
+// HTTP handler via the hub's ack registry. The RefMsgID identifies the outbound
+// server message that triggered this ack (e.g. a config_push msg_id).
+func (h *ClientdHandler) handleAck(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.AckPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("clientd ws: malformed ack payload")
+		return
+	}
+	delivered := h.Hub.DeliverAck(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Bool("ok", payload.OK).
+		Bool("delivered", delivered).
+		Msg("clientd ws: ack received from node")
 }
 
 // handleHello processes the initial hello message from a newly connected node.
@@ -250,6 +279,110 @@ func (h *ClientdHandler) handleLogBatch(ctx context.Context, nodeID string, msg 
 
 	log.Debug().Str("node_id", nodeID).Int("count", len(entries)).
 		Msg("clientd ws: log_batch persisted and published")
+}
+
+// configPushRequest is the JSON body for PUT /api/v1/nodes/{id}/config-push.
+type configPushRequest struct {
+	Target  string `json:"target"`
+	Content string `json:"content"`
+}
+
+// ConfigPush pushes a config file to a connected node and waits for the ack.
+// Route: PUT /api/v1/nodes/{id}/config-push (admin-only)
+func (h *ClientdHandler) ConfigPush(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	if nodeID == "" {
+		writeValidationError(w, "missing node id")
+		return
+	}
+
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clonr-clientd offline)",
+			Code:  "node_offline",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)) // 2 MB read limit
+	if err != nil {
+		writeValidationError(w, "failed to read request body")
+		return
+	}
+
+	var req configPushRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.Target == "" {
+		writeValidationError(w, "target is required")
+		return
+	}
+	if len(req.Content) > 1<<20 {
+		writeValidationError(w, "content exceeds 1 MB limit")
+		return
+	}
+
+	// Compute sha256 checksum of content so the node can verify integrity.
+	sum := sha256.Sum256([]byte(req.Content))
+	checksum := fmt.Sprintf("sha256:%x", sum)
+
+	msgID := uuid.New().String()
+	payload, err := json.Marshal(clientd.ConfigPushPayload{
+		Target:   req.Target,
+		Content:  req.Content,
+		Checksum: checksum,
+	})
+	if err != nil {
+		writeError(w, fmt.Errorf("marshal config_push payload: %w", err))
+		return
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "config_push",
+		MsgID:   msgID,
+		Payload: json.RawMessage(payload),
+	}
+
+	// Register ack channel before sending to avoid a race where the node
+	// replies faster than we register.
+	ackCh := h.Hub.RegisterAck(msgID)
+	defer h.Hub.UnregisterAck(msgID)
+
+	if err := h.Hub.Send(nodeID, serverMsg); err != nil {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "failed to send config_push to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	log.Info().Str("node_id", nodeID).Str("target", req.Target).Str("msg_id", msgID).
+		Msg("clientd: config_push sent to node, waiting for ack")
+
+	select {
+	case ack := <-ackCh:
+		if ack.OK {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"ok":     true,
+				"target": req.Target,
+			})
+		} else {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"ok":    false,
+				"error": ack.Error,
+			})
+		}
+	case <-time.After(30 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for ack from node (30s)",
+			Code:  "ack_timeout",
+		})
+	case <-r.Context().Done():
+		// Client disconnected before ack arrived — silently drop.
+		return
+	}
 }
 
 // GetHeartbeat returns the most recent heartbeat for a node as JSON.

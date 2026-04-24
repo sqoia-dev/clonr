@@ -222,9 +222,69 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 		c.stopJournalStreamer()
 		log.Info().Msg("clientd: journal streaming stopped by server request")
 
+	case "config_push":
+		c.handleConfigPush(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
+	}
+}
+
+// handleConfigPush parses a config_push payload, applies it, and sends an ack.
+func (c *Client) handleConfigPush(msg ServerMessage) {
+	var payload ConfigPushPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed config_push payload")
+		c.sendAck(msg.MsgID, false, "malformed payload: "+err.Error())
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("target", payload.Target).
+		Msg("clientd: applying config push")
+
+	if err := applyConfig(payload); err != nil {
+		log.Error().Err(err).Str("msg_id", msg.MsgID).Str("target", payload.Target).
+			Msg("clientd: config push apply failed")
+		c.sendAck(msg.MsgID, false, err.Error())
+		return
+	}
+
+	log.Info().Str("target", payload.Target).Str("msg_id", msg.MsgID).
+		Msg("clientd: config push applied successfully")
+	c.sendAck(msg.MsgID, true, "")
+}
+
+// sendAck enqueues an ack message referencing the given server message ID.
+func (c *Client) sendAck(refMsgID string, ok bool, errMsg string) {
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       ok,
+		Error:    errMsg,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal ack payload")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "ack",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(ackPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal ack message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", refMsgID).
+			Msg("clientd: ack dropped — send buffer full")
 	}
 }
 

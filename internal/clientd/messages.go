@@ -62,6 +62,18 @@ type AckPayload struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// ConfigPushPayload is the payload for the "config_push" server→node message.
+// The server sends this to request an atomic config file replacement on the node.
+type ConfigPushPayload struct {
+	// Target is the whitelisted config key (e.g. "hosts", "sssd", "chrony").
+	Target string `json:"target"`
+	// Content is the full file content to write.
+	Content string `json:"content"`
+	// Checksum is "sha256:<hex>" computed by the server over Content.
+	// The node validates this before writing.
+	Checksum string `json:"checksum"`
+}
+
 // LogPullStartPayload is the payload for the "log_pull_start" server→node message.
 // It instructs the node to begin streaming journal entries back as "log_batch" messages.
 type LogPullStartPayload struct {

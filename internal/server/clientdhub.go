@@ -61,6 +61,11 @@ type nodeJournalState struct {
 	ring     *journalRingBuffer // recent log entries for fast replay on new subscriber
 }
 
+// pendingAck holds a channel to receive an AckPayload for an in-flight config_push.
+type pendingAck struct {
+	ch chan clientd.AckPayload
+}
+
 // ClientdHub tracks all active clonr-clientd WebSocket connections, keyed by node ID.
 // It is safe for concurrent use.
 //
@@ -74,6 +79,11 @@ type ClientdHub struct {
 	// when Publish is called from the log handler while holding journalMu but not mu).
 	journalMu    sync.Mutex
 	journalState map[string]*nodeJournalState // nodeID → state
+
+	// ackRegistry maps outbound msg_id → pendingAck so the HTTP handler can
+	// block until the node sends back the "ack" message. sync.Map is used for
+	// lock-free fast-path reads; entries are stored by msg_id (string).
+	ackRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -162,6 +172,37 @@ func (h *ClientdHub) IsConnected(nodeID string) bool {
 	defer h.mu.RUnlock()
 	_, ok := h.conns[nodeID]
 	return ok
+}
+
+// RegisterAck creates a pending ack entry for msgID and returns the channel to
+// read the ack from. The caller must call UnregisterAck(msgID) when done.
+func (h *ClientdHub) RegisterAck(msgID string) <-chan clientd.AckPayload {
+	ch := make(chan clientd.AckPayload, 1)
+	h.ackRegistry.Store(msgID, pendingAck{ch: ch})
+	return ch
+}
+
+// UnregisterAck removes a pending ack entry. Safe to call after timeout or receipt.
+func (h *ClientdHub) UnregisterAck(msgID string) {
+	h.ackRegistry.Delete(msgID)
+}
+
+// DeliverAck looks up msgID in the ack registry and, if found, sends payload on
+// its channel (non-blocking). Called by the WebSocket handler when it receives an
+// "ack" message from the node.
+func (h *ClientdHub) DeliverAck(msgID string, payload clientd.AckPayload) bool {
+	v, ok := h.ackRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pa := v.(pendingAck)
+	select {
+	case pa.ch <- payload:
+		return true
+	default:
+		// Channel already has a value or is closed — ignore.
+		return false
+	}
 }
 
 // runSendLoop drains the conn's send channel, writing messages to the WebSocket.

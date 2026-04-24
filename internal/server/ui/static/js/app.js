@@ -3041,6 +3041,7 @@ const Pages = {
                     <div class="tab" id="node-tab-btn-mounts" onclick="Pages._switchNodeTab(this, 'tab-mounts', 'mounts');Pages._onMountsTabOpen('${node.id}')">Mounts</div>
                     <div class="tab" id="node-tab-btn-config" onclick="Pages._switchNodeTab(this, 'tab-config', 'config')">Configuration</div>
                     <div class="tab" id="node-tab-btn-logs" onclick="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
+                    <div class="tab" id="node-tab-btn-configpush" onclick="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
                 </div>
 
                 <!-- Overview tab — inline editable -->
@@ -3539,6 +3540,41 @@ const Pages = {
                         <div id="node-log-viewer" class="log-viewer tall"></div>`,
                         `<button class="btn btn-secondary btn-sm" id="node-log-refresh" onclick="Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Refresh</button>`)}
                 </div>
+
+                <!-- Config Push tab -->
+                ${(() => {
+                    const nodeIsLive = node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000;
+                    return `<div id="tab-configpush" class="tab-panel">
+                    ${cardWrap('Config Push', (() => {
+                        if (!nodeIsLive) {
+                            return `<div class="card-body">${emptyState('Node offline', 'Config push is only available when clonr-clientd is connected (Live).')}</div>`;
+                        }
+                        return `<div class="card-body" style="padding:16px">
+                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                                Push a whitelisted config file to this node atomically. The node validates the checksum,
+                                backs up the existing file, writes the new content, and restarts the associated service if needed.
+                            </p>
+                            <div class="form-group" style="margin-bottom:12px">
+                                <label class="form-label">Target</label>
+                                <select id="configpush-target" class="select" style="width:200px">
+                                    <option value="hosts">/etc/hosts</option>
+                                    <option value="sssd">/etc/sssd/sssd.conf</option>
+                                    <option value="chrony">/etc/chrony.conf</option>
+                                    <option value="ntp">/etc/ntp.conf</option>
+                                    <option value="resolv">/etc/resolv.conf</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom:12px">
+                                <label class="form-label">Content</label>
+                                <textarea id="configpush-content" class="form-input" rows="12"
+                                    style="font-family:monospace;font-size:12px;resize:vertical"
+                                    placeholder="Paste file content here…"></textarea>
+                            </div>
+                            <div id="configpush-result" style="display:none;margin-bottom:12px"></div>
+                        </div>`;
+                    })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" onclick="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
+                </div>`;
+                })()}
             `);
 
             // Store original values for revert on each editable tab.
@@ -4341,6 +4377,42 @@ const Pages = {
                 toggle.onchange = (e) => Pages.toggleNodeLogs(e.target.checked, mac);
             }
             Pages.loadNodeLogs(mac);
+        }
+    },
+
+    // ── Config Push ───────────────────────────────────────────────────────────
+
+    // _doConfigPush sends the config push request for nodeId and shows the result.
+    async _doConfigPush(nodeId) {
+        const targetEl  = document.getElementById('configpush-target');
+        const contentEl = document.getElementById('configpush-content');
+        const resultEl  = document.getElementById('configpush-result');
+        const submitBtn = document.getElementById('configpush-submit');
+        if (!targetEl || !contentEl || !resultEl || !submitBtn) return;
+
+        const target  = targetEl.value;
+        const content = contentEl.value;
+        if (!content.trim()) {
+            resultEl.style.display = '';
+            resultEl.className = 'alert alert-error';
+            resultEl.textContent = 'Content cannot be empty.';
+            return;
+        }
+
+        resultEl.style.display = '';
+        resultEl.className = 'alert alert-info';
+        resultEl.innerHTML = '<span class="spinner" style="width:14px;height:14px;display:inline-block;margin-right:6px"></span>Pushing config… (waiting for node ack, up to 30s)';
+        submitBtn.disabled = true;
+
+        try {
+            await API.request('PUT', `/nodes/${nodeId}/config-push`, { target, content });
+            resultEl.className = 'alert alert-success';
+            resultEl.textContent = `Config "${target}" pushed successfully.`;
+        } catch (e) {
+            resultEl.className = 'alert alert-error';
+            resultEl.textContent = `Push failed: ${e.message}`;
+        } finally {
+            submitBtn.disabled = false;
         }
     },
 
