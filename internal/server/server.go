@@ -62,6 +62,11 @@ type Server struct {
 	logsHandler         *handlers.LogsHandler
 	imgFactory          *image.Factory
 	buildInfo           BuildInfo
+
+	// dhcpLeaseLookup is set after construction by SetDHCPServer when the PXE
+	// server is available. The NodesHandler captures it via a closure so it picks
+	// up the live function even after the router is built.
+	dhcpLeaseLookup func(mac string) net.IP
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -145,6 +150,23 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 // Used by main to wire external callbacks (e.g. DHCP switch auto-discovery).
 func (s *Server) NetworkManager() *networkmodule.Manager {
 	return s.networkMgr
+}
+
+// SetDHCPLeaseLookup wires a DHCP lease lookup function so the registration
+// handler can auto-populate node interfaces from DHCP-assigned IPs. Call this
+// after server.New() when the PXE server is available. Safe to call with nil
+// to disable the feature (e.g. when PXE is disabled).
+func (s *Server) SetDHCPLeaseLookup(fn func(mac string) net.IP) {
+	s.dhcpLeaseLookup = fn
+}
+
+// lookupDHCPLease is the closure passed to NodesHandler. It delegates to the
+// dhcpLeaseLookup field, which may be set after router construction.
+func (s *Server) lookupDHCPLease(mac string) net.IP {
+	if s.dhcpLeaseLookup == nil {
+		return nil
+	}
+	return s.dhcpLeaseLookup(mac)
 }
 
 // StartBackgroundWorkers starts long-running background goroutines.
@@ -303,7 +325,9 @@ func (s *Server) buildRouter() chi.Router {
 		NetworkConfig: func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error) {
 			return s.networkMgr.NodeNetworkConfig(ctx, groupID)
 		},
-		ServerIP: s.cfg.PXE.ServerIP,
+		LookupDHCPLease: s.lookupDHCPLease,
+		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
+		ServerIP:        s.cfg.PXE.ServerIP,
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}

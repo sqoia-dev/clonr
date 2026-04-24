@@ -276,6 +276,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 			// Registered node but no IP configured — fall through to pool allocation.
 			return nil
 		}
+		// Wire DHCP lease lookup into the registration handler so it can
+		// auto-populate node interfaces from the DHCP-assigned IP on first boot.
+		srv.SetDHCPLeaseLookup(pxeSrv.DHCPServer.GetLeaseIP)
 		go func() {
 			if err := pxeSrv.Start(ctx); err != nil {
 				log.Error().Err(err).Msg("PXE server error")

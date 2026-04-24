@@ -313,6 +313,23 @@ func bootFilename(req *dhcpv4.DHCPv4, isIPXE bool, serverIP net.IP, httpPort str
 	return "undionly.kpxe"
 }
 
+// GetLeaseIP returns the IP currently leased to the given MAC, or nil if none.
+// The MAC is matched case-insensitively.
+func (d *DHCPServer) GetLeaseIP(mac string) net.IP {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	mac = strings.ToLower(mac)
+	if lease, ok := d.leases[mac]; ok && lease.ExpiresAt.After(time.Now()) {
+		return lease.IP
+	}
+	return nil
+}
+
+// SubnetCIDR returns the prefix length configured for this DHCP server (e.g. 24).
+func (d *DHCPServer) SubnetCIDR() int {
+	return d.subnetCIDR
+}
+
 // acquireOrAssignIP finds an existing lease or assigns a new IP from the pool.
 // If ResolveReservedIP is set and returns a non-nil IP for this MAC, that
 // reserved IP is served instead of a pool address (DHCP reservation).

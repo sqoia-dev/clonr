@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -67,6 +68,14 @@ type NodesHandler struct {
 	// NetworkConfig, when non-nil, is called during RegisterNode to resolve the
 	// network profile for the node's group. Returns nil if no profile is assigned.
 	NetworkConfig func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error)
+	// LookupDHCPLease returns the DHCP-assigned IP for a MAC, or nil if no active lease.
+	// Used during RegisterNode to auto-populate InterfaceConfig from hardware discovery.
+	// May be nil — if so, DHCP lookup is skipped and interfaces are not auto-populated.
+	LookupDHCPLease func(mac string) net.IP
+	// DHCPSubnetCIDR is the prefix length of the PXE provisioning subnet (e.g. 24).
+	// Used when constructing CIDR strings for auto-populated InterfaceConfigs.
+	// Defaults to 24 when zero.
+	DHCPSubnetCIDR int
 	// ServerIP is the clonr server's own IP address (from CLONR_PXE_SERVER_IP).
 	// When non-empty, it is included in ClusterHosts injected during RegisterNode so
 	// deployed nodes can resolve "clonr" in /etc/hosts without depending on DNS.
@@ -394,11 +403,33 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:        now,
 	}
 
+	// Auto-populate interfaces from hardware NICs + DHCP lease before upserting.
+	// This pre-fills the Network tab for new nodes so the admin doesn't have to
+	// manually enter each NIC after registration.
+	autoIfaces := buildAutoInterfaces(req.HardwareProfile, h.LookupDHCPLease, h.DHCPSubnetCIDR, h.ServerIP)
+	if len(autoIfaces) > 0 {
+		stub.Interfaces = autoIfaces
+	}
+
 	nodeCfg, err := h.DB.UpsertNodeByMAC(r.Context(), stub)
 	if err != nil {
 		log.Error().Err(err).Str("mac", primaryMAC).Msg("register node: upsert failed")
 		writeError(w, err)
 		return
+	}
+
+	// For existing nodes that re-registered with empty interfaces, apply auto-population
+	// now so the Network tab is pre-filled. We never overwrite manually-configured
+	// interfaces — only fill in when the node currently has none.
+	if len(nodeCfg.Interfaces) == 0 && len(autoIfaces) > 0 {
+		if err := h.DB.SetNodeInterfaces(r.Context(), nodeCfg.ID, autoIfaces); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).
+				Msg("register node: failed to auto-populate interfaces (non-fatal)")
+		} else {
+			nodeCfg.Interfaces = autoIfaces
+			log.Info().Str("node_id", nodeCfg.ID).Int("count", len(autoIfaces)).
+				Msg("register node: auto-populated interfaces from hardware discovery + DHCP")
+		}
 	}
 
 	action := "wait"
@@ -671,6 +702,49 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// buildAutoInterfaces parses the hardware profile and constructs InterfaceConfig
+// entries for each non-loopback NIC with a real MAC. If LookupDHCPLease is set
+// and returns a lease for the NIC's MAC, the IP/gateway are pre-filled.
+// subnetCIDR is the provisioning subnet prefix length (0 defaults to 24).
+// serverIP is used as the gateway when a DHCP lease is found.
+func buildAutoInterfaces(hwProfile json.RawMessage, lookupLease func(mac string) net.IP, subnetCIDR int, serverIP string) []api.InterfaceConfig {
+	if subnetCIDR <= 0 || subnetCIDR > 30 {
+		subnetCIDR = 24
+	}
+
+	var hw struct {
+		NICs []struct {
+			Name string `json:"Name"`
+			MAC  string `json:"MAC"`
+		} `json:"NICs"`
+	}
+	if err := json.Unmarshal(hwProfile, &hw); err != nil || len(hw.NICs) == 0 {
+		return nil
+	}
+
+	var ifaces []api.InterfaceConfig
+	for _, nic := range hw.NICs {
+		if nic.Name == "lo" || nic.MAC == "" || nic.MAC == "00:00:00:00:00:00" {
+			continue
+		}
+		mac := strings.ToLower(nic.MAC)
+		iface := api.InterfaceConfig{
+			MACAddress: mac,
+			Name:       nic.Name,
+		}
+		if lookupLease != nil {
+			if leaseIP := lookupLease(mac); leaseIP != nil {
+				iface.IPAddress = fmt.Sprintf("%s/%d", leaseIP.String(), subnetCIDR)
+				if serverIP != "" {
+					iface.Gateway = serverIP
+				}
+			}
+		}
+		ifaces = append(ifaces, iface)
+	}
+	return ifaces
 }
 
 // extractNodeIdentity parses the hardware profile JSON to find the primary MAC

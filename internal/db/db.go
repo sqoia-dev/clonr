@@ -744,6 +744,24 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	return requireOneRow(res, "node_configs", cfg.ID)
 }
 
+// SetNodeInterfaces persists the interfaces slice for the given node ID.
+// Only writes the interfaces column — all other fields are preserved.
+// Used during registration to auto-populate network config from hardware discovery.
+func (db *DB) SetNodeInterfaces(ctx context.Context, nodeID string, ifaces []api.InterfaceConfig) error {
+	data, err := json.Marshal(ifaces)
+	if err != nil {
+		return fmt.Errorf("db: marshal interfaces: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE node_configs SET interfaces = ?, updated_at = ? WHERE id = ?`,
+		string(data), time.Now().Unix(), nodeID,
+	)
+	if err != nil {
+		return fmt.Errorf("db: set node interfaces: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
+}
+
 // DeleteNodeConfig removes a NodeConfig by ID.
 func (db *DB) DeleteNodeConfig(ctx context.Context, id string) error {
 	res, err := db.sql.ExecContext(ctx, `DELETE FROM node_configs WHERE id = ?`, id)
