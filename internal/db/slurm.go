@@ -1113,6 +1113,24 @@ func (db *DB) SlurmGetUpgradeOp(ctx context.Context, id string) (*SlurmUpgradeOp
 	return &r, nil
 }
 
+// SlurmUpdateUpgradeOpResults updates only the node_results and status fields,
+// leaving phase/current_batch/total_batches/completed_at unchanged.
+// Used by the upgrade orchestrator to write per-node results frequently without
+// risking reset of progress counters.
+func (db *DB) SlurmUpdateUpgradeOpResults(ctx context.Context, id string, nodeResults json.RawMessage) error {
+	var nodeResultsStr sql.NullString
+	if len(nodeResults) > 0 {
+		nodeResultsStr = sql.NullString{String: string(nodeResults), Valid: true}
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE slurm_upgrade_operations SET node_results = ? WHERE id = ?`,
+		nodeResultsStr, id)
+	if err != nil {
+		return fmt.Errorf("db: SlurmUpdateUpgradeOpResults: %w", err)
+	}
+	return nil
+}
+
 // SlurmListUpgradeOps returns all upgrade operations ordered by start time descending.
 func (db *DB) SlurmListUpgradeOps(ctx context.Context) ([]SlurmUpgradeOpRow, error) {
 	rows, err := db.sql.QueryContext(ctx, `

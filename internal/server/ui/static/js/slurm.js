@@ -1196,4 +1196,358 @@ const SlurmPages = {
         `);
     },
 
+    // ── Upgrades wizard ────────────────────────────────────────────────────
+
+    async upgrades() {
+        App.render(loading('Loading Slurm upgrades…'));
+        try {
+            const [buildsResp, opsResp] = await Promise.all([
+                API.slurm.listBuilds().catch(() => ({ builds: [] })),
+                API.slurm.listUpgrades().catch(() => ({ operations: [] })),
+            ]);
+            const builds    = (buildsResp && buildsResp.builds) ? buildsResp.builds : [];
+            const completed = builds.filter(b => b.status === 'completed');
+            const ops       = (opsResp && opsResp.operations) ? opsResp.operations : [];
+            App.render(SlurmPages._upgradesHtml(completed, ops));
+            SlurmPages._bindUpgradesEvents(completed);
+        } catch (err) {
+            App.render(alertBox('Failed to load upgrades: ' + err.message));
+        }
+    },
+
+    _upgradesHtml(builds, ops) {
+        const buildOpts = builds.length === 0
+            ? `<option value="">No completed builds available</option>`
+            : builds.map(b => `<option value="${escHtml(b.id)}">${escHtml(b.version)} (${escHtml(b.arch)})</option>`).join('');
+
+        const opsRows = ops.length === 0
+            ? `<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;">No upgrade operations yet.</td></tr>`
+            : ops.map(op => {
+                const statusClass = {
+                    completed: 'badge-ready', failed: 'badge-error', in_progress: 'badge-info',
+                    paused: 'badge-warning', rolled_back: 'badge-neutral', queued: 'badge-neutral',
+                }[op.status] || 'badge-neutral';
+                return `
+                <tr>
+                    <td style="padding:8px 12px;font-size:12px;font-family:monospace;">
+                        <a href="#/slurm/upgrades/${encodeURIComponent(op.id)}" style="color:var(--accent);">${escHtml(op.id.slice(0,8))}…</a>
+                    </td>
+                    <td style="padding:8px 12px;font-size:12px;">${escHtml(op.status === 'in_progress' ? (op.phase || 'starting') : op.status)}</td>
+                    <td style="padding:8px 12px;font-size:12px;">
+                        <span class="badge ${statusClass}">${escHtml(op.status)}</span>
+                    </td>
+                    <td style="padding:8px 12px;font-size:12px;">${op.current_batch || 0}/${op.total_batches || 0}</td>
+                    <td style="padding:8px 12px;font-size:12px;">${fmtDate(op.started_at)}</td>
+                    <td style="padding:8px 12px;font-size:12px;">${op.completed_at ? fmtDate(op.completed_at) : '—'}</td>
+                    <td style="padding:8px 12px;">
+                        <a href="#/slurm/upgrades/${encodeURIComponent(op.id)}" class="btn btn-sm" style="font-size:11px;padding:3px 10px;">View</a>
+                    </td>
+                </tr>`;
+            }).join('');
+
+        return cardWrap('Slurm Rolling Upgrades', `
+            <!-- Upgrade wizard form -->
+            <div style="background:var(--surface-alt,var(--bg));border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:24px;">
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 16px;">Start New Upgrade</h3>
+                <div style="display:grid;gap:12px;max-width:520px;">
+                    <div>
+                        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Target Build</label>
+                        <select id="upgrade-build-select" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px;">
+                            ${buildOpts}
+                        </select>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Batch Size</label>
+                            <input type="number" id="upgrade-batch-size" value="10" min="1" max="200"
+                                style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px;">
+                        </div>
+                        <div>
+                            <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Drain Timeout (min)</label>
+                            <input type="number" id="upgrade-drain-timeout" value="30" min="1" max="240"
+                                style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px;">
+                        </div>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                        <input type="checkbox" id="upgrade-db-backup">
+                        I have confirmed SlurmDB backup before proceeding
+                    </label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button id="upgrade-validate-btn" class="btn btn-secondary" style="font-size:13px;padding:7px 16px;">Validate Plan</button>
+                        <button id="upgrade-start-btn" class="btn btn-primary" style="font-size:13px;padding:7px 16px;" disabled>Start Upgrade</button>
+                    </div>
+                </div>
+                <div id="upgrade-validation-result" style="margin-top:16px;display:none;"></div>
+            </div>
+
+            <!-- Upgrade history table -->
+            <h3 style="font-size:14px;font-weight:600;margin:0 0 12px;">Upgrade History</h3>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">ID</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Phase</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Batches</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Started</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Completed</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>${opsRows}</tbody>
+            </table>
+        `);
+    },
+
+    _bindUpgradesEvents(builds) {
+        const validateBtn  = document.getElementById('upgrade-validate-btn');
+        const startBtn     = document.getElementById('upgrade-start-btn');
+        const resultDiv    = document.getElementById('upgrade-validation-result');
+        let validationPassed = false;
+
+        const getReq = () => ({
+            to_build_id:       (document.getElementById('upgrade-build-select')?.value || '').trim(),
+            batch_size:        parseInt(document.getElementById('upgrade-batch-size')?.value || '10', 10),
+            drain_timeout_min: parseInt(document.getElementById('upgrade-drain-timeout')?.value || '30', 10),
+            confirmed_db_backup: document.getElementById('upgrade-db-backup')?.checked || false,
+        });
+
+        if (validateBtn) {
+            validateBtn.addEventListener('click', async () => {
+                const req = getReq();
+                if (!req.to_build_id) { App.toast('Select a target build first.', 'error'); return; }
+                validateBtn.disabled = true;
+                validateBtn.textContent = 'Validating…';
+                validationPassed = false;
+                if (startBtn) startBtn.disabled = true;
+                try {
+                    const v = await API.slurm.validateUpgrade(req);
+                    resultDiv.style.display = '';
+                    const warnHtml = (v.warnings || []).map(w =>
+                        `<div style="font-size:12px;color:var(--warning,#f59e0b);margin-top:4px;">⚠ ${escHtml(w)}</div>`).join('');
+                    const errHtml = (v.errors || []).map(e =>
+                        `<div style="font-size:12px;color:var(--error,#ef4444);margin-top:4px;">✗ ${escHtml(e)}</div>`).join('');
+                    const planHtml = v.upgrade_plan ? SlurmPages._upgradePlanHtml(v.upgrade_plan) : '';
+                    const jobInfo  = v.job_count >= 0 ? `<div style="font-size:12px;margin-top:6px;color:var(--text-secondary);">Running jobs: <strong>${v.job_count}</strong></div>` : '';
+                    const versionHtml = (v.from_version || v.to_version) ? `
+                        <div style="font-size:12px;margin-bottom:8px;">
+                            ${v.from_version ? `Current: <code>${escHtml(v.from_version)}</code>` : ''}
+                            ${v.from_version && v.to_version ? ' → ' : ''}
+                            ${v.to_version ? `Target: <code>${escHtml(v.to_version)}</code>` : ''}
+                        </div>` : '';
+                    resultDiv.innerHTML = `
+                        <div style="padding:14px;border:1px solid var(--border);border-radius:6px;background:var(--surface);">
+                            ${versionHtml}
+                            <div style="font-size:13px;font-weight:600;color:${v.valid ? 'var(--success,#22c55e)' : 'var(--error,#ef4444)'};">
+                                ${v.valid ? 'Validation passed' : 'Validation failed'}
+                            </div>
+                            ${errHtml}${warnHtml}${jobInfo}${planHtml}
+                        </div>`;
+                    if (v.valid) {
+                        validationPassed = true;
+                        if (startBtn) startBtn.disabled = false;
+                    }
+                } catch (err) {
+                    resultDiv.style.display = '';
+                    resultDiv.innerHTML = alertBox('Validation error: ' + err.message);
+                } finally {
+                    validateBtn.disabled = false;
+                    validateBtn.textContent = 'Validate Plan';
+                }
+            });
+        }
+
+        if (startBtn) {
+            startBtn.addEventListener('click', async () => {
+                const req = getReq();
+                if (!req.to_build_id) { App.toast('Select a target build first.', 'error'); return; }
+                if (!confirm('Start rolling upgrade? This will drain and restart Slurm services across the cluster.')) return;
+                startBtn.disabled = true;
+                startBtn.textContent = 'Starting…';
+                try {
+                    const resp = await API.slurm.startUpgrade(req);
+                    App.toast('Upgrade started (op: ' + (resp.op_id || '?') + ')', 'success');
+                    if (resp.op_id) {
+                        App.navigate('#/slurm/upgrades/' + resp.op_id);
+                    } else {
+                        SlurmPages.upgrades();
+                    }
+                } catch (err) {
+                    App.toast('Failed to start upgrade: ' + err.message, 'error');
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Start Upgrade';
+                }
+            });
+        }
+    },
+
+    _upgradePlanHtml(plan) {
+        if (!plan) return '';
+        const phaseRow = (label, nodes) => nodes && nodes.length > 0
+            ? `<tr><td style="padding:5px 10px;font-size:12px;font-weight:600;">${label}</td>
+               <td style="padding:5px 10px;font-size:12px;font-family:monospace;">${nodes.map(n => escHtml(n)).join(', ')}</td></tr>`
+            : '';
+        const batchRows = (plan.compute_batches || []).map((batch, i) =>
+            `<tr><td style="padding:5px 10px;font-size:12px;">Compute Batch ${i+1}</td>
+             <td style="padding:5px 10px;font-size:12px;font-family:monospace;">${batch.map(n => escHtml(n)).join(', ')}</td></tr>`
+        ).join('');
+
+        return `
+            <div style="margin-top:12px;">
+                <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Upgrade Plan</div>
+                <table style="border-collapse:collapse;width:100%;border:1px solid var(--border);border-radius:4px;">
+                    ${phaseRow('DBD', plan.dbd_nodes)}
+                    ${phaseRow('Controller', plan.controller_nodes)}
+                    ${batchRows}
+                    ${phaseRow('Login', plan.login_nodes)}
+                </table>
+            </div>`;
+    },
+
+    // ── Upgrade detail / progress ───────────────────────────────────────────
+
+    async upgradeDetail(opId) {
+        App.render(loading('Loading upgrade…'));
+        try {
+            const op = await API.slurm.getUpgrade(opId);
+            App.render(SlurmPages._upgradeDetailHtml(op));
+            SlurmPages._bindUpgradeDetailEvents(op);
+            // Auto-refresh every 3s if in progress.
+            if (op.status === 'in_progress' || op.status === 'queued') {
+                App.setAutoRefresh(() => SlurmPages.upgradeDetail(opId), 3000);
+            }
+        } catch (err) {
+            App.render(alertBox('Failed to load upgrade: ' + err.message));
+        }
+    },
+
+    _upgradeDetailHtml(op) {
+        const phases = ['dbd', 'controller', 'compute', 'login', 'done'];
+        const phaseIdx = phases.indexOf(op.phase || 'dbd');
+
+        const phaseBar = phases.slice(0, -1).map((ph, i) => {
+            const done    = i < phaseIdx;
+            const current = i === phaseIdx;
+            const color   = done ? 'var(--success,#22c55e)' : (current ? 'var(--accent)' : 'var(--border)');
+            return `<div style="display:flex;align-items:center;gap:6px;">
+                <div style="width:12px;height:12px;border-radius:50%;background:${color};flex-shrink:0;"></div>
+                <span style="font-size:12px;${current ? 'font-weight:700;' : ''}">${ph.toUpperCase()}</span>
+                ${i < phases.length - 2 ? '<div style="flex:1;height:1px;background:var(--border);margin:0 4px;"></div>' : ''}
+            </div>`;
+        }).join('');
+
+        const nodeResults = op.node_results || {};
+        const nodeRows = Object.entries(nodeResults).map(([nodeId, r]) => {
+            const badgeClass = r.ok ? 'badge-ready' : 'badge-error';
+            return `
+                <tr>
+                    <td style="padding:8px 12px;font-size:12px;font-family:monospace;">${escHtml(nodeId.slice(0,12))}…</td>
+                    <td style="padding:8px 12px;font-size:12px;">${escHtml(r.phase || '')}</td>
+                    <td style="padding:8px 12px;"><span class="badge ${badgeClass}">${r.ok ? 'OK' : 'FAIL'}</span></td>
+                    <td style="padding:8px 12px;font-size:12px;font-family:monospace;">${escHtml(r.installed_version || '—')}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:var(--error,#ef4444);">${escHtml(r.error || '')}</td>
+                </tr>`;
+        }).join('');
+
+        const statusClass = {
+            completed: 'badge-ready', failed: 'badge-error', in_progress: 'badge-info',
+            paused: 'badge-warning', rolled_back: 'badge-neutral', queued: 'badge-neutral',
+        }[op.status] || 'badge-neutral';
+
+        const canPause    = op.status === 'in_progress';
+        const canResume   = op.status === 'paused';
+        const canRollback = ['in_progress','paused','failed','completed'].includes(op.status);
+
+        return cardWrap(`Upgrade ${op.id.slice(0,8)}…`, `
+            <a href="#/slurm/upgrades" style="font-size:13px;color:var(--accent);display:block;margin-bottom:16px;">← Back to upgrades</a>
+
+            <!-- Status header -->
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap;">
+                <span class="badge ${statusClass}" style="font-size:13px;padding:4px 12px;">${escHtml(op.status)}</span>
+                <span style="font-size:13px;color:var(--text-secondary);">Batch ${op.current_batch || 0} / ${op.total_batches || 0}</span>
+                <span style="font-size:13px;color:var(--text-secondary);">Started: ${fmtDate(op.started_at)}</span>
+                ${op.completed_at ? `<span style="font-size:13px;color:var(--text-secondary);">Completed: ${fmtDate(op.completed_at)}</span>` : ''}
+            </div>
+
+            <!-- Phase bar -->
+            <div style="display:flex;align-items:center;gap:0;margin-bottom:24px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;">
+                ${phaseBar}
+            </div>
+
+            <!-- Action buttons -->
+            <div style="display:flex;gap:8px;margin-bottom:20px;">
+                ${canPause    ? `<button id="upgrade-pause-btn"    class="btn btn-secondary" style="font-size:13px;padding:7px 16px;">Pause</button>` : ''}
+                ${canResume   ? `<button id="upgrade-resume-btn"   class="btn btn-primary"   style="font-size:13px;padding:7px 16px;">Resume</button>` : ''}
+                ${canRollback ? `<button id="upgrade-rollback-btn" class="btn btn-danger"    style="font-size:13px;padding:7px 16px;">Rollback</button>` : ''}
+            </div>
+
+            <!-- Node results table -->
+            ${Object.keys(nodeResults).length === 0
+                ? `<p style="font-size:13px;color:var(--text-secondary);">No node results yet — upgrade is in the early phases.</p>`
+                : `<table style="width:100%;border-collapse:collapse;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border);">
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Node</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Phase</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Error</th>
+                        </tr>
+                    </thead>
+                    <tbody>${nodeRows}</tbody>
+                </table>`
+            }
+        `);
+    },
+
+    _bindUpgradeDetailEvents(op) {
+        const opId = op.id;
+        const pauseBtn    = document.getElementById('upgrade-pause-btn');
+        const resumeBtn   = document.getElementById('upgrade-resume-btn');
+        const rollbackBtn = document.getElementById('upgrade-rollback-btn');
+
+        if (pauseBtn) {
+            pauseBtn.addEventListener('click', async () => {
+                pauseBtn.disabled = true;
+                try {
+                    await API.slurm.pauseUpgrade(opId);
+                    App.toast('Upgrade paused.', 'success');
+                    SlurmPages.upgradeDetail(opId);
+                } catch (err) {
+                    App.toast('Pause failed: ' + err.message, 'error');
+                    pauseBtn.disabled = false;
+                }
+            });
+        }
+
+        if (resumeBtn) {
+            resumeBtn.addEventListener('click', async () => {
+                resumeBtn.disabled = true;
+                try {
+                    await API.slurm.resumeUpgrade(opId);
+                    App.toast('Upgrade resumed.', 'success');
+                    SlurmPages.upgradeDetail(opId);
+                } catch (err) {
+                    App.toast('Resume failed: ' + err.message, 'error');
+                    resumeBtn.disabled = false;
+                }
+            });
+        }
+
+        if (rollbackBtn) {
+            rollbackBtn.addEventListener('click', async () => {
+                if (!confirm('Rollback this upgrade to the previous version? A new rollback operation will be started.')) return;
+                rollbackBtn.disabled = true;
+                try {
+                    await API.slurm.rollbackUpgrade(opId);
+                    App.toast('Rollback initiated.', 'success');
+                    SlurmPages.upgrades();
+                } catch (err) {
+                    App.toast('Rollback failed: ' + err.message, 'error');
+                    rollbackBtn.disabled = false;
+                }
+            });
+        }
+    },
+
 };

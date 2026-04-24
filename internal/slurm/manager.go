@@ -62,6 +62,10 @@ type Manager struct {
 
 	mu  sync.RWMutex
 	cfg *db.SlurmModuleConfigRow // in-memory cache, loaded from DB on New()
+
+	// upgradeMu guards activeUpgrade state (separate from cfg lock to avoid contention).
+	upgradeMu     sync.RWMutex
+	activeUpgrade *upgradeState
 }
 
 // New creates a Manager and restores in-memory state from the DB.

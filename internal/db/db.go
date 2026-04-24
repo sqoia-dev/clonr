@@ -637,6 +637,22 @@ func (db *DB) HostnameExists(ctx context.Context, hostname string) (bool, error)
 	return count > 0, nil
 }
 
+// NodeGetHostname returns the hostname for a given node ID.
+// Returns an empty string and no error if the node doesn't exist.
+func (db *DB) NodeGetHostname(ctx context.Context, nodeID string) (string, error) {
+	var hostname string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT hostname FROM node_configs WHERE id = ?`, nodeID,
+	).Scan(&hostname)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("db: NodeGetHostname: %w", err)
+	}
+	return hostname, nil
+}
+
 // ListNodeConfigs returns all NodeConfigs. If baseImageID is non-empty, filters by it.
 // group_id is resolved from node_group_memberships (the authoritative source) so that
 // the node list page shows the correct group even when the denormalised fast-path

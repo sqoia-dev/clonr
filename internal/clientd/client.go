@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -231,6 +232,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "slurm_binary_push":
 		c.handleSlurmBinaryPush(msg)
 
+	case "slurm_admin_cmd":
+		c.handleSlurmAdminCmd(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
@@ -291,6 +295,91 @@ func (c *Client) handleSlurmConfigPush(msg ServerMessage) {
 	} else {
 		log.Error().Str("push_op_id", payload.PushOpID).Str("error", result.Error).
 			Msg("clientd: slurm config push apply failed")
+	}
+}
+
+// handleSlurmAdminCmd parses a slurm_admin_cmd payload, checks that slurmctld is
+// active on this node, executes the requested administrative command (drain, resume,
+// check_queue, reconfigure), and sends the result back as a structured ack.
+func (c *Client) handleSlurmAdminCmd(msg ServerMessage) {
+	var payload SlurmAdminCmdPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed slurm_admin_cmd payload")
+		c.sendSlurmAdminAck(msg.MsgID, SlurmAdminCmdResult{
+			OK:    false,
+			Error: "malformed slurm_admin_cmd payload: " + err.Error(),
+		})
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("command", payload.Command).
+		Strs("nodes", payload.Nodes).
+		Msg("clientd: handling slurm_admin_cmd")
+
+	// Verify slurmctld is active before accepting admin commands.
+	chkCtx, chkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	chk := exec.CommandContext(chkCtx, "systemctl", "is-active", "--quiet", "slurmctld")
+	chkErr := chk.Run()
+	chkCancel()
+	if chkErr != nil {
+		log.Warn().Str("msg_id", msg.MsgID).Msg("clientd: slurm_admin_cmd rejected — slurmctld not active on this node")
+		c.sendSlurmAdminAck(msg.MsgID, SlurmAdminCmdResult{
+			OK:    false,
+			Error: "slurmctld is not active on this node; admin commands only accepted on controller",
+		})
+		return
+	}
+
+	result := handleSlurmAdminCmd(payload)
+	c.sendSlurmAdminAck(msg.MsgID, result)
+
+	if result.OK {
+		log.Info().Str("command", payload.Command).Msg("clientd: slurm_admin_cmd executed successfully")
+	} else {
+		log.Warn().Str("command", payload.Command).Str("error", result.Error).
+			Msg("clientd: slurm_admin_cmd failed")
+	}
+}
+
+// sendSlurmAdminAck sends an "ack" message carrying a SlurmAdminCmdResult.
+// Uses the same pattern as sendSlurmAck: JSON-encodes the result in AckPayload.Error
+// so the server-side upgrade orchestrator can unmarshal it from the ack channel.
+func (c *Client) sendSlurmAdminAck(refMsgID string, result SlurmAdminCmdResult) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm admin ack result")
+		c.sendAck(refMsgID, false, "failed to marshal slurm admin ack result")
+		return
+	}
+
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       result.OK,
+		Error:    string(resultJSON),
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm admin ack payload")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "ack",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(ackPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm admin ack message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", refMsgID).
+			Msg("clientd: slurm admin ack dropped — send buffer full")
 	}
 }
 

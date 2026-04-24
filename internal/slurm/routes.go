@@ -82,6 +82,15 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	// Munge key management.
 	r.Post("/slurm/munge-key/generate", m.handleGenerateMungeKey)
 	r.Post("/slurm/munge-key/rotate", m.handleRotateMungeKey)
+
+	// Rolling upgrade operations (Sprint 9).
+	r.Post("/slurm/upgrades/validate", m.handleValidateUpgrade)
+	r.Post("/slurm/upgrades", m.handleStartUpgrade)
+	r.Get("/slurm/upgrades", m.handleListUpgrades)
+	r.Get("/slurm/upgrades/{op_id}", m.handleGetUpgrade)
+	r.Post("/slurm/upgrades/{op_id}/pause", m.handlePauseUpgrade)
+	r.Post("/slurm/upgrades/{op_id}/resume", m.handleResumeUpgrade)
+	r.Post("/slurm/upgrades/{op_id}/rollback", m.handleRollbackUpgrade)
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -863,6 +872,107 @@ func (m *Manager) handleListDepMatrix(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	jsonResponse(w, map[string]interface{}{"matrix": out, "total": len(out)}, http.StatusOK)
+}
+
+// ─── Rolling upgrade operations (Sprint 9) ────────────────────────────────────
+
+func (m *Manager) handleValidateUpgrade(w http.ResponseWriter, r *http.Request) {
+	var req UpgradeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.ToBuildID == "" {
+		jsonError(w, "to_build_id is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := m.ValidateUpgrade(r.Context(), req)
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: validate upgrade failed")
+		jsonError(w, "validation error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, result, http.StatusOK)
+}
+
+func (m *Manager) handleStartUpgrade(w http.ResponseWriter, r *http.Request) {
+	var req UpgradeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.ToBuildID == "" {
+		jsonError(w, "to_build_id is required", http.StatusBadRequest)
+		return
+	}
+
+	initiatedBy := keyLabelFromContext(r)
+	opID, err := m.StartUpgrade(r.Context(), req, initiatedBy)
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: start upgrade failed")
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jsonResponse(w, map[string]string{"op_id": opID, "status": "queued"}, http.StatusAccepted)
+}
+
+func (m *Manager) handleListUpgrades(w http.ResponseWriter, r *http.Request) {
+	ops, err := m.ListUpgradeOps(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: list upgrades failed")
+		jsonError(w, "failed to list upgrades", http.StatusInternalServerError)
+		return
+	}
+	if ops == nil {
+		ops = []UpgradeOperation{}
+	}
+	jsonResponse(w, map[string]interface{}{"operations": ops, "total": len(ops)}, http.StatusOK)
+}
+
+func (m *Manager) handleGetUpgrade(w http.ResponseWriter, r *http.Request) {
+	opID := chi.URLParam(r, "op_id")
+	op, err := m.GetUpgradeOp(r.Context(), opID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "upgrade operation not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch upgrade operation", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, op, http.StatusOK)
+}
+
+func (m *Manager) handlePauseUpgrade(w http.ResponseWriter, r *http.Request) {
+	opID := chi.URLParam(r, "op_id")
+	if err := m.PauseUpgrade(r.Context(), opID); err != nil {
+		log.Error().Err(err).Str("op_id", opID).Msg("slurm: pause upgrade failed")
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "paused"}, http.StatusOK)
+}
+
+func (m *Manager) handleResumeUpgrade(w http.ResponseWriter, r *http.Request) {
+	opID := chi.URLParam(r, "op_id")
+	if err := m.ResumeUpgrade(r.Context(), opID); err != nil {
+		log.Error().Err(err).Str("op_id", opID).Msg("slurm: resume upgrade failed")
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "in_progress"}, http.StatusOK)
+}
+
+func (m *Manager) handleRollbackUpgrade(w http.ResponseWriter, r *http.Request) {
+	opID := chi.URLParam(r, "op_id")
+	if err := m.RollbackUpgrade(r.Context(), opID); err != nil {
+		log.Error().Err(err).Str("op_id", opID).Msg("slurm: rollback upgrade failed")
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "rollback_initiated"}, http.StatusAccepted)
 }
 
 // ─── Munge key ────────────────────────────────────────────────────────────────

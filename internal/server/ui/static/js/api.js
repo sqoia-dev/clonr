@@ -373,6 +373,15 @@ const API = {
         // Munge key management
         generateMungeKey()                  { return API.post('/slurm/munge-key/generate', {}); },
         rotateMungeKey()                    { return API.post('/slurm/munge-key/rotate', {}); },
+
+        // Rolling upgrade operations (Sprint 9)
+        validateUpgrade(body)               { return API.post('/slurm/upgrades/validate', body); },
+        startUpgrade(body)                  { return API.post('/slurm/upgrades', body); },
+        listUpgrades()                      { return API.get('/slurm/upgrades'); },
+        getUpgrade(opId)                    { return API.get(`/slurm/upgrades/${encodeURIComponent(opId)}`); },
+        pauseUpgrade(opId)                  { return API.post(`/slurm/upgrades/${encodeURIComponent(opId)}/pause`, {}); },
+        resumeUpgrade(opId)                 { return API.post(`/slurm/upgrades/${encodeURIComponent(opId)}/resume`, {}); },
+        rollbackUpgrade(opId)               { return API.post(`/slurm/upgrades/${encodeURIComponent(opId)}/rollback`, {}); },
     },
     network: {
         // Switches

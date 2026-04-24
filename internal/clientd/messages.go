@@ -154,6 +154,27 @@ type SlurmBinaryAckPayload struct {
 	InstalledVersion string `json:"installed_version,omitempty"`
 }
 
+// SlurmAdminCmdPayload is the payload for the "slurm_admin_cmd" server→node message.
+// Only accepted on nodes with slurmctld running (controller role).
+// Used by the upgrade orchestrator to drain/resume nodes and check job queues.
+type SlurmAdminCmdPayload struct {
+	// Command is one of: "drain", "resume", "check_queue", "reconfigure".
+	Command string `json:"command"`
+	// Nodes is the list of Slurm node names (not clonr UUIDs) to act on.
+	// For check_queue and reconfigure this may be empty.
+	Nodes []string `json:"nodes"`
+	// Reason is passed to scontrol drain (optional).
+	Reason string `json:"reason,omitempty"`
+}
+
+// SlurmAdminCmdResult is the payload for the "ack" response to a slurm_admin_cmd.
+type SlurmAdminCmdResult struct {
+	OK       bool   `json:"ok"`
+	Output   string `json:"output"`
+	Error    string `json:"error,omitempty"`
+	JobCount int    `json:"job_count,omitempty"` // for check_queue: number of running/pending jobs
+}
+
 // SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
 // It carries per-file and per-script results and the apply action result.
 // The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.

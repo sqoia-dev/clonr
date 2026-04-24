@@ -194,6 +194,12 @@ const App = {
                 SlurmPages.push();
             } else if (parts[2] === 'builds') {
                 SlurmPages.builds();
+            } else if (parts[2] === 'upgrades') {
+                if (parts[3]) {
+                    SlurmPages.upgradeDetail(parts[3]);
+                } else {
+                    SlurmPages.upgrades();
+                }
             } else {
                 SlurmPages.settings();
             }
