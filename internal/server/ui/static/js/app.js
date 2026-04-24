@@ -264,12 +264,44 @@ const App = {
 
 // ─── Shared UI helpers ────────────────────────────────────────────────────
 
+// trapModalFocus — WCAG 2.1 AA focus trap for modal overlays.
+// Traps Tab/Shift+Tab within the overlay and calls onClose on Escape.
+function trapModalFocus(overlay, onClose) {
+    overlay.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            onClose();
+            return;
+        }
+        if (e.key === 'Tab') {
+            const focusable = overlay.querySelectorAll(
+                'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            );
+            if (focusable.length === 0) return;
+            const first = focusable[0];
+            const last  = focusable[focusable.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    });
+    setTimeout(() => {
+        const btn = overlay.querySelector('.modal-close, .shell-modal-close, button');
+        if (btn) btn.focus();
+    }, 50);
+}
+
 function loading(msg = 'Loading…') {
     return `<div class="loading"><div class="spinner"></div>${escHtml(msg)}</div>`;
 }
 
 function alertBox(msg, type = 'error') {
-    return `<div class="alert alert-${type}">${escHtml(msg)}</div>`;
+    const role = (type === 'error') ? 'alert' : 'status';
+    return `<div class="alert alert-${type}" role="${role}">${escHtml(msg)}</div>`;
 }
 
 function badge(status) {
@@ -1022,6 +1054,7 @@ const Pages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async confirmRebuildInitramfs() {
@@ -1039,7 +1072,7 @@ const Pages = {
             }
             if (resultDiv) {
                 resultDiv.style.display = 'block';
-                resultDiv.innerHTML = `<div class="alert alert-success" style="background:rgba(16,185,129,0.1);border:1px solid var(--success);border-radius:6px;padding:12px;color:var(--success)">
+                resultDiv.innerHTML = `<div class="alert alert-success" role="status" style="background:rgba(16,185,129,0.1);border:1px solid var(--success);border-radius:6px;padding:12px;color:var(--success)">
                     Rebuild complete. New sha256: <code>${escHtml((result && result.sha256 || '').slice(0,16))}…</code>
                 </div>`;
             }
@@ -1233,6 +1266,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Detect ISO URL and toggle ISO-specific fields.
         const urlInput    = document.getElementById('pull-url');
@@ -1402,6 +1436,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Wire up file picker and drag-and-drop after the DOM is appended.
         const zone    = document.getElementById('iso-drop-zone');
@@ -1623,6 +1658,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async _confirmDeleteImage(id) {
@@ -1657,7 +1693,7 @@ const Pages = {
                     <button class="modal-close" aria-label="Close" onclick="document.getElementById('capture-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <div class="alert alert-info" style="margin-bottom:16px;font-size:12px">
+                    <div class="alert alert-info" role="note" style="margin-bottom:16px;font-size:12px">
                         The server will SSH to the source host and rsync its filesystem into a new image.
                         SSH host key verification is disabled — only use this on trusted golden nodes.
                     </div>
@@ -1731,6 +1767,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
         const firstInput = overlay.querySelector('input[name="source_host"]');
         if (firstInput && !prefillHost) firstInput.focus();
     },
@@ -2012,7 +2049,8 @@ const Pages = {
             if (e.target === overlay) Pages.closeShellTerminal();
         });
 
-        // Close on Escape.
+        // Escape key closes the shell terminal; Tab is intentionally NOT trapped
+        // here because xterm.js needs to receive Tab keystrokes for the shell.
         this._shellEscHandler = (e) => { if (e.key === 'Escape') Pages.closeShellTerminal(); };
         document.addEventListener('keydown', this._shellEscHandler);
 
@@ -2642,6 +2680,7 @@ const Pages = {
 
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Wire up role-mismatch warning when admin changes the base image selection.
         const imageSelect = overlay.querySelector('select[name="base_image_id"]');
@@ -3396,7 +3435,7 @@ const Pages = {
                                     Flip → Disk + Reboot
                                 </button>
                             </div>
-                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info"></div>
+                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>
                         </div>`,
                         ''
                     ) : (node.power_provider && node.power_provider.type ? cardWrap('Power Actions',
@@ -3405,7 +3444,7 @@ const Pages = {
                                 <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">Flip Next Boot → Disk</button>
                                 <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">Flip → Disk + Reboot</button>
                             </div>
-                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info"></div>
+                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>
                         </div>`, ''
                     ) : '')}
 
@@ -3629,7 +3668,7 @@ const Pages = {
                                     style="font-family:monospace;font-size:12px;resize:vertical"
                                     placeholder="Paste file content here…"></textarea>
                             </div>
-                            <div id="configpush-result" style="display:none;margin-bottom:12px"></div>
+                            <div id="configpush-result" style="display:none;margin-bottom:12px" role="status" aria-live="polite"></div>
                         </div>`;
                     })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" onclick="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
                 </div>`;
@@ -3844,7 +3883,36 @@ const Pages = {
 
     _toggleActionsDropdown() {
         const menu = document.getElementById('node-actions-menu');
-        if (menu) menu.classList.toggle('open');
+        if (!menu) return;
+        const isOpen = menu.classList.toggle('open');
+        if (isOpen) {
+            // Move focus to the first item when opened via keyboard.
+            const first = menu.querySelector('.actions-dropdown-item:not([disabled])');
+            if (first) setTimeout(() => first.focus(), 10);
+            // Arrow key navigation within the dropdown.
+            menu._dropdownKeyHandler = (e) => {
+                const items = Array.from(menu.querySelectorAll('.actions-dropdown-item:not([disabled])'));
+                const idx = items.indexOf(document.activeElement);
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    const next = items[idx + 1] || items[0];
+                    if (next) next.focus();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    const prev = items[idx - 1] || items[items.length - 1];
+                    if (prev) prev.focus();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    menu.classList.remove('open');
+                    const btn = document.querySelector('#node-actions-dropdown > button');
+                    if (btn) btn.focus();
+                }
+            };
+            menu.addEventListener('keydown', menu._dropdownKeyHandler);
+        } else if (menu._dropdownKeyHandler) {
+            menu.removeEventListener('keydown', menu._dropdownKeyHandler);
+            menu._dropdownKeyHandler = null;
+        }
     },
 
     // _nodeDetailBack navigates back to /nodes, prompting if there are unsaved changes.
@@ -3931,6 +3999,7 @@ const Pages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
 
         overlay.querySelector('#ucd-cancel').onclick  = () => overlay.remove();
         overlay.querySelector('#ucd-discard').onclick = () => { overlay.remove(); onDiscard(); };
@@ -5277,6 +5346,7 @@ const Pages = {
         overlay._nodeId = nodeId;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     _getLayoutEditorModal() {
@@ -6041,6 +6111,7 @@ const Pages = {
 
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Initialise layout state reference on the overlay.
         // (already set above, but re-read after DOM insert for clarity)
@@ -6438,6 +6509,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async _submitGroupReimage(groupId) {
@@ -6554,6 +6626,7 @@ const Pages = {
             </div>`;
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async _submitAddMember(groupId) {
@@ -6797,6 +6870,7 @@ const Pages = {
 
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Prefill the URL field if provided (e.g. retrying an interrupted build).
         if (prefillUrl) {
@@ -6925,7 +6999,7 @@ const Pages = {
     // shown on the image detail page when status=building.
     _isoBuildInProgress(img) {
         if (img.build_method !== 'iso') {
-            return `<div class="alert alert-info" style="margin-bottom:16px">Build in progress — connecting to live stream…</div>`;
+            return `<div class="alert alert-info" role="status" style="margin-bottom:16px">Build in progress — connecting to live stream…</div>`;
         }
         return `
             <div class="card iso-build-panel" style="margin-bottom:16px" id="iso-build-card">

@@ -334,6 +334,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async _disable(needsAck) {
@@ -373,12 +374,22 @@ const LDAPPages = {
     },
 
     async _repairAdminBind() {
-        const errEl = document.getElementById('ldap-repair-err');
-        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+        const errEl  = document.getElementById('ldap-repair-err');
+        const pwdEl  = document.getElementById('ldap-repair-password');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; errEl.removeAttribute('role'); }
+        if (pwdEl) { pwdEl.removeAttribute('aria-invalid'); pwdEl.removeAttribute('aria-describedby'); }
 
-        const password = (document.getElementById('ldap-repair-password') || {}).value || '';
+        const password = (pwdEl || {}).value || '';
         if (!password) {
-            if (errEl) { errEl.textContent = 'Password is required'; errEl.style.display = ''; }
+            if (errEl) {
+                errEl.textContent = 'Password is required';
+                errEl.style.display = '';
+                errEl.setAttribute('role', 'alert');
+            }
+            if (pwdEl) {
+                pwdEl.setAttribute('aria-invalid', 'true');
+                pwdEl.setAttribute('aria-describedby', 'ldap-repair-err');
+            }
             return;
         }
 
@@ -648,6 +659,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Prefill UID/GID from API after modal is in the DOM.
         LDAPPages._lcuPrefillIds();
@@ -675,11 +687,34 @@ const LDAPPages = {
     },
 
     // _lcuSetFieldError shows/clears an inline validation error under a field.
+    // Also sets aria-invalid and aria-describedby on the associated input.
+    // Error element id convention: "{inputId}-err" (suffix "-err" stripped to find input).
+    // Exception: "lcu-pw-err" → input "lcu-password".
     _lcuSetFieldError(id, msg) {
         const el = document.getElementById(id);
         if (!el) return;
-        if (msg) { el.textContent = msg; el.style.display = ''; }
-        else     { el.textContent = '';  el.style.display = 'none'; }
+        if (msg) {
+            el.textContent = msg;
+            el.style.display = '';
+            el.setAttribute('role', 'alert');
+        } else {
+            el.textContent = '';
+            el.style.display = 'none';
+            el.removeAttribute('role');
+        }
+        // Derive the input id and update ARIA state.
+        let inputId = id.replace(/-err$/, '');
+        if (inputId === 'lcu-pw') inputId = 'lcu-password';
+        const input = document.getElementById(inputId);
+        if (input) {
+            if (msg) {
+                input.setAttribute('aria-invalid', 'true');
+                input.setAttribute('aria-describedby', id);
+            } else {
+                input.removeAttribute('aria-invalid');
+                input.removeAttribute('aria-describedby');
+            }
+        }
     },
 
     async _createUserSubmit() {
@@ -809,6 +844,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     _leuOnShellChange(val) {
@@ -887,6 +923,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     _lrpTogglePassword() {
@@ -913,13 +950,23 @@ const LDAPPages = {
 
     async _resetPasswordSubmit(uid) {
         const errEl = document.getElementById('lrp-pw-err');
-        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+        const pwdEl = document.getElementById('lrp-password');
+        if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; errEl.removeAttribute('role'); }
+        if (pwdEl) { pwdEl.removeAttribute('aria-invalid'); pwdEl.removeAttribute('aria-describedby'); }
 
-        const password    = (document.getElementById('lrp-password')     || {}).value   || '';
+        const password    = (pwdEl || {}).value   || '';
         const forceChange = !!(document.getElementById('lrp-force-change') || {}).checked;
 
         if (!password) {
-            if (errEl) { errEl.textContent = 'Password is required'; errEl.style.display = ''; }
+            if (errEl) {
+                errEl.textContent = 'Password is required';
+                errEl.style.display = '';
+                errEl.setAttribute('role', 'alert');
+            }
+            if (pwdEl) {
+                pwdEl.setAttribute('aria-invalid', 'true');
+                pwdEl.setAttribute('aria-describedby', 'lrp-pw-err');
+            }
             return;
         }
 
@@ -966,6 +1013,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
     },
 
     async _doLockUser(uid) {
@@ -1124,28 +1172,46 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
         LDAPPages._lcgPrefillGid();
     },
 
     async _createGroupSubmit() {
+        // Helper to set/clear field error with ARIA support.
+        const setErr = (errId, inputId, msg) => {
+            const errEl   = document.getElementById(errId);
+            const inputEl = document.getElementById(inputId);
+            if (errEl) {
+                errEl.textContent = msg || '';
+                errEl.style.display = msg ? '' : 'none';
+                if (msg) errEl.setAttribute('role', 'alert');
+                else     errEl.removeAttribute('role');
+            }
+            if (inputEl) {
+                if (msg) {
+                    inputEl.setAttribute('aria-invalid', 'true');
+                    inputEl.setAttribute('aria-describedby', errId);
+                } else {
+                    inputEl.removeAttribute('aria-invalid');
+                    inputEl.removeAttribute('aria-describedby');
+                }
+            }
+        };
+
         // Clear previous inline errors.
-        ['lcg-cn-err', 'lcg-gidnum-err'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) { el.textContent = ''; el.style.display = 'none'; }
-        });
+        setErr('lcg-cn-err', 'lcg-cn', '');
+        setErr('lcg-gidnum-err', 'lcg-gidnum', '');
 
         const cn     = (document.getElementById('lcg-cn')     || {}).value || '';
         const gidNum = parseInt((document.getElementById('lcg-gidnum') || {}).value || '0', 10);
 
         let hasErr = false;
         if (!cn.trim()) {
-            const el = document.getElementById('lcg-cn-err');
-            if (el) { el.textContent = 'Group name is required'; el.style.display = ''; }
+            setErr('lcg-cn-err', 'lcg-cn', 'Group name is required');
             hasErr = true;
         }
         if (!gidNum) {
-            const el = document.getElementById('lcg-gidnum-err');
-            if (el) { el.textContent = 'GID Number is required'; el.style.display = ''; }
+            setErr('lcg-gidnum-err', 'lcg-gidnum', 'GID Number is required');
             hasErr = true;
         }
         if (hasErr) return;
@@ -1263,6 +1329,7 @@ const LDAPPages = {
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+        trapModalFocus(overlay, () => overlay.remove());
 
         // Fetch users and render member list + picker in the background.
         LDAPPages._lgdRefreshMembers(group.cn, group.member_uids || [], isAdmin);
