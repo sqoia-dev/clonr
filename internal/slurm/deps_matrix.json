@@ -1,0 +1,37 @@
+[
+  {
+    "slurm_version_min": "24.05.0",
+    "slurm_version_max": "25.00.0",
+    "dep_name": "munge",
+    "dep_version_min": "0.5.15",
+    "dep_version_max": "0.5.99"
+  },
+  {
+    "slurm_version_min": "24.05.0",
+    "slurm_version_max": "25.00.0",
+    "dep_name": "pmix",
+    "dep_version_min": "4.2.0",
+    "dep_version_max": "6.0.0"
+  },
+  {
+    "slurm_version_min": "24.05.0",
+    "slurm_version_max": "25.00.0",
+    "dep_name": "hwloc",
+    "dep_version_min": "2.9.0",
+    "dep_version_max": "3.0.0"
+  },
+  {
+    "slurm_version_min": "24.05.0",
+    "slurm_version_max": "25.00.0",
+    "dep_name": "ucx",
+    "dep_version_min": "1.15.0",
+    "dep_version_max": "2.0.0"
+  },
+  {
+    "slurm_version_min": "24.05.0",
+    "slurm_version_max": "25.00.0",
+    "dep_name": "libjwt",
+    "dep_version_min": "1.15.0",
+    "dep_version_max": "2.0.0"
+  }
+]

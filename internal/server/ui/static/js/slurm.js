@@ -884,6 +884,273 @@ const SlurmPages = {
         `);
     },
 
+    // ── Builds page ────────────────────────────────────────────────────────
+
+    async builds() {
+        App.render(loading('Loading Slurm builds…'));
+        try {
+            const [buildsResp, matrixResp] = await Promise.all([
+                API.slurm.listBuilds().catch(() => ({ builds: [] })),
+                API.slurm.listDepMatrix().catch(() => ({ matrix: [] })),
+            ]);
+            const builds = (buildsResp && buildsResp.builds) ? buildsResp.builds : [];
+            const matrix = (matrixResp && matrixResp.matrix) ? matrixResp.matrix : [];
+            App.render(SlurmPages._buildsHtml(builds, matrix));
+            SlurmPages._bindBuildsEvents();
+        } catch (err) {
+            App.render(alertBox('Failed to load builds: ' + err.message));
+        }
+    },
+
+    _buildsHtml(builds, matrix) {
+        const statusColors = {
+            building:  'badge-neutral',
+            completed: 'badge-ready',
+            failed:    'badge-error',
+        };
+
+        const buildRows = builds.length === 0
+            ? `<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;">No builds yet. Use the form below to start one.</td></tr>`
+            : builds.map(b => `
+                <tr data-build-id="${escHtml(b.id)}">
+                    <td style="padding:10px 12px;font-size:13px;font-family:monospace;">${escHtml(b.version)}</td>
+                    <td style="padding:10px 12px;font-size:13px;">${escHtml(b.arch)}</td>
+                    <td style="padding:10px 12px;">
+                        <span class="badge ${statusColors[b.status] || 'badge-neutral'}">${escHtml(b.status)}</span>
+                        ${b.is_active ? '<span class="badge badge-ready" style="margin-left:4px;">Active</span>' : ''}
+                    </td>
+                    <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${b.started_at ? fmtDate(b.started_at) : '—'}</td>
+                    <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${b.artifact_size ? SlurmPages._fmtBytes(b.artifact_size) : '—'}</td>
+                    <td style="padding:10px 12px;white-space:nowrap;">
+                        ${b.status === 'building'
+                            ? `<button class="btn btn-sm" onclick="SlurmPages._viewBuildLogs('${escHtml(b.id)}')">Logs</button>`
+                            : ''}
+                        ${b.status === 'completed' && !b.is_active
+                            ? `<button class="btn btn-primary btn-sm" style="margin-left:4px;" onclick="SlurmPages._setActiveBuild('${escHtml(b.id)}')">Set Active</button>`
+                            : ''}
+                        ${b.status === 'completed'
+                            ? `<button class="btn btn-sm" style="margin-left:4px;" onclick="SlurmPages._viewBuildLogs('${escHtml(b.id)}')">Logs</button>`
+                            : ''}
+                        ${!b.is_active
+                            ? `<button class="btn btn-danger btn-sm" style="margin-left:4px;" onclick="SlurmPages._deleteBuild('${escHtml(b.id)}', '${escHtml(b.version)}')">Delete</button>`
+                            : ''}
+                    </td>
+                </tr>
+            `).join('');
+
+        const matrixRows = matrix.length === 0
+            ? `<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--text-secondary);font-size:13px;">No compatibility matrix data.</td></tr>`
+            : matrix.map(m => `
+                <tr>
+                    <td style="padding:8px 12px;font-size:13px;font-family:monospace;">${escHtml(m.dep_name)}</td>
+                    <td style="padding:8px 12px;font-size:13px;font-family:monospace;">${escHtml(m.dep_version_min)} – ${escHtml(m.dep_version_max)}</td>
+                    <td style="padding:8px 12px;font-size:13px;font-family:monospace;">${escHtml(m.slurm_version_min)} – ${escHtml(m.slurm_version_max)}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:var(--text-secondary);">${escHtml(m.source || '—')}</td>
+                </tr>
+            `).join('');
+
+        return `
+            ${cardWrap('Slurm Builds', `
+                <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border);">
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Arch</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Started</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Artifact Size</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>${buildRows}</tbody>
+                </table>
+
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 12px;">Start New Build</h3>
+                <form id="slurm-new-build-form" style="display:flex;flex-direction:column;gap:10px;max-width:480px;">
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">Slurm Version</label>
+                        <input id="slurm-build-version" class="input" type="text" placeholder="e.g. 24.05.3" style="width:100%;" required>
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">Architecture</label>
+                        <select id="slurm-build-arch" class="input" style="width:100%;">
+                            <option value="x86_64">x86_64</option>
+                            <option value="aarch64">aarch64</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;">Extra Configure Flags (optional)</label>
+                        <input id="slurm-build-flags" class="input" type="text" placeholder="e.g. --with-pmix=/opt/pmix" style="width:100%;">
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;margin-top:4px;">
+                        <button type="submit" class="btn btn-primary btn-sm" id="slurm-new-build-btn">Start Build</button>
+                        <span id="slurm-new-build-status" style="font-size:12px;color:var(--text-secondary);"></span>
+                    </div>
+                </form>
+
+                <div id="slurm-build-log-section" style="display:none;margin-top:24px;">
+                    <h3 style="font-size:14px;font-weight:600;margin:0 0 8px;">Build Log</h3>
+                    <pre id="slurm-build-log-output" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+                    <button class="btn btn-sm" style="margin-top:8px;" id="slurm-build-log-close">Close</button>
+                </div>
+            `)}
+            ${cardWrap('Munge Key Management', `
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px;">
+                    Generate or rotate the munge key distributed to all Slurm nodes.
+                    The key is encrypted at rest with AES-256-GCM.
+                </p>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                    <button class="btn btn-primary btn-sm" id="slurm-generate-munge-btn">Generate Munge Key</button>
+                    <button class="btn btn-sm" id="slurm-rotate-munge-btn">Rotate Munge Key</button>
+                    <span id="slurm-munge-status" style="font-size:12px;color:var(--text-secondary);"></span>
+                </div>
+            `)}
+            ${cardWrap('Dependency Compatibility Matrix', `
+                <table style="width:100%;border-collapse:collapse;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border);">
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Dependency</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Dep Version Range</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Slurm Version Range</th>
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Source</th>
+                        </tr>
+                    </thead>
+                    <tbody>${matrixRows}</tbody>
+                </table>
+            `)}
+        `;
+    },
+
+    _bindBuildsEvents() {
+        // New build form submission.
+        const form = document.getElementById('slurm-new-build-form');
+        if (form) {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const btn    = document.getElementById('slurm-new-build-btn');
+                const status = document.getElementById('slurm-new-build-status');
+                const ver    = (document.getElementById('slurm-build-version').value || '').trim();
+                const arch   = (document.getElementById('slurm-build-arch').value || 'x86_64').trim();
+                const flags  = (document.getElementById('slurm-build-flags').value || '').trim();
+
+                if (!ver) { status.textContent = 'Version is required.'; return; }
+
+                btn.disabled = true;
+                status.textContent = 'Starting build…';
+                try {
+                    const body = { version: ver, arch };
+                    if (flags) body.configure_flags = flags.split(/\s+/).filter(Boolean);
+                    const resp = await API.slurm.startBuild(body);
+                    status.textContent = `Build started (ID: ${resp.build_id || resp.id}). Refreshing…`;
+                    App.toast('Build started successfully.', 'success');
+                    setTimeout(() => SlurmPages.builds(), 1500);
+                } catch (err) {
+                    status.textContent = 'Error: ' + err.message;
+                    btn.disabled = false;
+                }
+            });
+        }
+
+        // Munge key generate button.
+        const genBtn = document.getElementById('slurm-generate-munge-btn');
+        if (genBtn) {
+            genBtn.addEventListener('click', async () => {
+                const status = document.getElementById('slurm-munge-status');
+                genBtn.disabled = true;
+                status.textContent = 'Generating…';
+                try {
+                    await API.slurm.generateMungeKey();
+                    status.textContent = 'Munge key generated successfully.';
+                    App.toast('Munge key generated.', 'success');
+                } catch (err) {
+                    status.textContent = 'Error: ' + err.message;
+                } finally {
+                    genBtn.disabled = false;
+                }
+            });
+        }
+
+        // Munge key rotate button.
+        const rotBtn = document.getElementById('slurm-rotate-munge-btn');
+        if (rotBtn) {
+            rotBtn.addEventListener('click', async () => {
+                const status = document.getElementById('slurm-munge-status');
+                rotBtn.disabled = true;
+                status.textContent = 'Rotating…';
+                try {
+                    await API.slurm.rotateMungeKey();
+                    status.textContent = 'Munge key rotated successfully.';
+                    App.toast('Munge key rotated.', 'success');
+                } catch (err) {
+                    status.textContent = 'Error: ' + err.message;
+                } finally {
+                    rotBtn.disabled = false;
+                }
+            });
+        }
+
+        // Build log close button.
+        const closeBtn = document.getElementById('slurm-build-log-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+                const section = document.getElementById('slurm-build-log-section');
+                if (section) section.style.display = 'none';
+            });
+        }
+    },
+
+    async _viewBuildLogs(buildId) {
+        const section = document.getElementById('slurm-build-log-section');
+        const output  = document.getElementById('slurm-build-log-output');
+        if (!section || !output) return;
+
+        section.style.display = '';
+        output.textContent = 'Loading logs…';
+        output.scrollTop = output.scrollHeight;
+
+        try {
+            const resp = await API.slurm.buildLogs(buildId);
+            // The server returns either a `logs` string or a `message` describing where
+            // to find logs (e.g. via the SSE log stream).
+            const logs = resp && resp.logs
+                ? resp.logs
+                : (resp && resp.message ? resp.message : '(no log output)');
+            output.textContent = logs;
+            output.scrollTop = output.scrollHeight;
+        } catch (err) {
+            output.textContent = 'Error loading logs: ' + err.message;
+        }
+    },
+
+    async _setActiveBuild(buildId) {
+        if (!confirm('Set this build as active? Nodes will be instructed to install it on next push.')) return;
+        try {
+            await API.slurm.setActiveBuild(buildId);
+            App.toast('Active build updated.', 'success');
+            SlurmPages.builds();
+        } catch (err) {
+            App.toast('Failed to set active build: ' + err.message, 'error');
+        }
+    },
+
+    async _deleteBuild(buildId, version) {
+        if (!confirm(`Delete build ${version}? This cannot be undone.`)) return;
+        try {
+            await API.slurm.deleteBuild(buildId);
+            App.toast(`Build ${version} deleted.`, 'success');
+            SlurmPages.builds();
+        } catch (err) {
+            App.toast('Failed to delete build: ' + err.message, 'error');
+        }
+    },
+
+    _fmtBytes(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    },
+
     // ── Sync status page ───────────────────────────────────────────────────
 
     async syncStatus() {

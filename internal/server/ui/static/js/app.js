@@ -192,6 +192,8 @@ const App = {
                 SlurmPages.syncStatus();
             } else if (parts[2] === 'push') {
                 SlurmPages.push();
+            } else if (parts[2] === 'builds') {
+                SlurmPages.builds();
             } else {
                 SlurmPages.settings();
             }

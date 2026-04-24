@@ -1464,6 +1464,41 @@ type SlurmApplyResult struct {
 	Output   string `json:"output,omitempty"`
 }
 
+// ── Slurm build types (Sprint 8) ─────────────────────────────────────────────
+
+// SlurmBuild is the API representation of one Slurm build attempt.
+type SlurmBuild struct {
+	ID               string   `json:"id"`
+	Version          string   `json:"version"`
+	Arch             string   `json:"arch"`
+	Status           string   `json:"status"` // building|completed|failed
+	ConfigureFlags   []string `json:"configure_flags,omitempty"`
+	ArtifactPath     string   `json:"artifact_path,omitempty"`
+	ArtifactChecksum string   `json:"artifact_checksum,omitempty"`
+	ArtifactSize     int64    `json:"artifact_size_bytes,omitempty"`
+	StartedAt        int64    `json:"started_at"`
+	CompletedAt      *int64   `json:"completed_at,omitempty"`
+	ErrorMessage     string   `json:"error_message,omitempty"`
+	IsActive         bool     `json:"is_active"`
+}
+
+// SlurmBuildDep is the API representation of one dependency artifact.
+type SlurmBuildDep struct {
+	Name             string `json:"name"`
+	Version          string `json:"version"`
+	ArtifactPath     string `json:"artifact_path"`
+	ArtifactChecksum string `json:"artifact_checksum"`
+}
+
+// SlurmBinaryPushPayload is the payload for the "slurm_binary_push" server→node message.
+// The server pushes this to instruct nodes to download and install a new Slurm build.
+type SlurmBinaryPushPayload struct {
+	BuildID     string `json:"build_id"`
+	Version     string `json:"version"`
+	ArtifactURL string `json:"artifact_url"`
+	Checksum    string `json:"checksum"`
+}
+
 // NetworkNodeConfig carries the resolved per-node network configuration
 // injected into NodeConfig during the deploy pipeline.
 type NetworkNodeConfig struct {

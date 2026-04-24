@@ -1,0 +1,491 @@
+// deps.go — Dependency builder for the Slurm build pipeline.
+// Builds munge, hwloc, UCX, PMIx, and libjwt from source.
+// Dependencies are built in order and their install paths returned so
+// the main Slurm build can reference them via --with-<dep>=<path>.
+package slurm
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+
+	"github.com/sqoia-dev/clonr/internal/db"
+)
+
+// DepBuild describes one dependency to build.
+type DepBuild struct {
+	Name    string // "munge", "pmix", "hwloc", "ucx", "libjwt"
+	Version string
+}
+
+// depBuildOrder is the order in which dependencies must be built.
+var depBuildOrder = []string{"munge", "hwloc", "ucx", "pmix", "libjwt"}
+
+// depDownloadURL returns the canonical source tarball URL for a dependency.
+func depDownloadURL(name, version string) (string, error) {
+	switch name {
+	case "munge":
+		return fmt.Sprintf("https://github.com/dun/munge/releases/download/munge-%s/munge-%s.tar.xz", version, version), nil
+	case "pmix":
+		return fmt.Sprintf("https://github.com/openpmix/openpmix/releases/download/v%s/pmix-%s.tar.gz", version, version), nil
+	case "hwloc":
+		parts := strings.SplitN(version, ".", 3)
+		if len(parts) < 2 {
+			return "", fmt.Errorf("deps: hwloc: cannot parse version %q", version)
+		}
+		majorMinor := parts[0] + "." + parts[1]
+		return fmt.Sprintf("https://download.open-mpi.org/release/hwloc/v%s/hwloc-%s.tar.gz", majorMinor, version), nil
+	case "ucx":
+		return fmt.Sprintf("https://github.com/openucx/ucx/releases/download/v%s/ucx-%s.tar.gz", version, version), nil
+	case "libjwt":
+		return fmt.Sprintf("https://github.com/benmcollins/libjwt/releases/download/v%s/libjwt-%s.tar.gz", version, version), nil
+	default:
+		return "", fmt.Errorf("deps: unknown dependency %q", name)
+	}
+}
+
+// depArchiveExt returns "xz" for munge, "gz" for all others.
+func depArchiveExt(name string) string {
+	if name == "munge" {
+		return "xz"
+	}
+	return "gz"
+}
+
+// buildDependencies builds all required Slurm dependencies for the given Slurm version.
+// Returns a map of dep_name → install prefix path.
+func (m *Manager) buildDependencies(ctx context.Context, buildID, slurmVersion, arch, workspace string) (map[string]string, error) {
+	depRanges, err := m.db.SlurmResolveDepVersions(ctx, slurmVersion)
+	if err != nil {
+		return nil, fmt.Errorf("deps: resolve dep matrix for slurm %s: %w", slurmVersion, err)
+	}
+
+	installPaths := make(map[string]string, len(depBuildOrder))
+	depsDir := filepath.Join(workspace, "deps")
+	if err := os.MkdirAll(depsDir, 0755); err != nil {
+		return nil, fmt.Errorf("deps: mkdir deps: %w", err)
+	}
+
+	for _, depName := range depBuildOrder {
+		rng, ok := depRanges[depName]
+		if !ok {
+			m.logBuildLine(buildID, fmt.Sprintf("[deps] no matrix entry for %s — skipping", depName))
+			continue
+		}
+		version := rng.DepVersionMin
+
+		m.logBuildLine(buildID, fmt.Sprintf("[deps] building %s %s", depName, version))
+
+		installPrefix, err := m.buildOneDep(ctx, buildID, depName, version, arch, depsDir, workspace)
+		if err != nil {
+			return nil, fmt.Errorf("deps: build %s %s: %w", depName, version, err)
+		}
+		installPaths[depName] = installPrefix
+		m.logBuildLine(buildID, fmt.Sprintf("[deps] %s %s installed at %s", depName, version, installPrefix))
+
+		// Record the dependency in the DB.
+		artifactPath := filepath.Join(depsDir, depName+"-"+version+"-"+arch+".tar.gz")
+		checksum, _ := checksumFile(artifactPath)
+		depRow := db.SlurmBuildDepRow{
+			ID:               uuid.New().String(),
+			BuildID:          buildID,
+			DepName:          depName,
+			DepVersion:       version,
+			ArtifactPath:     artifactPath,
+			ArtifactChecksum: checksum,
+		}
+		if err := m.db.SlurmInsertBuildDep(ctx, depRow); err != nil {
+			log.Warn().Err(err).Str("dep", depName).Msg("deps: failed to record dep artifact in DB")
+		}
+	}
+
+	return installPaths, nil
+}
+
+// buildOneDep builds a single dependency or reuses an existing install.
+func (m *Manager) buildOneDep(ctx context.Context, buildID, name, version, arch, depsDir, workspace string) (string, error) {
+	installPrefix := filepath.Join(depsDir, name+"-install")
+
+	// Reuse if already installed (idempotent on retry).
+	if _, err := os.Stat(installPrefix); err == nil {
+		m.logBuildLine(buildID, fmt.Sprintf("[deps] %s %s: reusing existing install", name, version))
+		return installPrefix, nil
+	}
+
+	srcURL, err := depDownloadURL(name, version)
+	if err != nil {
+		return "", err
+	}
+	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: downloading %s", name, srcURL))
+
+	ext := depArchiveExt(name)
+	tarPath := filepath.Join(workspace, name+"-"+version+".tar."+ext)
+	if err := downloadFile(ctx, srcURL, tarPath); err != nil {
+		return "", fmt.Errorf("download %s: %w", srcURL, err)
+	}
+
+	srcDir := filepath.Join(workspace, name+"-"+version+"-src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir srcdir: %w", err)
+	}
+	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: extracting source", name))
+
+	// Use system tar for both gz and xz — it handles both transparently.
+	if err := tarExtract(ctx, tarPath, srcDir); err != nil {
+		return "", fmt.Errorf("extract %s: %w", name, err)
+	}
+
+	topDir, err := findTopDir(srcDir)
+	if err != nil {
+		return "", fmt.Errorf("find top dir in %s: %w", srcDir, err)
+	}
+
+	if err := os.MkdirAll(installPrefix, 0755); err != nil {
+		return "", fmt.Errorf("mkdir install prefix: %w", err)
+	}
+
+	configureArgs := []string{"--prefix=" + installPrefix}
+	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: ./configure %s", name, strings.Join(configureArgs, " ")))
+	if err := runCmd(ctx, topDir, "./configure", configureArgs...); err != nil {
+		return "", fmt.Errorf("configure %s: %w", name, err)
+	}
+
+	ncpu := fmt.Sprintf("%d", runtime.NumCPU())
+	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: make -j%s", name, ncpu))
+	if err := runCmd(ctx, topDir, "make", "-j"+ncpu); err != nil {
+		return "", fmt.Errorf("make %s: %w", name, err)
+	}
+
+	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: make install", name))
+	if err := runCmd(ctx, topDir, "make", "install"); err != nil {
+		return "", fmt.Errorf("make install %s: %w", name, err)
+	}
+
+	// Package the install as an artifact (non-fatal if it fails).
+	artifactPath := filepath.Join(depsDir, name+"-"+version+"-"+arch+".tar.gz")
+	if err := createTarGz(installPrefix, artifactPath); err != nil {
+		log.Warn().Err(err).Str("dep", name).Msg("deps: failed to package dep artifact")
+	}
+
+	return installPrefix, nil
+}
+
+// tarExtract extracts any tarball (gz, xz, bz2) using the system tar command.
+func tarExtract(ctx context.Context, src, dst string) error {
+	cmd := exec.CommandContext(ctx, "tar", "-xf", src, "-C", dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tar -xf: %w\noutput: %s", err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// ─── Munge key management ─────────────────────────────────────────────────────
+
+// GenerateMungeKey creates a new random 1024-byte munge key and stores it encrypted.
+func (m *Manager) GenerateMungeKey(ctx context.Context) error {
+	key := make([]byte, 1024)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("slurm: generate munge key: %w", err)
+	}
+	encryptedHex, err := m.encryptSecret(key)
+	if err != nil {
+		return fmt.Errorf("slurm: encrypt munge key: %w", err)
+	}
+	if err := m.db.SlurmUpsertSecret(ctx, db.SlurmSecretRow{
+		KeyType:        "munge.key",
+		EncryptedValue: encryptedHex,
+		RotatedAt:      time.Now().Unix(),
+		RotatedBy:      "system",
+	}); err != nil {
+		return fmt.Errorf("slurm: store munge key: %w", err)
+	}
+	log.Info().Msg("slurm: munge key generated and stored")
+	return nil
+}
+
+// GetMungeKey retrieves and decrypts the munge key.
+func (m *Manager) GetMungeKey(ctx context.Context) ([]byte, error) {
+	row, err := m.db.SlurmGetSecret(ctx, "munge.key")
+	if err != nil {
+		return nil, fmt.Errorf("slurm: get munge key: %w", err)
+	}
+	return m.decryptSecret(row.EncryptedValue)
+}
+
+// RotateMungeKey generates a new munge key (overwriting the old one).
+// Callers should push the new key to all nodes after calling this.
+func (m *Manager) RotateMungeKey(ctx context.Context) error {
+	return m.GenerateMungeKey(ctx)
+}
+
+// ─── Encryption (AES-256-GCM) ─────────────────────────────────────────────────
+
+// encryptSecret encrypts plaintext using AES-256-GCM.
+// Returns hex(nonce || ciphertext).
+func (m *Manager) encryptSecret(plaintext []byte) (string, error) {
+	key, err := m.secretEncryptionKey()
+	if err != nil {
+		return "", err
+	}
+	return aesGCMEncrypt(key, plaintext)
+}
+
+// decryptSecret decrypts a hex-encoded ciphertext produced by encryptSecret.
+func (m *Manager) decryptSecret(ciphertextHex string) ([]byte, error) {
+	key, err := m.secretEncryptionKey()
+	if err != nil {
+		return nil, err
+	}
+	return aesGCMDecrypt(key, ciphertextHex)
+}
+
+// secretEncryptionKey derives a 32-byte AES key from CLONR_SECRET_KEY.
+func (m *Manager) secretEncryptionKey() ([]byte, error) {
+	envKey := os.Getenv("CLONR_SECRET_KEY")
+	if envKey != "" {
+		raw, err := hex.DecodeString(envKey)
+		if err == nil && len(raw) == 32 {
+			return raw, nil
+		}
+		// Arbitrary string: hash to 32 bytes.
+		h := sha256.Sum256([]byte(envKey))
+		return h[:], nil
+	}
+	log.Warn().Msg("slurm: CLONR_SECRET_KEY not set — using derived key (set CLONR_SECRET_KEY in production)")
+	h := sha256.Sum256([]byte("clonr-slurm-secrets-v1"))
+	return h[:], nil
+}
+
+// aesGCMEncrypt encrypts plaintext with AES-256-GCM.
+// Returns hex(nonce || ciphertext || tag).
+func aesGCMEncrypt(key, plaintext []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("aes cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	return hex.EncodeToString(ciphertext), nil
+}
+
+// aesGCMDecrypt decrypts a hex-encoded AES-256-GCM ciphertext.
+func aesGCMDecrypt(key []byte, ciphertextHex string) ([]byte, error) {
+	data, err := hex.DecodeString(ciphertextHex)
+	if err != nil {
+		return nil, fmt.Errorf("decode hex: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aes cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("gcm: %w", err)
+	}
+	ns := gcm.NonceSize()
+	if len(data) < ns {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:ns], data[ns:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+// ─── Matrix seeding ───────────────────────────────────────────────────────────
+
+// seedDepMatrix loads the bundled deps_matrix.json and seeds the DB.
+// INSERT OR IGNORE makes it idempotent.
+func (m *Manager) seedDepMatrix(ctx context.Context) error {
+	type matrixEntry struct {
+		SlurmVersionMin string `json:"slurm_version_min"`
+		SlurmVersionMax string `json:"slurm_version_max"`
+		DepName         string `json:"dep_name"`
+		DepVersionMin   string `json:"dep_version_min"`
+		DepVersionMax   string `json:"dep_version_max"`
+	}
+	var entries []matrixEntry
+	if err := json.Unmarshal(depsMatrixJSON, &entries); err != nil {
+		return fmt.Errorf("slurm: parse deps_matrix.json: %w", err)
+	}
+
+	rows := make([]db.SlurmDepMatrixRow, 0, len(entries))
+	now := time.Now().Unix()
+	for _, e := range entries {
+		rows = append(rows, db.SlurmDepMatrixRow{
+			ID:              uuid.New().String(),
+			SlurmVersionMin: e.SlurmVersionMin,
+			SlurmVersionMax: e.SlurmVersionMax,
+			DepName:         e.DepName,
+			DepVersionMin:   e.DepVersionMin,
+			DepVersionMax:   e.DepVersionMax,
+			Source:          "bundled",
+			CreatedAt:       now,
+		})
+	}
+	if err := m.db.SlurmSeedDepMatrix(ctx, rows); err != nil {
+		return fmt.Errorf("slurm: seed dep matrix: %w", err)
+	}
+	log.Info().Int("entries", len(rows)).Msg("slurm: dep matrix seeded")
+	return nil
+}
+
+// ─── Shell command helper ─────────────────────────────────────────────────────
+
+// runCmd runs an external command in dir. Args are passed directly to exec.Command
+// (no shell) preventing injection. Combined output is logged at debug level.
+func runCmd(ctx context.Context, dir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		log.Debug().Str("cmd", name).Str("dir", dir).Msgf("output:\n%s", strings.TrimRight(string(out), "\n"))
+	}
+	if err != nil {
+		return fmt.Errorf("%s %v: %w\noutput: %s", name, args, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// ─── File / archive helpers ───────────────────────────────────────────────────
+
+// downloadFile downloads srcURL to dst atomically (writes dst+".tmp" then renames).
+func downloadFile(ctx context.Context, srcURL, dst string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srcURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("http get %s: %w", srcURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("http get %s: status %d", srcURL, resp.StatusCode)
+	}
+
+	tmp := dst + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write download: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	return os.Rename(tmp, dst)
+}
+
+// findTopDir returns the single top-level directory within dir after extraction.
+func findTopDir(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("readdir %s: %w", dir, err)
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("extracted tarball is empty in %s", dir)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return filepath.Join(dir, e.Name()), nil
+		}
+	}
+	return dir, nil
+}
+
+// createTarGz creates a gzip-compressed tar archive of src at dst.
+func createTarGz(src, dst string) error {
+	f, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("create archive: %w", err)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = relPath
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		_, err = io.Copy(tw, in)
+		return err
+	})
+}
+
+// checksumFile returns the hex-encoded SHA-256 of the file at path.
+func checksumFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// logBuildLine emits a log line tagged with the build ID.
+func (m *Manager) logBuildLine(buildID, line string) {
+	log.Info().Str("build_id", buildID).Msg(line)
+}

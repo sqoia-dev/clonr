@@ -129,6 +129,31 @@ type SlurmFilePush struct {
 	DestPath string `json:"dest_path"`
 }
 
+// SlurmBinaryPushPayload is the payload for the "slurm_binary_push" server→node message.
+// The server sends this to instruct the node to download and install a new Slurm build.
+type SlurmBinaryPushPayload struct {
+	// BuildID is the server-side build UUID for tracking and ack correlation.
+	BuildID string `json:"build_id"`
+	// Version is the Slurm version string, e.g. "24.05.3".
+	Version string `json:"version"`
+	// ArtifactURL is the signed download URL for the build artifact tarball.
+	ArtifactURL string `json:"artifact_url"`
+	// Checksum is the SHA-256 hex digest of the artifact to verify after download.
+	Checksum string `json:"checksum"`
+}
+
+// SlurmBinaryAckPayload is the payload for the "ack" message sent after slurm_binary_push.
+type SlurmBinaryAckPayload struct {
+	// BuildID is the build UUID from the push message.
+	BuildID string `json:"build_id"`
+	// OK is true when the binary was installed successfully.
+	OK bool `json:"ok"`
+	// Error is a human-readable description of the failure, if any.
+	Error string `json:"error,omitempty"`
+	// InstalledVersion is the Slurm version now running on the node.
+	InstalledVersion string `json:"installed_version,omitempty"`
+}
+
 // SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
 // It carries per-file and per-script results and the apply action result.
 // The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.

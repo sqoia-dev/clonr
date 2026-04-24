@@ -66,12 +66,16 @@ type Manager struct {
 
 // New creates a Manager and restores in-memory state from the DB.
 // If no config row exists (fresh install), the module starts in not_configured state.
+// Seeds the dep matrix from the embedded JSON on every startup (INSERT OR IGNORE).
 func New(database *db.DB, hub ClientdHubIface) *Manager {
 	m := &Manager{
 		db:  database,
 		hub: hub,
 	}
 	m.restoreFromDB(context.Background())
+	if err := m.seedDepMatrix(context.Background()); err != nil {
+		log.Warn().Err(err).Msg("slurm: dep matrix seed failed (non-fatal)")
+	}
 	return m
 }
 

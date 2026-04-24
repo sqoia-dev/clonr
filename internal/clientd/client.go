@@ -228,6 +228,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "slurm_config_push":
 		c.handleSlurmConfigPush(msg)
 
+	case "slurm_binary_push":
+		c.handleSlurmBinaryPush(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
@@ -288,6 +291,86 @@ func (c *Client) handleSlurmConfigPush(msg ServerMessage) {
 	} else {
 		log.Error().Str("push_op_id", payload.PushOpID).Str("error", result.Error).
 			Msg("clientd: slurm config push apply failed")
+	}
+}
+
+// handleSlurmBinaryPush parses a slurm_binary_push payload, downloads and installs
+// the Slurm binary artifact, and sends a structured ack back to the server.
+func (c *Client) handleSlurmBinaryPush(msg ServerMessage) {
+	var payload SlurmBinaryPushPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed slurm_binary_push payload")
+		c.sendAck(msg.MsgID, false, "malformed slurm_binary_push payload: "+err.Error())
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("build_id", payload.BuildID).
+		Str("version", payload.Version).
+		Msg("clientd: handling slurm binary push")
+
+	// Derive the base HTTP URL from the WebSocket server URL.
+	baseURL := strings.Replace(c.serverURL, "ws://", "http://", 1)
+	baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
+	// Strip the path suffix (e.g. /api/v1/nodes/.../clientd/ws) to get the root.
+	if idx := strings.Index(baseURL, "/api/"); idx != -1 {
+		baseURL = baseURL[:idx]
+	}
+
+	result := applySlurmBinary(context.Background(), baseURL, payload)
+	c.sendSlurmBinaryAck(msg.MsgID, result)
+
+	if result.OK {
+		log.Info().
+			Str("build_id", payload.BuildID).
+			Str("installed_version", result.InstalledVersion).
+			Msg("clientd: slurm binary push installed successfully")
+	} else {
+		log.Error().
+			Str("build_id", payload.BuildID).
+			Str("error", result.Error).
+			Msg("clientd: slurm binary push failed")
+	}
+}
+
+// sendSlurmBinaryAck sends an "ack" message with the SlurmBinaryAckPayload
+// JSON-encoded in the AckPayload.Error field so the server-side push orchestrator
+// can unmarshal the full result (mirrors the sendSlurmAck pattern).
+func (c *Client) sendSlurmBinaryAck(refMsgID string, result SlurmBinaryAckPayload) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm binary ack result")
+		c.sendAck(refMsgID, false, "failed to marshal slurm binary ack result")
+		return
+	}
+
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       result.OK,
+		Error:    string(resultJSON), // server decodes this as SlurmBinaryAckPayload JSON
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm binary ack payload")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "ack",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(ackPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal slurm binary ack message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", refMsgID).
+			Msg("clientd: slurm binary ack dropped — send buffer full")
 	}
 }
 

@@ -362,6 +362,17 @@ const API = {
         // Builds
         listBuilds()                        { return API.get('/slurm/builds'); },
         getBuild(buildId)                   { return API.get(`/slurm/builds/${encodeURIComponent(buildId)}`); },
+        startBuild(body)                    { return API.post('/slurm/builds', body); },
+        deleteBuild(buildId)                { return API.del(`/slurm/builds/${encodeURIComponent(buildId)}`); },
+        buildLogs(buildId)                  { return API.get(`/slurm/builds/${encodeURIComponent(buildId)}/logs`); },
+        setActiveBuild(buildId)             { return API.post(`/slurm/builds/${encodeURIComponent(buildId)}/set-active`, {}); },
+
+        // Dependency matrix
+        listDepMatrix()                     { return API.get('/slurm/deps/matrix'); },
+
+        // Munge key management
+        generateMungeKey()                  { return API.post('/slurm/munge-key/generate', {}); },
+        rotateMungeKey()                    { return API.post('/slurm/munge-key/rotate', {}); },
     },
     network: {
         // Switches

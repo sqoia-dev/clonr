@@ -8,8 +8,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
@@ -62,9 +67,21 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/slurm/scripts/{script_type}/history", m.handleScriptHistory)
 	r.Put("/slurm/scripts/{script_type}/config", m.handleUpsertScriptConfig)
 
-	// Build management (basic CRUD — full pipeline is Sprint 8).
+	// Build management (Sprint 8 full pipeline).
 	r.Get("/slurm/builds", m.handleListBuilds)
+	r.Post("/slurm/builds", m.handleStartBuild)
 	r.Get("/slurm/builds/{build_id}", m.handleGetBuild)
+	r.Delete("/slurm/builds/{build_id}", m.handleDeleteBuild)
+	r.Get("/slurm/builds/{build_id}/artifact", m.handleDownloadArtifact)
+	r.Get("/slurm/builds/{build_id}/logs", m.handleBuildLogs)
+	r.Post("/slurm/builds/{build_id}/set-active", m.handleSetActiveBuild)
+
+	// Dependency matrix.
+	r.Get("/slurm/deps/matrix", m.handleListDepMatrix)
+
+	// Munge key management.
+	r.Post("/slurm/munge-key/generate", m.handleGenerateMungeKey)
+	r.Post("/slurm/munge-key/rotate", m.handleRotateMungeKey)
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -636,39 +653,13 @@ func (m *Manager) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type buildResp struct {
-		ID                string   `json:"id"`
-		Version           string   `json:"version"`
-		Arch              string   `json:"arch"`
-		Status            string   `json:"status"`
-		ConfigureFlags    []string `json:"configure_flags,omitempty"`
-		ArtifactPath      string   `json:"artifact_path,omitempty"`
-		ArtifactChecksum  string   `json:"artifact_checksum,omitempty"`
-		ArtifactSizeBytes int64    `json:"artifact_size_bytes,omitempty"`
-		InitiatedBy       string   `json:"initiated_by,omitempty"`
-		StartedAt         int64    `json:"started_at"`
-		CompletedAt       *int64   `json:"completed_at,omitempty"`
-		ErrorMessage      string   `json:"error_message,omitempty"`
-	}
+	activeBuildID, _ := m.db.SlurmGetActiveBuildID(r.Context())
 
-	out := make([]buildResp, 0, len(rows))
+	out := make([]api.SlurmBuild, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, buildResp{
-			ID:                row.ID,
-			Version:           row.Version,
-			Arch:              row.Arch,
-			Status:            row.Status,
-			ConfigureFlags:    row.ConfigureFlags,
-			ArtifactPath:      row.ArtifactPath,
-			ArtifactChecksum:  row.ArtifactChecksum,
-			ArtifactSizeBytes: row.ArtifactSizeBytes,
-			InitiatedBy:       row.InitiatedBy,
-			StartedAt:         row.StartedAt,
-			CompletedAt:       row.CompletedAt,
-			ErrorMessage:      row.ErrorMessage,
-		})
+		out = append(out, buildRowToAPI(row, activeBuildID))
 	}
-	jsonResponse(w, map[string]interface{}{"builds": out, "total": len(out)}, http.StatusOK)
+	jsonResponse(w, map[string]interface{}{"builds": out, "total": len(out), "active_build_id": activeBuildID}, http.StatusOK)
 }
 
 func (m *Manager) handleGetBuild(w http.ResponseWriter, r *http.Request) {
@@ -682,7 +673,216 @@ func (m *Manager) handleGetBuild(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to fetch build", http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, row, http.StatusOK)
+	activeBuildID, _ := m.db.SlurmGetActiveBuildID(r.Context())
+	jsonResponse(w, buildRowToAPI(*row, activeBuildID), http.StatusOK)
+}
+
+func (m *Manager) handleStartBuild(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SlurmVersion   string   `json:"slurm_version"`
+		Arch           string   `json:"arch"`
+		ConfigureFlags []string `json:"configure_flags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.SlurmVersion == "" {
+		jsonError(w, "slurm_version is required", http.StatusBadRequest)
+		return
+	}
+
+	initiatedBy := keyLabelFromContext(r)
+	cfg := BuildConfig{
+		SlurmVersion:   body.SlurmVersion,
+		Arch:           body.Arch,
+		ConfigureFlags: body.ConfigureFlags,
+	}
+	buildID, err := m.StartBuild(r.Context(), cfg, initiatedBy)
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: start build failed")
+		jsonError(w, "failed to start build: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResponse(w, map[string]string{"build_id": buildID, "status": "building"}, http.StatusAccepted)
+}
+
+func (m *Manager) handleDeleteBuild(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+
+	// Fetch the build to get the artifact path for cleanup.
+	row, err := m.db.SlurmGetBuild(r.Context(), buildID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "build not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch build", http.StatusInternalServerError)
+		return
+	}
+
+	if err := m.db.SlurmDeleteBuild(r.Context(), buildID); err != nil {
+		log.Error().Err(err).Str("build_id", buildID).Msg("slurm: delete build failed")
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	// Best-effort artifact cleanup.
+	if row.ArtifactPath != "" {
+		if err := os.Remove(row.ArtifactPath); err != nil && !os.IsNotExist(err) {
+			log.Warn().Err(err).Str("path", row.ArtifactPath).Msg("slurm: delete build: artifact cleanup failed")
+		}
+	}
+
+	jsonResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+func (m *Manager) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+	token := r.URL.Query().Get("token")
+	expires := r.URL.Query().Get("expires")
+
+	// Validate signed URL.
+	if token == "" || expires == "" {
+		jsonError(w, "missing token or expires parameter", http.StatusBadRequest)
+		return
+	}
+	if !m.ValidateArtifactToken(buildID, token, expires) {
+		jsonError(w, "invalid or expired token", http.StatusForbidden)
+		return
+	}
+
+	row, err := m.db.SlurmGetBuild(r.Context(), buildID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "build not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch build", http.StatusInternalServerError)
+		return
+	}
+	if row.Status != "completed" || row.ArtifactPath == "" {
+		jsonError(w, "build artifact not available", http.StatusNotFound)
+		return
+	}
+
+	// Sanitize path before serving.
+	cleanPath := filepath.Clean(row.ArtifactPath)
+	if !strings.HasPrefix(cleanPath, slurmBuildsDir) {
+		jsonError(w, "invalid artifact path", http.StatusInternalServerError)
+		return
+	}
+
+	f, err := os.Open(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			jsonError(w, "artifact file not found on disk", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to open artifact", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment; filename="+filepath.Base(cleanPath))
+	if row.ArtifactChecksum != "" {
+		w.Header().Set("X-Checksum-SHA256", row.ArtifactChecksum)
+	}
+	if row.ArtifactSizeBytes > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", row.ArtifactSizeBytes))
+	}
+	http.ServeContent(w, r, filepath.Base(cleanPath), time.Time{}, f)
+}
+
+func (m *Manager) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+
+	// Verify the build exists.
+	if _, err := m.db.SlurmGetBuild(r.Context(), buildID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, "build not found", http.StatusNotFound)
+			return
+		}
+		jsonError(w, "failed to fetch build", http.StatusInternalServerError)
+		return
+	}
+
+	// Build logs are emitted via zerolog with build_id field. For v1, return a
+	// stub that indicates where to find the logs (server log stream).
+	jsonResponse(w, map[string]interface{}{
+		"build_id": buildID,
+		"message":  "Build logs are available via GET /api/v1/logs?component=slurm-build or the SSE log stream",
+		"log_key":  buildID,
+	}, http.StatusOK)
+}
+
+func (m *Manager) handleSetActiveBuild(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+
+	if err := m.db.SlurmSetActiveBuild(r.Context(), buildID); err != nil {
+		log.Error().Err(err).Str("build_id", buildID).Msg("slurm: set active build failed")
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	jsonResponse(w, map[string]string{"status": "ok", "active_build_id": buildID}, http.StatusOK)
+}
+
+// ─── Dependency matrix ────────────────────────────────────────────────────────
+
+func (m *Manager) handleListDepMatrix(w http.ResponseWriter, r *http.Request) {
+	type matrixRow struct {
+		ID              string `json:"id"`
+		SlurmVersionMin string `json:"slurm_version_min"`
+		SlurmVersionMax string `json:"slurm_version_max"`
+		DepName         string `json:"dep_name"`
+		DepVersionMin   string `json:"dep_version_min"`
+		DepVersionMax   string `json:"dep_version_max"`
+		Source          string `json:"source"`
+	}
+
+	// Query the dep matrix for all known Slurm versions by doing a wildcard resolve.
+	// We fetch raw rows via the DB since SlurmResolveDepVersions is version-scoped.
+	rows, err := m.db.SlurmListDepMatrix(r.Context())
+	if err != nil {
+		jsonError(w, "failed to fetch dep matrix", http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]matrixRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, matrixRow{
+			ID:              row.ID,
+			SlurmVersionMin: row.SlurmVersionMin,
+			SlurmVersionMax: row.SlurmVersionMax,
+			DepName:         row.DepName,
+			DepVersionMin:   row.DepVersionMin,
+			DepVersionMax:   row.DepVersionMax,
+			Source:          row.Source,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"matrix": out, "total": len(out)}, http.StatusOK)
+}
+
+// ─── Munge key ────────────────────────────────────────────────────────────────
+
+func (m *Manager) handleGenerateMungeKey(w http.ResponseWriter, r *http.Request) {
+	if err := m.GenerateMungeKey(r.Context()); err != nil {
+		log.Error().Err(err).Msg("slurm: generate munge key failed")
+		jsonError(w, "failed to generate munge key: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok", "message": "munge key generated and stored"}, http.StatusOK)
+}
+
+func (m *Manager) handleRotateMungeKey(w http.ResponseWriter, r *http.Request) {
+	if err := m.RotateMungeKey(r.Context()); err != nil {
+		log.Error().Err(err).Msg("slurm: rotate munge key failed")
+		jsonError(w, "failed to rotate munge key: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ok", "message": "munge key rotated"}, http.StatusOK)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -727,6 +927,24 @@ func (m *Manager) computeScriptDrift(ctx context.Context) []map[string]interface
 		}
 	}
 	return result
+}
+
+// buildRowToAPI converts a DB build row to the API type.
+func buildRowToAPI(row db.SlurmBuildRow, activeBuildID string) api.SlurmBuild {
+	return api.SlurmBuild{
+		ID:               row.ID,
+		Version:          row.Version,
+		Arch:             row.Arch,
+		Status:           row.Status,
+		ConfigureFlags:   row.ConfigureFlags,
+		ArtifactPath:     row.ArtifactPath,
+		ArtifactChecksum: row.ArtifactChecksum,
+		ArtifactSize:     row.ArtifactSizeBytes,
+		StartedAt:        row.StartedAt,
+		CompletedAt:      row.CompletedAt,
+		ErrorMessage:     row.ErrorMessage,
+		IsActive:         row.ID == activeBuildID && activeBuildID != "",
+	}
 }
 
 // configRowToAPI converts a DB config file row to the API type.
