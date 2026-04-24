@@ -69,6 +69,7 @@ func findClientdBin(hint string) string {
 	candidates = append(candidates,
 		"/opt/clonr/bin/clonr-clientd",
 		"/usr/local/bin/clonr-clientd",
+		"/usr/bin/clonr-clientd",
 	)
 
 	for _, p := range candidates {
