@@ -276,6 +276,19 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		}
 	}
 
+	// Step 10: Proxmox qemu-guest-agent — install and enable the guest agent so
+	// Proxmox can query the VM for its actual network info (IPs, interfaces),
+	// enabling the Proxmox UI network tab to auto-populate.
+	if cfg.PowerProvider != nil && cfg.PowerProvider.Type == "proxmox" {
+		log.Info().Msg("finalize: installing qemu-guest-agent for Proxmox-backed node")
+		if err := installQEMUGuestAgent(ctx, mountRoot); err != nil {
+			// Non-fatal: node boots without the agent; operator can install manually.
+			log.Warn().Err(err).Msg("WARNING: finalize: qemu-guest-agent install failed (non-fatal)")
+		} else {
+			log.Info().Msg("finalize: qemu-guest-agent installed and enabled")
+		}
+	}
+
 	return nil
 }
 
@@ -302,6 +315,53 @@ func applyBMCConfig(ctx context.Context, bmc *api.BMCNodeConfig) error {
 		}
 	}
 	return nil
+}
+
+// installQEMUGuestAgent detects the distro family in rootDir, installs the
+// qemu-guest-agent package via the appropriate package manager, and enables the
+// service via systemctl. It is called during finalization when a node's power
+// provider is Proxmox, allowing Proxmox to query live network information from
+// the VM and auto-populate the Proxmox UI network tab.
+//
+// Distro detection:
+//   - /etc/redhat-release present → RHEL/Rocky/Alma family (dnf)
+//   - /etc/debian_version present → Debian/Ubuntu family (apt-get)
+//   - Neither found → warn and skip (non-fatal at the call site)
+func installQEMUGuestAgent(ctx context.Context, rootDir string) error {
+	log := logger()
+
+	var pkgMgr string
+	switch {
+	case fileExists(filepath.Join(rootDir, "etc", "redhat-release")):
+		pkgMgr = "dnf"
+	case fileExists(filepath.Join(rootDir, "etc", "debian_version")):
+		pkgMgr = "apt-get"
+	default:
+		log.Warn().Str("root", rootDir).
+			Msg("finalize: qemu-guest-agent: could not detect distro family — skipping install")
+		return nil
+	}
+
+	log.Info().Str("pkg_mgr", pkgMgr).Msg("finalize: installing qemu-guest-agent in chroot")
+	if out, err := exec.CommandContext(ctx, "chroot", rootDir,
+		pkgMgr, "install", "-y", "qemu-guest-agent",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("install qemu-guest-agent via %s: %w\noutput: %s", pkgMgr, err, string(out))
+	}
+
+	if out, err := exec.CommandContext(ctx, "chroot", rootDir,
+		"systemctl", "enable", "qemu-guest-agent",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl enable qemu-guest-agent: %w\noutput: %s", err, string(out))
+	}
+
+	return nil
+}
+
+// fileExists reports whether the file at path exists (is stat-able).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // writeIBConfig writes IPoIB NetworkManager connection profiles and udev rules
