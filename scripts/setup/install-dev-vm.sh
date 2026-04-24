@@ -368,6 +368,11 @@ configure_firewall() {
         --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=8080 protocol=tcp accept' \
         --permanent
 
+    # Provisioning network (10.99.0.0/24): LDAPS for SSSD on deployed nodes
+    firewall-cmd --zone=drop \
+        --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=636 protocol=tcp accept' \
+        --permanent
+
     # DHCP (UDP 67): PXE clients send DHCPDISCOVER from 0.0.0.0 (before they have
     # an IP), so source-address rich rules will never match. Use a direct iptables
     # rule scoped to eth1 to accept DHCP on the provisioning interface only.
