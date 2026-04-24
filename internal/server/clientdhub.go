@@ -66,6 +66,12 @@ type pendingAck struct {
 	ch chan clientd.AckPayload
 }
 
+// pendingExecResult holds a channel to receive an ExecResultPayload for an
+// in-flight exec_request.
+type pendingExecResult struct {
+	ch chan clientd.ExecResultPayload
+}
+
 // ClientdHub tracks all active clonr-clientd WebSocket connections, keyed by node ID.
 // It is safe for concurrent use.
 //
@@ -84,6 +90,10 @@ type ClientdHub struct {
 	// block until the node sends back the "ack" message. sync.Map is used for
 	// lock-free fast-path reads; entries are stored by msg_id (string).
 	ackRegistry sync.Map
+
+	// execRegistry maps outbound msg_id → pendingExecResult so the HTTP handler
+	// can block until the node sends back the "exec_result" message.
+	execRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -201,6 +211,37 @@ func (h *ClientdHub) DeliverAck(msgID string, payload clientd.AckPayload) bool {
 		return true
 	default:
 		// Channel already has a value or is closed — ignore.
+		return false
+	}
+}
+
+// RegisterExec creates a pending exec result entry for msgID and returns the
+// channel to read the ExecResultPayload from. The caller must call
+// UnregisterExec(msgID) when done.
+func (h *ClientdHub) RegisterExec(msgID string) <-chan clientd.ExecResultPayload {
+	ch := make(chan clientd.ExecResultPayload, 1)
+	h.execRegistry.Store(msgID, pendingExecResult{ch: ch})
+	return ch
+}
+
+// UnregisterExec removes a pending exec result entry.
+func (h *ClientdHub) UnregisterExec(msgID string) {
+	h.execRegistry.Delete(msgID)
+}
+
+// DeliverExecResult delivers an ExecResultPayload to the waiting HTTP handler.
+// Called by the WebSocket handler when it receives an "exec_result" message from
+// the node. Returns true if the result was delivered to a waiting caller.
+func (h *ClientdHub) DeliverExecResult(msgID string, payload clientd.ExecResultPayload) bool {
+	v, ok := h.execRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingExecResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
 		return false
 	}
 }

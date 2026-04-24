@@ -3082,6 +3082,7 @@ const Pages = {
                     <div class="tab" id="node-tab-btn-logs" onclick="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
                     <div class="tab" id="node-tab-btn-configpush" onclick="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
                     <div class="tab" id="node-tab-btn-slurm" onclick="Pages._switchNodeTab(this, 'tab-slurm', 'slurm');Pages._onSlurmTabOpen('${escHtml(node.id)}')">Slurm</div>
+                    ${(node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000) ? `<div class="tab" id="node-tab-btn-diagnostics" onclick="Pages._switchNodeTab(this, 'tab-diagnostics', 'diagnostics')">Diagnostics</div>` : ''}
                 </div>
 
                 <!-- Overview tab — inline editable -->
@@ -3649,6 +3650,91 @@ const Pages = {
                         </div>
                     `)}
                 </div>
+
+                <!-- Diagnostics tab — only rendered when node is Live -->
+                ${(() => {
+                    const nodeIsLive = node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000;
+                    if (!nodeIsLive) return '';
+                    const quickCmds = [
+                        { label: 'System Info',   cmd: 'uname',      args: ['-a'] },
+                        { label: 'Disk Usage',    cmd: 'df',         args: ['-h'] },
+                        { label: 'Memory',        cmd: 'free',       args: ['-m'] },
+                        { label: 'CPU Info',      cmd: 'lscpu',      args: [] },
+                        { label: 'IP Config',     cmd: 'ip',         args: ['addr', 'show'] },
+                        { label: 'Processes',     cmd: 'ps',         args: ['aux'] },
+                        { label: 'Slurm Status',  cmd: 'sinfo',      args: ['-N', '-l'] },
+                        { label: 'Job Queue',     cmd: 'squeue',     args: ['-l'] },
+                        { label: 'SSSD Status',   cmd: 'systemctl',  args: ['status', 'sssd'] },
+                        { label: 'Slurm Conf',    cmd: 'cat',        args: ['/etc/slurm/slurm.conf'] },
+                    ];
+                    const whitelistedCmds = [
+                        'journalctl','systemctl','df','free','uptime','ip','cat',
+                        'ping','sinfo','squeue','scontrol','hostname','uname',
+                        'whoami','id','ps','top','lscpu','lsblk','mount',
+                    ];
+                    return `<div id="tab-diagnostics" class="tab-panel">
+                    ${cardWrap('Diagnostics', `
+                        <div class="card-body" style="padding:16px">
+                            <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary)">
+                                Run read-only diagnostic commands on this node via clonr-clientd.
+                                Only whitelisted commands are permitted — no shell, no pipes.
+                            </p>
+
+                            <div style="margin-bottom:20px">
+                                <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:8px">Quick Commands</div>
+                                <div style="display:flex;flex-wrap:wrap;gap:6px">
+                                    ${quickCmds.map(q =>
+                                        `<button class="btn btn-secondary btn-sm"
+                                            onclick="Pages._runDiagnosticCmd('${escHtml(node.id)}', '${escHtml(q.cmd)}', ${JSON.stringify(q.args)})"
+                                        >${escHtml(q.label)}</button>`
+                                    ).join('')}
+                                </div>
+                            </div>
+
+                            <div style="margin-bottom:16px">
+                                <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:8px">Custom Command</div>
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+                                    <div class="form-group" style="margin:0;flex:0 0 160px">
+                                        <label class="form-label" style="font-size:12px">Command</label>
+                                        <select id="diag-cmd-select" class="select" style="font-size:12px">
+                                            ${whitelistedCmds.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('')}
+                                        </select>
+                                    </div>
+                                    <div class="form-group" style="margin:0;flex:1 1 200px">
+                                        <label class="form-label" style="font-size:12px">Arguments <span style="font-weight:400;color:var(--text-dim)">(space-separated)</span></label>
+                                        <input type="text" id="diag-args-input" class="form-input" style="font-size:12px;font-family:monospace"
+                                            placeholder="-h" onkeydown="if(event.key==='Enter')Pages._runDiagnosticCmdCustom('${escHtml(node.id)}')">
+                                    </div>
+                                    <div style="padding-bottom:0">
+                                        <button class="btn btn-primary btn-sm" id="diag-run-btn"
+                                            onclick="Pages._runDiagnosticCmdCustom('${escHtml(node.id)}')">Run</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="diag-result-wrap" style="display:none">
+                                <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;font-size:12px;color:var(--text-secondary)">
+                                    <span id="diag-result-cmd" style="font-family:monospace;font-weight:600"></span>
+                                    <span id="diag-exit-badge"></span>
+                                    <span id="diag-truncated-badge" style="display:none" class="badge badge-warning">Output truncated at 64 KB</span>
+                                </div>
+                                <div id="diag-stdout-wrap" style="margin-bottom:8px">
+                                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:4px">stdout</div>
+                                    <pre id="diag-stdout" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:10px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+                                </div>
+                                <div id="diag-stderr-wrap" style="display:none">
+                                    <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:4px">stderr</div>
+                                    <pre id="diag-stderr" style="background:#fef9ec;border:1px solid #f0c040;border-radius:4px;padding:10px;font-size:12px;overflow:auto;max-height:200px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+                                </div>
+                                <div id="diag-error-wrap" style="display:none" class="alert alert-error" style="margin-top:8px"></div>
+                            </div>
+                            <div id="diag-running" style="display:none;font-size:13px;color:var(--text-secondary);padding:8px 0">
+                                <span class="spinner" style="width:14px;height:14px;display:inline-block;margin-right:6px"></span>Running&hellip; (up to 30s)
+                            </div>
+                        </div>
+                    `)}
+                </div>`;
+                })()}
             `);
 
             // Store original values for revert on each editable tab.
@@ -4488,6 +4574,92 @@ const Pages = {
         } finally {
             submitBtn.disabled = false;
         }
+    },
+
+    // ── Diagnostics tab ───────────────────────────────────────────────────────
+
+    // _runDiagnosticCmd runs a specific command+args on nodeId and renders the result.
+    async _runDiagnosticCmd(nodeId, command, args) {
+        const resultWrap  = document.getElementById('diag-result-wrap');
+        const runningEl   = document.getElementById('diag-running');
+        const cmdEl       = document.getElementById('diag-result-cmd');
+        const exitBadge   = document.getElementById('diag-exit-badge');
+        const truncBadge  = document.getElementById('diag-truncated-badge');
+        const stdoutEl    = document.getElementById('diag-stdout');
+        const stdoutWrap  = document.getElementById('diag-stdout-wrap');
+        const stderrEl    = document.getElementById('diag-stderr');
+        const stderrWrap  = document.getElementById('diag-stderr-wrap');
+        const errWrap     = document.getElementById('diag-error-wrap');
+        const runBtn      = document.getElementById('diag-run-btn');
+
+        if (!resultWrap || !runningEl) return;
+
+        // Reset display.
+        resultWrap.style.display = 'none';
+        runningEl.style.display = '';
+        if (runBtn) runBtn.disabled = true;
+
+        // Disable all quick-command buttons during the run.
+        const quickBtns = document.querySelectorAll('#tab-diagnostics .btn-secondary');
+        quickBtns.forEach(b => { b.disabled = true; });
+
+        try {
+            const result = await API.nodes.exec(nodeId, command, args);
+
+            // Render the command line.
+            const cmdLine = [command, ...(args || [])].join(' ');
+            if (cmdEl) cmdEl.textContent = '$ ' + cmdLine;
+
+            // Exit code badge.
+            if (exitBadge) {
+                exitBadge.innerHTML = result.exit_code === 0
+                    ? `<span class="badge badge-success">exit 0</span>`
+                    : `<span class="badge badge-error">exit ${result.exit_code}</span>`;
+            }
+
+            // Truncation warning.
+            if (truncBadge) truncBadge.style.display = result.truncated ? '' : 'none';
+
+            // Stdout.
+            if (stdoutEl) stdoutEl.textContent = result.stdout || '';
+            if (stdoutWrap) stdoutWrap.style.display = result.stdout ? '' : 'none';
+
+            // Stderr.
+            if (stderrEl) stderrEl.textContent = result.stderr || '';
+            if (stderrWrap) stderrWrap.style.display = result.stderr ? '' : 'none';
+
+            // Error message (from whitelist rejection or exec failure).
+            if (errWrap) {
+                errWrap.style.display = result.error ? '' : 'none';
+                errWrap.textContent = result.error || '';
+            }
+
+            resultWrap.style.display = '';
+        } catch (e) {
+            if (errWrap) {
+                errWrap.style.display = '';
+                errWrap.textContent = 'Request failed: ' + e.message;
+            }
+            if (resultWrap) resultWrap.style.display = '';
+        } finally {
+            runningEl.style.display = 'none';
+            if (runBtn) runBtn.disabled = false;
+            quickBtns.forEach(b => { b.disabled = false; });
+        }
+    },
+
+    // _runDiagnosticCmdCustom reads the command/args inputs and runs the command.
+    _runDiagnosticCmdCustom(nodeId) {
+        const cmdSelect = document.getElementById('diag-cmd-select');
+        const argsInput = document.getElementById('diag-args-input');
+        if (!cmdSelect) return;
+
+        const command = cmdSelect.value;
+        // Split args on whitespace, filtering empty tokens.
+        const argsRaw = (argsInput ? argsInput.value : '').trim();
+        const args = argsRaw ? argsRaw.split(/\s+/).filter(Boolean) : [];
+
+        Pages._runDiagnosticCmd(nodeId, command, args);
     },
 
     // ── Slurm Role tab ────────────────────────────────────────────────────────

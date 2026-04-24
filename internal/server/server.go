@@ -554,6 +554,9 @@ func (s *Server) buildRouter() chi.Router {
 			// Config push — push a whitelisted config file to a live node.
 			r.Put("/nodes/{id}/config-push", clientdH.ConfigPush)
 
+			// Remote exec — run a whitelisted diagnostic command on a live node.
+			r.Post("/nodes/{id}/exec", clientdH.ExecOnNode)
+
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.
 			r.Get("/nodes/{id}/layout-recommendation", layoutH.GetLayoutRecommendation)

@@ -235,6 +235,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "slurm_admin_cmd":
 		c.handleSlurmAdminCmd(msg)
 
+	case "exec_request":
+		c.handleExecRequest(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
@@ -460,6 +463,63 @@ func (c *Client) sendSlurmBinaryAck(refMsgID string, result SlurmBinaryAckPayloa
 	default:
 		log.Warn().Str("ref_msg_id", refMsgID).
 			Msg("clientd: slurm binary ack dropped — send buffer full")
+	}
+}
+
+// handleExecRequest parses an exec_request server message, runs the whitelisted
+// command, and sends the result back as an exec_result client message.
+func (c *Client) handleExecRequest(msg ServerMessage) {
+	var payload ExecRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed exec_request payload")
+		c.sendExecResult(ExecResultPayload{
+			RefMsgID: msg.MsgID,
+			ExitCode: -1,
+			Error:    "malformed exec_request payload: " + err.Error(),
+		})
+		return
+	}
+
+	// The RefMsgID in the payload is the server's msg_id so the HTTP handler can
+	// correlate; if the payload didn't include it, fall back to the envelope msg_id.
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("command", payload.Command).
+		Strs("args", payload.Args).
+		Msg("clientd: handling exec_request")
+
+	result := handleExecRequest(payload)
+	c.sendExecResult(result)
+}
+
+// sendExecResult enqueues an exec_result message carrying the command output.
+func (c *Client) sendExecResult(result ExecResultPayload) {
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal exec_result payload")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "exec_result",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(resultPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal exec_result message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", result.RefMsgID).
+			Msg("clientd: exec_result dropped — send buffer full")
 	}
 }
 

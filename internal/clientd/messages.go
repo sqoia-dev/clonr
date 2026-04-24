@@ -175,6 +175,27 @@ type SlurmAdminCmdResult struct {
 	JobCount int    `json:"job_count,omitempty"` // for check_queue: number of running/pending jobs
 }
 
+// ExecRequestPayload is the payload for the "exec_request" server→node message.
+// The server sends this to request execution of a whitelisted diagnostic command.
+type ExecRequestPayload struct {
+	// RefMsgID is the msg_id of this server message, echoed in the exec_result reply
+	// so the waiting HTTP handler can correlate the response.
+	RefMsgID string   `json:"ref_msg_id"`
+	Command  string   `json:"command"`
+	Args     []string `json:"args"`
+}
+
+// ExecResultPayload is the payload for the "exec_result" client→server message.
+// The node sends this after executing (or refusing) an exec_request.
+type ExecResultPayload struct {
+	RefMsgID  string `json:"ref_msg_id"`
+	ExitCode  int    `json:"exit_code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	Truncated bool   `json:"truncated"`
+	Error     string `json:"error,omitempty"`
+}
+
 // SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
 // It carries per-file and per-script results and the apply action result.
 // The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.

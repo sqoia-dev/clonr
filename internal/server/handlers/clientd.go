@@ -44,6 +44,10 @@ type ClientdHubIface interface {
 	RegisterAck(msgID string) <-chan clientd.AckPayload
 	UnregisterAck(msgID string)
 	DeliverAck(msgID string, payload clientd.AckPayload) bool
+	// Exec registry — used for exec_request round-trips.
+	RegisterExec(msgID string) <-chan clientd.ExecResultPayload
+	UnregisterExec(msgID string)
+	DeliverExecResult(msgID string, payload clientd.ExecResultPayload) bool
 }
 
 // ClientdHandler handles the clonr-clientd WebSocket endpoint and related REST queries.
@@ -147,6 +151,9 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 
 	case "ack":
 		h.handleAck(nodeID, msg)
+
+	case "exec_result":
+		h.handleExecResult(nodeID, msg)
 
 	default:
 		log.Debug().Str("node_id", nodeID).Str("type", msg.Type).
@@ -411,4 +418,114 @@ func (h *ClientdHandler) GetConnectedNodes(w http.ResponseWriter, r *http.Reques
 		"connected_nodes": ids,
 		"count":           len(ids),
 	})
+}
+
+// handleExecResult processes an "exec_result" message from the node, delivering
+// it to the ExecOnNode HTTP handler that is waiting on the exec registry.
+func (h *ClientdHandler) handleExecResult(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.ExecResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("clientd ws: malformed exec_result payload")
+		return
+	}
+	delivered := h.Hub.DeliverExecResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Int("exit_code", payload.ExitCode).
+		Bool("truncated", payload.Truncated).
+		Bool("delivered", delivered).
+		Msg("clientd ws: exec_result received from node")
+}
+
+// execRequest is the JSON body for POST /api/v1/nodes/{id}/exec.
+type execRequest struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+// ExecOnNode sends an exec_request to a connected node and waits for the result.
+// Route: POST /api/v1/nodes/{id}/exec (admin-only)
+func (h *ClientdHandler) ExecOnNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	if nodeID == "" {
+		writeValidationError(w, "missing node id")
+		return
+	}
+
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clonr-clientd offline)",
+			Code:  "node_offline",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		writeValidationError(w, "failed to read request body")
+		return
+	}
+
+	var req execRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.Command == "" {
+		writeValidationError(w, "command is required")
+		return
+	}
+	if req.Args == nil {
+		req.Args = []string{}
+	}
+
+	msgID := uuid.New().String()
+	payload, err := json.Marshal(clientd.ExecRequestPayload{
+		RefMsgID: msgID,
+		Command:  req.Command,
+		Args:     req.Args,
+	})
+	if err != nil {
+		writeError(w, fmt.Errorf("marshal exec_request payload: %w", err))
+		return
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "exec_request",
+		MsgID:   msgID,
+		Payload: json.RawMessage(payload),
+	}
+
+	// Register before sending to avoid a race where the node replies before we register.
+	execCh := h.Hub.RegisterExec(msgID)
+	defer h.Hub.UnregisterExec(msgID)
+
+	if err := h.Hub.Send(nodeID, serverMsg); err != nil {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "failed to send exec_request to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	log.Info().
+		Str("node_id", nodeID).
+		Str("command", req.Command).
+		Strs("args", req.Args).
+		Str("msg_id", msgID).
+		Msg("clientd: exec_request sent to node, waiting for result")
+
+	select {
+	case result := <-execCh:
+		writeJSON(w, http.StatusOK, result)
+	case <-time.After(30 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for exec_result from node (30s)",
+			Code:  "exec_timeout",
+		})
+	case <-r.Context().Done():
+		// Client disconnected before result arrived — silently drop.
+		return
+	}
 }

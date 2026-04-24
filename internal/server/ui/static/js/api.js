@@ -143,6 +143,7 @@ const API = {
             flipToDisk(id, cycle)   { return API.post(`/nodes/${id}/power/flip-to-disk${cycle ? '?cycle=true' : ''}`); },
         },
         sensors(id)           { return API.get(`/nodes/${id}/sensors`); },
+        exec(id, command, args) { return API.post(`/nodes/${id}/exec`, { command, args: args || [] }); },
     },
     logs: {
         query(params = {})    { return API.get('/logs', params); },
