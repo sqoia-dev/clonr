@@ -229,64 +229,48 @@ func (d *BlockDeployer) attemptBlockWrite(ctx context.Context, disk string, opts
 	return d.streamBlockWrite(ctx, resp.Body, totalBytes, disk, opts, progress)
 }
 
-// downloadVerifyAndWrite downloads the block image to a temp file, verifies
-// its checksum, then writes the temp file to disk.
+// downloadVerifyAndWrite streams the block image directly to disk while
+// computing its sha256 checksum, then verifies the checksum after the write
+// completes. No temp file is created, so RAM usage is bounded by the copy
+// buffer regardless of image size.
 func (d *BlockDeployer) downloadVerifyAndWrite(ctx context.Context, body io.Reader, totalBytes int64, disk string, opts DeployOpts, progress ProgressFunc) error {
-	tmpFile, err := os.CreateTemp("", "clonr-block-*.img")
-	if err != nil {
-		return fmt.Errorf("create temp file for checksum verification: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-
-	// Download and hash simultaneously.
-	hasher := sha256.New()
-	tee := io.TeeReader(body, hasher)
-	// Update downloading phase total now that we know the content-length.
-	if opts.Reporter != nil {
-		opts.Reporter.StartPhase("downloading", totalBytes)
-	}
-	pr := &progressReader{r: tee, total: totalBytes, fn: progress, phase: "downloading", reporter: opts.Reporter}
-
-	if _, err := io.Copy(tmpFile, pr); err != nil {
-		return fmt.Errorf("network error downloading image blob: %w", err)
-	}
-
-	// Verify checksum.
-	gotChecksum := hex.EncodeToString(hasher.Sum(nil))
-	if gotChecksum != opts.ExpectedChecksum {
-		return fmt.Errorf("image integrity check failed: downloaded blob sha256=%s does not match "+
-			"expected=%s — the image may be corrupt or the server checksum is stale; "+
-			"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
-	}
-	logger().Info().Str("sha256", gotChecksum).Msg("image checksum verified")
-
-	// Seek to start for writing.
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek temp file for block write: %w", err)
-	}
-
-	if progress != nil {
-		progress(0, totalBytes, "writing")
-	}
-
-	// Open the target disk for writing.
+	// Open the target disk before starting the download so we fail fast on
+	// permission or device errors without wasting bandwidth.
 	f, err := os.OpenFile(disk, os.O_WRONLY|os.O_SYNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open disk %s: %w", disk, err)
 	}
 	defer f.Close()
 
-	buf := make([]byte, 4*1024*1024)
+	// Tee the download body through the hasher so we compute the checksum in
+	// a single streaming pass — no temp file, no second read.
+	hasher := sha256.New()
+	tee := io.TeeReader(body, hasher)
+
 	if opts.Reporter != nil {
-		opts.Reporter.StartPhase("extracting", totalBytes)
+		opts.Reporter.StartPhase("downloading", totalBytes)
 	}
-	pr2 := &progressReader{r: tmpFile, total: totalBytes, fn: progress, phase: "writing", reporter: opts.Reporter}
-	if _, err := io.CopyBuffer(f, pr2, buf); err != nil {
+	pr := &progressReader{r: tee, total: totalBytes, fn: progress, phase: "downloading", reporter: opts.Reporter}
+
+	buf := make([]byte, 4*1024*1024)
+	if _, err := io.CopyBuffer(f, pr, buf); err != nil {
 		return fmt.Errorf("write to %s: %w", disk, err)
 	}
 
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync disk %s: %w", disk, err)
+	}
+
+	// Verify checksum after the write is durable.
+	gotChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if gotChecksum != opts.ExpectedChecksum {
+		return fmt.Errorf("image integrity check failed: written blob sha256=%s does not match "+
+			"expected=%s — the image may be corrupt or the server checksum is stale; "+
+			"use --skip-verify to deploy anyway", gotChecksum, opts.ExpectedChecksum)
+	}
+	logger().Info().Str("sha256", gotChecksum).Msg("image checksum verified")
+
+	return nil
 }
 
 // streamBlockWrite streams the download directly to disk without checksum verification.
