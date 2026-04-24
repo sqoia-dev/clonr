@@ -4,6 +4,7 @@
 package slurm
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -53,11 +54,12 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/slurm/nodes/by-role/{role}", m.handleNodesByRole)
 	r.Get("/slurm/roles/summary", m.handleRoleSummary)
 
-	// Script management (basic CRUD — full push is Sprint 7).
+	// Script management.
+	r.Get("/slurm/scripts", m.handleListScripts)
+	r.Get("/slurm/scripts/configs", m.handleListScriptConfigs)
 	r.Get("/slurm/scripts/{script_type}", m.handleGetScript)
 	r.Put("/slurm/scripts/{script_type}", m.handleSaveScript)
 	r.Get("/slurm/scripts/{script_type}/history", m.handleScriptHistory)
-	r.Get("/slurm/scripts/configs", m.handleListScriptConfigs)
 	r.Put("/slurm/scripts/{script_type}/config", m.handleUpsertScriptConfig)
 
 	// Build management (basic CRUD — full pipeline is Sprint 8).
@@ -250,7 +252,25 @@ func (m *Manager) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 			InSync:          d.InSync,
 		})
 	}
-	jsonResponse(w, map[string]interface{}{"drift": entries, "total": len(entries)}, http.StatusOK)
+
+	// Compute script drift: compare slurm_script_state deployed_version against
+	// current max version in slurm_scripts for each (node, script_type) pair.
+	type scriptDriftEntry struct {
+		NodeID          string `json:"node_id"`
+		ScriptType      string `json:"script_type"`
+		CurrentVersion  int    `json:"current_version"`
+		DeployedVersion int    `json:"deployed_version"`
+		InSync          bool   `json:"in_sync"`
+	}
+
+	scriptDrift := m.computeScriptDrift(r.Context())
+
+	jsonResponse(w, map[string]interface{}{
+		"drift":        entries,
+		"total":        len(entries),
+		"script_drift": scriptDrift,
+		"script_total": len(scriptDrift),
+	}, http.StatusOK)
 }
 
 func (m *Manager) handleNodeSyncStatus(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +307,7 @@ func (m *Manager) handleNodeSyncStatus(w http.ResponseWriter, r *http.Request) {
 func (m *Manager) handlePush(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Filenames   []string `json:"filenames"`
+		ScriptTypes []string `json:"script_types,omitempty"`
 		ApplyAction string   `json:"apply_action"` // "reconfigure" or "restart"
 		NodeIDs     []string `json:"node_ids,omitempty"`
 	}
@@ -303,10 +324,19 @@ func (m *Manager) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate any explicitly-requested script types.
+	for _, st := range body.ScriptTypes {
+		if !IsKnownScriptType(st) {
+			jsonError(w, "unknown script type: "+st, http.StatusBadRequest)
+			return
+		}
+	}
+
 	initiatedBy := keyLabelFromContext(r)
 
 	req := PushRequest{
 		Filenames:   body.Filenames,
+		ScriptTypes: body.ScriptTypes,
 		ApplyAction: body.ApplyAction,
 		TargetNodes: body.NodeIDs,
 	}
@@ -431,6 +461,59 @@ func (m *Manager) handleRoleSummary(w http.ResponseWriter, r *http.Request) {
 
 // ─── Scripts ──────────────────────────────────────────────────────────────────
 
+// handleListScripts returns all known script types with their current version,
+// enabled status, and dest_path. Script types that have no saved version yet
+// are still listed (with version=0 and no content).
+func (m *Manager) handleListScripts(w http.ResponseWriter, r *http.Request) {
+	// Canonical list of all supported script types (stable order).
+	allTypes := []string{
+		"Prolog", "Epilog", "TaskProlog", "TaskEpilog",
+		"PrologSlurmctld", "EpilogSlurmctld",
+		"HealthCheckProgram", "RebootProgram",
+		"SrunProlog", "SrunEpilog",
+	}
+
+	// Fetch all script configs (enabled/dest_path per type).
+	cfgRows, err := m.db.SlurmListScriptConfigs(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: list scripts: failed to fetch configs")
+		jsonError(w, "failed to fetch script configs", http.StatusInternalServerError)
+		return
+	}
+	cfgMap := make(map[string]db.SlurmScriptConfigRow, len(cfgRows))
+	for _, c := range cfgRows {
+		cfgMap[c.ScriptType] = c
+	}
+
+	type scriptSummary struct {
+		ScriptType string `json:"script_type"`
+		Version    int    `json:"version"`
+		Checksum   string `json:"checksum,omitempty"`
+		DestPath   string `json:"dest_path,omitempty"`
+		Enabled    bool   `json:"enabled"`
+		HasContent bool   `json:"has_content"`
+	}
+
+	out := make([]scriptSummary, 0, len(allTypes))
+	for _, st := range allTypes {
+		cfg := cfgMap[st]
+		summary := scriptSummary{
+			ScriptType: st,
+			DestPath:   cfg.DestPath,
+			Enabled:    cfg.Enabled,
+		}
+		row, err := m.db.SlurmGetCurrentScript(r.Context(), st)
+		if err == nil && row != nil {
+			summary.Version = row.Version
+			summary.Checksum = row.Checksum
+			summary.HasContent = true
+		}
+		out = append(out, summary)
+	}
+
+	jsonResponse(w, map[string]interface{}{"scripts": out, "total": len(out)}, http.StatusOK)
+}
+
 func (m *Manager) handleGetScript(w http.ResponseWriter, r *http.Request) {
 	scriptType := chi.URLParam(r, "script_type")
 	row, err := m.db.SlurmGetCurrentScript(r.Context(), scriptType)
@@ -459,6 +542,11 @@ func (m *Manager) handleSaveScript(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Content == "" || body.DestPath == "" {
 		jsonError(w, "content and dest_path are required", http.StatusBadRequest)
+		return
+	}
+
+	if err := ValidateScript(scriptType, body.Content); err != nil {
+		jsonError(w, "script validation failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -598,6 +686,48 @@ func (m *Manager) handleGetBuild(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// computeScriptDrift returns drift entries for scripts by comparing slurm_script_state
+// deployed_version against the current max version in slurm_scripts.
+func (m *Manager) computeScriptDrift(ctx context.Context) []map[string]interface{} {
+	// Get all node script state rows.
+	allNodeRoles, err := m.db.SlurmListAllNodeRoles(ctx)
+	if err != nil {
+		return nil
+	}
+
+	// Build current script version map: scriptType → currentVersion
+	currentVersions := make(map[string]int)
+	scriptCfgs, _ := m.db.SlurmListScriptConfigs(ctx)
+	for _, sc := range scriptCfgs {
+		if !sc.Enabled {
+			continue
+		}
+		row, err := m.db.SlurmGetCurrentScript(ctx, sc.ScriptType)
+		if err == nil && row != nil {
+			currentVersions[sc.ScriptType] = row.Version
+		}
+	}
+
+	var result []map[string]interface{}
+	for _, entry := range allNodeRoles {
+		stateRows, err := m.db.SlurmGetScriptState(ctx, entry.NodeID)
+		if err != nil {
+			continue
+		}
+		for _, s := range stateRows {
+			curVer := currentVersions[s.ScriptType]
+			result = append(result, map[string]interface{}{
+				"node_id":          s.NodeID,
+				"script_type":      s.ScriptType,
+				"current_version":  curVer,
+				"deployed_version": s.DeployedVersion,
+				"in_sync":          curVer == s.DeployedVersion && curVer > 0,
+			})
+		}
+	}
+	return result
+}
 
 // configRowToAPI converts a DB config file row to the API type.
 func configRowToAPI(row db.SlurmConfigFileRow) api.SlurmConfigFile {

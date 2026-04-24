@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,12 +18,22 @@ import (
 // slurmDestPath maps logical filenames to their destination paths under /etc/slurm/.
 // Only filenames in this whitelist may be written. Unknown filenames are rejected.
 var slurmDestPath = map[string]string{
-	"slurm.conf":    "/etc/slurm/slurm.conf",
-	"gres.conf":     "/etc/slurm/gres.conf",
-	"cgroup.conf":   "/etc/slurm/cgroup.conf",
-	"topology.conf": "/etc/slurm/topology.conf",
-	"plugstack.conf": "/etc/slurm/plugstack.conf",
-	"slurmdbd.conf": "/etc/slurm/slurmdbd.conf",
+	"slurm.conf":     "/etc/slurm/slurm.conf",
+	"gres.conf":      "/etc/slurm/gres.conf",
+	"cgroup.conf":    "/etc/slurm/cgroup.conf",
+	"topology.conf":  "/etc/slurm/topology.conf",
+	"plugstack.conf":  "/etc/slurm/plugstack.conf",
+	"slurmdbd.conf":  "/etc/slurm/slurmdbd.conf",
+}
+
+// slurmScriptDestPrefixes lists the path prefixes that are allowed for script
+// dest_path values. This prevents the server from instructing the client to
+// overwrite arbitrary files on the node.
+var slurmScriptDestPrefixes = []string{
+	"/etc/slurm/",
+	"/usr/local/sbin/",
+	"/usr/local/bin/",
+	"/opt/slurm/",
 }
 
 // slurmFileMode returns the file permission for a given Slurm config file.
@@ -36,14 +47,14 @@ func slurmFileMode(filename string) os.FileMode {
 
 const maxSlurmConfigSizeBytes = 2 << 20 // 2 MB
 
-// applySlurmConfig writes all files from the push payload atomically, then
-// runs the specified apply action. Returns a SlurmConfigAckPayload describing
-// the outcome of every file write and the apply action.
+// applySlurmConfig writes all files and scripts from the push payload atomically,
+// then runs the specified apply action. Returns a SlurmConfigAckPayload describing
+// the outcome of every file/script write and the apply action.
 func applySlurmConfig(payload SlurmConfigPushPayload) SlurmConfigAckPayload {
 	fileResults := make([]SlurmFileApplyResult, 0, len(payload.Files))
 	var bakPaths []string // track backups for rollback on restart failure
 
-	// Phase 1: validate + write all files atomically.
+	// Phase 1: validate + write all config files atomically.
 	allFilesOK := true
 	for _, f := range payload.Files {
 		result := writeSlurmFile(f)
@@ -64,6 +75,14 @@ func applySlurmConfig(payload SlurmConfigPushPayload) SlurmConfigAckPayload {
 			Error:       fmt.Sprintf("file write failed for: %s", strings.Join(failedFiles, ", ")),
 			FileResults: fileResults,
 		}
+	}
+
+	// Phase 1b: write scripts (best-effort, independent of config files).
+	// Script failures do NOT prevent the apply action; they are reported separately.
+	scriptResults := make([]SlurmScriptApplyResult, 0, len(payload.Scripts))
+	for _, s := range payload.Scripts {
+		result := writeSlurmScript(s)
+		scriptResults = append(scriptResults, result)
 	}
 
 	// Phase 2: run apply action.
@@ -92,6 +111,7 @@ func applySlurmConfig(payload SlurmConfigPushPayload) SlurmConfigAckPayload {
 					OK:            false,
 					Error:         "restart failed after file write; files rolled back",
 					FileResults:   fileResults,
+					ScriptResults: scriptResults,
 					ApplyOutput:   truncate(applyOutput, 2048),
 					ApplyExitCode: applyExit,
 				}
@@ -103,6 +123,7 @@ func applySlurmConfig(payload SlurmConfigPushPayload) SlurmConfigAckPayload {
 			OK:            false,
 			Error:         "apply action failed: " + applyErr.Error(),
 			FileResults:   fileResults,
+			ScriptResults: scriptResults,
 			ApplyOutput:   truncate(applyOutput, 2048),
 			ApplyExitCode: applyExit,
 		}
@@ -112,9 +133,98 @@ func applySlurmConfig(payload SlurmConfigPushPayload) SlurmConfigAckPayload {
 		PushOpID:      payload.PushOpID,
 		OK:            true,
 		FileResults:   fileResults,
+		ScriptResults: scriptResults,
 		ApplyOutput:   truncate(applyOutput, 2048),
 		ApplyExitCode: applyExit,
 	}
+}
+
+// writeSlurmScript validates and atomically writes one Slurm hook script.
+// Scripts are written with mode 0755 (executable).
+func writeSlurmScript(s SlurmScriptPush) SlurmScriptApplyResult {
+	// Validate dest_path against the whitelist of allowed prefixes.
+	allowed := false
+	for _, prefix := range slurmScriptDestPrefixes {
+		if strings.HasPrefix(s.DestPath, prefix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed || s.DestPath == "" {
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("dest_path %q is not under an allowed prefix", s.DestPath),
+		}
+	}
+
+	if s.Content == "" {
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      "script content is empty",
+		}
+	}
+
+	if len(s.Content) > maxSlurmConfigSizeBytes {
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("script size %d exceeds 2 MB limit", len(s.Content)),
+		}
+	}
+
+	if err := validateChecksum(s.Content, s.Checksum); err != nil {
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      err.Error(),
+		}
+	}
+
+	const scriptMode = os.FileMode(0755)
+	tmpPath := s.DestPath + ".tmp"
+
+	// Ensure parent directory exists.
+	if err := os.MkdirAll(filepath.Dir(s.DestPath), 0755); err != nil {
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("mkdir parent: %v", err),
+		}
+	}
+
+	// Write to .tmp then rename into place (atomic on same filesystem).
+	if err := os.WriteFile(tmpPath, []byte(s.Content), scriptMode); err != nil {
+		_ = os.Remove(tmpPath)
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("write temp file: %v", err),
+		}
+	}
+	if err := os.Chmod(tmpPath, scriptMode); err != nil {
+		_ = os.Remove(tmpPath)
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("chmod temp file: %v", err),
+		}
+	}
+	if err := os.Rename(tmpPath, s.DestPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return SlurmScriptApplyResult{
+			ScriptType: s.ScriptType,
+			OK:         false,
+			Error:      fmt.Sprintf("rename into place: %v", err),
+		}
+	}
+
+	log.Info().
+		Str("script_type", s.ScriptType).
+		Str("dest", s.DestPath).
+		Msg("slurmapply: script written successfully")
+	return SlurmScriptApplyResult{ScriptType: s.ScriptType, OK: true}
 }
 
 // writeSlurmFile validates and atomically writes one Slurm config file.

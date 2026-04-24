@@ -89,14 +89,32 @@ type LogPullStartPayload struct {
 }
 
 // SlurmConfigPushPayload is the payload for the "slurm_config_push" server→node message.
-// The server sends this to push one or more Slurm config files to the node atomically.
+// The server sends this to push one or more Slurm config files and hook scripts to the node atomically.
 type SlurmConfigPushPayload struct {
 	// PushOpID is the push operation UUID (for ack correlation and state updates).
 	PushOpID string `json:"push_op_id"`
 	// Files is the list of config files to write. Each file has content + checksum.
 	Files []SlurmFilePush `json:"files"`
+	// Scripts is the optional list of hook scripts to write (e.g. Prolog, Epilog).
+	// Script content changes do NOT trigger scontrol reconfigure because the path
+	// in slurm.conf does not change — only the executable at that path is replaced.
+	Scripts []SlurmScriptPush `json:"scripts,omitempty"`
 	// ApplyAction is "reconfigure" (scontrol reconfigure) or "restart" (systemctl restart slurmd).
 	ApplyAction string `json:"apply_action"`
+}
+
+// SlurmScriptPush is one Slurm hook script within a SlurmConfigPushPayload.
+type SlurmScriptPush struct {
+	// ScriptType is the Slurm parameter name, e.g. "Prolog".
+	ScriptType string `json:"script_type"`
+	// Content is the full script content (must start with a shebang).
+	Content string `json:"content"`
+	// Checksum is "sha256:<hex>" computed by the server over Content.
+	Checksum string `json:"checksum"`
+	// DestPath is the absolute path where the script should be written on the node.
+	DestPath string `json:"dest_path"`
+	// Version is the DB version number for state tracking after successful write.
+	Version int `json:"version"`
 }
 
 // SlurmFilePush is one file within a SlurmConfigPushPayload.
@@ -112,21 +130,30 @@ type SlurmFilePush struct {
 }
 
 // SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
-// It carries per-file results and the apply action result.
+// It carries per-file and per-script results and the apply action result.
 // The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.
 type SlurmConfigAckPayload struct {
 	// PushOpID is the push operation UUID from the original SlurmConfigPushPayload.
 	PushOpID string `json:"push_op_id"`
-	// OK is true when all files were written and the apply action succeeded.
+	// OK is true when all files/scripts were written and the apply action succeeded.
 	OK bool `json:"ok"`
 	// Error is a human-readable summary of the failure, if any.
 	Error string `json:"error,omitempty"`
 	// FileResults holds per-file write outcomes.
 	FileResults []SlurmFileApplyResult `json:"file_results"`
+	// ScriptResults holds per-script write outcomes.
+	ScriptResults []SlurmScriptApplyResult `json:"script_results,omitempty"`
 	// ApplyOutput is the stdout/stderr of the apply action command (truncated to 2 KB).
 	ApplyOutput string `json:"apply_output,omitempty"`
 	// ApplyExitCode is the exit code of the apply action command.
 	ApplyExitCode int `json:"apply_exit_code"`
+}
+
+// SlurmScriptApplyResult is the per-script result within a SlurmConfigAckPayload.
+type SlurmScriptApplyResult struct {
+	ScriptType string `json:"script_type"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
 }
 
 // SlurmFileApplyResult is the per-file result within a SlurmConfigAckPayload.

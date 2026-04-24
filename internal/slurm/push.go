@@ -30,6 +30,11 @@ type PushRequest struct {
 	// Filenames is the list of managed config files to push.
 	// Empty means all files relevant to each node's roles.
 	Filenames []string `json:"filenames"`
+	// ScriptTypes is an optional list of script types to include in the push
+	// (e.g. ["Prolog", "Epilog"]). Empty means include all enabled scripts
+	// relevant to each node's roles. Scripts are written to their configured
+	// dest_path with mode 0755 but do NOT trigger scontrol reconfigure.
+	ScriptTypes []string `json:"script_types,omitempty"`
 	// ApplyAction is "reconfigure" (scontrol reconfigure) or "restart" (systemctl restart).
 	ApplyAction string `json:"apply_action"`
 	// TargetNodes is an optional subset of node IDs to push to.
@@ -37,10 +42,11 @@ type PushRequest struct {
 	TargetNodes []string `json:"target_nodes,omitempty"`
 }
 
-// nodeWork holds the pre-computed files to send to a specific node.
+// nodeWork holds the pre-computed files and scripts to send to a specific node.
 type nodeWork struct {
-	nodeID     string
-	files      []clientd.SlurmFilePush
+	nodeID       string
+	files        []clientd.SlurmFilePush
+	scripts      []clientd.SlurmScriptPush
 	isController bool
 }
 
@@ -210,6 +216,48 @@ func (m *Manager) executePushCore(ctx context.Context, existingOpID string, req 
 			continue
 		}
 
+		// ── Build script payloads for this node ──────────────────────────
+		//
+		// Determine which script types apply to this node's roles.
+		nodeScriptTypes := ScriptTypesForRoles(roles)
+		// If the caller specified an explicit list, intersect with role-relevant types.
+		if len(req.ScriptTypes) > 0 {
+			nodeScriptTypes = intersect(req.ScriptTypes, nodeScriptTypes)
+		}
+
+		var scriptPushes []clientd.SlurmScriptPush
+		if len(nodeScriptTypes) > 0 {
+			// Fetch enabled script configs.
+			scriptCfgs, _ := m.db.SlurmListScriptConfigs(ctx)
+			enabledMap := make(map[string]string) // scriptType → destPath
+			for _, sc := range scriptCfgs {
+				if sc.Enabled {
+					enabledMap[sc.ScriptType] = sc.DestPath
+				}
+			}
+
+			for _, st := range nodeScriptTypes {
+				destPath, ok := enabledMap[st]
+				if !ok {
+					continue // script not enabled
+				}
+				row, err := m.db.SlurmGetCurrentScript(ctx, st)
+				if err != nil || row == nil {
+					log.Warn().Str("node_id", nodeID).Str("script_type", st).
+						Msg("slurm: push: script has no saved version, skipping")
+					continue
+				}
+				sum := sha256.Sum256([]byte(row.Content))
+				scriptPushes = append(scriptPushes, clientd.SlurmScriptPush{
+					ScriptType: st,
+					Content:    row.Content,
+					Checksum:   fmt.Sprintf("sha256:%x", sum),
+					DestPath:   destPath,
+					Version:    row.Version,
+				})
+			}
+		}
+
 		isCtrl := hasRole(roles, RoleController)
 		if isCtrl {
 			controllerIDs = append(controllerIDs, nodeID)
@@ -218,6 +266,7 @@ func (m *Manager) executePushCore(ctx context.Context, existingOpID string, req 
 		works = append(works, nodeWork{
 			nodeID:       nodeID,
 			files:        filePushes,
+			scripts:      scriptPushes,
 			isController: isCtrl,
 		})
 	}
@@ -277,12 +326,20 @@ func (m *Manager) executePushCore(ctx context.Context, existingOpID string, req 
 	successCount := 0
 	failureCount := 0
 
+	// Build a map of nodeID → scripts sent, for state update after ack.
+	nodeScriptsSent := make(map[string][]clientd.SlurmScriptPush, len(works))
+	for _, w := range works {
+		nodeScriptsSent[w.nodeID] = w.scripts
+	}
+
 	for outcome := range outcomeCh {
 		nodeResults[outcome.nodeID] = outcome.result
 		if outcome.result.OK {
 			successCount++
 			// Update per-file config state for this node.
 			m.updateNodeConfigState(ctx, opID, outcome.nodeID, outcome.result.FileResults, managedFiles, fileVersions)
+			// Update per-script state for this node.
+			m.updateNodeScriptState(ctx, opID, outcome.nodeID, outcome.result.ScriptResults, nodeScriptsSent[outcome.nodeID])
 		} else {
 			failureCount++
 		}
@@ -383,6 +440,7 @@ func (m *Manager) pushToNode(ctx context.Context, opID, applyAction string, w no
 	payload, err := json.Marshal(clientd.SlurmConfigPushPayload{
 		PushOpID:    opID,
 		Files:       w.files,
+		Scripts:     w.scripts,
 		ApplyAction: applyAction,
 	})
 	if err != nil {
@@ -413,6 +471,7 @@ func (m *Manager) pushToNode(ctx context.Context, opID, applyAction string, w no
 		Str("node_id", w.nodeID).
 		Str("msg_id", msgID).
 		Int("files", len(w.files)).
+		Int("scripts", len(w.scripts)).
 		Msg("slurm: push: slurm_config_push sent, waiting for ack")
 
 	// Wait for ack, timeout, or context cancellation.
@@ -468,10 +527,21 @@ func (m *Manager) interpretSlurmAck(nodeID string, ack clientd.AckPayload) nodeO
 		})
 	}
 
+	// Convert SlurmScriptApplyResult → api.SlurmScriptResult.
+	scriptResults := make([]api.SlurmScriptResult, 0, len(slurmAck.ScriptResults))
+	for _, sr := range slurmAck.ScriptResults {
+		scriptResults = append(scriptResults, api.SlurmScriptResult{
+			ScriptType: sr.ScriptType,
+			OK:         sr.OK,
+			Error:      sr.Error,
+		})
+	}
+
 	result := api.SlurmNodeResult{
-		OK:          slurmAck.OK,
-		Error:       slurmAck.Error,
-		FileResults: fileResults,
+		OK:            slurmAck.OK,
+		Error:         slurmAck.Error,
+		FileResults:   fileResults,
+		ScriptResults: scriptResults,
 		ApplyResult: api.SlurmApplyResult{
 			Action:   "", // will be set by caller context
 			OK:       slurmAck.OK,
@@ -525,6 +595,59 @@ func (m *Manager) updateNodeConfigState(
 			log.Error().Err(err).
 				Str("node_id", nodeID).Str("filename", fn).
 				Msg("slurm: push: failed to update node config state")
+		}
+	}
+}
+
+// updateNodeScriptState updates slurm_script_state for each successfully
+// written script in the ack result.
+func (m *Manager) updateNodeScriptState(
+	ctx context.Context,
+	opID, nodeID string,
+	scriptResults []api.SlurmScriptResult,
+	sentScripts []clientd.SlurmScriptPush,
+) {
+	if len(sentScripts) == 0 {
+		return
+	}
+
+	// Build a set of successfully written script types.
+	okScripts := make(map[string]bool)
+	for _, sr := range scriptResults {
+		if sr.OK {
+			okScripts[sr.ScriptType] = true
+		}
+	}
+	// If scriptResults is empty but the push succeeded, assume all scripts were written.
+	if len(scriptResults) == 0 {
+		for _, s := range sentScripts {
+			okScripts[s.ScriptType] = true
+		}
+	}
+
+	// Build a quick lookup of sent scripts for version + checksum.
+	sentMap := make(map[string]clientd.SlurmScriptPush, len(sentScripts))
+	for _, s := range sentScripts {
+		sentMap[s.ScriptType] = s
+	}
+
+	for st, ok := range okScripts {
+		if !ok {
+			continue
+		}
+		s, found := sentMap[st]
+		if !found {
+			continue
+		}
+		// Derive content hash from the checksum field (strip "sha256:" prefix).
+		hash := s.Checksum
+		if len(hash) > 7 && hash[:7] == "sha256:" {
+			hash = hash[7:]
+		}
+		if err := m.db.SlurmUpsertScriptState(ctx, nodeID, st, s.Version, hash, opID); err != nil {
+			log.Error().Err(err).
+				Str("node_id", nodeID).Str("script_type", st).
+				Msg("slurm: push: failed to update node script state")
 		}
 	}
 }

@@ -351,18 +351,19 @@ const SlurmPages = {
     async push() {
         App.render(loading('Loading Slurm push panel…'));
         try {
-            const [status, configs] = await Promise.all([
+            const [status, configs, scriptsData] = await Promise.all([
                 API.slurm.status(),
                 API.slurm.listConfigs(),
+                API.slurm.listScripts().catch(() => ({ scripts: [] })),
             ]);
-            App.render(SlurmPages._pushHtml(status, configs.configs || []));
+            App.render(SlurmPages._pushHtml(status, configs.configs || [], scriptsData.scripts || []));
             SlurmPages._bindPushEvents();
         } catch (err) {
             App.render(alertBox('Failed to load push panel: ' + err.message));
         }
     },
 
-    _pushHtml(status, configs) {
+    _pushHtml(status, configs, scripts) {
         const managedFiles = configs.map(c => c.filename);
         const fileCheckboxes = managedFiles.map(fn => `
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px;">
@@ -371,13 +372,25 @@ const SlurmPages = {
             </label>
         `).join('');
 
+        // Only show scripts that have content saved.
+        const availableScripts = (scripts || []).filter(s => s.has_content && s.enabled);
+        const scriptCheckboxes = availableScripts.length > 0
+            ? availableScripts.map(s => `
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px;">
+                    <input type="checkbox" name="push-script" value="${escHtml(s.script_type)}" checked style="width:14px;height:14px;">
+                    <span style="font-family:monospace;">${escHtml(s.script_type)}</span>
+                    <span style="font-size:11px;color:var(--text-secondary);">v${s.version}</span>
+                </label>
+            `).join('')
+            : '<div style="font-size:13px;color:var(--text-secondary);padding:4px 0;">No enabled scripts with saved content</div>';
+
         const connectedNodes = status.connected_nodes || [];
         const nodeOptions = connectedNodes.map(n =>
             `<option value="${escHtml(n)}">${escHtml(n)}</option>`
         ).join('');
 
         return cardWrap('Push Slurm Configs', `
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;max-width:900px;">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;max-width:1100px;">
                 <!-- Files -->
                 <div>
                     <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;color:var(--text-secondary);">FILES TO PUSH</h3>
@@ -387,6 +400,14 @@ const SlurmPages = {
                             <span style="font-weight:600;">All files</span>
                         </label>
                         <div id="push-file-list">${fileCheckboxes}</div>
+                    </div>
+                </div>
+                <!-- Scripts -->
+                <div>
+                    <h3 style="font-size:13px;font-weight:600;margin:0 0 10px;color:var(--text-secondary);">SCRIPTS TO PUSH</h3>
+                    <div style="border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg);">
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Only enabled scripts with saved content are listed</div>
+                        <div id="push-script-list">${scriptCheckboxes}</div>
                     </div>
                 </div>
                 <!-- Options -->
@@ -459,6 +480,10 @@ const SlurmPages = {
                 document.querySelectorAll('input[name="push-file"]:checked')
             ).map(chk => chk.value);
 
+            const scriptTypes = Array.from(
+                document.querySelectorAll('input[name="push-script"]:checked')
+            ).map(chk => chk.value);
+
             const applyAction = document.getElementById('push-apply-action')?.value || 'reconfigure';
 
             const nodeSelect = document.getElementById('push-target-nodes');
@@ -467,6 +492,7 @@ const SlurmPages = {
                 : [];
 
             const body = { filenames, apply_action: applyAction };
+            if (scriptTypes.length > 0) body.script_types = scriptTypes;
             if (nodeIds.length > 0) body.node_ids = nodeIds;
 
             pushBtn.disabled = true;
@@ -593,6 +619,269 @@ const SlurmPages = {
 
         html += '</div>';
         return html;
+    },
+
+    // ── Scripts list page ──────────────────────────────────────────────────
+
+    async scripts() {
+        App.render(loading('Loading Slurm scripts…'));
+        try {
+            const data = await API.slurm.listScripts();
+            App.render(SlurmPages._scriptsHtml(data.scripts || []));
+        } catch (err) {
+            App.render(alertBox('Failed to load scripts: ' + err.message));
+        }
+    },
+
+    _scriptsHtml(scripts) {
+        const rows = scripts.map(s => {
+            const enabledBadge = s.enabled
+                ? '<span class="badge badge-ready">enabled</span>'
+                : '<span class="badge badge-neutral">disabled</span>';
+            const versionText = s.has_content
+                ? `v${s.version}`
+                : '<span style="color:var(--text-secondary)">—</span>';
+            const checksumText = s.checksum
+                ? `<code style="font-size:11px;">${s.checksum.substring(0, 12)}…</code>`
+                : '—';
+
+            return `
+                <tr>
+                    <td style="padding:10px 12px;font-family:monospace;font-size:13px;">
+                        <a href="#/slurm/scripts/${encodeURIComponent(s.script_type)}" style="color:var(--accent);">${escHtml(s.script_type)}</a>
+                    </td>
+                    <td style="padding:10px 12px;">${enabledBadge}</td>
+                    <td style="padding:10px 12px;font-size:13px;">${versionText}</td>
+                    <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${checksumText}</td>
+                    <td style="padding:10px 12px;font-family:monospace;font-size:12px;">${s.dest_path ? escHtml(s.dest_path) : '<span style="color:var(--text-secondary)">—</span>'}</td>
+                    <td style="padding:10px 12px;">
+                        <a href="#/slurm/scripts/${encodeURIComponent(s.script_type)}" class="btn btn-sm" style="font-size:12px;padding:3px 10px;">Edit</a>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+
+        return cardWrap('Slurm Scripts', `
+            <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px;">
+                Slurm hook scripts (Prolog, Epilog, HealthCheckProgram, etc.) managed by clonr.
+                Scripts are pushed with 0755 permissions and do not require <code>scontrol reconfigure</code> unless the path in slurm.conf changes.
+            </p>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Script Type</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Status</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Checksum</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Dest Path</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;"></th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
+    },
+
+    // ── Script editor page ─────────────────────────────────────────────────
+
+    async scriptEditor(scriptType) {
+        App.render(loading('Loading ' + escHtml(scriptType) + '…'));
+        try {
+            // Load script content (may 404 if no version saved yet) and config in parallel.
+            const [scriptCfgs] = await Promise.all([
+                API.slurm.listScriptConfigs(),
+            ]);
+
+            // Find this script's config.
+            const cfgs = scriptCfgs.configs || [];
+            const cfg = cfgs.find(c => c.script_type === scriptType) || { script_type: scriptType, dest_path: '', enabled: false };
+
+            let script = null;
+            try {
+                script = await API.slurm.getScript(scriptType);
+            } catch (_) {
+                // No version yet — show empty editor.
+            }
+
+            App.render(SlurmPages._scriptEditorHtml(scriptType, script, cfg));
+            SlurmPages._bindScriptEditorEvents(scriptType, cfg);
+        } catch (err) {
+            App.render(alertBox('Failed to load script: ' + err.message));
+        }
+    },
+
+    _scriptEditorHtml(scriptType, script, cfg) {
+        const version = script ? script.version : 0;
+        const content = script ? script.content : '#!/bin/bash\n# Slurm ' + scriptType + ' script\n# Exits 0 to allow the job, non-zero to deny.\n';
+        const destPath = cfg.dest_path || script?.dest_path || '';
+        const enabled = cfg.enabled;
+
+        const historyLink = script
+            ? `<a href="#/slurm/scripts/${encodeURIComponent(scriptType)}/history" style="font-size:13px;color:var(--accent);">View history</a>`
+            : '';
+
+        const versionNote = version > 0
+            ? `<span style="font-size:13px;color:var(--text-secondary);">Current version: <strong>v${version}</strong></span>`
+            : `<span style="font-size:13px;color:var(--text-secondary);">No version saved yet</span>`;
+
+        return cardWrap(`Script: ${escHtml(scriptType)}`, `
+            <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                ${versionNote}
+                ${historyLink}
+                <a href="#/slurm/scripts" style="font-size:13px;color:var(--accent);margin-left:auto;">Back to list</a>
+            </div>
+
+            <!-- Config section: dest_path + enable/disable -->
+            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;">
+                <div style="font-size:13px;font-weight:600;margin-bottom:10px;">Configuration</div>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:200px;">
+                        <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px;">Destination Path</label>
+                        <input type="text" id="script-dest-path"
+                            value="${escHtml(destPath)}"
+                            placeholder="e.g. /etc/slurm/prolog.sh"
+                            style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:monospace;background:var(--bg-input,#fff);color:var(--text);box-sizing:border-box;">
+                    </div>
+                    <div style="padding-top:18px;">
+                        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                            <input type="checkbox" id="script-enabled" ${enabled ? 'checked' : ''} style="width:14px;height:14px;">
+                            <span>Enabled</span>
+                        </label>
+                    </div>
+                    <div style="padding-top:18px;">
+                        <button id="script-save-config-btn" class="btn btn-secondary" style="font-size:13px;padding:6px 14px;">Save Config</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Script content editor -->
+            <textarea id="script-content"
+                style="width:100%;min-height:400px;font-family:monospace;font-size:13px;padding:10px;
+                       border:1px solid var(--border);border-radius:6px;background:var(--bg-code,#f8fafc);
+                       color:var(--text);resize:vertical;box-sizing:border-box;
+                       tab-size:4;">${escHtml(content)}</textarea>
+            <div style="margin-top:10px;display:flex;align-items:center;gap:10px;">
+                <input type="text" id="script-message" placeholder="Version message (optional)"
+                    style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;
+                           background:var(--bg-input,#fff);color:var(--text);">
+                <button id="script-save-btn" class="btn btn-primary" style="font-size:13px;padding:6px 16px;">Save New Version</button>
+            </div>
+            <div style="margin-top:10px;font-size:12px;color:var(--text-secondary);">
+                Scripts must start with a shebang line (e.g. <code>#!/bin/bash</code>).
+                The script is pushed as an executable file (mode 0755) to the configured destination path.
+            </div>
+        `);
+    },
+
+    _bindScriptEditorEvents(scriptType, initialCfg) {
+        // Tab support in textarea.
+        const ta = document.getElementById('script-content');
+        if (ta) {
+            ta.addEventListener('keydown', e => {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const start = ta.selectionStart;
+                    const end = ta.selectionEnd;
+                    ta.value = ta.value.substring(0, start) + '\t' + ta.value.substring(end);
+                    ta.selectionStart = ta.selectionEnd = start + 1;
+                }
+            });
+        }
+
+        // Save config (dest_path + enabled).
+        const cfgBtn = document.getElementById('script-save-config-btn');
+        if (cfgBtn) {
+            cfgBtn.addEventListener('click', async () => {
+                const destPath = (document.getElementById('script-dest-path')?.value || '').trim();
+                const enabled = document.getElementById('script-enabled')?.checked ?? false;
+                if (!destPath) { App.toast('Destination path is required', 'error'); return; }
+                cfgBtn.disabled = true;
+                cfgBtn.textContent = 'Saving…';
+                try {
+                    await API.slurm.setScriptConfig(scriptType, { dest_path: destPath, enabled });
+                    App.toast('Script config saved', 'success');
+                } catch (err) {
+                    App.toast('Failed to save config: ' + err.message, 'error');
+                } finally {
+                    cfgBtn.disabled = false;
+                    cfgBtn.textContent = 'Save Config';
+                }
+            });
+        }
+
+        // Save script content as new version.
+        const saveBtn = document.getElementById('script-save-btn');
+        if (saveBtn) {
+            saveBtn.addEventListener('click', async () => {
+                const content = document.getElementById('script-content')?.value || '';
+                const destPath = (document.getElementById('script-dest-path')?.value || '').trim();
+                const message = (document.getElementById('script-message')?.value || '').trim();
+                if (!content.trim()) { App.toast('Script content cannot be empty', 'error'); return; }
+                if (!destPath) { App.toast('Destination path is required before saving content', 'error'); return; }
+                saveBtn.disabled = true;
+                saveBtn.textContent = 'Saving…';
+                try {
+                    const result = await API.slurm.saveScript(scriptType, { content, dest_path: destPath, message });
+                    App.toast(`Saved as version ${result.version}`, 'success');
+                    SlurmPages.scriptEditor(scriptType);
+                } catch (err) {
+                    App.toast('Save failed: ' + err.message, 'error');
+                } finally {
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = 'Save New Version';
+                }
+            });
+        }
+    },
+
+    // ── Script history page ────────────────────────────────────────────────
+
+    async scriptHistory(scriptType) {
+        App.render(loading('Loading history for ' + escHtml(scriptType) + '…'));
+        try {
+            const data = await API.slurm.scriptHistory(scriptType);
+            App.render(SlurmPages._scriptHistoryHtml(scriptType, data.history || []));
+        } catch (err) {
+            App.render(alertBox('Failed to load script history: ' + err.message));
+        }
+    },
+
+    _scriptHistoryHtml(scriptType, history) {
+        if (!history.length) {
+            return cardWrap(`History: ${escHtml(scriptType)}`, emptyState('No versions found.'));
+        }
+
+        const rows = history.map(h => `
+            <tr>
+                <td style="padding:10px 12px;font-size:13px;">v${h.version}</td>
+                <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${h.authored_by ? escHtml(h.authored_by) : '—'}</td>
+                <td style="padding:10px 12px;font-size:13px;">${h.message ? escHtml(h.message) : '—'}</td>
+                <td style="padding:10px 12px;font-size:12px;color:var(--text-secondary);">${h.created_at ? new Date(h.created_at * 1000).toLocaleString() : '—'}</td>
+                <td style="padding:10px 12px;font-family:monospace;font-size:12px;">${h.checksum ? h.checksum.substring(0, 12) + '…' : '—'}</td>
+                <td style="padding:10px 12px;font-family:monospace;font-size:12px;">${h.dest_path ? escHtml(h.dest_path) : '—'}</td>
+            </tr>
+        `).join('');
+
+        return cardWrap(`History: ${escHtml(scriptType)}`, `
+            <div style="margin-bottom:12px;">
+                <a href="#/slurm/scripts/${encodeURIComponent(scriptType)}" style="font-size:13px;color:var(--accent);">Back to editor</a>
+                &nbsp;|&nbsp;
+                <a href="#/slurm/scripts" style="font-size:13px;color:var(--accent);">All scripts</a>
+            </div>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Version</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Author</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Message</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Created</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Checksum</th>
+                        <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Dest Path</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
     },
 
     // ── Sync status page ───────────────────────────────────────────────────

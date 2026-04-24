@@ -1435,10 +1435,18 @@ type SlurmPushOperation struct {
 
 // SlurmNodeResult is the per-node push result included in SlurmPushOperation.
 type SlurmNodeResult struct {
-	OK          bool              `json:"ok"`
-	Error       string            `json:"error,omitempty"`
-	FileResults []SlurmFileResult `json:"file_results"`
-	ApplyResult SlurmApplyResult  `json:"apply_result"`
+	OK            bool                `json:"ok"`
+	Error         string              `json:"error,omitempty"`
+	FileResults   []SlurmFileResult   `json:"file_results"`
+	ScriptResults []SlurmScriptResult `json:"script_results,omitempty"`
+	ApplyResult   SlurmApplyResult    `json:"apply_result"`
+}
+
+// SlurmScriptResult is the per-script result within a SlurmNodeResult.
+type SlurmScriptResult struct {
+	ScriptType string `json:"script_type"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
 }
 
 // SlurmFileResult is the per-file result within a SlurmNodeResult.

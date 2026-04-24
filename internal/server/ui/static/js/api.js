@@ -350,6 +350,7 @@ const API = {
         getNodeOverrides(nodeId)            { return API.get(`/nodes/${encodeURIComponent(nodeId)}/slurm/overrides`); },
         setNodeOverrides(nodeId, body)      { return API.put(`/nodes/${encodeURIComponent(nodeId)}/slurm/overrides`, body); },
         // Scripts
+        listScripts()                       { return API.get('/slurm/scripts'); },
         getScript(scriptType)               { return API.get(`/slurm/scripts/${encodeURIComponent(scriptType)}`); },
         saveScript(scriptType, body)        { return API.put(`/slurm/scripts/${encodeURIComponent(scriptType)}`, body); },
         scriptHistory(scriptType)           { return API.get(`/slurm/scripts/${encodeURIComponent(scriptType)}/history`); },

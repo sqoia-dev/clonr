@@ -180,6 +180,14 @@ const App = {
                 } else {
                     SlurmPages.configs();
                 }
+            } else if (parts[2] === 'scripts') {
+                if (parts[3] && parts[4] === 'history') {
+                    SlurmPages.scriptHistory(decodeURIComponent(parts[3]));
+                } else if (parts[3]) {
+                    SlurmPages.scriptEditor(decodeURIComponent(parts[3]));
+                } else {
+                    SlurmPages.scripts();
+                }
             } else if (parts[2] === 'sync') {
                 SlurmPages.syncStatus();
             } else if (parts[2] === 'push') {
