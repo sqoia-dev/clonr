@@ -158,7 +158,18 @@ func (c *Client) connect(ctx context.Context) error {
 	readDone := make(chan error, 1)
 
 	go func() {
-		readDone <- c.readLoop(connCtx, conn)
+		err := c.readLoop(connCtx, conn)
+		if err != nil {
+			// Log the read error regardless of context state so we can diagnose
+			// unexpected readLoop exits (e.g. websocket close, deadline, etc.).
+			log.Error().Err(err).Str("ctx_err", fmt.Sprintf("%v", connCtx.Err())).
+				Msg("clientd: readLoop exited with error")
+		}
+		readDone <- err
+		// Signal writeLoop to stop so the connection is re-established. Without
+		// this, writeLoop continues sending heartbeats while nobody reads incoming
+		// messages — exec_request, config_push, etc. all stall silently.
+		connCancel()
 	}()
 
 	// Send hello immediately.
@@ -171,7 +182,7 @@ func (c *Client) connect(ctx context.Context) error {
 
 	// Wait for the read loop to stop.
 	connCancel()
-	<-readDone
+	readErr := <-readDone
 
 	if ctx.Err() != nil {
 		// Parent context cancelled — send goodbye and close cleanly.
@@ -183,17 +194,28 @@ func (c *Client) connect(ctx context.Context) error {
 		return nil
 	}
 
+	// If writeLoop exited because connCtx was cancelled (by readLoop goroutine
+	// calling connCancel after a read error), writeErr is nil. Return readErr so
+	// Run() knows the connection was lost and should reconnect.
+	if writeErr == nil && readErr != nil {
+		return readErr
+	}
 	return writeErr
 }
 
 // readLoop reads messages from the server and dispatches them by type.
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
+	log.Debug().Msg("clientd: readLoop started")
+	defer log.Debug().Msg("clientd: readLoop exiting")
 	for {
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
+				// Context already cancelled (writeLoop exited or shutdown signal).
+				// Log at debug so reconnection cycles aren't noisy.
+				log.Debug().Err(err).Msg("clientd: readLoop read error (context cancelled, reconnecting)")
 				return nil
 			}
 			return fmt.Errorf("clientd: read: %w", err)
