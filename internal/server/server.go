@@ -56,6 +56,7 @@ type Server struct {
 	ldapMgr             *ldapmodule.Manager
 	sysAccountsMgr      *sysaccounts.Manager
 	networkMgr          *networkmodule.Manager
+	clientdHub          *ClientdHub
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
 	http                *http.Server
@@ -135,6 +136,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		ldapMgr:             ldapMgr,
 		sysAccountsMgr:      sysAccountsMgr,
 		networkMgr:          networkMgr,
+		clientdHub:          NewClientdHub(),
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -447,6 +449,11 @@ func (s *Server) buildRouter() chi.Router {
 		// is only reached by node-scoped keys (requireNodeOwnership allows both).
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/self", nodes.GetNode)
 
+		// clonr-clientd WebSocket endpoint — node-scoped key required; the key's
+		// bound node_id must match the {id} URL parameter (same as verify-boot).
+		clientdH := &handlers.ClientdHandler{DB: s.db, Hub: s.clientdHub}
+		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/clientd/ws", clientdH.HandleClientdWS)
+
 		// Image fetch routes accessible by node-scoped keys (deploy agent reads its assigned image).
 		// requireImageAccess handles both admin and node scopes; node keys may only access the
 		// image currently assigned to their bound node. Must be outside the admin-only group.
@@ -519,12 +526,17 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/active-deploys", factory.ActiveDeploys)
 
 			// Nodes — by-mac must be before /{id} to avoid chi match ambiguity.
+			// nodes/connected must be before nodes/{id} to avoid chi match ambiguity.
 			r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)
+			r.Get("/nodes/connected", clientdH.GetConnectedNodes)
 			r.Get("/nodes", nodes.ListNodes)
 			r.Post("/nodes", nodes.CreateNode)
 			r.Get("/nodes/{id}", nodes.GetNode)
 			r.Put("/nodes/{id}", nodes.UpdateNode)
 			r.Delete("/nodes/{id}", nodes.DeleteNode)
+
+			// clientd heartbeat — admin read of latest heartbeat data.
+			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
 
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.

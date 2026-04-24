@@ -2264,10 +2264,20 @@ const Pages = {
         const hostnameHtml = (n.hostname && n.hostname !== '(none)')
             ? `${escHtml(n.hostname)}${n.hostname_auto ? ' <span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>' : ''}`
             : `<span class="text-dim" style="font-style:italic">Unassigned</span>`;
+        // Show a green "Live" badge when clonr-clientd has reported a heartbeat
+        // within the last 2 minutes (last_seen_at is updated on every heartbeat).
+        const liveBadge = (() => {
+            if (!n.last_seen_at) return '';
+            const seenMs = new Date(n.last_seen_at).getTime();
+            const ageMs = Date.now() - seenMs;
+            return ageMs < 2 * 60 * 1000
+                ? ' <span class="badge badge-success badge-sm" title="clonr-clientd is connected and sending heartbeats">Live</span>'
+                : '';
+        })();
         return `<tr data-key="${escHtml(n.id)}">
             <td>
                 <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
-                    ${hostnameHtml}
+                    ${hostnameHtml}${liveBadge}
                 </a>
                 <div class="text-dim text-sm text-mono">${escHtml(n.primary_mac || '—')}</div>
             </td>
@@ -2927,11 +2937,12 @@ const Pages = {
         Pages._nodeEditorNodeId = id;
 
         try {
-            const [node, imagesResp, nodeGroupsResp, reimagesResp] = await Promise.all([
+            const [node, imagesResp, nodeGroupsResp, reimagesResp, heartbeatResp] = await Promise.all([
                 API.nodes.get(id),
                 API.images.list(),
                 API.nodeGroups.list().catch(() => ({ groups: [] })),
                 API.reimages.listForNode(id).catch(() => ({ requests: [] })),
+                API.request('GET', `/nodes/${id}/heartbeat`).catch(() => null),
             ]);
             const images     = imagesResp.images || [];
             const nodeGroups = (nodeGroupsResp && (nodeGroupsResp.node_groups || nodeGroupsResp.groups)) || [];
@@ -3127,6 +3138,81 @@ const Pages = {
                                 <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(node.updated_at)}</div></div>
                             </div>
                         </div>`)}
+
+                    ${cardWrap('Heartbeat', (() => {
+                        if (!heartbeatResp) {
+                            return `<div class="card-body">${emptyState('No heartbeat received', 'clonr-clientd is not connected or has not sent a heartbeat yet.')}</div>`;
+                        }
+                        const hb = heartbeatResp;
+                        const receivedAt = hb.ReceivedAt || hb.received_at;
+                        const load1 = hb.Load1 ?? hb.load_1 ?? null;
+                        const load5 = hb.Load5 ?? hb.load_5 ?? null;
+                        const load15 = hb.Load15 ?? hb.load_15 ?? null;
+                        const memTotal = hb.MemTotalKB ?? hb.mem_total_kb ?? null;
+                        const memAvail = hb.MemAvailKB ?? hb.mem_avail_kb ?? null;
+                        const uptime = hb.UptimeSec ?? hb.uptime_sec ?? null;
+                        const kernel = hb.Kernel || hb.kernel || '';
+                        const clientdVer = hb.ClientdVer || hb.clientd_ver || '';
+                        const disk = hb.DiskUsage || hb.disk_usage || [];
+                        const services = hb.Services || hb.services || [];
+
+                        const fmtUptime = (s) => {
+                            if (s === null) return '—';
+                            const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+                                  m = Math.floor((s % 3600) / 60);
+                            return d > 0 ? `${d}d ${h}h ${m}m` : (h > 0 ? `${h}h ${m}m` : `${m}m`);
+                        };
+                        const fmtMem = (kb) => kb !== null ? (kb / 1024 / 1024).toFixed(1) + ' GB' : '—';
+                        const fmtPct = (used, total) => total ? Math.round(used / total * 100) + '%' : '—';
+                        const fmtBytes = (b) => {
+                            if (b >= 1e12) return (b/1e12).toFixed(1) + ' TB';
+                            if (b >= 1e9)  return (b/1e9).toFixed(1) + ' GB';
+                            if (b >= 1e6)  return (b/1e6).toFixed(0) + ' MB';
+                            return b + ' B';
+                        };
+
+                        const diskRows = disk.map(d =>
+                            `<tr>
+                                <td class="text-mono text-sm">${escHtml(d.mount_point || d.MountPoint || '?')}</td>
+                                <td class="text-sm">${fmtBytes(d.total_bytes ?? d.TotalBytes ?? 0)}</td>
+                                <td class="text-sm">${fmtBytes(d.used_bytes ?? d.UsedBytes ?? 0)}</td>
+                                <td class="text-sm">${fmtPct(d.used_bytes ?? d.UsedBytes ?? 0, d.total_bytes ?? d.TotalBytes ?? 0)}</td>
+                            </tr>`
+                        ).join('');
+
+                        const svcBadges = services.map(s => {
+                            const name = s.name || s.Name || '?';
+                            const active = s.active || s.Active;
+                            const state = s.state || s.State || '';
+                            const cls = active ? 'badge-success' : 'badge-neutral';
+                            return `<span class="badge ${cls} badge-sm" title="${escHtml(state)}">${escHtml(name)}</span>`;
+                        }).join(' ');
+
+                        return `<div class="card-body">
+                            <div class="kv-grid" style="margin-bottom:12px">
+                                <div class="kv-item"><div class="kv-key">Received</div><div class="kv-value">${receivedAt ? fmtRelative(receivedAt) : '—'}</div></div>
+                                <div class="kv-item"><div class="kv-key">Uptime</div><div class="kv-value">${fmtUptime(uptime)}</div></div>
+                                <div class="kv-item"><div class="kv-key">Load (1/5/15)</div><div class="kv-value text-mono">${load1 !== null ? load1.toFixed(2) : '—'} / ${load5 !== null ? load5.toFixed(2) : '—'} / ${load15 !== null ? load15.toFixed(2) : '—'}</div></div>
+                                <div class="kv-item"><div class="kv-key">Memory (total / free)</div><div class="kv-value">${fmtMem(memTotal)} / ${fmtMem(memAvail)}</div></div>
+                                ${kernel ? `<div class="kv-item"><div class="kv-key">Kernel</div><div class="kv-value text-mono text-sm">${escHtml(kernel)}</div></div>` : ''}
+                                ${clientdVer ? `<div class="kv-item"><div class="kv-key">clientd version</div><div class="kv-value text-mono text-sm">${escHtml(clientdVer)}</div></div>` : ''}
+                            </div>
+                            ${disk.length > 0 ? `
+                                <div class="text-dim text-sm" style="margin-bottom:6px;font-weight:500">Disk Usage</div>
+                                <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:12px">
+                                    <thead><tr style="border-bottom:1px solid var(--border)">
+                                        <th style="padding:4px 8px;text-align:left;color:var(--text-secondary);font-weight:500">Mount</th>
+                                        <th style="padding:4px 8px;text-align:left;color:var(--text-secondary);font-weight:500">Total</th>
+                                        <th style="padding:4px 8px;text-align:left;color:var(--text-secondary);font-weight:500">Used</th>
+                                        <th style="padding:4px 8px;text-align:left;color:var(--text-secondary);font-weight:500">%</th>
+                                    </tr></thead>
+                                    <tbody>${diskRows}</tbody>
+                                </table>` : ''}
+                            ${services.length > 0 ? `
+                                <div class="text-dim text-sm" style="margin-bottom:6px;font-weight:500">Services</div>
+                                <div style="display:flex;flex-wrap:wrap;gap:6px">${svcBadges}</div>` : ''}
+                        </div>`;
+                    })())}
 
                     ${cardWrap('Reimage History', (() => {
                         const recent = reimageHistory.slice(0, 10);

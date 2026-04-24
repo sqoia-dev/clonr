@@ -37,6 +37,12 @@ type BlockDeployer struct {
 	// "http://clonr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
 	// Written to /etc/clonr/verify-boot-url inside the deployed rootfs. ADR-0008.
 	VerifyBootURL string
+
+	// ClientdURL is the WebSocket URL for clonr-clientd, e.g.
+	// "ws://clonr-server:8080/api/v1/nodes/<nodeID>/clientd/ws".
+	// Written to /etc/clonr/clonrd-url inside the deployed rootfs.
+	// Leave empty to skip clientd injection.
+	ClientdURL string
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -48,6 +54,12 @@ func (d *BlockDeployer) ResolvedDisk() string { return d.targetDisk }
 func (d *BlockDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
 	d.NodeToken = nodeToken
 	d.VerifyBootURL = verifyBootURL
+}
+
+// SetClientdURL implements ClientdInjector. Call before Finalize to enable
+// clonr-clientd WebSocket agent injection.
+func (d *BlockDeployer) SetClientdURL(clientdURL string) {
+	d.ClientdURL = clientdURL
 }
 
 // Preflight validates that a suitable target disk exists and resolves its path.
@@ -332,6 +344,12 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 	// ── Phone-home injection (ADR-0008) ──────────────────────────────────────
 	if err := injectPhoneHome(mountRoot, d.NodeToken, d.VerifyBootURL); err != nil {
 		return fmt.Errorf("deploy/block: finalize: phone-home injection: %w", err)
+	}
+
+	// ── clonr-clientd injection ───────────────────────────────────────────────
+	// Non-fatal: clientd missing means no live heartbeat, but the node boots fine.
+	if err := injectClientd(mountRoot, d.ClientdURL); err != nil {
+		logger().Warn().Err(err).Msg("WARNING: finalize: clientd injection failed (non-fatal)")
 	}
 
 	return nil

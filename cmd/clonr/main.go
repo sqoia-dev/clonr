@@ -634,6 +634,11 @@ PXE-booted nodes running from initramfs.`,
 				verifyBootURL := cfg.ServerURL + "/api/v1/nodes/" + nodeCfg.ID + "/verify-boot"
 				phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
 			}
+			// Wire clonr-clientd injection: set the WebSocket URL on the deployer.
+			if ci, ok := deployer.(deploy.ClientdInjector); ok && nodeCfg != nil {
+				clientdURL := httpToWS(cfg.ServerURL) + "/api/v1/nodes/" + nodeCfg.ID + "/clientd/ws"
+				ci.SetClientdURL(clientdURL)
+			}
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
 				printPhase(phaseFailed, "Finalize")
 				printDeployError("finalize", err.Error())
@@ -1103,6 +1108,11 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	if phi, ok := deployer.(deploy.PhoneHomeInjector); ok {
 		verifyBootURL := cfg.ServerURL + "/api/v1/nodes/" + nodeCfg.ID + "/verify-boot"
 		phi.SetPhoneHome(cfg.AuthToken, verifyBootURL)
+	}
+	// Wire clonr-clientd injection: set the WebSocket URL on the deployer.
+	if ci, ok := deployer.(deploy.ClientdInjector); ok {
+		clientdURL := httpToWS(cfg.ServerURL) + "/api/v1/nodes/" + nodeCfg.ID + "/clientd/ws"
+		ci.SetClientdURL(clientdURL)
 	}
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
 		printPhase(phaseFailed, "Finalize")
@@ -1824,6 +1834,20 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:8]
+}
+
+// httpToWS converts an HTTP(S) server URL to the equivalent WebSocket URL
+// by replacing the scheme: http:// → ws://, https:// → wss://.
+// Returns the input unchanged when the scheme is already ws/wss or unrecognised.
+func httpToWS(serverURL string) string {
+	switch {
+	case len(serverURL) >= 8 && serverURL[:8] == "https://":
+		return "wss://" + serverURL[8:]
+	case len(serverURL) >= 7 && serverURL[:7] == "http://":
+		return "ws://" + serverURL[7:]
+	default:
+		return serverURL
+	}
 }
 
 // humanBytes formats a byte count as a human-readable string.

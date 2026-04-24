@@ -225,6 +225,13 @@ type PhoneHomeInjector interface {
 	SetPhoneHome(nodeToken, verifyBootURL string)
 }
 
+// ClientdInjector is an optional interface implemented by Deployers that support
+// clonr-clientd WebSocket agent injection. Callers check for this interface via
+// type assertion and set the URL before calling Finalize.
+type ClientdInjector interface {
+	SetClientdURL(clientdURL string)
+}
+
 // runCmd executes a command and streams its output through the package logger.
 // Returns an error (including tail of output) if the process exits non-zero.
 func runCmd(ctx context.Context, name string, args ...string) error {
