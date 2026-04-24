@@ -5,13 +5,20 @@
 # whether work is already done before doing it.
 #
 # Prerequisites:
-#   - Rocky Linux 9 (minimal install)
+#   - Rocky Linux 9 (minimal install), or Ubuntu/Debian
 #   - Root shell (run as root or via sudo)
 #   - Internet access to dl.google.com and github.com
 #   - Two block devices:
 #       /dev/sdb (or first disk) — OS disk (32 GB+)
 #       /dev/sda (or second disk) — data disk (100 GB+), must be XFS with
 #         LABEL=clonr-data, or will be formatted by this script
+#   - eth0: LAN/internet uplink (DHCP)
+#   - eth1: provisioning network (static 10.99.0.1/24)
+#
+# This script configures the host as a NAT gateway so that nodes on the
+# provisioning network (10.99.0.0/24) can reach the internet via eth0.
+# IP forwarding, masquerade (firewalld external zone or iptables), and a
+# DNS forwarder (dnsmasq on eth1) are all set up automatically.
 #
 # Usage:
 #   bash scripts/setup/install-dev-vm.sh
@@ -24,6 +31,21 @@
 #   GO_VERSION       — Go toolchain version to install (default: go1.24.2)
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# OS detection (set early — used throughout the script)
+# ---------------------------------------------------------------------------
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        . /etc/os-release
+        OS_ID="${ID}"
+        OS_VERSION="${VERSION_ID:-0}"
+    else
+        OS_ID="unknown"
+        OS_VERSION="0"
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Config
@@ -72,6 +94,7 @@ install_packages() {
         vim \
         gdisk \
         firewalld \
+        dnsmasq \
         xfsprogs \
         e2fsprogs \
         dosfstools \
@@ -343,44 +366,163 @@ configure_firewall() {
 
     systemctl enable --now firewalld
 
-    # Default zone: drop (deny everything not explicitly allowed)
-    firewall-cmd --set-default-zone=drop
+    # ── Zone assignment ──────────────────────────────────────────────────────
+    # eth0 (LAN/internet) → external zone (masquerade enabled by default)
+    # eth1 (provisioning)  → internal zone (trusted local services)
 
-    # Assign interfaces if not already in the zone
-    for iface in eth0 eth1; do
-        ip link show "${iface}" &>/dev/null || continue
-        firewall-cmd --zone=drop --add-interface="${iface}" --permanent 2>/dev/null || true
-    done
+    # Set zones via NetworkManager for persistence across NM restart events.
+    local lan_con pxe_con
+    lan_con=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep ':eth0$' | head -1 | cut -d: -f1)
+    pxe_con=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep ':eth1$' | head -1 | cut -d: -f1)
 
-    # LAN rules (192.168.1.0/24): SSH + clonr API
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 service name=ssh accept' \
-        --permanent
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=8080 protocol=tcp accept' \
-        --permanent
+    if [[ -n "${lan_con}" ]]; then
+        nmcli con modify "${lan_con}" connection.zone external
+        log "Set ${lan_con} (eth0) → external zone"
+    else
+        firewall-cmd --zone=external --change-interface=eth0 --permanent 2>/dev/null || true
+        log "Set eth0 → external zone (firewall-cmd fallback)"
+    fi
 
-    # Provisioning network (10.99.0.0/24): TFTP + HTTP API
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=69 protocol=udp accept' \
-        --permanent
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=8080 protocol=tcp accept' \
-        --permanent
+    if [[ -n "${pxe_con}" ]]; then
+        nmcli con modify "${pxe_con}" connection.zone internal
+        log "Set ${pxe_con} (eth1) → internal zone"
+    else
+        firewall-cmd --zone=internal --change-interface=eth1 --permanent 2>/dev/null || true
+        log "Set eth1 → internal zone (firewall-cmd fallback)"
+    fi
 
-    # Provisioning network (10.99.0.0/24): LDAPS for SSSD on deployed nodes
-    firewall-cmd --zone=drop \
-        --add-rich-rule='rule family=ipv4 source address=10.99.0.0/24 port port=636 protocol=tcp accept' \
-        --permanent
+    # ── External zone (eth0, LAN) ────────────────────────────────────────────
+    # Masquerade is enabled by default in the external zone; ensure it's on.
+    firewall-cmd --zone=external --add-masquerade --permanent 2>/dev/null || true
 
-    # DHCP (UDP 67): PXE clients send DHCPDISCOVER from 0.0.0.0 (before they have
-    # an IP), so source-address rich rules will never match. Use a direct iptables
-    # rule scoped to eth1 to accept DHCP on the provisioning interface only.
+    # Allow SSH and clonr API from LAN
+    firewall-cmd --zone=external --add-service=ssh --permanent
+    firewall-cmd --zone=external --add-port=8080/tcp --permanent
+
+    # ── Internal zone (eth1, provisioning) ───────────────────────────────────
+    # Services needed by PXE clients and deployed nodes
+    firewall-cmd --zone=internal --add-service=ssh --permanent
+    firewall-cmd --zone=internal --add-service=dhcp --permanent
+    firewall-cmd --zone=internal --add-service=dns --permanent
+    firewall-cmd --zone=internal --add-service=tftp --permanent
+    firewall-cmd --zone=internal --add-port=8080/tcp --permanent
+    firewall-cmd --zone=internal --add-port=636/tcp --permanent
+
+    # DHCP (UDP 67): PXE clients send DHCPDISCOVER from 0.0.0.0 (before they
+    # have an IP), so source-address rules won't match. Add a direct iptables
+    # rule scoped to eth1 as a belt-and-suspenders guarantee.
     firewall-cmd --permanent --direct --add-rule ipv4 filter INPUT 0 \
         -i eth1 -p udp --dport 67 -j ACCEPT
 
+    # ── Inter-zone forwarding policy ─────────────────────────────────────────
+    # Allow traffic from internal (provisioning) to external (internet) for NAT.
+    # firewalld 1.x requires a policy object for cross-zone forwarding.
+    if ! firewall-cmd --permanent --get-policies 2>/dev/null | grep -q 'int-to-ext'; then
+        firewall-cmd --permanent --new-policy int-to-ext
+        firewall-cmd --permanent --policy int-to-ext --set-target ACCEPT
+        firewall-cmd --permanent --policy int-to-ext --add-ingress-zone internal
+        firewall-cmd --permanent --policy int-to-ext --add-egress-zone external
+        log "Created int-to-ext forwarding policy"
+    else
+        log "int-to-ext policy already exists"
+    fi
+
     firewall-cmd --reload
-    step_done "firewalld"
+    step_done "firewalld (zone-based with masquerade)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 8b: NAT gateway — IP forwarding + dnsmasq + masquerade
+# ---------------------------------------------------------------------------
+setup_nat_gateway() {
+    info "Configuring NAT gateway for provisioning network"
+
+    # ── a) Enable IP forwarding (persistent) ─────────────────────────────────
+    cat > /etc/sysctl.d/99-clonr-ipforward.conf << 'SYSCTL'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+SYSCTL
+    sysctl -p /etc/sysctl.d/99-clonr-ipforward.conf
+    log "IP forwarding enabled"
+
+    # ── b) Install dnsmasq ────────────────────────────────────────────────────
+    if ! command -v dnsmasq &>/dev/null; then
+        if command -v dnf &>/dev/null; then
+            dnf install -y dnsmasq
+        elif command -v apt-get &>/dev/null; then
+            apt-get install -y dnsmasq
+        elif command -v yum &>/dev/null; then
+            yum install -y dnsmasq
+        else
+            warn "No supported package manager found — dnsmasq must be installed manually"
+        fi
+    fi
+
+    # Write dnsmasq config — listen only on the provisioning interface so we
+    # don't conflict with systemd-resolved or any other resolver on eth0.
+    mkdir -p /etc/dnsmasq.d
+    cat > /etc/dnsmasq.d/clonr-provisioning.conf << 'DNSMASQ'
+# clonr provisioning network DNS forwarder
+# Only listen on the provisioning interface — do not conflict with systemd-resolved
+# or other DNS on eth0.
+interface=eth1
+bind-interfaces
+domain-needed
+bogus-priv
+# Forward to well-known public resolvers. The first server that responds wins.
+server=8.8.8.8
+server=1.1.1.1
+DNSMASQ
+
+    systemctl enable --now dnsmasq
+    log "dnsmasq configured and started"
+
+    # ── c) Masquerade fallback for non-firewalld systems ─────────────────────
+    # On systems without firewalld (Ubuntu/Debian with ufw, or bare iptables),
+    # set up masquerade via iptables and persist it.
+    if ! command -v firewall-cmd &>/dev/null; then
+        log "firewalld not found — applying iptables masquerade"
+        iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE
+
+        if command -v ufw &>/dev/null; then
+            # Persist via ufw/before.rules if not already present
+            if ! grep -q 'clonr-masquerade' /etc/ufw/before.rules 2>/dev/null; then
+                sed -i '/^# END COMMIT/i # clonr-masquerade\n-A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE' \
+                    /etc/ufw/before.rules 2>/dev/null || true
+                grep -q '^DEFAULT_FORWARD_POLICY' /etc/default/ufw \
+                    && sed -i 's/DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw \
+                    || echo 'DEFAULT_FORWARD_POLICY="ACCEPT"' >> /etc/default/ufw
+                ufw allow in on eth1 to any port 53
+                ufw reload
+            fi
+        else
+            # No ufw — write an iptables-restore service to persist across reboots
+            if command -v iptables-save &>/dev/null; then
+                iptables-save > /etc/iptables.rules
+                cat > /etc/systemd/system/iptables-restore.service << 'UNIT'
+[Unit]
+Description=Restore iptables rules
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/iptables.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+                systemctl daemon-reload
+                systemctl enable iptables-restore
+            fi
+        fi
+    fi
+    # When firewalld IS present the masquerade is already handled by
+    # configure_firewall() (external zone + int-to-ext policy).
+
+    step_done "NAT gateway (IP forwarding + dnsmasq + masquerade)"
 }
 
 # ---------------------------------------------------------------------------
@@ -454,9 +596,20 @@ print_status() {
     echo "========================================"
     echo ""
     echo "Services:"
-    systemctl is-active clonr-serverd        && echo "  clonr-serverd:          active" || echo "  clonr-serverd:          FAILED"
-    systemctl is-active clonr-autodeploy.timer && echo "  clonr-autodeploy.timer: active" || echo "  clonr-autodeploy.timer: FAILED"
-    systemctl is-active firewalld            && echo "  firewalld:              active" || echo "  firewalld:              FAILED"
+    systemctl is-active clonr-serverd          && echo "  clonr-serverd:          active" || echo "  clonr-serverd:          FAILED"
+    systemctl is-active clonr-autodeploy.timer  && echo "  clonr-autodeploy.timer: active" || echo "  clonr-autodeploy.timer: FAILED"
+    systemctl is-active firewalld              && echo "  firewalld:              active" || echo "  firewalld:              FAILED"
+    systemctl is-active dnsmasq               && echo "  dnsmasq:                active" || echo "  dnsmasq:                FAILED"
+    echo ""
+    echo "NAT Gateway:"
+    sysctl net.ipv4.ip_forward | tr -d ' '
+    if command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --zone=external --query-masquerade --permanent 2>/dev/null \
+            && echo "  masquerade:             enabled" || echo "  masquerade:             DISABLED"
+    else
+        iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE 2>/dev/null \
+            && echo "  masquerade (iptables):  enabled" || echo "  masquerade (iptables):  DISABLED"
+    fi
     echo ""
     echo "Disk:"
     df -h "${CLONR_DATA_MOUNT}" /
@@ -479,8 +632,10 @@ print_status() {
 # Main
 # ---------------------------------------------------------------------------
 require_root
+detect_os
 
 log "Starting clonr dev VM bootstrap"
+log "OS: ${OS_ID} ${OS_VERSION}"
 log "Repo: ${CLONR_REPO_URL}"
 log "Data mount: ${CLONR_DATA_MOUNT} (LABEL=${CLONR_DATA_LABEL})"
 log "Go: ${GO_VERSION}"
@@ -495,6 +650,7 @@ install_service
 install_autodeploy
 setup_pxe_network
 configure_firewall
+setup_nat_gateway
 harden_ssh
 install_udev_rules
 print_status
