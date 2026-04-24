@@ -7,13 +7,13 @@
 
 [sssd]
 services = nss, pam
-config_file_version = 2
 domains = {{.Domain}}
 
 [nss]
 homedir_substring = /home
 
 [pam]
+offline_credentials_expiration = 7
 
 [domain/{{.Domain}}]
 id_provider = ldap
@@ -45,7 +45,6 @@ ldap_group_search_base = ou=groups,{{.BaseDN}}
 ldap_group_name = cn
 ldap_group_gid_number = gidNumber
 ldap_group_member = memberUid
-ldap_group_membership_check_against_member_of = false
 
 # TLS — require valid certificate signed by our CA
 ldap_tls_reqcert = demand
@@ -68,6 +67,3 @@ enumerate = false
 cache_credentials = true
 entry_cache_timeout = 300
 krb5_store_password_if_offline = false
-
-# Offline grace: allow cached logins for up to 7 days when LDAP is unreachable.
-offline_credentials_expiration = 7

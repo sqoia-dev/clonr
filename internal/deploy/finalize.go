@@ -327,26 +327,40 @@ func applyBMCConfig(ctx context.Context, bmc *api.BMCNodeConfig) error {
 //   - /etc/redhat-release present → RHEL/Rocky/Alma family (dnf)
 //   - /etc/debian_version present → Debian/Ubuntu family (apt-get)
 //   - Neither found → warn and skip (non-fatal at the call site)
+//
+// If /usr/bin/qemu-ga or /usr/sbin/qemu-ga already exists in the rootfs the
+// package install step is skipped — the chroot has no network so dnf/apt-get
+// would always fail when the binary is already present from the base image.
 func installQEMUGuestAgent(ctx context.Context, rootDir string) error {
 	log := logger()
 
-	var pkgMgr string
-	switch {
-	case fileExists(filepath.Join(rootDir, "etc", "redhat-release")):
-		pkgMgr = "dnf"
-	case fileExists(filepath.Join(rootDir, "etc", "debian_version")):
-		pkgMgr = "apt-get"
-	default:
-		log.Warn().Str("root", rootDir).
-			Msg("finalize: qemu-guest-agent: could not detect distro family — skipping install")
-		return nil
-	}
+	// If the binary is already present (baked into the base image), skip the
+	// network-dependent package install entirely and go straight to enabling
+	// the service.
+	alreadyInstalled := fileExists(filepath.Join(rootDir, "usr", "bin", "qemu-ga")) ||
+		fileExists(filepath.Join(rootDir, "usr", "sbin", "qemu-ga"))
+	if alreadyInstalled {
+		log.Info().Str("root", rootDir).
+			Msg("finalize: qemu-guest-agent binary already present — skipping package install")
+	} else {
+		var pkgMgr string
+		switch {
+		case fileExists(filepath.Join(rootDir, "etc", "redhat-release")):
+			pkgMgr = "dnf"
+		case fileExists(filepath.Join(rootDir, "etc", "debian_version")):
+			pkgMgr = "apt-get"
+		default:
+			log.Warn().Str("root", rootDir).
+				Msg("finalize: qemu-guest-agent: could not detect distro family — skipping install")
+			return nil
+		}
 
-	log.Info().Str("pkg_mgr", pkgMgr).Msg("finalize: installing qemu-guest-agent in chroot")
-	if out, err := exec.CommandContext(ctx, "chroot", rootDir,
-		pkgMgr, "install", "-y", "qemu-guest-agent",
-	).CombinedOutput(); err != nil {
-		return fmt.Errorf("install qemu-guest-agent via %s: %w\noutput: %s", pkgMgr, err, string(out))
+		log.Info().Str("pkg_mgr", pkgMgr).Msg("finalize: installing qemu-guest-agent in chroot")
+		if out, err := exec.CommandContext(ctx, "chroot", rootDir,
+			pkgMgr, "install", "-y", "qemu-guest-agent",
+		).CombinedOutput(); err != nil {
+			return fmt.Errorf("install qemu-guest-agent via %s: %w\noutput: %s", pkgMgr, err, string(out))
+		}
 	}
 
 	if out, err := exec.CommandContext(ctx, "chroot", rootDir,
@@ -1986,13 +2000,13 @@ func renderSSSDConf(cfg *api.LDAPNodeConfig, domain string) string {
 
 [sssd]
 services = nss, pam
-config_file_version = 2
 domains = %s
 
 [nss]
 homedir_substring = /home
 
 [pam]
+offline_credentials_expiration = 7
 
 [domain/%s]
 id_provider = ldap
@@ -2022,7 +2036,6 @@ ldap_group_search_base = ou=groups,%s
 ldap_group_name = cn
 ldap_group_gid_number = gidNumber
 ldap_group_member = memberUid
-ldap_group_membership_check_against_member_of = false
 
 ldap_tls_reqcert = demand
 ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clonr-ca.crt
@@ -2037,7 +2050,6 @@ ldap_referrals = false
 enumerate = false
 cache_credentials = true
 entry_cache_timeout = 300
-offline_credentials_expiration = 7
 `, domain, domain,
 		cfg.ServerURI, cfg.BaseDN,
 		cfg.ServiceBindDN, cfg.ServiceBindPasswd,
