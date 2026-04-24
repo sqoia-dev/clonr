@@ -455,6 +455,12 @@ func (s *Server) buildRouter() chi.Router {
 		// the same one minted during PXE enrollment and is reused post-boot.
 		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/verify-boot", nodes.VerifyBoot)
 
+		// flip-to-disk — called by the deploy agent (node-scoped key) after writing
+		// the rootfs to signal the server to set next boot to disk and power-cycle.
+		// Must be outside the admin-only group: UEFI nodes use a node-scoped key and
+		// would get 403 if this were admin-only. Admin keys also pass (manual override).
+		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/power/flip-to-disk", powerH.FlipToDisk)
+
 		// Self-read: allow a node-scoped key to read its own node record.
 		// Used by the deploy agent's state verification loop after deploy-complete.
 		// The chi router matches the most specific (longest) path first, so the
@@ -590,7 +596,6 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/nodes/{id}/power/reset", ipmiH.PowerReset)
 			r.Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
 			r.Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
-			r.Post("/nodes/{id}/power/flip-to-disk", powerH.FlipToDisk)
 			r.Get("/nodes/{id}/sensors", ipmiH.GetSensors)
 
 			// Reimage — queue, track and retry node reimages via the power provider.

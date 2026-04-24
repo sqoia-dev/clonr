@@ -56,6 +56,12 @@ type FilesystemDeployer struct {
 	// Written to /etc/clonr/clonrd-url inside the deployed rootfs.
 	// Leave empty to skip clientd injection.
 	ClientdURL string
+
+	// ClientdBinPath is the filesystem path to the clonr-clientd binary that
+	// is copied into the deployed rootfs at /usr/local/bin/clonr-clientd.
+	// Empty means auto-detect via findClientdBin (searches alongside os.Args[0],
+	// /opt/clonr/bin/, and /usr/local/bin/).
+	ClientdBinPath string
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -73,6 +79,12 @@ func (d *FilesystemDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
 // clonr-clientd WebSocket agent injection.
 func (d *FilesystemDeployer) SetClientdURL(clientdURL string) {
 	d.ClientdURL = clientdURL
+}
+
+// SetClientdBinPath sets the path to the clonr-clientd binary copied into the
+// deployed rootfs. Call before Finalize. Empty means auto-detect.
+func (d *FilesystemDeployer) SetClientdBinPath(p string) {
+	d.ClientdBinPath = p
 }
 
 // Preflight validates disk size and resolves the target disk.
@@ -830,7 +842,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 	// ── clonr-clientd injection ───────────────────────────────────────────────
 	// Non-fatal: clientd missing means no live heartbeat, but the node boots fine.
-	if err := injectClientd(mountRoot, d.ClientdURL); err != nil {
+	if err := injectClientd(mountRoot, d.ClientdURL, d.ClientdBinPath); err != nil {
 		logger().Warn().Err(err).Msg("WARNING: finalize: clientd injection failed (non-fatal)")
 	}
 

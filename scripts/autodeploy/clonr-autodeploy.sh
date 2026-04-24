@@ -23,6 +23,8 @@ SERVERD_BIN="/usr/local/bin/clonr-serverd"
 SERVERD_NEW="${SERVERD_BIN}.autodeploy-new"
 CLI_STATIC_BIN="/usr/local/bin/clonr-static"
 CLI_STATIC_NEW="${CLI_STATIC_BIN}.autodeploy-new"
+CLIENTD_BIN="/usr/local/bin/clonr-clientd"
+CLIENTD_NEW="${CLIENTD_BIN}.autodeploy-new"
 INITRAMFS_BOOT="/var/lib/clonr/boot/initramfs.img"
 INITRAMFS_TFTP="/var/lib/clonr/tftpboot/clonr-initramfs.img"
 GOBIN="/usr/local/go/bin/go"
@@ -145,6 +147,17 @@ sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"
 log "clonr static CLI build OK ($(du -h "${CLI_STATIC_NEW}" | cut -f1))"
 
 # ---------------------------------------------------------------------------
+# Build clonr-clientd (node agent copied into deployed rootfs during finalize)
+# ---------------------------------------------------------------------------
+log "Building clonr-clientd..."
+GOTOOLCHAIN=auto CGO_ENABLED=0 "${GOBIN}" build \
+    -ldflags="-X main.version=${_VERSION} -X main.commitSHA=${_COMMIT} -X main.buildTime=${_BUILD_TIME} -s -w" \
+    -o "${CLIENTD_NEW}" ./cmd/clonr-clientd > "${_BUILD_LOG}" 2>&1 \
+    || { sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"; log "ERROR: clonr-clientd build failed"; exit 1; }
+sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"
+log "clonr-clientd build OK ($(du -h "${CLIENTD_NEW}" | cut -f1))"
+
+# ---------------------------------------------------------------------------
 # Rebuild initramfs — stage new CLI binary before building
 # ---------------------------------------------------------------------------
 log "Building initramfs (embedding new clonr CLI)..."
@@ -191,7 +204,7 @@ BUILD_STATUS=$(curl -s --max-time 5 "http://localhost:8080/api/v1/images" 2>/dev
 if [ "${BUILD_STATUS}" = "building" ]; then
     log "Build in progress — deferring restart to next cycle (binary staged, will deploy when idle)"
     # Clean up staged binaries so next cycle recompiles from the already-reset tree.
-    rm -f "${SERVERD_NEW}" "${CLI_STATIC_NEW}"
+    rm -f "${SERVERD_NEW}" "${CLI_STATIC_NEW}" "${CLIENTD_NEW}"
     exit 0
 fi
 
@@ -202,9 +215,10 @@ fi
 # ---------------------------------------------------------------------------
 # Atomic replace: server binary + restart service
 # ---------------------------------------------------------------------------
-log "Replacing clonr-serverd binary and restarting service..."
+log "Replacing clonr-serverd, clonr-static, and clonr-clientd binaries..."
 mv "${SERVERD_NEW}" "${SERVERD_BIN}"
 mv "${CLI_STATIC_NEW}" "${CLI_STATIC_BIN}"
+mv "${CLIENTD_NEW}" "${CLIENTD_BIN}"
 # Also update the non-static clonr CLI in-place (dynamic version for operator use)
 _BUILD_LOG2=$(mktemp /tmp/clonr-build.XXXXXXXX)
 GOTOOLCHAIN=auto "${GOBIN}" build -o /usr/local/bin/clonr ./cmd/clonr > "${_BUILD_LOG2}" 2>&1 \

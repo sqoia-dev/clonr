@@ -232,6 +232,14 @@ type ClientdInjector interface {
 	SetClientdURL(clientdURL string)
 }
 
+// ClientdBinPathSetter is an optional interface implemented by Deployers that
+// support copying the clonr-clientd binary into the deployed rootfs. Callers
+// check for this interface via type assertion and set the path before calling
+// Finalize. Empty path triggers auto-detection (see findClientdBin).
+type ClientdBinPathSetter interface {
+	SetClientdBinPath(p string)
+}
+
 // runCmd executes a command and streams its output through the package logger.
 // Returns an error (including tail of output) if the process exits non-zero.
 func runCmd(ctx context.Context, name string, args ...string) error {

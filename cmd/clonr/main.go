@@ -639,6 +639,10 @@ PXE-booted nodes running from initramfs.`,
 				clientdURL := httpToWS(cfg.ServerURL) + "/api/v1/nodes/" + nodeCfg.ID + "/clientd/ws"
 				ci.SetClientdURL(clientdURL)
 			}
+			// Wire clonr-clientd binary path so injectClientd can copy it into rootfs.
+			if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
+				bs.SetClientdBinPath(cfg.ClientdBinPath)
+			}
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
 				printPhase(phaseFailed, "Finalize")
 				printDeployError("finalize", err.Error())
@@ -1114,6 +1118,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		clientdURL := httpToWS(cfg.ServerURL) + "/api/v1/nodes/" + nodeCfg.ID + "/clientd/ws"
 		ci.SetClientdURL(clientdURL)
 	}
+	// Wire clonr-clientd binary path so injectClientd can copy it into rootfs.
+	if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
+		bs.SetClientdBinPath(cfg.ClientdBinPath)
+	}
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
 		printPhase(phaseFailed, "Finalize")
 		printDeployError("finalize", err.Error())
@@ -1247,12 +1255,15 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			deployLog.Warn().Err(err).
 				Int("attempt", attempt).Int("max", maxVerifyAttempts).
 				Msg("state verification: GetNode failed")
-		} else if updated.State() == api.NodeStateDeployed && updated.LastDeploySucceededAt != nil {
+		} else if s := updated.State(); s == api.NodeStateDeployedPreboot ||
+			s == api.NodeStateDeployedVerified ||
+			s == api.NodeStateDeployed {
+			// ADR-0008: after deploy-complete the server sets deployed_preboot, not
+			// the legacy "deployed" state. Accept all three as a successful outcome.
 			deployLog.Info().
 				Str("hostname", nodeCfg.Hostname).
-				Str("state", string(updated.State())).
-				Time("last_deploy_succeeded_at", *updated.LastDeploySucceededAt).
-				Msg("state verified: node is deployed, next PXE boot will exit to disk")
+				Str("state", string(s)).
+				Msg("state verified: deploy recorded by server, next PXE boot will exit to disk")
 			stateVerified = true
 			break
 		} else {

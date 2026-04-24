@@ -14,6 +14,12 @@ type ClientConfig struct {
 	// Set via --token flag or CLONR_TOKEN env var.
 	// Leave empty when the server has auth disabled.
 	AuthToken string
+
+	// ClientdBinPath is the absolute path to the clonr-clientd binary that is
+	// copied into the deployed rootfs during finalization. When empty, the deploy
+	// agent auto-detects the binary by searching alongside os.Args[0],
+	// /opt/clonr/bin/, and /usr/local/bin/. Set via CLONR_CLIENTD_BIN_PATH.
+	ClientdBinPath string
 }
 
 // LoadClientConfig populates ClientConfig from environment variables with
@@ -21,7 +27,8 @@ type ClientConfig struct {
 // after calling LoadClientConfig.
 func LoadClientConfig() ClientConfig {
 	return ClientConfig{
-		ServerURL: envOrDefault("CLONR_SERVER", "http://localhost:8080"),
-		AuthToken: os.Getenv("CLONR_TOKEN"),
+		ServerURL:      envOrDefault("CLONR_SERVER", "http://localhost:8080"),
+		AuthToken:      os.Getenv("CLONR_TOKEN"),
+		ClientdBinPath: os.Getenv("CLONR_CLIENTD_BIN_PATH"),
 	}
 }

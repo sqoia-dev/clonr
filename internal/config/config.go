@@ -22,6 +22,7 @@ type ServerConfig struct {
 	LogLevel        string        `json:"log_level"`        // debug, info, warn, error — default "info"
 	LogRetention    time.Duration `json:"log_retention"`    // from CLONR_LOG_RETENTION; default 14d
 	ClonrBinPath    string        `json:"clonr_bin_path"`   // CLONR_BIN_PATH: abs path to clonr CLI binary baked into initramfs; default /usr/local/bin/clonr
+	ClientdBinPath  string        `json:"clientd_bin_path"` // CLONR_CLIENTD_BIN_PATH: abs path to clonr-clientd binary copied into deployed rootfs; auto-detected when empty
 	// VerifyTimeout is the duration after deploy_completed_preboot_at within which
 	// the deployed OS must phone home via POST /verify-boot. ADR-0008.
 	// From CLONR_VERIFY_TIMEOUT (Go duration string, e.g. "5m"). Default: 5 minutes.
@@ -88,7 +89,8 @@ func LoadServerConfig() ServerConfig {
 		SessionSecure: os.Getenv("CLONR_SESSION_SECURE") == "1",
 		LogLevel:      envOrDefault("CLONR_LOG_LEVEL", "info"),
 		LogRetention:  parseLogRetention(),
-		ClonrBinPath:  envOrDefault("CLONR_BIN_PATH", "/usr/local/bin/clonr"),
+		ClonrBinPath:   envOrDefault("CLONR_BIN_PATH", "/usr/local/bin/clonr"),
+		ClientdBinPath: os.Getenv("CLONR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
 		VerifyTimeout: parseVerifyTimeout(),
 		PXE:           LoadPXEConfig(),
 		LDAPDataDir:   envOrDefault("CLONR_LDAP_DATA_DIR", "/var/lib/clonr/ldap"),
