@@ -1918,8 +1918,10 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 		mode os.FileMode
 	}{
 		{"var/log/sssd", 0o700},
+		{"var/lib/sss", 0o711},
 		{"var/lib/sss/db", 0o700},
 		{"var/lib/sss/mc", 0o755},
+		{"var/lib/sss/pipes", 0o755},
 		{"var/lib/sss/pipes/private", 0o700},
 		{"var/lib/sss/pubconf", 0o755},
 		{"var/lib/sss/gpo_cache", 0o750},
