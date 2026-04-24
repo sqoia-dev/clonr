@@ -306,10 +306,18 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 // (olcPPolicyHashCleartext: TRUE) hashes it using slapd's native crypt(3)
 // (glibc), ensuring bind verification works correctly.
 //
-// If forceChange is true, pwdReset is set to TRUE atomically with the
-// userPassword Replace, causing the ppolicy overlay to require the user to
+// If forceChange is true, pwdReset is set to TRUE in a second Modify after the
+// password is committed, causing the ppolicy overlay to require the user to
 // change their password at next login. If forceChange is false, pwdReset is
-// deleted (tolerating NoSuchAttribute so the operation is idempotent).
+// deleted in a second Modify, tolerating NoSuchAttribute so the call is
+// idempotent regardless of prior ppolicy state.
+//
+// IMPORTANT: pwdReset is handled in a separate Modify from userPassword.
+// Combining them in a single multi-change Modify causes slapd to roll back the
+// entire operation when pwdReset does not exist on the entry (NoSuchAttribute
+// applies to the full transaction, not just the offending change). Splitting
+// the writes makes the password replace unconditional and the pwdReset
+// cleanup best-effort.
 //
 // pwdChangedTime is intentionally NOT touched — it is NO-USER-MODIFICATION and
 // is managed entirely by the ppolicy overlay.
@@ -321,23 +329,31 @@ func (c *ditClient) SetPassword(uid, password string, forceChange bool) error {
 	defer conn.Close()
 
 	dn := c.userDN(uid)
-	modReq := goldap.NewModifyRequest(dn, nil)
-	modReq.Replace("userPassword", []string{password})
 
+	// Step 1: replace userPassword unconditionally.
+	pwReq := goldap.NewModifyRequest(dn, nil)
+	pwReq.Replace("userPassword", []string{password})
+	if err := conn.Modify(pwReq); err != nil {
+		return fmt.Errorf("ldap dit: set password for %s: %w", uid, err)
+	}
+
+	// Step 2: handle pwdReset in a separate Modify so a missing attribute
+	// cannot roll back the password change above.
+	resetReq := goldap.NewModifyRequest(dn, nil)
 	if forceChange {
-		modReq.Replace("pwdReset", []string{"TRUE"})
+		resetReq.Replace("pwdReset", []string{"TRUE"})
 	} else {
 		// Delete with empty value list removes the attribute. Tolerate
 		// NoSuchAttribute — the user may never have had pwdReset set.
-		modReq.Delete("pwdReset", []string{})
+		resetReq.Delete("pwdReset", []string{})
 	}
-
-	if err := conn.Modify(modReq); err != nil {
-		// If forceChange=false and pwdReset didn't exist, that's fine.
+	if err := conn.Modify(resetReq); err != nil {
 		if !forceChange && goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+			// pwdReset was absent — the password is already committed, so this
+			// is a no-op. Return success.
 			return nil
 		}
-		return fmt.Errorf("ldap dit: set password for %s: %w", uid, err)
+		return fmt.Errorf("ldap dit: set pwdReset for %s: %w", uid, err)
 	}
 	return nil
 }
