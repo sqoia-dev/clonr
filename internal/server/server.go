@@ -337,6 +337,9 @@ func (s *Server) buildRouter() chi.Router {
 		NetworkConfig: func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error) {
 			return s.networkMgr.NodeNetworkConfig(ctx, groupID)
 		},
+		SlurmNodeConfig: func(ctx context.Context, nodeID string) (*api.SlurmNodeConfig, error) {
+			return s.slurmMgr.NodeConfig(ctx, nodeID)
+		},
 		LookupDHCPLease: s.lookupDHCPLease,
 		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
 		ServerIP:        s.cfg.PXE.ServerIP,

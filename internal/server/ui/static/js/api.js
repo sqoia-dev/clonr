@@ -355,6 +355,9 @@ const API = {
         scriptHistory(scriptType)           { return API.get(`/slurm/scripts/${encodeURIComponent(scriptType)}/history`); },
         listScriptConfigs()                 { return API.get('/slurm/scripts/configs'); },
         setScriptConfig(scriptType, body)   { return API.put(`/slurm/scripts/${encodeURIComponent(scriptType)}/config`, body); },
+        // Render preview (dry-run)
+        renderPreview(filename, nodeId)     { return API.get(`/slurm/configs/${encodeURIComponent(filename)}/render/${encodeURIComponent(nodeId)}`); },
+
         // Builds
         listBuilds()                        { return API.get('/slurm/builds'); },
         getBuild(buildId)                   { return API.get(`/slurm/builds/${encodeURIComponent(buildId)}`); },

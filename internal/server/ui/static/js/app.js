@@ -3063,6 +3063,7 @@ const Pages = {
                     <div class="tab" id="node-tab-btn-config" onclick="Pages._switchNodeTab(this, 'tab-config', 'config')">Configuration</div>
                     <div class="tab" id="node-tab-btn-logs" onclick="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
                     <div class="tab" id="node-tab-btn-configpush" onclick="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
+                    <div class="tab" id="node-tab-btn-slurm" onclick="Pages._switchNodeTab(this, 'tab-slurm', 'slurm');Pages._onSlurmTabOpen('${escHtml(node.id)}')">Slurm</div>
                 </div>
 
                 <!-- Overview tab — inline editable -->
@@ -3596,6 +3597,40 @@ const Pages = {
                     })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" onclick="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
                 </div>`;
                 })()}
+
+                <!-- Slurm Role tab -->
+                <div id="tab-slurm" class="tab-panel">
+                    ${cardWrap('Slurm Role', `
+                        <div class="card-body" style="padding:16px">
+                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                                Assign Slurm roles to this node. The role determines which config files
+                                are deployed and which systemd services are enabled during imaging.
+                            </p>
+                            <div id="slurm-role-current" style="margin-bottom:12px;font-size:13px;color:var(--text-secondary)">
+                                Loading current role&hellip;
+                            </div>
+                            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                    <input type="checkbox" id="slurm-role-controller" value="controller"> Controller
+                                </label>
+                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                    <input type="checkbox" id="slurm-role-compute" value="compute"> Compute
+                                </label>
+                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                    <input type="checkbox" id="slurm-role-login" value="login"> Login
+                                </label>
+                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                    <input type="checkbox" id="slurm-role-dbd" value="dbd"> DBD
+                                </label>
+                            </div>
+                            <div id="slurm-role-save-row" style="display:flex;align-items:center;gap:10px">
+                                <button class="btn btn-primary btn-sm" id="slurm-role-save-btn"
+                                    onclick="Pages._saveSlurmRole('${escHtml(node.id)}')">Save Role</button>
+                                <span id="slurm-role-save-status" style="font-size:12px;color:var(--text-secondary)"></span>
+                            </div>
+                        </div>
+                    `)}
+                </div>
             `);
 
             // Store original values for revert on each editable tab.
@@ -4434,6 +4469,64 @@ const Pages = {
             resultEl.textContent = `Push failed: ${e.message}`;
         } finally {
             submitBtn.disabled = false;
+        }
+    },
+
+    // ── Slurm Role tab ────────────────────────────────────────────────────────
+
+    // _onSlurmTabOpen fetches the current roles for nodeId and checks the
+    // appropriate checkboxes. Called once when the Slurm tab is first opened.
+    async _onSlurmTabOpen(nodeId) {
+        const currentEl = document.getElementById('slurm-role-current');
+        try {
+            const data = await API.slurm.getNodeRole(nodeId);
+            const roles = data.roles || [];
+            // Update checkboxes.
+            ['controller', 'compute', 'login', 'dbd'].forEach(r => {
+                const cb = document.getElementById(`slurm-role-${r}`);
+                if (cb) cb.checked = roles.includes(r);
+            });
+            // Show current role badges.
+            if (currentEl) {
+                if (roles.length === 0) {
+                    currentEl.innerHTML = '<span class="badge badge-neutral">No role assigned</span>';
+                } else {
+                    currentEl.innerHTML = roles.map(r =>
+                        `<span class="badge badge-info" style="margin-right:4px">${escHtml(r)}</span>`
+                    ).join('');
+                }
+            }
+        } catch (err) {
+            if (currentEl) currentEl.textContent = 'Failed to load role: ' + err.message;
+        }
+    },
+
+    // _saveSlurmRole reads the checked role checkboxes and calls PUT /nodes/:id/slurm/role.
+    async _saveSlurmRole(nodeId) {
+        const btn = document.getElementById('slurm-role-save-btn');
+        const statusEl = document.getElementById('slurm-role-save-status');
+        const roles = ['controller', 'compute', 'login', 'dbd']
+            .filter(r => { const cb = document.getElementById(`slurm-role-${r}`); return cb && cb.checked; });
+        if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+        if (statusEl) statusEl.textContent = '';
+        try {
+            await API.slurm.setNodeRole(nodeId, { roles });
+            if (statusEl) { statusEl.textContent = 'Saved.'; statusEl.style.color = 'var(--success, green)'; }
+            // Refresh displayed badges.
+            const currentEl = document.getElementById('slurm-role-current');
+            if (currentEl) {
+                if (roles.length === 0) {
+                    currentEl.innerHTML = '<span class="badge badge-neutral">No role assigned</span>';
+                } else {
+                    currentEl.innerHTML = roles.map(r =>
+                        `<span class="badge badge-info" style="margin-right:4px">${escHtml(r)}</span>`
+                    ).join('');
+                }
+            }
+        } catch (err) {
+            if (statusEl) { statusEl.textContent = 'Error: ' + err.message; statusEl.style.color = 'var(--error, red)'; }
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Save Role'; }
         }
     },
 

@@ -219,7 +219,7 @@ const SlurmPages = {
 
     _configEditorHtml(config) {
         return cardWrap(`Edit: ${escHtml(config.filename)}`, `
-            <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;">
+            <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                 <span style="font-size:13px;color:var(--text-secondary);">Current version: <strong>v${config.version}</strong></span>
                 <a href="#/slurm/configs/${encodeURIComponent(config.filename)}/history" style="font-size:13px;color:var(--accent);">View history</a>
                 <a href="#/slurm/configs" style="font-size:13px;color:var(--accent);margin-left:auto;">Back to list</a>
@@ -234,29 +234,70 @@ const SlurmPages = {
                            background:var(--bg-input,#fff);color:var(--text);">
                 <button id="slurm-save-config-btn" class="btn btn-primary" style="font-size:13px;padding:6px 16px;">Save New Version</button>
             </div>
+            <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+                <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Preview rendered output for node</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                    <input type="text" id="slurm-preview-node-id" placeholder="Node ID (UUID)"
+                        style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;
+                               font-size:13px;font-family:monospace;background:var(--bg-input,#fff);color:var(--text);">
+                    <button id="slurm-preview-btn" class="btn btn-secondary" style="font-size:13px;padding:6px 14px;">Preview</button>
+                </div>
+                <div id="slurm-preview-result" style="display:none;"></div>
+            </div>
         `);
     },
 
     _bindEditorEvents(filename) {
         const btn = document.getElementById('slurm-save-config-btn');
-        if (!btn) return;
-        btn.addEventListener('click', async () => {
-            const content = document.getElementById('slurm-config-content').value;
-            const message = document.getElementById('slurm-config-message').value.trim();
-            if (!content.trim()) { App.toast('Content cannot be empty', 'error'); return; }
-            try {
-                btn.disabled = true;
-                btn.textContent = 'Saving…';
-                const result = await API.slurm.saveConfig(filename, { content, message });
-                App.toast(`Saved as version ${result.version}`, 'success');
-                SlurmPages.configEditor(filename);
-            } catch (err) {
-                App.toast('Save failed: ' + err.message, 'error');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Save New Version';
-            }
-        });
+        if (btn) {
+            btn.addEventListener('click', async () => {
+                const content = document.getElementById('slurm-config-content').value;
+                const message = document.getElementById('slurm-config-message').value.trim();
+                if (!content.trim()) { App.toast('Content cannot be empty', 'error'); return; }
+                try {
+                    btn.disabled = true;
+                    btn.textContent = 'Saving…';
+                    const result = await API.slurm.saveConfig(filename, { content, message });
+                    App.toast(`Saved as version ${result.version}`, 'success');
+                    SlurmPages.configEditor(filename);
+                } catch (err) {
+                    App.toast('Save failed: ' + err.message, 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = 'Save New Version';
+                }
+            });
+        }
+
+        // Preview button — renders the saved template for a specific node ID.
+        const previewBtn = document.getElementById('slurm-preview-btn');
+        const previewResult = document.getElementById('slurm-preview-result');
+        if (previewBtn && previewResult) {
+            previewBtn.addEventListener('click', async () => {
+                const nodeId = (document.getElementById('slurm-preview-node-id')?.value || '').trim();
+                if (!nodeId) { App.toast('Enter a Node ID to preview', 'error'); return; }
+                previewBtn.disabled = true;
+                previewBtn.textContent = 'Loading…';
+                previewResult.style.display = '';
+                previewResult.innerHTML = '<div class="loading" style="padding:8px 0"><div class="spinner" style="width:14px;height:14px;display:inline-block;margin-right:6px"></div>Rendering…</div>';
+                try {
+                    const data = await API.slurm.renderPreview(filename, nodeId);
+                    previewResult.innerHTML = `
+                        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">
+                            Rendered for node <code style="font-family:monospace">${escHtml(nodeId)}</code>
+                            &mdash; checksum: <code style="font-family:monospace">${escHtml((data.checksum||'').substring(0,16))}…</code>
+                        </div>
+                        <pre style="background:var(--bg-code,#f8fafc);border:1px solid var(--border);border-radius:6px;
+                                    padding:12px;font-size:12px;overflow:auto;max-height:400px;white-space:pre-wrap;
+                                    word-break:break-word;">${escHtml(data.rendered_content || '')}</pre>`;
+                } catch (err) {
+                    previewResult.innerHTML = `<div class="alert alert-error" style="margin:0;">Preview failed: ${escHtml(err.message)}</div>`;
+                } finally {
+                    previewBtn.disabled = false;
+                    previewBtn.textContent = 'Preview';
+                }
+            });
+        }
     },
 
     // ── Config history page ────────────────────────────────────────────────

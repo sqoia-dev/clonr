@@ -68,6 +68,10 @@ type NodesHandler struct {
 	// NetworkConfig, when non-nil, is called during RegisterNode to resolve the
 	// network profile for the node's group. Returns nil if no profile is assigned.
 	NetworkConfig func(ctx context.Context, groupID string) (*api.NetworkNodeConfig, error)
+	// SlurmNodeConfig, when non-nil, is called during RegisterNode to inject the
+	// rendered Slurm config for the specific node into the NodeConfig returned to
+	// the deploy agent. Returns nil if the Slurm module is disabled or not ready.
+	SlurmNodeConfig func(ctx context.Context, nodeID string) (*api.SlurmNodeConfig, error)
 	// LookupDHCPLease returns the DHCP-assigned IP for a MAC, or nil if no active lease.
 	// Used during RegisterNode to auto-populate InterfaceConfig from hardware discovery.
 	// May be nil — if so, DHCP lookup is skipped and interfaces are not auto-populated.
@@ -485,6 +489,16 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch network config (non-fatal)")
 		} else {
 			nodeCfg.NetworkConfig = netCfg
+		}
+	}
+
+	// Populate Slurm config if the module is enabled. The deploy agent writes
+	// rendered Slurm config files and enables Slurm/munge services during finalization.
+	if h.SlurmNodeConfig != nil && action == "deploy" {
+		if slurmCfg, err := h.SlurmNodeConfig(r.Context(), nodeCfg.ID); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch Slurm config (non-fatal)")
+		} else {
+			nodeCfg.SlurmConfig = slurmCfg
 		}
 	}
 

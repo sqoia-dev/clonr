@@ -241,6 +241,20 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		}
 	}
 
+	// Slurm module — write slurm.conf, gres.conf, etc., enable Slurm/munge services.
+	if cfg.SlurmConfig != nil {
+		log.Info().Str("cluster", cfg.SlurmConfig.ClusterName).
+			Int("configs", len(cfg.SlurmConfig.Configs)).
+			Msg("finalize: writing Slurm configuration")
+		if err := writeSlurmConfig(ctx, mountRoot, cfg.SlurmConfig); err != nil {
+			// Non-fatal: Slurm config failure should not abort a deployment.
+			// The node will boot without Slurm; operator can re-image to add Slurm.
+			log.Warn().Err(err).Msg("WARNING: finalize: Slurm config failed (non-fatal)")
+		} else {
+			log.Info().Msg("finalize: Slurm configuration written")
+		}
+	}
+
 	// Step 8: System accounts — inject local POSIX accounts and groups into the
 	// deployed filesystem before first boot. Services (slurm, munge, nfs) start
 	// before sssd; accounts must exist locally.
@@ -2023,6 +2037,156 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 	).CombinedOutput(); err != nil {
 		log.Warn().Err(err).Str("output", string(out)).
 			Msg("finalize: authselect in chroot failed (non-fatal) — PAM/nsswitch may need manual configuration")
+	}
+
+	return nil
+}
+
+// writeSlurmConfig writes Slurm config files, scripts, and service enablement into
+// the deployed filesystem rooted at mountRoot. All operations are non-fatal —
+// errors are logged as warnings so a Slurm config problem never aborts a deploy.
+//
+// What it does:
+//   - Creates /etc/slurm/, /etc/munge/, /var/spool/slurm{d,ctld}/, /var/log/slurm/,
+//     /var/log/munge/, /var/run/munge/
+//   - Writes each rendered config file from SlurmNodeConfig.Configs
+//   - Writes each script from SlurmNodeConfig.Scripts (mode 0755)
+//   - Writes munge.key if present (mode 0400, owner munge:munge)
+//   - Enables role-appropriate systemd services via chroot systemctl enable
+func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.SlurmNodeConfig) error {
+	if slurmCfg == nil {
+		return nil
+	}
+
+	log := logger()
+
+	// Determine which roles this node has based on which config files it received.
+	// slurmdbd.conf → controller or dbd; gres.conf → compute; slurm.conf → all.
+	hasSlurmdbd := false
+	hasGres := false
+	hasSlurmConf := false
+	for _, cf := range slurmCfg.Configs {
+		switch cf.Filename {
+		case "slurmdbd.conf":
+			hasSlurmdbd = true
+		case "gres.conf":
+			hasGres = true
+		case "slurm.conf":
+			hasSlurmConf = true
+		}
+	}
+	_ = hasSlurmConf // always written if present
+
+	// ── Create directories ────────────────────────────────────────────────────
+	dirs := []struct {
+		path string
+		mode os.FileMode
+	}{
+		{"etc/slurm", 0o755},
+		{"etc/munge", 0o700},
+		{"var/log/slurm", 0o755},
+		{"var/log/munge", 0o755},
+		{"var/run/munge", 0o755},
+	}
+	if hasGres || !hasSlurmdbd {
+		// compute node needs slurmd spool dir
+		dirs = append(dirs, struct {
+			path string
+			mode os.FileMode
+		}{"var/spool/slurmd", 0o755})
+	}
+	if hasSlurmdbd {
+		// controller/dbd needs slurmctld spool dir
+		dirs = append(dirs, struct {
+			path string
+			mode os.FileMode
+		}{"var/spool/slurmctld", 0o755})
+	}
+
+	for _, d := range dirs {
+		fullPath := filepath.Join(mountRoot, d.path)
+		if err := os.MkdirAll(fullPath, d.mode); err != nil {
+			log.Warn().Err(err).Str("path", d.path).Msg("finalize slurm: mkdir (non-fatal)")
+		}
+	}
+
+	// ── Write config files ────────────────────────────────────────────────────
+	fileModeMap := map[string]os.FileMode{
+		"slurmdbd.conf": 0o600,
+	}
+	for _, cf := range slurmCfg.Configs {
+		mode := os.FileMode(0o644)
+		if m, ok := fileModeMap[cf.Filename]; ok {
+			mode = m
+		}
+		destPath := filepath.Join(mountRoot, "etc", "slurm", cf.Filename)
+		if err := os.WriteFile(destPath, []byte(cf.Content), mode); err != nil {
+			log.Warn().Err(err).Str("filename", cf.Filename).Msg("finalize slurm: write config file (non-fatal)")
+			continue
+		}
+		log.Info().Str("filename", cf.Filename).Str("mode", cf.FileMode).
+			Msg("finalize slurm: wrote config file")
+	}
+
+	// ── Write scripts ─────────────────────────────────────────────────────────
+	for _, sf := range slurmCfg.Scripts {
+		if sf.DestPath == "" {
+			continue
+		}
+		// Scripts may live anywhere (e.g. /etc/slurm/prolog.sh, /usr/local/sbin/...).
+		destPath := filepath.Join(mountRoot, sf.DestPath)
+		// Ensure parent directory exists.
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			log.Warn().Err(err).Str("dest_path", sf.DestPath).Msg("finalize slurm: mkdir for script (non-fatal)")
+		}
+		if err := os.WriteFile(destPath, []byte(sf.Content), 0o755); err != nil {
+			log.Warn().Err(err).Str("script_type", sf.ScriptType).Str("dest_path", sf.DestPath).
+				Msg("finalize slurm: write script (non-fatal)")
+			continue
+		}
+		log.Info().Str("script_type", sf.ScriptType).Str("dest_path", sf.DestPath).
+			Msg("finalize slurm: wrote script")
+	}
+
+	// ── Fix ownership of slurm directories ───────────────────────────────────
+	for _, d := range []string{"/etc/slurm", "/var/log/slurm", "/var/spool/slurmd", "/var/spool/slurmctld"} {
+		fullPath := filepath.Join(mountRoot, d)
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			continue
+		}
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "chown", "-R", "slurm:slurm", d).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("path", d).Str("output", string(out)).
+				Msg("finalize slurm: chown slurm dir (non-fatal) — slurm user may not exist in image")
+		}
+	}
+
+	// ── Fix ownership of munge directories ───────────────────────────────────
+	for _, d := range []string{"/etc/munge", "/var/log/munge", "/var/run/munge"} {
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "chown", "-R", "munge:munge", d).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("path", d).Str("output", string(out)).
+				Msg("finalize slurm: chown munge dir (non-fatal) — munge user may not exist in image")
+		}
+	}
+
+	// ── Enable services in chroot ─────────────────────────────────────────────
+	// Always enable munge — required by all Slurm daemons.
+	services := []string{"munge.service"}
+	if hasGres {
+		// Compute node.
+		services = append(services, "slurmd.service")
+	}
+	if hasSlurmdbd {
+		// Controller or DBD node.
+		services = append(services, "slurmctld.service", "slurmdbd.service")
+	}
+
+	for _, svc := range services {
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "systemctl", "enable", svc).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("service", svc).Str("output", string(out)).
+				Msgf("finalize slurm: systemctl enable %s (non-fatal) — service may not be installed", svc)
+		} else {
+			log.Info().Str("service", svc).Msg("finalize slurm: enabled service")
+		}
 	}
 
 	return nil

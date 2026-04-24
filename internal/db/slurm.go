@@ -697,6 +697,38 @@ func (db *DB) SlurmListNodesByRole(ctx context.Context, role string) ([]string, 
 	return ids, rows.Err()
 }
 
+// SlurmNodeRoleEntry is a single (node_id, roles) pair returned by SlurmListAllNodeRoles.
+type SlurmNodeRoleEntry struct {
+	NodeID string
+	Roles  []string
+}
+
+// SlurmListAllNodeRoles returns all (node_id, roles) pairs in slurm_node_roles.
+// Used by the renderer to build the full node list for slurm.conf generation.
+func (db *DB) SlurmListAllNodeRoles(ctx context.Context) ([]SlurmNodeRoleEntry, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT node_id, roles FROM slurm_node_roles ORDER BY node_id`)
+	if err != nil {
+		return nil, fmt.Errorf("db: SlurmListAllNodeRoles: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []SlurmNodeRoleEntry
+	for rows.Next() {
+		var nodeID, rolesJSON string
+		if err := rows.Scan(&nodeID, &rolesJSON); err != nil {
+			return nil, err
+		}
+		var roles []string
+		_ = json.Unmarshal([]byte(rolesJSON), &roles)
+		if roles == nil {
+			roles = []string{}
+		}
+		entries = append(entries, SlurmNodeRoleEntry{NodeID: nodeID, Roles: roles})
+	}
+	return entries, rows.Err()
+}
+
 // SlurmRoleSummary returns a map of role → node count across all nodes.
 func (db *DB) SlurmRoleSummary(ctx context.Context) (map[string]int, error) {
 	rows, err := db.sql.QueryContext(ctx,

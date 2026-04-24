@@ -6,7 +6,9 @@ package slurm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -269,6 +271,8 @@ func (m *Manager) Status(ctx context.Context) (*SlurmModuleStatus, error) {
 
 // NodeConfig returns the SlurmNodeConfig struct for injection into api.NodeConfig
 // during the deploy pipeline. Returns nil if the module is not enabled or not ready.
+// It renders each config file for the specific node (resolving template variables)
+// and filters to only the files relevant to the node's assigned roles.
 func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNodeConfig, error) {
 	m.mu.RLock()
 	cfg := m.cfg
@@ -278,29 +282,115 @@ func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNode
 		return nil, nil
 	}
 
-	// Fetch current version of each managed file.
+	// Determine which files this node should receive based on its roles.
+	roles, err := m.db.SlurmGetNodeRoles(ctx, nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("slurm: NodeConfig: failed to fetch roles, using all managed files")
+		roles = []string{}
+	}
+
+	// FilesForRoles returns the role-filtered set. If the node has no roles
+	// assigned yet, fall back to all managed files so the deploy still works.
+	relevantFiles := FilesForRoles(roles)
+	if len(relevantFiles) == 0 {
+		relevantFiles = cfg.ManagedFiles
+	}
+
+	// Render all managed files for this node.
+	rendered, err := m.RenderAllForNode(ctx, nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("slurm: NodeConfig: render failed, falling back to raw content")
+		rendered = nil
+	}
+
+	// Build the Configs list, restricted to role-relevant files.
+	relevantSet := make(map[string]struct{}, len(relevantFiles))
+	for _, f := range relevantFiles {
+		relevantSet[f] = struct{}{}
+	}
+
 	var configs []api.SlurmConfigFile
 	for _, filename := range cfg.ManagedFiles {
+		if _, ok := relevantSet[filename]; !ok {
+			continue
+		}
+
 		row, err := m.db.SlurmGetCurrentConfig(ctx, filename)
 		if err != nil {
 			log.Warn().Err(err).Str("filename", filename).Msg("slurm: NodeConfig: skip missing file")
 			continue
 		}
+
+		content := row.Content
+		if rendered != nil {
+			if rc, ok := rendered[filename]; ok {
+				content = rc
+			}
+		}
+
+		mode := "0644"
+		if filename == "slurmdbd.conf" {
+			mode = "0600"
+		}
+
 		configs = append(configs, api.SlurmConfigFile{
 			Filename: row.Filename,
 			Path:     "/etc/slurm/" + row.Filename,
-			Content:  row.Content,
-			Checksum: row.Checksum,
-			FileMode: "0644",
+			Content:  content,
+			Checksum: checksumString(content),
+			FileMode: mode,
 			Owner:    "slurm:slurm",
 			Version:  row.Version,
+		})
+	}
+
+	// Collect scripts for role-relevant script types.
+	var scripts []api.SlurmScriptFile
+	scriptTypes := ScriptTypesForRoles(roles)
+	scriptConfigs, err := m.db.SlurmListScriptConfigs(ctx)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("slurm: NodeConfig: failed to list script configs")
+		scriptConfigs = nil
+	}
+
+	// Build a set of enabled script types for quick lookup.
+	enabledScripts := make(map[string]string) // scriptType → destPath
+	for _, sc := range scriptConfigs {
+		if sc.Enabled {
+			enabledScripts[sc.ScriptType] = sc.DestPath
+		}
+	}
+
+	for _, st := range scriptTypes {
+		if _, ok := enabledScripts[st]; !ok {
+			continue
+		}
+		row, err := m.db.SlurmGetCurrentScript(ctx, st)
+		if err != nil {
+			log.Warn().Err(err).Str("script_type", st).Msg("slurm: NodeConfig: skip missing script")
+			continue
+		}
+		scripts = append(scripts, api.SlurmScriptFile{
+			ScriptType: row.ScriptType,
+			DestPath:   row.DestPath,
+			Content:    row.Content,
+			Checksum:   row.Checksum,
+			Version:    row.Version,
 		})
 	}
 
 	return &api.SlurmNodeConfig{
 		ClusterName: cfg.ClusterName,
 		Configs:     configs,
+		Scripts:     scripts,
 	}, nil
+}
+
+// checksumString returns the hex-encoded SHA-256 of s.
+// Used to recompute the checksum after template rendering produces new content.
+func checksumString(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 // ─── Push ops helpers ─────────────────────────────────────────────────────────

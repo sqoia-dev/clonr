@@ -31,6 +31,7 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/slurm/configs/{filename}", m.handleGetConfig)
 	r.Put("/slurm/configs/{filename}", m.handleSaveConfig)
 	r.Get("/slurm/configs/{filename}/history", m.handleConfigHistory)
+	r.Get("/slurm/configs/{filename}/render/{node_id}", m.handleRenderPreview)
 
 	// Sync / drift status.
 	r.Get("/slurm/sync-status", m.handleSyncStatus)
@@ -190,6 +191,35 @@ func (m *Manager) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
 		files = append(files, configRowToAPI(row))
 	}
 	jsonResponse(w, map[string]interface{}{"filename": filename, "history": files, "total": len(files)}, http.StatusOK)
+}
+
+// handleRenderPreview is GET /api/v1/slurm/configs/{filename}/render/{node_id}.
+// Renders the specified config file template for the given node and returns the
+// result. Pure dry-run: no state is written, no files are deployed.
+func (m *Manager) handleRenderPreview(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+	nodeID := chi.URLParam(r, "node_id")
+
+	rendered, err := m.RenderAllForNode(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("filename", filename).Str("node_id", nodeID).
+			Msg("slurm: render preview failed")
+		jsonError(w, "render failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	content, ok := rendered[filename]
+	if !ok {
+		jsonError(w, "config file not found or not applicable for this node", http.StatusNotFound)
+		return
+	}
+
+	jsonResponse(w, map[string]string{
+		"filename":         filename,
+		"node_id":          nodeID,
+		"rendered_content": content,
+		"checksum":         checksumString(content),
+	}, http.StatusOK)
 }
 
 // ─── Sync / drift status ──────────────────────────────────────────────────────
