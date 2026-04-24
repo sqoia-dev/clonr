@@ -92,7 +92,8 @@
             <!-- Slurm module nav — Config editor gated on enabled; Settings always visible -->
             <div id="nav-slurm-section">
                 <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
-                <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-sidebar);opacity:0.5;padding:4px 12px 2px;">Slurm</div>
+                <details open>
+                <summary>Slurm</summary>
                 <div id="nav-slurm-managed" style="display:none;">
                     <a href="#/slurm/configs" class="nav-item" id="nav-slurm-configs">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -154,12 +155,14 @@
                     <span>Settings</span>
                     <span id="nav-slurm-status-badge" class="badge badge-neutral badge-sm" style="margin-left:6px;">Disabled</span>
                 </a>
+                </details>
             </div>
 
             <!-- LDAP module nav — Users+Groups gated on enabled; Settings always visible -->
             <div id="nav-ldap-section">
                 <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">
-                <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-sidebar);opacity:0.5;padding:4px 12px 2px;">LDAP</div>
+                <details open>
+                <summary>LDAP</summary>
                 <div id="nav-ldap-managed" style="display:none;">
                     <a href="#/ldap/users" class="nav-item" id="nav-ldap-users">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -182,6 +185,7 @@
                     <span>Settings</span>
                     <span id="nav-ldap-status-badge" class="badge badge-neutral badge-sm" style="display:none;margin-left:6px;">Disabled</span>
                 </a>
+                </details>
             </div>
         </nav>
 
