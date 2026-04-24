@@ -1910,6 +1910,35 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 		return fmt.Errorf("ldap finalize: mkdir sssd dir: %w", err)
 	}
 
+	// Create SSSD runtime directories required at boot.
+	// These are normally created by the sssd RPM scriptlets but may be
+	// missing if the image was scrubbed or built minimally.
+	for _, dir := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{"var/log/sssd", 0o700},
+		{"var/lib/sss/db", 0o700},
+		{"var/lib/sss/mc", 0o755},
+		{"var/lib/sss/pipes/private", 0o700},
+		{"var/lib/sss/pubconf", 0o755},
+		{"var/lib/sss/gpo_cache", 0o750},
+		{"etc/sssd/conf.d", 0o700},
+	} {
+		fullPath := filepath.Join(mountRoot, dir.path)
+		if err := os.MkdirAll(fullPath, dir.mode); err != nil {
+			log.Warn().Err(err).Str("path", dir.path).Msg("finalize: create sssd runtime dir (non-fatal)")
+		}
+	}
+
+	// Fix ownership of SSSD directories — sssd runs as the sssd user.
+	// Use chroot chown so the UIDs resolve from the image's /etc/passwd.
+	for _, d := range []string{"/var/log/sssd", "/var/lib/sss", "/etc/sssd"} {
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "chown", "-R", "sssd:sssd", d).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("path", d).Str("output", string(out)).Msg("finalize: chown sssd dir (non-fatal)")
+		}
+	}
+
 	sssdContent := renderSSSDConf(ldapCfg, domain)
 	sssdPath := filepath.Join(sssdDir, "sssd.conf")
 	if err := os.WriteFile(sssdPath, []byte(sssdContent), 0o600); err != nil {
