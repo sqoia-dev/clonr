@@ -459,6 +459,7 @@ PXE-booted nodes running from initramfs.`,
 			// ─────────────────────────────────────────────────────────────────
 
 			// Step 1: Discover hardware.
+			progressReporter.SetMessage("Discovering hardware")
 			printPhase(phaseInProgress, "Discovering hardware")
 			deployLog.Info().Str("component", "hardware").Msg("starting hardware discovery")
 			hw, err := hardware.Discover()
@@ -470,6 +471,7 @@ PXE-booted nodes running from initramfs.`,
 			printPhase(phaseDone, "Hardware discovered")
 
 			// Step 2: Get node config by primary MAC.
+			progressReporter.SetMessage("Fetching node configuration from server")
 			printPhase(phaseInProgress, "Fetching node config from server")
 			primaryMAC := primaryMACFromHW(hw)
 			if primaryMAC == "" {
@@ -495,6 +497,7 @@ PXE-booted nodes running from initramfs.`,
 			deployLog.Info().Str("component", "deploy").Str("hostname", nodeCfg.Hostname).Msg("node config loaded")
 
 			// Step 3: Get image details.
+			progressReporter.SetMessage("Fetching image details")
 			printPhase(phaseInProgress, "Fetching image details")
 			deployLog.Info().Str("component", "deploy").Str("image_id", flagImage).Msg("fetching image details")
 			img, err := c.GetImage(ctx, flagImage)
@@ -536,6 +539,7 @@ PXE-booted nodes running from initramfs.`,
 			}
 
 			// Step 4: Preflight.
+			progressReporter.SetMessage("Running preflight checks")
 			printPhase(phaseInProgress, "Running preflight checks")
 			deployLog.Info().Str("component", "deploy").Msg("running preflight checks")
 			progressReporter.StartPhase("preflight", 0)
@@ -545,6 +549,18 @@ PXE-booted nodes running from initramfs.`,
 				deployer = &deploy.BlockDeployer{}
 			default:
 				deployer = &deploy.FilesystemDeployer{}
+			}
+
+			// Wire progress reporter and serial console callback early so they
+			// are active during Deploy() as well as Finalize(). During download/
+			// extract the progress bar owns the console line; the reportStep
+			// calls in Deploy fire only at phase boundaries (not during streaming)
+			// so they do not fight with the \r progress bar overwrites.
+			if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
+				fd.Progress = progressReporter
+				fd.ConsoleCallback = func(msg string) {
+					printPhaseUpdate("Deploying", msg)
+				}
 			}
 
 			if err := deployer.Preflight(ctx, img.DiskLayout, *hw); err != nil {
@@ -643,10 +659,9 @@ PXE-booted nodes running from initramfs.`,
 			if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 				bs.SetClientdBinPath(cfg.ClientdBinPath)
 			}
-			// Wire progress reporter and serial console callback so Finalize can
-			// stream sub-step descriptions to the UI and console in real time.
+			// Switch the console callback label from "Deploying" to "Finalizing"
+			// now that we are entering the finalize phase. Progress is already set.
 			if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
-				fd.Progress = progressReporter
 				fd.ConsoleCallback = func(msg string) {
 					printPhaseUpdate("Finalizing", msg)
 				}
@@ -948,6 +963,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	defer reporter.Complete()
 
 	// Fetch image details.
+	reporter.SetMessage("Fetching image details")
 	printPhase(phaseInProgress, "Fetching image details")
 	img, err := c.GetImage(ctx, nodeCfg.BaseImageID)
 	if err != nil {
@@ -973,6 +989,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		Str("format", string(img.Format)).Msg("image details fetched")
 
 	// Resolve hardware for preflight.
+	reporter.SetMessage("Discovering hardware")
 	printPhase(phaseInProgress, "Discovering hardware")
 	hw, err := hardware.Discover()
 	if err != nil {
@@ -1029,6 +1046,17 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		deployer = &deploy.FilesystemDeployer{}
 	}
 
+	// Wire progress reporter and serial console callback early so they are
+	// active during Deploy() as well as Finalize(). The console callback
+	// label is updated to "Finalizing" before Finalize() is called below.
+	if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
+		fd.Progress = reporter
+		fd.ConsoleCallback = func(msg string) {
+			printPhaseUpdate("Deploying", msg)
+		}
+	}
+
+	reporter.SetMessage("Running preflight checks")
 	printPhase(phaseInProgress, "Running preflight checks")
 	deployLog.Info().Msg("running preflight checks")
 	reporter.StartPhase("preflight", 0)
@@ -1132,10 +1160,9 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 		bs.SetClientdBinPath(cfg.ClientdBinPath)
 	}
-	// Wire progress reporter and serial console callback so Finalize can
-	// stream sub-step descriptions to the UI and console in real time.
+	// Switch the console callback label from "Deploying" to "Finalizing"
+	// now that we are entering the finalize phase. Progress is already set.
 	if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
-		fd.Progress = reporter
 		fd.ConsoleCallback = func(msg string) {
 			printPhaseUpdate("Finalizing", msg)
 		}

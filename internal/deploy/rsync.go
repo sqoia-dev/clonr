@@ -121,13 +121,26 @@ func (d *FilesystemDeployer) SetClientdBinPath(p string) {
 
 // Preflight validates disk size and resolves the target disk.
 func (d *FilesystemDeployer) Preflight(ctx context.Context, layout api.DiskLayout, hw hardware.SystemInfo) error {
+	preflight := func(msg string) {
+		logger().Info().Msg("preflight: " + msg)
+		if d.Progress != nil {
+			d.Progress.SetMessage(msg)
+		}
+		if d.ConsoleCallback != nil {
+			d.ConsoleCallback(msg)
+		}
+	}
+
+	preflight("Scanning block devices")
 	target, err := selectTargetDisk(layout, hw)
 	if err != nil {
 		return err
 	}
+	preflight("Selecting target disk: " + target)
 
 	// Validate that the selected disk is large enough for the layout, producing
 	// an actionable error message that names both the disk and the image requirement.
+	preflight("Validating disk layout")
 	diskSize, sizeErr := diskSizeBytes(target)
 	if sizeErr == nil {
 		needed := totalLayoutBytes(layout)
@@ -173,6 +186,19 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	disk := opts.TargetDisk
 	if disk == "" {
 		disk = d.targetDisk
+	}
+
+	// reportStep sends a human-readable sub-step description to the UI progress
+	// reporter and the serial console callback (if set), mirroring the pattern
+	// used in Finalize. Called at phase boundaries (not during byte-streaming).
+	reportStep := func(msg string) {
+		logger().Info().Msg("deploy: " + msg)
+		if d.Progress != nil {
+			d.Progress.SetMessage(msg)
+		}
+		if d.ConsoleCallback != nil {
+			d.ConsoleCallback(msg)
+		}
 	}
 
 	logger().Info().Str("disk", disk).Msg("deploy: target disk selected")
@@ -243,6 +269,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	}
 
 	// Emit progress: partitioning phase.
+	reportStep("Creating partition table on " + disk)
 	logger().Info().Str("disk", disk).Int("partitions", len(d.layout.Partitions)).Msg("partitioning disk")
 	if progress != nil {
 		progress(0, 0, "partitioning")
@@ -267,6 +294,9 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 
 	// Create RAID arrays before partitioning for RAID-on-whole-disk topology.
 	if len(d.layout.RAIDArrays) > 0 && !rainOnPartitions {
+		for _, spec := range d.layout.RAIDArrays {
+			reportStep("Assembling RAID array: " + spec.Name)
+		}
 		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays")
 		if err := CreateRAIDArrays(ctx, d.layout, d.hw); err != nil {
 			doRollback("RAID array creation failed")
@@ -286,6 +316,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		}
 		return err // partitionDisk already produces an actionable error
 	}
+	reportStep("Partition table created")
 	logger().Info().Str("disk", disk).Msg("partitioning complete")
 	if opts.Reporter != nil {
 		opts.Reporter.EndPhase("")
@@ -294,6 +325,9 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// Create RAID arrays after partitioning for md-on-partitions topology.
 	// The partition devices (sda2, sdb2, etc.) now exist on the raw disks.
 	if len(d.layout.RAIDArrays) > 0 && rainOnPartitions {
+		for _, spec := range d.layout.RAIDArrays {
+			reportStep("Assembling RAID array: " + spec.Name)
+		}
 		logger().Info().Int("count", len(d.layout.RAIDArrays)).Msg("creating RAID arrays (md-on-partitions: after partitioning)")
 		if err := CreateRAIDArrays(ctx, d.layout, d.hw); err != nil {
 			doRollback("RAID array creation failed")
@@ -316,6 +350,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	}
 
 	// Emit progress: formatting phase.
+	reportStep("Formatting partitions")
 	logger().Info().Str("disk", disk).Msg("formatting partitions")
 	if progress != nil {
 		progress(0, 0, "formatting")
@@ -334,18 +369,21 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		}
 		return fmt.Errorf("deploy: create filesystems: %w", err)
 	}
+	reportStep("Filesystems created")
 	logger().Info().Str("devices", strings.Join(partDevs, ", ")).Msg("filesystems created")
 	if opts.Reporter != nil {
 		opts.Reporter.EndPhase("")
 	}
 
 	// Mount partitions.
+	reportStep("Mounting target filesystems")
 	logger().Info().Str("mount_root", opts.MountRoot).Msg("mounting partitions")
 	if err := d.mountPartitions(ctx, partDevs, opts.MountRoot); err != nil {
 		logger().Error().Err(err).Msg("partition mount failed")
 		doRollback("partition mount failed")
 		return fmt.Errorf("deploy: mount partitions: %w", err)
 	}
+	reportStep("Target filesystems mounted")
 	logger().Info().Str("mount_root", opts.MountRoot).Msg("partitions mounted")
 	// Always attempt unmount on exit.
 	defer d.unmountAll(opts.MountRoot)
@@ -360,6 +398,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	}
 
 	// ── Wait for the pre-fetched blob connection, then extract ────────────────
+	reportStep("Connecting to image server")
 	if progress != nil {
 		progress(0, 0, "downloading")
 	}
@@ -372,8 +411,10 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	}
 	defer blob.resp.Body.Close()
 	if blob.totalBytes > 0 {
+		reportStep("Downloading image")
 		logger().Info().Str("size", humanReadableBytes(blob.totalBytes)).Msg("image blob connection ready — extracting")
 	} else {
+		reportStep("Downloading image")
 		logger().Info().Msg("image blob connection ready — extracting (unknown size)")
 	}
 
@@ -425,6 +466,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// Attempt extraction with retries. On a watchdog-triggered stall or a
 	// truncated stream, close the current response, wait briefly, then re-issue
 	// a fresh HTTP request rather than retrying from the same dead TCP connection.
+	reportStep("Extracting image to disk")
 	var extractErr error
 	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
 		var body io.Reader
@@ -487,6 +529,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		}
 		return fmt.Errorf("deploy: extract: %w", extractErr)
 	}
+	reportStep("Image extracted successfully")
 	logger().Info().Msg("extraction complete")
 	if opts.Reporter != nil {
 		opts.Reporter.EndPhase("")
