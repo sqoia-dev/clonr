@@ -161,7 +161,7 @@ func CreateAPIKeyFull(ctx context.Context, database *db.DB, scope api.KeyScope, 
 }
 
 // CreateNodeScopedKey mints a fresh node-scoped API key bound to nodeID with a
-// 1-hour TTL. Any existing node-scoped keys for the same node are revoked atomically
+// 30-day TTL. Any existing node-scoped keys for the same node are revoked atomically
 // in the same database transaction as the insert, eliminating the window between
 // revoke and create where the node would temporarily have no valid key.
 //
@@ -173,7 +173,7 @@ func CreateNodeScopedKey(ctx context.Context, database *db.DB, nodeID string) (r
 		return "", err
 	}
 
-	exp := time.Now().Add(1 * time.Hour)
+	exp := time.Now().Add(30 * 24 * time.Hour)
 	rec := db.APIKeyRecord{
 		ID:          uuid.New().String(),
 		Scope:       api.KeyScopeNode,

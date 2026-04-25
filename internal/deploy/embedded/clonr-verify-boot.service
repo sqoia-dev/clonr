@@ -4,6 +4,7 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/clonr/node-token
 ConditionPathExists=/etc/clonr/verify-boot-url
+ConditionPathExists=!/usr/local/bin/clonr-clientd
 
 [Service]
 Type=oneshot

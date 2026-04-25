@@ -1,6 +1,7 @@
 package clientd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -125,6 +126,12 @@ func (c *Client) connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("clientd: read token: %w", err)
 	}
+
+	// Phone home before establishing the WebSocket. This is idempotent on the
+	// server (deploy_verified_booted_at is only set once), so calling it on
+	// every reconnect is safe. Running it here means the verify-boot call
+	// succeeds even if the WebSocket connection subsequently fails.
+	c.verifyBoot(token)
 
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+token)
@@ -802,6 +809,101 @@ func (c *Client) readToken() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// verifyBoot performs the POST /api/v1/nodes/{id}/verify-boot phone-home call.
+// It derives the HTTP base URL from the WebSocket URL, collects system information,
+// and POSTs the payload with the node token. This is non-fatal — errors are logged
+// and execution continues. The server only sets deploy_verified_booted_at once
+// (idempotent), so this is safe to call on every reconnect attempt.
+func (c *Client) verifyBoot(token string) {
+	// Read the verify-boot URL written by the deploy agent.
+	// It lives at /etc/clonr/verify-boot-url, placed there by injectPhoneHome.
+	verifyBootURL, err := os.ReadFile("/etc/clonr/verify-boot-url")
+	if err != nil {
+		// File not present means this node was not deployed with phone-home injection
+		// (e.g. manual install, or an older deploy). Skip silently.
+		log.Debug().Err(err).Msg("clientd: verify-boot-url not found — skipping verify-boot (non-fatal)")
+		return
+	}
+	url := strings.TrimSpace(string(verifyBootURL))
+	if url == "" {
+		log.Debug().Msg("clientd: verify-boot-url is empty — skipping verify-boot")
+		return
+	}
+
+	// Collect system information for the payload.
+	hostname, _ := os.Hostname()
+
+	var kernelVersion string
+	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		kernelVersion = strings.TrimSpace(string(data))
+	}
+
+	var uptimeSeconds float64
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		if fields := strings.Fields(string(data)); len(fields) >= 1 {
+			_, _ = fmt.Sscanf(fields[0], "%f", &uptimeSeconds)
+		}
+	}
+
+	// systemctl is-system-running: "running", "degraded", "starting", etc.
+	var systemctlState string
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, "systemctl", "is-system-running").Output()
+		cancel()
+		if err == nil || len(out) > 0 {
+			systemctlState = strings.TrimSpace(string(out))
+		}
+	}
+
+	payload := struct {
+		Hostname       string  `json:"hostname"`
+		KernelVersion  string  `json:"kernel_version"`
+		UptimeSeconds  float64 `json:"uptime_seconds"`
+		SystemctlState string  `json:"systemctl_state"`
+	}{
+		Hostname:       hostname,
+		KernelVersion:  kernelVersion,
+		UptimeSeconds:  uptimeSeconds,
+		SystemctlState: systemctlState,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: verify-boot: failed to marshal payload (non-fatal)")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Warn().Err(err).Str("url", url).Msg("clientd: verify-boot: failed to build request (non-fatal)")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Str("url", url).Msg("clientd: verify-boot: HTTP request failed (non-fatal)")
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		log.Info().
+			Str("node_id", c.nodeID).
+			Str("hostname", hostname).
+			Str("kernel", kernelVersion).
+			Str("systemctl_state", systemctlState).
+			Msg("clientd: verify-boot: phone-home succeeded")
+	} else {
+		log.Warn().
+			Int("status", resp.StatusCode).
+			Str("url", url).
+			Msg("clientd: verify-boot: unexpected HTTP status (non-fatal)")
+	}
 }
 
 // extractNodeID parses the node ID from the WebSocket URL path.
