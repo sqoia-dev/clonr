@@ -433,13 +433,17 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 // that config via configfile. This works regardless of the disk layout because
 // search scans all partitions rather than relying on a hardcoded device path.
 //
-// Module availability: grubx64.efi built by grub2-install --target=x86_64-efi
-// includes part_gpt, search, xfs, ext2, and fat built-in, so insmod is a
-// no-op when the module is already present but harmless otherwise.
+// Module availability: grub.efi is built at image-creation time by
+// grub2-mkimage with all required modules (part_gpt, search, xfs, ext2, fat)
+// compiled in and a disk-search config embedded. Alternatively, grub2-install
+// --target=x86_64-efi during deploy finalization produces a binary with the
+// same properties (modules compiled in). In both cases insmod is a no-op when
+// the module is already present but harmless otherwise.
 func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
 	const cfg = `# grub.cfg stub served by clonr — redirects to local disk config.
-# No insmod needed: grub.efi built by grub2-install has modules compiled in.
-# Modules can't be loaded over HTTP so insmod would fail silently here.
+# No insmod needed: grub.efi is built by grub2-mkimage at image-creation time
+# (or replaced by grub2-install during deploy finalization) with all required
+# modules compiled in. Modules can't be loaded over HTTP so insmod would fail.
 
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then

@@ -303,57 +303,88 @@ var grubEFICandidates = []string{
 	"EFI/BOOT/BOOTX64.EFI", // removable fallback, last resort
 }
 
-// buildStandaloneGrubEFI builds a self-contained grub.efi using grub2-mkimage
-// with modules from the extracted rootfs. The binary has an embedded config that
-// searches local disks for grub.cfg, so it works when chain-loaded over HTTP
-// without needing to fetch configs from the server.
+// buildStandaloneGrubEFI uses grub2-mkimage to build a standalone EFI binary
+// with all required modules compiled in and a disk-search config embedded.
+// This is the binary served by the clonr server for UEFI iPXE chain-boot.
+//
+// rootMnt is the mounted rootfs of the extracted image (for accessing its
+// /usr/lib/grub/x86_64-efi/ module directory — using the image's own modules
+// guarantees compatibility with the deployed OS).
+//
+// destPath is the full path where grub.efi should be written.
+//
+// Returns nil on success. On failure (grub2-mkimage missing, modules absent,
+// build error), returns an error so the caller can fall back to copying the
+// stock binary.
 func buildStandaloneGrubEFI(rootMnt, destPath string) error {
-	modDir := filepath.Join(rootMnt, "usr", "lib", "grub", "x86_64-efi")
-	if _, err := os.Stat(modDir); err != nil {
-		return fmt.Errorf("grub x86_64-efi modules not found at %s: %w", modDir, err)
+	// Check that grub2-mkimage is available on the host.
+	grubMkimage, err := exec.LookPath("grub2-mkimage")
+	if err != nil {
+		// Try alternate name on Debian/Ubuntu hosts.
+		if alt, err2 := exec.LookPath("grub-mkimage"); err2 == nil {
+			grubMkimage = alt
+		} else {
+			return fmt.Errorf("grub2-mkimage not found on host: %w", err)
+		}
 	}
 
-	// Embedded config: search local partitions for the on-disk grub.cfg.
-	// This is the same logic as the server's ServeGrubCfg endpoint, but baked
-	// into the binary so no HTTP fetch is needed after chain-loading.
-	embeddedCfg := `search --file --set=root /grub2/grub.cfg
+	// Check that the image's GRUB module directory exists.
+	modDir := filepath.Join(rootMnt, "usr", "lib", "grub", "x86_64-efi")
+	if _, err := os.Stat(modDir); err != nil {
+		return fmt.Errorf("grub modules not found at %s: %w", modDir, err)
+	}
+
+	// Embedded grub.cfg — searches local disks for the OS-installed grub.cfg
+	// and loads it via configfile. No HTTP/network modules needed because the
+	// search logic is built into the binary.
+	embeddedCfg := `# Embedded by clonr at image build time.
+# Searches local disks for the OS-installed grub.cfg and loads it.
+search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then
     configfile ($root)/grub2/grub.cfg
 fi
-search --file --set=root /boot/grub2/grub.cfg
-if [ -f ($root)/boot/grub2/grub.cfg ]; then
-    configfile ($root)/boot/grub2/grub.cfg
-fi
+
 search --file --set=root /EFI/rocky/grub.cfg
 if [ -f ($root)/EFI/rocky/grub.cfg ]; then
     configfile ($root)/EFI/rocky/grub.cfg
 fi
+
+# Last resort: try common GPT layouts.
 set root=(hd0,gpt2)
 if [ -f /grub2/grub.cfg ]; then
     configfile /grub2/grub.cfg
 fi
+
+set root=(hd0,gpt3)
+if [ -f /grub2/grub.cfg ]; then
+    configfile /grub2/grub.cfg
+fi
+
 echo "clonr: grub.cfg not found on any local partition"
-echo "Dropping to GRUB shell — check partition layout and grub.cfg location."
+echo "Dropping to GRUB shell for manual recovery."
 `
 
-	cfgFile, err := os.CreateTemp("", "clonr-grub-embed-*.cfg")
+	cfgFile, err := os.CreateTemp("", "clonr-grub-embedded-*.cfg")
 	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
+		return fmt.Errorf("create embedded cfg temp file: %w", err)
 	}
 	cfgPath := cfgFile.Name()
 	defer os.Remove(cfgPath)
 	if _, err := cfgFile.WriteString(embeddedCfg); err != nil {
 		cfgFile.Close()
-		return err
+		return fmt.Errorf("write embedded cfg: %w", err)
 	}
 	cfgFile.Close()
 
+	// Modules to compile in. This list covers reading GPT/MBR partitions on
+	// both XFS and ext-family filesystems, searching by file path, and loading
+	// a Linux kernel via configfile.
 	modules := []string{
 		"part_gpt", "part_msdos",
 		"xfs", "ext2", "fat",
 		"search", "search_fs_uuid", "search_fs_file", "search_label",
 		"normal", "linux", "configfile",
-		"echo", "test", "gzio",
+		"echo", "test", "minicmd",
 	}
 
 	args := []string{
@@ -361,14 +392,14 @@ echo "Dropping to GRUB shell — check partition layout and grub.cfg location."
 		"-o", destPath,
 		"-c", cfgPath,
 		"-d", modDir,
-		"-p", "",
+		"-p", "", // no default prefix; embedded config handles everything
 	}
 	args = append(args, modules...)
 
-	cmd := exec.Command("grub2-mkimage", args...)
+	cmd := exec.Command(grubMkimage, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("grub2-mkimage failed: %w\noutput: %s", err, string(out))
+		return fmt.Errorf("grub2-mkimage: %w\noutput: %s", err, string(out))
 	}
 	return nil
 }
@@ -389,7 +420,14 @@ func copyGrubEFI(rootMnt, rootfsDestDir string) {
 	// This produces a binary that works when chain-loaded over HTTP because
 	// all required modules (part_gpt, xfs, search, etc.) are compiled in.
 	if err := buildStandaloneGrubEFI(rootMnt, destPath); err == nil {
+		fmt.Fprintf(os.Stderr, "image: built standalone grub.efi at %s\n", destPath)
 		return
+	} else {
+		// Standalone build failed — fall back to copying the stock RPM binary.
+		// This is expected in environments where grub2-mkimage is unavailable.
+		// The deploy finalization copy-back (rsync.go after grub2-install) will
+		// eventually replace the binary; this fallback is better than no grub.efi.
+		fmt.Fprintf(os.Stderr, "image: standalone grub.efi build failed (%v) — falling back to stock RPM binary (chain-boot may fail)\n", err)
 	}
 
 	// Fallback: copy the stock grubx64.efi from the rootfs ESP.
