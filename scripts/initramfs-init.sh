@@ -280,10 +280,80 @@ if [ -f /tmp/clustr-deploy-success ]; then
     fi
 fi
 
+# ── Step 8b: optional dropbear SSH + screen setup ────────────────────────────
+# Gated by clustr.ssh=1 in the kernel cmdline. When enabled:
+#   - dropbear SSH starts on port 22 with a per-boot password
+#   - deploy agent runs inside a screen session named "clustr-deploy"
+#   - operator can: ssh root@<node-ip>  then  screen -r clustr-deploy
+ENABLE_SSH=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.ssh=' | cut -d= -f2 | tr -d '[:space:]' | head -1)
+SSH_PASS=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.ssh.pass=' | cut -d= -f2- | tr -d '[:space:]' | head -1)
+SSH_PASS="${SSH_PASS:-clustrdev}"
+
+if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
+    log "--- SSH debug access enabled ---"
+    log "  password : $SSH_PASS"
+
+    # Generate an ephemeral ed25519 host key.
+    mkdir -p /etc/dropbear
+    if [ -x /usr/sbin/dropbearkey ]; then
+        /usr/sbin/dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null && \
+            log "  host key : generated"
+    fi
+
+    # Write root password to /etc/shadow so dropbear can authenticate.
+    # busybox sh includes the 'passwd' applet on most builds; fall back to
+    # direct /etc/shadow manipulation if it is not available.
+    SHADOW_WRITTEN=0
+    if command -v passwd >/dev/null 2>&1; then
+        printf '%s\n%s\n' "$SSH_PASS" "$SSH_PASS" | passwd root 2>/dev/null && SHADOW_WRITTEN=1
+    fi
+    if [ "$SHADOW_WRITTEN" -eq 0 ] && command -v openssl >/dev/null 2>&1; then
+        SALT=$(head -c 8 /dev/urandom 2>/dev/null | base64 2>/dev/null | tr -d '/+=\n' | head -c 8)
+        HASH=$(printf '%s' "$SSH_PASS" | openssl passwd -1 -salt "$SALT" -stdin 2>/dev/null)
+        if [ -n "$HASH" ] && [ -f /etc/shadow ]; then
+            sed -i "s|^root:[^:]*:|root:${HASH}:|" /etc/shadow 2>/dev/null && SHADOW_WRITTEN=1
+        fi
+    fi
+    if [ "$SHADOW_WRITTEN" -eq 0 ]; then
+        log "  WARNING: could not set root password — password auth will fail"
+    fi
+
+    # Start dropbear: -E log to stderr, -B allow blank-password root if needed,
+    # -p 22, run in background.
+    /usr/sbin/dropbear -E -B -p 22 2>>"$LOG" &
+    DROPBEAR_PID=$!
+    log "  dropbear PID=$DROPBEAR_PID started on :22"
+    NODE_IP=$(ip addr show 2>/dev/null | grep 'inet ' | grep -v '127\.' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    log "  SSH : ssh root@${NODE_IP:-<node-ip>}  (password: $SSH_PASS)"
+    log "  Then: screen -r clustr-deploy"
+    log "--- end SSH info ---"
+fi
+
 log "running: /usr/bin/clustr deploy --auto --server ${CLUSTR_SERVER} --token <redacted>"
 
-/usr/bin/clustr deploy --auto --server "${CLUSTR_SERVER}" --token "${CLUSTR_TOKEN}" >> "$LOG" 2>&1
-CLUSTR_EXIT=$?
+if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/bin/screen ]; then
+    # Run deploy agent inside a named screen session so the operator can attach.
+    # The screen session runs in detached mode (-dm). We block by polling until
+    # the session exits, then read the exit code from /tmp/clustr-exit-code.
+    log "starting deploy agent in screen session 'clustr-deploy'..."
+    screen -dmS clustr-deploy sh -c \
+        "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" 2>&1 | tee -a \"$LOG\"; echo \$? > /tmp/clustr-exit-code; exec sh"
+    # Wait for the deploy to write its exit code.
+    WAITED=0
+    while [ ! -f /tmp/clustr-exit-code ]; do
+        sleep 5
+        WAITED=$((WAITED + 5))
+        # Log a heartbeat every 60 seconds so the log server shows progress.
+        case "$WAITED" in
+            60|120|180|300|600|900|1200|1800) log "  deploy in progress (${WAITED}s elapsed)..." ;;
+        esac
+    done
+    CLUSTR_EXIT=$(cat /tmp/clustr-exit-code 2>/dev/null | tr -d '[:space:]')
+    CLUSTR_EXIT="${CLUSTR_EXIT:-1}"
+else
+    /usr/bin/clustr deploy --auto --server "${CLUSTR_SERVER}" --token "${CLUSTR_TOKEN}" >> "$LOG" 2>&1
+    CLUSTR_EXIT=$?
+fi
 
 log "clustr exit: $CLUSTR_EXIT"
 
@@ -296,7 +366,12 @@ if [ "$CLUSTR_EXIT" -eq 0 ]; then
     reboot -f
 else
     log "deployment failed (exit $CLUSTR_EXIT) — sleeping to allow log collection"
-    log "(pull log: nc <node-ip> 9999)"
+    if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
+        log "SSH still active — connect to inspect: ssh root@<node-ip>  (password: $SSH_PASS)"
+        log "Attach to deploy session: screen -r clustr-deploy"
+    else
+        log "(pull log: nc <node-ip> 9999)"
+    fi
     # ── Step 9: loop on failure — PID 1 must not exit ─────────────────────────
     while true; do
         sleep 3600

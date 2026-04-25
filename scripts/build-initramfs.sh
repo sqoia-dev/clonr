@@ -70,6 +70,8 @@ declare -A TOOL_PACKAGES=(
     [file]="file:file"
     [sshpass]="sshpass:sshpass"
     [busybox]="busybox:busybox-static"
+    [dropbear]="dropbear:dropbear-bin"
+    [screen]="screen:screen"
 )
 
 # Remote execution / copy helpers — use local commands when on the same host.
@@ -594,6 +596,53 @@ ${transitive}"
     done
 
     echo "  [+] Deployment tools installed"
+
+    # ── dropbear SSH server ────────────────────────────────────────────────────
+    # dropbear is a small SSH server suitable for initramfs. When present,
+    # the init script starts it (gated by clustr.ssh=1 in the kernel cmdline)
+    # so the operator can SSH into a node during deploy to inspect failures.
+    #
+    # We install from the server rather than the build host to guarantee the
+    # binary matches the target kernel's libc. If dropbear is not available on
+    # the server, the feature is silently disabled — the build still succeeds.
+    echo "[+] Installing dropbear SSH server..."
+    DROPBEAR_PATH=$(remote_exec "command -v dropbear 2>/dev/null || command -v /usr/sbin/dropbear 2>/dev/null" || echo "")
+    if [[ -n "$DROPBEAR_PATH" ]]; then
+        mkdir -p "$WORKDIR/usr/sbin" "$WORKDIR/etc/dropbear"
+        if install_server_binary "$DROPBEAR_PATH" "$WORKDIR/usr/sbin"; then
+            # Also install dropbearkey for host-key generation at boot time.
+            DROPBEARKEY_PATH=$(remote_exec "command -v dropbearkey 2>/dev/null" || echo "")
+            if [[ -n "$DROPBEARKEY_PATH" ]]; then
+                install_server_binary "$DROPBEARKEY_PATH" "$WORKDIR/usr/sbin" || true
+            fi
+            echo "  [+] dropbear SSH server installed at /usr/sbin/dropbear"
+        else
+            echo "  [!] dropbear found but could not be installed — SSH-into-initramfs disabled" >&2
+        fi
+    else
+        echo "  [!] dropbear not found on ${CLUSTR_SERVER_HOST} — SSH-into-initramfs disabled" >&2
+        echo "       Install with: dnf install -y dropbear   # Rocky/RHEL" >&2
+        echo "       Install with: apt-get install -y dropbear-bin  # Debian/Ubuntu" >&2
+    fi
+
+    # ── screen ────────────────────────────────────────────────────────────────
+    # screen lets the operator attach to the deploy agent's session at runtime.
+    # When present, the deploy agent runs inside 'screen -S clustr-deploy' so
+    # the operator can 'screen -r clustr-deploy' after SSHing in.
+    echo "[+] Installing screen..."
+    SCREEN_PATH=$(remote_exec "command -v screen 2>/dev/null" || echo "")
+    if [[ -n "$SCREEN_PATH" ]]; then
+        mkdir -p "$WORKDIR/usr/bin"
+        if install_server_binary "$SCREEN_PATH" "$WORKDIR/usr/bin"; then
+            echo "  [+] screen installed at /usr/bin/screen"
+        else
+            echo "  [!] screen found but could not be installed — using direct exec fallback" >&2
+        fi
+    else
+        echo "  [!] screen not found on ${CLUSTR_SERVER_HOST} — using direct exec fallback" >&2
+        echo "       Install with: dnf install -y screen   # Rocky/RHEL" >&2
+        echo "       Install with: apt-get install -y screen  # Debian/Ubuntu" >&2
+    fi
 fi
 
 # Create symlinks for all busybox applets we need.

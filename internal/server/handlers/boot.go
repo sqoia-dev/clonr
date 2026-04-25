@@ -215,12 +215,14 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 
 			// Mint a fresh node-scoped token for this deploy run.
 			token := h.mintToken(r, nodeCfg.ID)
-			script, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
+			script, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
 			if genErr != nil {
 				log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script")
 				http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
 				return
 			}
+			log.Info().Str("mac", mac).Str("node_id", nodeCfg.ID).Str("ssh_pass", sshPass).
+				Msg("boot: deploy boot script served — SSH debug password for this boot")
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(script)
@@ -256,12 +258,14 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 					Str("node_id", created.ID).
 					Msg("boot: auto-registered unknown MAC — serving boot script with fresh token")
 				token := h.mintToken(r, created.ID)
-				autoScript, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
+				autoScript, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script for auto-registered node")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
 					return
 				}
+				log.Info().Str("mac", mac).Str("node_id", created.ID).Str("ssh_pass", sshPass).
+					Msg("boot: auto-register deploy boot script served — SSH debug password for this boot")
 				w.Header().Set("Content-Type", "text/plain")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(autoScript)
@@ -274,12 +278,14 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 
 	// Default: return the full clustr initramfs boot script with no token.
 	// Covers: requests without a MAC parameter, or auto-register failures.
-	script, err := pxe.GenerateBootScript(h.ServerURL, "")
+	script, sshPass, err := pxe.GenerateBootScript(h.ServerURL, "")
 	if err != nil {
 		log.Error().Err(err).Msg("boot: generate iPXE script")
 		http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
 		return
 	}
+	log.Info().Str("mac", mac).Str("ssh_pass", sshPass).
+		Msg("boot: tokenless boot script served — SSH debug password for this boot")
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(script)

@@ -2,6 +2,8 @@ package pxe
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"text/template"
@@ -28,9 +30,13 @@ import (
 // clustr.token is a short-lived node-scoped API key minted at PXE-serve time.
 // The initramfs init script parses it from /proc/cmdline and exports CLUSTR_TOKEN
 // so that `clustr deploy --auto` can authenticate against the server.
+//
+// clustr.ssh=1 enables the dropbear SSH server inside the initramfs for live
+// deploy inspection. clustr.ssh.pass is a random per-boot password logged by
+// the server at INFO level so the operator can find it via journalctl.
 const bootScriptTemplate = `#!ipxe
 set server-url {{.ServerURL}}
-kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clustr.server=${server-url} clustr.mac=${mac} clustr.token={{.Token}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
+kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clustr.server=${server-url} clustr.mac=${mac} clustr.token={{.Token}} clustr.ssh=1 clustr.ssh.pass={{.SSHPass}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
 initrd --name initramfs.img ${server-url}/api/v1/boot/initramfs.img
 boot
 `
@@ -40,19 +46,37 @@ var bootTmpl = template.Must(template.New("boot").Parse(bootScriptTemplate))
 // bootScriptData holds template vars for the iPXE boot script.
 type bootScriptData struct {
 	ServerURL string
-	Token     string // full clustr-node-<hex> token, embedded in kernel cmdline
+	Token   string // full clustr-node-<hex> token, embedded in kernel cmdline
+	SSHPass string // random per-boot password for dropbear SSH debug access
+}
+
+// randomSSHPass generates a short random hex string for use as a per-boot
+// dropbear password. 4 bytes → 8 hex chars: short enough to type, random
+// enough for an ephemeral debug credential on a private provisioning network.
+func randomSSHPass() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "clustrdev" // fallback if entropy source fails
+	}
+	return hex.EncodeToString(b)
 }
 
 // GenerateBootScript renders the iPXE boot script for the given server URL and
 // node-scoped deploy token. The MAC is left as an iPXE variable (${mac}) so iPXE
 // fills it at runtime.
-func GenerateBootScript(serverURL, token string) ([]byte, error) {
-	data := bootScriptData{ServerURL: serverURL, Token: token}
+//
+// A random SSH debug password is generated per call and embedded in the kernel
+// cmdline as clustr.ssh.pass=<value>. The password is returned as the second
+// return value so callers can log it at INFO level — operators can then retrieve
+// it via journalctl when they need to SSH into a deploying node.
+func GenerateBootScript(serverURL, token string) (script []byte, sshPass string, err error) {
+	sshPass = randomSSHPass()
+	data := bootScriptData{ServerURL: serverURL, Token: token, SSHPass: sshPass}
 	var buf bytes.Buffer
-	if err := bootTmpl.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("pxe/boot: render boot script: %w", err)
+	if execErr := bootTmpl.Execute(&buf, data); execErr != nil {
+		return nil, "", fmt.Errorf("pxe/boot: render boot script: %w", execErr)
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), sshPass, nil
 }
 
 // diskBootBIOSTemplate is the iPXE response for BIOS-firmware nodes in NodeStateDeployed.
