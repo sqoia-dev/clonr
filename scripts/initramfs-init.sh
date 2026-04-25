@@ -291,8 +291,8 @@ if [ "$CLONR_EXIT" -eq 0 ]; then
     log "deployment succeeded — rebooting into deployed OS in 3s"
     sync
     sleep 3
-    # reboot triggers the kernel to restart the machine. On BIOS/GPT systems
-    # with scsi0 first in boot order, the next boot loads GRUB from the disk.
+    # reboot triggers PXE again (net0 is always first in boot order).
+    # clonr serves an iPXE disk-boot script that chains grub.efi from the server.
     reboot -f
 else
     log "deployment failed (exit $CLONR_EXIT) — sleeping to allow log collection"
