@@ -19,21 +19,21 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Build static clonr client
+      - name: Build static clustr client
         env:
           TAG: ${{ github.ref_name }}
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath \
               -ldflags="-s -w -X main.version=${TAG}" \
-              -o bin/clonr \
-              ./cmd/clonr
+              -o bin/clustr \
+              ./cmd/clustr
 
       - name: Build initramfs
-        run: bash scripts/build-initramfs.sh bin/clonr
+        run: bash scripts/build-initramfs.sh bin/clustr
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
         with:
           append_body: false
-          files: initramfs-clonr.img
+          files: initramfs-clustr.img

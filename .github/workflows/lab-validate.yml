@@ -50,9 +50,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build clonr-serverd
+      - name: Build clustr-serverd
         run: |
-          GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o /tmp/clonr-serverd ./cmd/clonr-serverd
+          GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o /tmp/clustr-serverd ./cmd/clustr-serverd
 
       - name: Install SSH keys
         env:
@@ -69,8 +69,8 @@ jobs:
 
       - name: Run lab validation
         env:
-          CLONR_SERVER_URL: ${{ secrets.LAB_CLONR_SERVER_URL }}
-          CLONR_ADMIN_KEY: ${{ secrets.LAB_CLONR_ADMIN_KEY }}
+          CLUSTR_SERVER_URL: ${{ secrets.LAB_CLUSTR_SERVER_URL }}
+          CLUSTR_ADMIN_KEY: ${{ secrets.LAB_CLUSTR_ADMIN_KEY }}
           PROXMOX_HOST: ${{ secrets.LAB_PROXMOX_HOST }}
           PROXMOX_SSH_KEY: ~/.ssh/proxmox_key
           LAB_SSH_KEY: ~/.ssh/lab_server_key

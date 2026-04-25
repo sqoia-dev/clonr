@@ -1,6 +1,6 @@
-// Package bootassets embeds static boot-time binaries shipped with clonr-serverd.
+// Package bootassets embeds static boot-time binaries shipped with clustr-serverd.
 // These are served over HTTP by the BootHandler to PXE/UEFI HTTP boot clients
-// that need to chainload into iPXE before executing the clonr boot script.
+// that need to chainload into iPXE before executing the clustr boot script.
 package bootassets
 
 import _ "embed"

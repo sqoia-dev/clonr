@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // APIKeysHandler handles all /admin/api-keys endpoints.
@@ -130,9 +130,9 @@ func (h *APIKeysHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	var bearerPrefix string
 	if scope == api.KeyScopeAdmin {
-		bearerPrefix = "clonr-admin-"
+		bearerPrefix = "clustr-admin-"
 	} else {
-		bearerPrefix = "clonr-node-"
+		bearerPrefix = "clustr-node-"
 	}
 
 	resp := createKeyResponse{
@@ -255,9 +255,9 @@ func (h *APIKeysHandler) HandleRotate(w http.ResponseWriter, r *http.Request) {
 
 	var bearerPrefix string
 	if old.Scope == api.KeyScopeAdmin {
-		bearerPrefix = "clonr-admin-"
+		bearerPrefix = "clustr-admin-"
 	} else {
-		bearerPrefix = "clonr-node-"
+		bearerPrefix = "clustr-node-"
 	}
 
 	resp := createKeyResponse{

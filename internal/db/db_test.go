@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 func openTestDB(t *testing.T) *db.DB {
@@ -194,12 +194,12 @@ func TestBaseImage_BlobPath(t *testing.T) {
 		t.Errorf("blob path should be empty initially, got %q", path)
 	}
 
-	if err := d.SetBlobPath(ctx, img.ID, "/var/lib/clonr/images/"+img.ID+".blob"); err != nil {
+	if err := d.SetBlobPath(ctx, img.ID, "/var/lib/clustr/images/"+img.ID+".blob"); err != nil {
 		t.Fatalf("set blob path: %v", err)
 	}
 
 	path, _ = d.GetBlobPath(ctx, img.ID)
-	if path != "/var/lib/clonr/images/"+img.ID+".blob" {
+	if path != "/var/lib/clustr/images/"+img.ID+".blob" {
 		t.Errorf("blob path: got %q", path)
 	}
 }

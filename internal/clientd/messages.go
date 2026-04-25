@@ -1,5 +1,5 @@
 // Package clientd provides the shared message types and WebSocket client
-// for the clonr-clientd daemon.
+// for the clustr-clientd daemon.
 package clientd
 
 import "encoding/json"
@@ -160,7 +160,7 @@ type SlurmBinaryAckPayload struct {
 type SlurmAdminCmdPayload struct {
 	// Command is one of: "drain", "resume", "check_queue", "reconfigure".
 	Command string `json:"command"`
-	// Nodes is the list of Slurm node names (not clonr UUIDs) to act on.
+	// Nodes is the list of Slurm node names (not clustr UUIDs) to act on.
 	// For check_queue and reconfigure this may be empty.
 	Nodes []string `json:"nodes"`
 	// Reason is passed to scontrol drain (optional).

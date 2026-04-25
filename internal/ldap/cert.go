@@ -1,4 +1,4 @@
-// Package ldap implements the clonr LDAP module — slapd lifecycle management,
+// Package ldap implements the clustr LDAP module — slapd lifecycle management,
 // user/group CRUD, and node-side sssd configuration.
 package ldap
 
@@ -45,7 +45,7 @@ func generateCA(commonName string) (*certBundle, *rsa.PrivateKey, *x509.Certific
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			CommonName:   commonName,
-			Organization: []string{"clonr LDAP CA"},
+			Organization: []string{"clustr LDAP CA"},
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
@@ -78,7 +78,7 @@ func generateCA(commonName string) (*certBundle, *rsa.PrivateKey, *x509.Certific
 }
 
 // generateServerCert creates an RSA-4096 server certificate signed by the given
-// CA, valid for 5 years. SANs include the hostname, primary IP, and clonr.local.
+// CA, valid for 5 years. SANs include the hostname, primary IP, and clustr.local.
 // Per the design spec, we only bind ldaps:// on 636 — no StartTLS.
 func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCert *x509.Certificate) (*certBundle, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 4096)
@@ -95,7 +95,7 @@ func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCer
 	notAfter := notBefore.Add(5 * 365 * 24 * time.Hour)
 
 	// Populate SANs: DNS names + IP addresses.
-	dnsNames := []string{"clonr.local"}
+	dnsNames := []string{"clustr.local"}
 	if hostname != "" {
 		dnsNames = append(dnsNames, hostname)
 	}
@@ -118,7 +118,7 @@ func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCer
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			CommonName:   hostname,
-			Organization: []string{"clonr LDAP"},
+			Organization: []string{"clustr LDAP"},
 		},
 		DNSNames:    dnsNames,
 		IPAddresses: ipAddresses,

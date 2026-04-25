@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // newAPIKeyTestServer creates a test server pre-seeded with a known admin key.
@@ -41,7 +41,7 @@ func newAPIKeyTestServer(t *testing.T) (*httptest.Server, *http.Client, string, 
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	fullKey := "clonr-admin-" + rawKey
+	fullKey := "clustr-admin-" + rawKey
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -114,8 +114,8 @@ func TestAPIKeys_Create_Admin(t *testing.T) {
 		t.Fatal("expected raw 'key' in create response")
 	}
 	rawKey, _ := out["key"].(string)
-	if !strings.HasPrefix(rawKey, "clonr-admin-") {
-		t.Errorf("expected clonr-admin- prefix, got %q", rawKey)
+	if !strings.HasPrefix(rawKey, "clustr-admin-") {
+		t.Errorf("expected clustr-admin- prefix, got %q", rawKey)
 	}
 	apiKey, _ := out["api_key"].(map[string]any)
 	if apiKey["label"] != "ci-runner" {
@@ -141,8 +141,8 @@ func TestAPIKeys_Create_Node(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&out)
 
 	rawKey, _ := out["key"].(string)
-	if !strings.HasPrefix(rawKey, "clonr-node-") {
-		t.Errorf("expected clonr-node- prefix, got %q", rawKey)
+	if !strings.HasPrefix(rawKey, "clustr-node-") {
+		t.Errorf("expected clustr-node- prefix, got %q", rawKey)
 	}
 	apiKey, _ := out["api_key"].(map[string]any)
 	if apiKey["node_id"] != "test-node-123" {
@@ -246,7 +246,7 @@ func TestAPIKeys_Rotate(t *testing.T) {
 	_ = json.NewDecoder(rotateResp.Body).Decode(&rotated)
 
 	newRawKey, _ := rotated["key"].(string)
-	if !strings.HasPrefix(newRawKey, "clonr-admin-") {
+	if !strings.HasPrefix(newRawKey, "clustr-admin-") {
 		t.Errorf("new key prefix: got %q", newRawKey)
 	}
 	newAPIKey, _ := rotated["api_key"].(map[string]any)
@@ -292,7 +292,7 @@ func TestAPIKeys_ExpiredKey(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	_ = database.UpdateAPIKeyExpiry(context.Background(), id, &past)
 
-	fullKey := "clonr-admin-" + raw
+	fullKey := "clustr-admin-" + raw
 	resp := adminDo(t, client, ts, http.MethodGet, "/api/v1/admin/api-keys", "", fullKey)
 	defer resp.Body.Close()
 
@@ -337,7 +337,7 @@ func TestAPIKeys_RevokedKey(t *testing.T) {
 	}
 
 	// Now the revoked key should get 401 with key_revoked.
-	fullKey := "clonr-admin-" + raw
+	fullKey := "clustr-admin-" + raw
 	resp := adminDo(t, client, ts, http.MethodGet, "/api/v1/admin/api-keys", "", fullKey)
 	defer resp.Body.Close()
 

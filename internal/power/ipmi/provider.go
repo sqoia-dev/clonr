@@ -18,8 +18,8 @@
 //
 // Environment variables:
 //
-//	CLONR_IPMI_USE_RAW=true  — force raw chassis bootparam command for all BMCs
-//	CLONR_IPMI_EFI=true      — force UEFI boot mode when auto-detect fails
+//	CLUSTR_IPMI_USE_RAW=true  — force raw chassis bootparam command for all BMCs
+//	CLUSTR_IPMI_EFI=true      — force UEFI boot mode when auto-detect fails
 package ipmi
 
 import (
@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	coreipm "github.com/sqoia-dev/clonr/internal/ipmi"
-	"github.com/sqoia-dev/clonr/internal/power"
+	coreipm "github.com/sqoia-dev/clustr/internal/ipmi"
+	"github.com/sqoia-dev/clustr/internal/power"
 )
 
 // Provider adapts ipmi.Client to the power.Provider interface.
@@ -132,8 +132,8 @@ func (p *Provider) SetNextBoot(ctx context.Context, dev power.BootDevice) error 
 
 	opts := coreipm.BootOpts{
 		Persistent: true, // always persistent for deploy operations
-		EFI:        os.Getenv("CLONR_IPMI_EFI") == "true",
-		UseRaw:     quirks.UseRaw || os.Getenv("CLONR_IPMI_USE_RAW") == "true",
+		EFI:        os.Getenv("CLUSTR_IPMI_EFI") == "true",
+		UseRaw:     quirks.UseRaw || os.Getenv("CLUSTR_IPMI_USE_RAW") == "true",
 	}
 	if quirks.ForcePersistent {
 		opts.Persistent = true

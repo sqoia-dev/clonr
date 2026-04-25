@@ -9,10 +9,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/power"
-	"github.com/sqoia-dev/clonr/internal/reimage"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/power"
+	"github.com/sqoia-dev/clustr/internal/reimage"
 )
 
 // ─── Fake power providers ─────────────────────────────────────────────────────

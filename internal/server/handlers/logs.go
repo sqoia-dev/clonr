@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // nodeRateLimiter enforces a per-node request rate limit using a token-bucket

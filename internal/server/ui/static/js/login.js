@@ -53,7 +53,7 @@
                 try { body = await resp.json(); } catch (_) {}
 
                 // Clear any legacy localStorage key from the old modal flow.
-                try { localStorage.removeItem('clonr_admin_key'); } catch (_) {}
+                try { localStorage.removeItem('clustr_admin_key'); } catch (_) {}
 
                 if (body.force_password_change) {
                     window.location.href = '/set-password';

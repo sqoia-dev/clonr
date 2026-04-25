@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // newNodeScopedTestServer creates a test server pre-seeded with an admin key and a node.
@@ -42,7 +42,7 @@ func newNodeScopedTestServer(t *testing.T) (*server.Server, *httptest.Server, st
 	if err != nil {
 		t.Fatalf("create admin api key: %v", err)
 	}
-	fullAdminKey := "clonr-admin-" + rawAdminKey
+	fullAdminKey := "clustr-admin-" + rawAdminKey
 
 	// Register a node via UpsertByMAC (no FK on base_image_id for self-registered nodes).
 	nodeCfg := api.NodeConfig{
@@ -211,7 +211,7 @@ func TestImageAccess_NodeKeyBlockedForOtherImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateNodeScopedKey: %v", err)
 	}
-	token := "clonr-node-" + raw
+	token := "clustr-node-" + raw
 
 	// Node has no base_image_id assigned — requesting any image → 403.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/images/some-image-id", nil)
@@ -275,7 +275,7 @@ func TestDeployCallbacks_NodeKeyOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint key for node-A: %v", err)
 	}
-	tokenA := "clonr-node-" + rawA
+	tokenA := "clustr-node-" + rawA
 
 	// Node-A key on node-A's deploy-complete → should succeed (200 or 204).
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/nodes/"+nodeA.ID+"/deploy-complete",

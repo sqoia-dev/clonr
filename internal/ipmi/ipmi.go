@@ -76,7 +76,7 @@ type BootOpts struct {
 	// UseRaw forces the raw `ipmitool raw 0x00 0x08 …` path instead of the
 	// friendly `ipmitool chassis bootdev` command. Set automatically for BMC
 	// vendors known to ignore the friendly command (e.g. old Dell iDRAC5/6,
-	// Supermicro X9). Can also be forced globally via $CLONR_IPMI_USE_RAW=true.
+	// Supermicro X9). Can also be forced globally via $CLUSTR_IPMI_USE_RAW=true.
 	UseRaw bool
 }
 
@@ -308,7 +308,7 @@ func (c *Client) SetBootDisk(ctx context.Context) error {
 // persistence, EFI mode, and raw vs. friendly command path.
 //
 // Strategy:
-//  1. If opts.UseRaw or the $CLONR_IPMI_USE_RAW env var is set, go directly to
+//  1. If opts.UseRaw or the $CLUSTR_IPMI_USE_RAW env var is set, go directly to
 //     the raw chassis bootparam command (IPMI spec table 28-14).
 //  2. Otherwise attempt the friendly `ipmitool chassis bootdev` command first.
 //  3. If that fails (non-zero exit), fall back to the raw command automatically.
@@ -316,12 +316,12 @@ func (c *Client) SetBootDisk(ctx context.Context) error {
 // This ensures the override sticks on BMCs that silently ignore the friendly
 // path (old Dell iDRAC5/6, Supermicro X9/X10 in certain firmware revisions).
 func (c *Client) SetBootDevWithOpts(ctx context.Context, dev BootDevice, opts BootOpts) error {
-	// Env override: CLONR_IPMI_USE_RAW=true forces raw path.
-	if os.Getenv("CLONR_IPMI_USE_RAW") == "true" {
+	// Env override: CLUSTR_IPMI_USE_RAW=true forces raw path.
+	if os.Getenv("CLUSTR_IPMI_USE_RAW") == "true" {
 		opts.UseRaw = true
 	}
-	// Env override: CLONR_IPMI_EFI=true forces UEFI mode when auto-detect fails.
-	if os.Getenv("CLONR_IPMI_EFI") == "true" {
+	// Env override: CLUSTR_IPMI_EFI=true forces UEFI mode when auto-detect fails.
+	if os.Getenv("CLUSTR_IPMI_EFI") == "true" {
 		opts.EFI = true
 	}
 

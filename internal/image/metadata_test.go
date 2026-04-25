@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/image"
+	"github.com/sqoia-dev/clustr/internal/image"
 )
 
 // testMetadata returns a fully-populated ImageMetadata for round-trip tests.
@@ -38,7 +38,7 @@ func testMetadata(imageID string) image.ImageMetadata {
 			},
 		},
 		DefaultKernelArgs:  []string{"console=ttyS0,115200", "rd.shell"},
-		PostInstallScripts: []string{"/usr/local/sbin/clonr-firstboot.sh"},
+		PostInstallScripts: []string{"/usr/local/sbin/clustr-firstboot.sh"},
 	}
 }
 

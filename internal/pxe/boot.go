@@ -25,12 +25,12 @@ import (
 // The --name form (`initrd --name initramfs.img`) is required ONLY when multiple
 // initrds are loaded and must be referenced by name in the cmdline — skip it here.
 //
-// clonr.token is a short-lived node-scoped API key minted at PXE-serve time.
-// The initramfs init script parses it from /proc/cmdline and exports CLONR_TOKEN
-// so that `clonr deploy --auto` can authenticate against the server.
+// clustr.token is a short-lived node-scoped API key minted at PXE-serve time.
+// The initramfs init script parses it from /proc/cmdline and exports CLUSTR_TOKEN
+// so that `clustr deploy --auto` can authenticate against the server.
 const bootScriptTemplate = `#!ipxe
 set server-url {{.ServerURL}}
-kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clonr.server=${server-url} clonr.mac=${mac} clonr.token={{.Token}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
+kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clustr.server=${server-url} clustr.mac=${mac} clustr.token={{.Token}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
 initrd --name initramfs.img ${server-url}/api/v1/boot/initramfs.img
 boot
 `
@@ -40,7 +40,7 @@ var bootTmpl = template.Must(template.New("boot").Parse(bootScriptTemplate))
 // bootScriptData holds template vars for the iPXE boot script.
 type bootScriptData struct {
 	ServerURL string
-	Token     string // full clonr-node-<hex> token, embedded in kernel cmdline
+	Token     string // full clustr-node-<hex> token, embedded in kernel cmdline
 }
 
 // GenerateBootScript renders the iPXE boot script for the given server URL and
@@ -108,7 +108,7 @@ goto disk
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
 // Presents a 5-second boot menu. The default "disk" action chain-loads grubx64.efi
-// directly from the clonr server (served from the image's extracted EFI binary).
+// directly from the clustr server (served from the image's extracted EFI binary).
 // This is more reliable than plain `exit` on OVMF, which depends on BootOrder being
 // correctly set via efibootmgr — chain-loading works regardless of BootOrder state.
 //
@@ -178,11 +178,11 @@ var diskBootUEFITmpl = template.Must(template.New("diskboot-uefi").Parse(diskBoo
 // diskBootScriptData holds template vars for the disk boot script.
 type diskBootScriptData struct {
 	Hostname  string
-	// ServerURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
+	// ServerURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
 	// Used to build the grub.efi chain URL and the reimage re-chain URL.
 	// The ${mac} variable in the template is expanded by iPXE at runtime.
 	ServerURL string
-	// Version is the clonr server version string displayed in the boot menu.
+	// Version is the clustr server version string displayed in the boot menu.
 	Version string
 }
 
@@ -205,7 +205,7 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 // firmware must be "bios" or "uefi" (case-insensitive). Any value other than
 // "bios" is treated as UEFI (fail-safe: UEFI is the default for new images).
 //
-// serverURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
+// serverURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
 // It is embedded in the boot script for the grub.efi chain URL and the reimage
 // re-chain URL. The ${mac} variable in the script is expanded by iPXE at runtime.
 func GenerateDiskBootScript(hostname, firmware, serverURL, version string) ([]byte, error) {

@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,30 +49,30 @@ type FilesystemDeployer struct {
 	targetDisk string
 	hw         hardware.SystemInfo
 
-	// NodeToken is the node-scoped Bearer token written to /etc/clonr/node-token
+	// NodeToken is the node-scoped Bearer token written to /etc/clustr/node-token
 	// inside the deployed rootfs during Finalize. ADR-0008.
 	// Leave empty to skip phone-home injection (e.g. in tests or non-auto mode).
 	NodeToken string
 
 	// VerifyBootURL is the full URL for the verify-boot endpoint, e.g.
-	// "http://clonr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
-	// Written to /etc/clonr/verify-boot-url inside the deployed rootfs. ADR-0008.
+	// "http://clustr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
+	// Written to /etc/clustr/verify-boot-url inside the deployed rootfs. ADR-0008.
 	VerifyBootURL string
 
-	// ClientdURL is the WebSocket URL for clonr-clientd, e.g.
-	// "ws://clonr-server:8080/api/v1/nodes/<nodeID>/clientd/ws".
-	// Written to /etc/clonr/clonrd-url inside the deployed rootfs.
+	// ClientdURL is the WebSocket URL for clustr-clientd, e.g.
+	// "ws://clustr-server:8080/api/v1/nodes/<nodeID>/clientd/ws".
+	// Written to /etc/clustr/clustrd-url inside the deployed rootfs.
 	// Leave empty to skip clientd injection.
 	ClientdURL string
 
-	// ClientdBinPath is the filesystem path to the clonr-clientd binary that
-	// is copied into the deployed rootfs at /usr/local/bin/clonr-clientd.
+	// ClientdBinPath is the filesystem path to the clustr-clientd binary that
+	// is copied into the deployed rootfs at /usr/local/bin/clustr-clientd.
 	// Empty means auto-detect via findClientdBin (searches alongside os.Args[0],
-	// /opt/clonr/bin/, and /usr/local/bin/).
+	// /opt/clustr/bin/, and /usr/local/bin/).
 	ClientdBinPath string
 
 	// ImageDir is the server-side base directory where image subdirectories live
-	// (e.g. /var/lib/clonr/images). When set together with ImageID, the
+	// (e.g. /var/lib/clustr/images). When set together with ImageID, the
 	// grub2-install-built grubx64.efi is copied back to
 	// <ImageDir>/<ImageID>/grub.efi after UEFI bootloader installation so the
 	// server serves the module-compiled binary for future UEFI chain-boots.
@@ -108,12 +108,12 @@ func (d *FilesystemDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
 }
 
 // SetClientdURL implements ClientdInjector. Call before Finalize to enable
-// clonr-clientd WebSocket agent injection.
+// clustr-clientd WebSocket agent injection.
 func (d *FilesystemDeployer) SetClientdURL(clientdURL string) {
 	d.ClientdURL = clientdURL
 }
 
-// SetClientdBinPath sets the path to the clonr-clientd binary copied into the
+// SetClientdBinPath sets the path to the clustr-clientd binary copied into the
 // deployed rootfs. Call before Finalize. Empty means auto-detect.
 func (d *FilesystemDeployer) SetClientdBinPath(p string) {
 	d.ClientdBinPath = p
@@ -210,7 +210,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	type blobResult struct {
 		resp             *http.Response
 		totalBytes       int64
-		serverChecksum   string // X-Clonr-Blob-SHA256 response header, if present
+		serverChecksum   string // X-Clustr-Blob-SHA256 response header, if present
 		err              error
 	}
 	blobCh := make(chan blobResult, 1)
@@ -235,7 +235,7 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 			blobCh <- blobResult{err: fmt.Errorf("HTTP %d fetching blob from %s", resp.StatusCode, opts.ImageURL)}
 			return
 		}
-		serverChecksum := resp.Header.Get("X-Clonr-Blob-SHA256")
+		serverChecksum := resp.Header.Get("X-Clustr-Blob-SHA256")
 		blobCh <- blobResult{resp: resp, totalBytes: resp.ContentLength, serverChecksum: serverChecksum}
 	}()
 
@@ -418,11 +418,11 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		logger().Info().Msg("image blob connection ready — extracting (unknown size)")
 	}
 
-	// Prefer the server-advertised tar checksum (X-Clonr-Blob-SHA256) over the
+	// Prefer the server-advertised tar checksum (X-Clustr-Blob-SHA256) over the
 	// image-record checksum. For filesystem-format images the image record stores a
 	// directory-level hash (sha256 of the rootfs tree), NOT a tar stream hash, so it
 	// cannot be used to verify the tar blob. Only use it when the server confirms it
-	// is a tar stream hash via X-Clonr-Blob-SHA256. Without the header, skip
+	// is a tar stream hash via X-Clustr-Blob-SHA256. Without the header, skip
 	// verification entirely so the first-stream case (before the server caches the
 	// tar checksum sidecar) does not falsely reject a correct download.
 	expectedChecksum := opts.ExpectedChecksum
@@ -431,21 +431,21 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 			logger().Warn().
 				Str("img_checksum", expectedChecksum).
 				Str("server_header", blob.serverChecksum).
-				Msg("X-Clonr-Blob-SHA256 header differs from image record checksum — using header value (tar stream hash)")
+				Msg("X-Clustr-Blob-SHA256 header differs from image record checksum — using header value (tar stream hash)")
 		}
 		expectedChecksum = blob.serverChecksum
 		logger().Info().Str("sha256", expectedChecksum).
 			Msg("using server-advertised tar checksum for integrity verification")
 	} else {
-		// No X-Clonr-Blob-SHA256 header: the image record checksum is a directory
+		// No X-Clustr-Blob-SHA256 header: the image record checksum is a directory
 		// hash, not a tar stream hash — using it would cause a false mismatch.
 		// Skip integrity verification; the server will cache the tar checksum after
 		// the first successful stream and advertise it on subsequent downloads.
 		if expectedChecksum != "" {
-			logger().Warn().Msg("server did not advertise X-Clonr-Blob-SHA256; image record checksum is a directory hash and cannot verify the tar stream — skipping integrity verification for this stream")
+			logger().Warn().Msg("server did not advertise X-Clustr-Blob-SHA256; image record checksum is a directory hash and cannot verify the tar stream — skipping integrity verification for this stream")
 			expectedChecksum = ""
 		} else {
-			logger().Warn().Msg("server did not advertise X-Clonr-Blob-SHA256 and no checksum in image record — skipping integrity verification")
+			logger().Warn().Msg("server did not advertise X-Clustr-Blob-SHA256 and no checksum in image record — skipping integrity verification")
 		}
 	}
 
@@ -1008,7 +1008,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		return fmt.Errorf("deploy: finalize: phone-home injection: %w", err)
 	}
 
-	// ── clonr-clientd injection ───────────────────────────────────────────────
+	// ── clustr-clientd injection ───────────────────────────────────────────────
 	// Non-fatal: clientd missing means no live heartbeat, but the node boots fine.
 	reportStep("Injecting node agent")
 	if err := injectClientd(mountRoot, d.ClientdURL, d.ClientdBinPath); err != nil {

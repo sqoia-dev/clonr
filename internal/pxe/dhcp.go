@@ -1,4 +1,4 @@
-// Package pxe provides a built-in DHCP/TFTP/iPXE server for clonr-serverd.
+// Package pxe provides a built-in DHCP/TFTP/iPXE server for clustr-serverd.
 // It handles PXE boot requests from bare-metal nodes on the provisioning network,
 // assigns IPs, and chainloads into iPXE.
 package pxe
@@ -23,7 +23,7 @@ type leaseEntry struct {
 }
 
 // NOTE: DHCP leases are stored in memory only and are lost on server restart.
-// This is an intentional tradeoff: clonr targets isolated provisioning networks
+// This is an intentional tradeoff: clustr targets isolated provisioning networks
 // where nodes PXE-boot on demand. A node that re-appears after a restart will
 // simply acquire a new lease from the pool. Persistent lease storage (e.g.
 // a SQLite file) is not implemented and is not required for this use case.
@@ -36,7 +36,7 @@ type DHCPServer struct {
 	rangeEnd   net.IP
 	subnetCIDR int    // prefix length for DHCP option 1 (subnet mask), e.g. 24
 	leaseDur   time.Duration
-	httpPort   string // port of the clonr-serverd HTTP API (for iPXE chainload URL)
+	httpPort   string // port of the clustr-serverd HTTP API (for iPXE chainload URL)
 
 	mu     sync.Mutex
 	leases map[string]leaseEntry // keyed by MAC string
@@ -157,7 +157,7 @@ func (d *DHCPServer) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.
 	isPXEClient := strings.HasPrefix(vendorClass, "PXEClient")
 	isIPXE := strings.Contains(userClass, "iPXE")
 	// isNonPXE covers deployed-OS clients that request DHCP for network
-	// configuration after first boot. The clonr provisioning network is also
+	// configuration after first boot. The clustr provisioning network is also
 	// the OS management network, so we serve all DHCP clients — not just PXE.
 	isNonPXE := !isPXEClient && !isIPXE
 

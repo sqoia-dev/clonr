@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // newAuthTestServer creates a test server pre-seeded with an admin API key
-// and the default clonr/clonr bootstrap user (via BootstrapDefaultUser).
+// and the default clustr/clustr bootstrap user (via BootstrapDefaultUser).
 func newAuthTestServer(t *testing.T) (*server.Server, *httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -37,7 +37,7 @@ func newAuthTestServer(t *testing.T) (*server.Server, *httptest.Server, string) 
 		SessionSecure: false,
 	}
 
-	// Bootstrap the default user (clonr/clonr) — this is what the real server does at startup.
+	// Bootstrap the default user (clustr/clustr) — this is what the real server does at startup.
 	if err := server.BootstrapDefaultUser(context.Background(), database); err != nil {
 		t.Fatalf("bootstrap default user: %v", err)
 	}
@@ -49,7 +49,7 @@ func newAuthTestServer(t *testing.T) (*server.Server, *httptest.Server, string) 
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	fullKey := "clonr-admin-" + rawKey
+	fullKey := "clustr-admin-" + rawKey
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -72,7 +72,7 @@ func TestLogin_UsernamePassword_HappyPath(t *testing.T) {
 	_, ts, _ := newAuthTestServer(t)
 	client := clientWithJar(t)
 
-	body := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	body := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -92,21 +92,21 @@ func TestLogin_UsernamePassword_HappyPath(t *testing.T) {
 		t.Error("expected {ok:true} in login response")
 	}
 	if out["force_password_change"] != true {
-		t.Error("expected force_password_change=true for default clonr user")
+		t.Error("expected force_password_change=true for default clustr user")
 	}
 
 	// Verify session cookie is set.
 	found := false
 	for _, c := range resp.Cookies() {
-		if c.Name == "clonr_session" && c.Value != "" {
+		if c.Name == "clustr_session" && c.Value != "" {
 			found = true
 			if !c.HttpOnly {
-				t.Error("clonr_session cookie should be HttpOnly")
+				t.Error("clustr_session cookie should be HttpOnly")
 			}
 		}
 	}
 	if !found {
-		t.Error("clonr_session cookie not set after login")
+		t.Error("clustr_session cookie not set after login")
 	}
 }
 
@@ -114,7 +114,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 	_, ts, _ := newAuthTestServer(t)
 	client := clientWithJar(t)
 
-	body := strings.NewReader(`{"username":"clonr","password":"wrongpassword"}`)
+	body := strings.NewReader(`{"username":"clustr","password":"wrongpassword"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -176,8 +176,8 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	_, ts, _ := newAuthTestServer(t)
 	client := clientWithJar(t)
 
-	// Login with clonr/clonr.
-	loginBody := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	// Login with clustr/clustr.
+	loginBody := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", loginBody)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := client.Do(req)
@@ -187,7 +187,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	}
 
 	// Change password. Must meet complexity: uppercase + lowercase + digit.
-	pwBody := strings.NewReader(`{"current_password":"clonr","new_password":"Newpassword1"}`)
+	pwBody := strings.NewReader(`{"current_password":"clustr","new_password":"Newpassword1"}`)
 	pwReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/set-password", pwBody)
 	pwReq.Header.Set("Content-Type", "application/json")
 	pwResp, err := client.Do(pwReq)
@@ -204,7 +204,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 
 	// Verify force-change cookie is cleared.
 	for _, c := range pwResp.Cookies() {
-		if c.Name == "clonr_force_password_change" {
+		if c.Name == "clustr_force_password_change" {
 			if c.MaxAge > 0 {
 				t.Error("force_password_change cookie should be cleared after set-password")
 			}
@@ -214,7 +214,7 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	// Logout then log back in with the new password.
 	client.Post(ts.URL+"/api/v1/auth/logout", "application/json", nil)
 
-	newLoginBody := strings.NewReader(`{"username":"clonr","password":"Newpassword1"}`)
+	newLoginBody := strings.NewReader(`{"username":"clustr","password":"Newpassword1"}`)
 	newReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", newLoginBody)
 	newReq.Header.Set("Content-Type", "application/json")
 	newResp, _ := client.Do(newReq)
@@ -229,14 +229,14 @@ func TestSetPassword_WeakPassword(t *testing.T) {
 	client := clientWithJar(t)
 
 	// Login.
-	loginBody := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	loginBody := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", loginBody)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := client.Do(req)
 	resp.Body.Close()
 
 	// Try to set a weak password.
-	pwBody := strings.NewReader(`{"current_password":"clonr","new_password":"short"}`)
+	pwBody := strings.NewReader(`{"current_password":"clustr","new_password":"short"}`)
 	pwReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/set-password", pwBody)
 	pwReq.Header.Set("Content-Type", "application/json")
 	pwResp, _ := client.Do(pwReq)
@@ -269,12 +269,12 @@ func TestLogin_LegacyKey_HappyPath(t *testing.T) {
 	// Verify session cookie is set.
 	found := false
 	for _, c := range resp.Cookies() {
-		if c.Name == "clonr_session" && c.Value != "" {
+		if c.Name == "clustr_session" && c.Value != "" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("clonr_session cookie not set after legacy key login")
+		t.Error("clustr_session cookie not set after legacy key login")
 	}
 }
 
@@ -282,7 +282,7 @@ func TestLogin_InvalidKey(t *testing.T) {
 	_, ts, _ := newAuthTestServer(t)
 	client := clientWithJar(t)
 
-	body := strings.NewReader(`{"key":"clonr-admin-000000000000000000000000000000000000000000000000000000000000ffff"}`)
+	body := strings.NewReader(`{"key":"clustr-admin-000000000000000000000000000000000000000000000000000000000000ffff"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -302,7 +302,7 @@ func TestMe_WithValidSession(t *testing.T) {
 	client := clientWithJar(t)
 
 	// Login with username/password.
-	body := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	body := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := client.Do(req)
@@ -355,7 +355,7 @@ func TestLogout_ClearsCookie(t *testing.T) {
 	client := clientWithJar(t)
 
 	// Login.
-	body := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	body := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := client.Do(req)
@@ -391,7 +391,7 @@ func TestCookieAuth_GrantsAccess(t *testing.T) {
 	client := clientWithJar(t)
 
 	// Login to get a session cookie.
-	body := strings.NewReader(`{"username":"clonr","password":"clonr"}`)
+	body := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := client.Do(req)

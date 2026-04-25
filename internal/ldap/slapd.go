@@ -1,19 +1,19 @@
-// slapd.go — slapd bootstrap and systemd wrappers for the clonr LDAP module.
+// slapd.go — slapd bootstrap and systemd wrappers for the clustr LDAP module.
 //
 // IMPORTANT: This file contains privileged operations that ASSUME root access
 // at Enable() time. Specifically:
 //   - slapadd -n 0 (seeding the cn=config backend) must run as root or the
 //     ldap user (whichever owns the slapd.d/ directory).
 //   - systemctl mask slapd.service prevents the distro unit from conflicting
-//     with clonr-slapd.service.
-//   - update-ca-trust and cert file writes to /etc/clonr/ require root.
+//     with clustr-slapd.service.
+//   - update-ca-trust and cert file writes to /etc/clustr/ require root.
 //
-// clonr-serverd is expected to run as root (or with the necessary capabilities)
+// clustr-serverd is expected to run as root (or with the necessary capabilities)
 // when Enable() is called. Normal operation (health checks, DIT CRUD) does NOT
 // require root — those operations use the LDAP protocol over the network.
 //
-// Polkit rule at internal/ldap/assets/50-clonr-slapd.rules grants the clonr
-// user start|stop|restart|reload on clonr-slapd.service only.
+// Polkit rule at internal/ldap/assets/50-clustr-slapd.rules grants the clustr
+// user start|stop|restart|reload on clustr-slapd.service only.
 // Both files are embedded into the binary and installed by EnsureSystemdUnit()
 // during Enable().
 
@@ -144,7 +144,7 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 	}
 
 	// Write LDIF to a temp file then slapadd it.
-	tmpLDIF, err := os.CreateTemp("", "clonr-slapd-seed-*.ldif")
+	tmpLDIF, err := os.CreateTemp("", "clustr-slapd-seed-*.ldif")
 	if err != nil {
 		return fmt.Errorf("ldap slapd: create temp LDIF: %w", err)
 	}
@@ -180,7 +180,7 @@ func SeedConfig(ctx context.Context, data slapdSeedData) error {
 // slapdUser is the OS user that slapd runs as ("ldap" on EL, "openldap" on Debian).
 func WriteServerCert(configDir string, certPEM, keyPEM []byte, slapdUser string) error {
 	// The TLS dir holds the server private key and must be 0700 ldap:ldap.
-	// Its parent (/etc/clonr/ldap) is 0755 so slapd can traverse to it.
+	// Its parent (/etc/clustr/ldap) is 0755 so slapd can traverse to it.
 	tlsDir := filepath.Join(configDir, "tls")
 	if err := os.MkdirAll(tlsDir, 0o700); err != nil {
 		return fmt.Errorf("ldap slapd: mkdir tls dir: %w", err)
@@ -237,7 +237,7 @@ func WriteCACert(pkiDir, ldapConfigDir string, caCertPEM, caKeyPEM []byte) error
 
 // UpdateCATrust runs update-ca-trust to register the CA cert with the system trust store.
 func UpdateCATrust(ctx context.Context, caCertPEM []byte) error {
-	anchorPath := "/etc/pki/ca-trust/source/anchors/clonr-ca.crt"
+	anchorPath := "/etc/pki/ca-trust/source/anchors/clustr-ca.crt"
 	if err := os.WriteFile(anchorPath, caCertPEM, 0o644); err != nil {
 		return fmt.Errorf("ldap slapd: write CA to trust anchors: %w", err)
 	}
@@ -250,7 +250,7 @@ func UpdateCATrust(ctx context.Context, caCertPEM []byte) error {
 }
 
 // MaskDistroSlapd runs systemctl mask slapd.service to prevent the distro unit
-// from starting and conflicting with clonr-slapd.service.
+// from starting and conflicting with clustr-slapd.service.
 func MaskDistroSlapd(ctx context.Context) error {
 	out, err := exec.CommandContext(ctx, "systemctl", "mask", "slapd.service").CombinedOutput()
 	if err != nil {
@@ -261,7 +261,7 @@ func MaskDistroSlapd(ctx context.Context) error {
 	return nil
 }
 
-// EnsureSystemdUnit writes the embedded clonr-slapd.service and polkit rule to
+// EnsureSystemdUnit writes the embedded clustr-slapd.service and polkit rule to
 // their system paths, then runs daemon-reload if either file changed.
 //
 // Idempotent: if both files already exist with identical content, no writes
@@ -272,18 +272,18 @@ func MaskDistroSlapd(ctx context.Context) error {
 // and the masked distro unit at once).
 func EnsureSystemdUnit(ctx context.Context) error {
 	const (
-		unitDst   = "/etc/systemd/system/clonr-slapd.service"
-		polkitDst = "/etc/polkit-1/rules.d/50-clonr-slapd.rules"
+		unitDst   = "/etc/systemd/system/clustr-slapd.service"
+		polkitDst = "/etc/polkit-1/rules.d/50-clustr-slapd.rules"
 	)
 
-	unitSrc, err := assetFS.ReadFile("assets/clonr-slapd.service")
+	unitSrc, err := assetFS.ReadFile("assets/clustr-slapd.service")
 	if err != nil {
-		return fmt.Errorf("ldap slapd: read embedded clonr-slapd.service: %w", err)
+		return fmt.Errorf("ldap slapd: read embedded clustr-slapd.service: %w", err)
 	}
 
-	polkitSrc, err := assetFS.ReadFile("assets/50-clonr-slapd.rules")
+	polkitSrc, err := assetFS.ReadFile("assets/50-clustr-slapd.rules")
 	if err != nil {
-		return fmt.Errorf("ldap slapd: read embedded 50-clonr-slapd.rules: %w", err)
+		return fmt.Errorf("ldap slapd: read embedded 50-clustr-slapd.rules: %w", err)
 	}
 
 	changed := false
@@ -295,12 +295,12 @@ func EnsureSystemdUnit(ctx context.Context) error {
 			return fmt.Errorf("ldap slapd: mkdir /etc/systemd/system: %w", err)
 		}
 		if err := os.WriteFile(unitDst, unitSrc, 0o644); err != nil {
-			return fmt.Errorf("ldap slapd: write clonr-slapd.service: %w", err)
+			return fmt.Errorf("ldap slapd: write clustr-slapd.service: %w", err)
 		}
-		log.Info().Str("path", unitDst).Msg("ldap slapd: wrote clonr-slapd.service")
+		log.Info().Str("path", unitDst).Msg("ldap slapd: wrote clustr-slapd.service")
 		changed = true
 	} else {
-		log.Info().Str("path", unitDst).Msg("ldap slapd: clonr-slapd.service unchanged, skipping write")
+		log.Info().Str("path", unitDst).Msg("ldap slapd: clustr-slapd.service unchanged, skipping write")
 	}
 
 	// Write polkit rule if missing or content differs.
@@ -310,12 +310,12 @@ func EnsureSystemdUnit(ctx context.Context) error {
 			return fmt.Errorf("ldap slapd: mkdir /etc/polkit-1/rules.d: %w", err)
 		}
 		if err := os.WriteFile(polkitDst, polkitSrc, 0o644); err != nil {
-			return fmt.Errorf("ldap slapd: write 50-clonr-slapd.rules: %w", err)
+			return fmt.Errorf("ldap slapd: write 50-clustr-slapd.rules: %w", err)
 		}
-		log.Info().Str("path", polkitDst).Msg("ldap slapd: wrote 50-clonr-slapd.rules")
+		log.Info().Str("path", polkitDst).Msg("ldap slapd: wrote 50-clustr-slapd.rules")
 		changed = true
 	} else {
-		log.Info().Str("path", polkitDst).Msg("ldap slapd: 50-clonr-slapd.rules unchanged, skipping write")
+		log.Info().Str("path", polkitDst).Msg("ldap slapd: 50-clustr-slapd.rules unchanged, skipping write")
 	}
 
 	// Only daemon-reload if something changed.
@@ -328,9 +328,9 @@ func EnsureSystemdUnit(ctx context.Context) error {
 	}
 
 	// Verify systemd sees the unit. `systemctl cat` exits non-zero if unknown.
-	if out, err := exec.CommandContext(ctx, "systemctl", "cat", "clonr-slapd.service").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "systemctl", "cat", "clustr-slapd.service").CombinedOutput(); err != nil {
 		return fmt.Errorf(
-			"ldap slapd: systemd unit clonr-slapd.service was written but systemd does not see it. "+
+			"ldap slapd: systemd unit clustr-slapd.service was written but systemd does not see it. "+
 				"Try: systemctl daemon-reload (cat output: %s)",
 			string(out),
 		)
@@ -339,31 +339,31 @@ func EnsureSystemdUnit(ctx context.Context) error {
 	return nil
 }
 
-// StartSlapd starts the clonr-slapd.service via systemctl.
+// StartSlapd starts the clustr-slapd.service via systemctl.
 func StartSlapd(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "start", "clonr-slapd.service").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "systemctl", "start", "clustr-slapd.service").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ldap slapd: systemctl start clonr-slapd: %w (output: %s)", err, string(out))
+		return fmt.Errorf("ldap slapd: systemctl start clustr-slapd: %w (output: %s)", err, string(out))
 	}
 	return nil
 }
 
-// StopSlapd stops the clonr-slapd.service via systemctl.
+// StopSlapd stops the clustr-slapd.service via systemctl.
 func StopSlapd(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "stop", "clonr-slapd.service").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "systemctl", "stop", "clustr-slapd.service").CombinedOutput()
 	if err != nil {
 		// Non-fatal: service may already be stopped.
 		log.Warn().Err(err).Str("output", string(out)).
-			Msg("ldap slapd: systemctl stop clonr-slapd (may already be stopped)")
+			Msg("ldap slapd: systemctl stop clustr-slapd (may already be stopped)")
 	}
 	return nil
 }
 
-// EnableSlapdService runs systemctl enable clonr-slapd.service so it starts on boot.
+// EnableSlapdService runs systemctl enable clustr-slapd.service so it starts on boot.
 func EnableSlapdService(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "enable", "clonr-slapd.service").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "systemctl", "enable", "clustr-slapd.service").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ldap slapd: systemctl enable clonr-slapd: %w (output: %s)", err, string(out))
+		return fmt.Errorf("ldap slapd: systemctl enable clustr-slapd: %w (output: %s)", err, string(out))
 	}
 	return nil
 }
@@ -396,7 +396,7 @@ func SlapcatBackup(ctx context.Context, backupDir string) (string, error) {
 // CreateDataDir creates the mdb data directory with correct ownership.
 // slapdUser is the OS user that slapd runs as ("ldap" on EL, "openldap" on Debian).
 //
-// The parent of dataDir (e.g. /var/lib/clonr/ldap) is created at 0755 so that
+// The parent of dataDir (e.g. /var/lib/clustr/ldap) is created at 0755 so that
 // the slapd user can traverse into it. The dataDir itself (e.g. .../ldap/data)
 // is created at 0700 — slapd owns it exclusively.
 func CreateDataDir(_ context.Context, dataDir string, slapdUser string) error {

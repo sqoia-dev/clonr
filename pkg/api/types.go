@@ -1,4 +1,4 @@
-// Package api defines the shared wire types used by clonr-serverd and the clonr CLI.
+// Package api defines the shared wire types used by clustr-serverd and the clustr CLI.
 // All JSON field names here are authoritative — the REST API contract.
 package api
 
@@ -291,7 +291,7 @@ const (
 	// occurred since. Needs admin attention.
 	NodeStateFailed NodeState = "failed"
 
-	// NodeStateDeployedPreboot: deploy-complete callback received from clonr-static
+	// NodeStateDeployedPreboot: deploy-complete callback received from clustr-static
 	// inside the PXE initramfs. Rootfs written successfully. Waiting for the OS to
 	// phone home via POST /verify-boot to confirm the bootloader + kernel work.
 	// ADR-0008.
@@ -302,7 +302,7 @@ const (
 	NodeStateDeployedVerified NodeState = "deployed_verified"
 
 	// NodeStateDeployVerifyTimeout: verify-boot was not received within
-	// CLONR_VERIFY_TIMEOUT after deploy_completed_preboot_at. Indicates a likely
+	// CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at. Indicates a likely
 	// bootloader, kernel, or network failure. Needs operator attention. ADR-0008.
 	NodeStateDeployVerifyTimeout NodeState = "deploy_verify_timeout"
 )
@@ -343,10 +343,10 @@ type SystemAccountsNodeConfig struct {
 // LDAPNodeConfig holds the read-only LDAP client configuration injected into
 // a node's deployed filesystem during finalization. It carries the service
 // account credentials — NEVER the Directory Manager (admin) credentials.
-// The admin password is held only in clonr-serverd's memory and is never
+// The admin password is held only in clustr-serverd's memory and is never
 // templated into any node asset.
 type LDAPNodeConfig struct {
-	// ServerURI is the ldaps:// URI of the slapd server, e.g. "ldaps://clonr-server:636".
+	// ServerURI is the ldaps:// URI of the slapd server, e.g. "ldaps://clustr-server:636".
 	ServerURI string `json:"server_uri"`
 	// BaseDN is the LDAP base DN, e.g. "dc=cluster,dc=local".
 	BaseDN string `json:"base_dn"`
@@ -369,7 +369,7 @@ type LDAPNodeConfig struct {
 // no per-user file push is required.
 type SudoersNodeConfig struct {
 	// GroupCN is the CN of the LDAP posixGroup whose members receive sudo access.
-	// E.g. "clonr-admins". The drop-in file is named after this CN.
+	// E.g. "clustr-admins". The drop-in file is named after this CN.
 	GroupCN  string `json:"group_cn"`
 	// NoPasswd, when true, writes NOPASSWD:ALL so members can sudo without a password.
 	NoPasswd bool   `json:"no_passwd"`
@@ -382,7 +382,7 @@ type HostEntry struct {
 	Hostname string   `json:"hostname"`
 	FQDN     string   `json:"fqdn,omitempty"`
 	// Aliases holds additional hostnames written after Hostname on the same line.
-	// Used to add service-specific aliases (e.g. "clonr-server" for LDAP resolution).
+	// Used to add service-specific aliases (e.g. "clustr-server" for LDAP resolution).
 	Aliases  []string `json:"aliases,omitempty"`
 }
 
@@ -414,7 +414,7 @@ type NodeConfig struct {
 	DiskLayoutOverride *DiskLayout       `json:"disk_layout_override,omitempty"`
 	// LDAPConfig, when non-nil, causes finalization to write sssd.conf, ldap.conf,
 	// and the CA certificate bundle into the deployed filesystem so the node can
-	// authenticate users against the clonr LDAP server.
+	// authenticate users against the clustr LDAP server.
 	// ServiceBindDN/ServiceBindPasswd carry the read-only node-reader account;
 	// the admin (Directory Manager) credentials are NEVER present here.
 	LDAPConfig *LDAPNodeConfig `json:"ldap_config,omitempty"`
@@ -441,7 +441,7 @@ type NodeConfig struct {
 
 	// ClusterHosts is the full cluster host roster injected at registration time.
 	// Finalization writes these into /etc/hosts so nodes can resolve each other
-	// and the clonr server before DNS/LDAP is available.
+	// and the clustr server before DNS/LDAP is available.
 	// Transient: populated at registration, never stored in the database.
 	ClusterHosts []HostEntry `json:"cluster_hosts,omitempty"`
 
@@ -451,7 +451,7 @@ type NodeConfig struct {
 	// after server-side merging for the deploy path.
 	ExtraMounts        []FstabEntry      `json:"extra_mounts,omitempty"`
 	// ReimagePending is set to true by the reimage orchestrator after it fires
-	// PowerCycle. The PXE boot handler returns the full clonr initramfs boot
+	// PowerCycle. The PXE boot handler returns the full clustr initramfs boot
 	// script while this flag is set, causing the node to deploy fresh.
 	// Cleared by the deploy-complete callback once deployment finalizes.
 	ReimagePending  bool                 `json:"reimage_pending,omitempty"`
@@ -465,7 +465,7 @@ type NodeConfig struct {
 
 	// ADR-0008: Two-Phase Deploy Success fields.
 
-	// DeployCompletedPrebootAt is set when clonr-static POSTs deploy-complete from
+	// DeployCompletedPrebootAt is set when clustr-static POSTs deploy-complete from
 	// inside the PXE initramfs. Proves the rootfs was written without error.
 	// Does NOT prove the OS boots. See ADR-0008.
 	DeployCompletedPrebootAt *time.Time `json:"deploy_completed_preboot_at,omitempty"`
@@ -474,7 +474,7 @@ type NodeConfig struct {
 	// all started. Terminal success state. See ADR-0008.
 	DeployVerifiedBootedAt *time.Time `json:"deploy_verified_booted_at,omitempty"`
 	// DeployVerifyTimeoutAt is set by the background scanner when verify-boot was
-	// not received within CLONR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
+	// not received within CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
 	// Indicates a likely bootloader or network failure. See ADR-0008.
 	DeployVerifyTimeoutAt *time.Time `json:"deploy_verify_timeout_at,omitempty"`
 	// LastSeenAt is updated on every verify-boot call. Acts as a heartbeat —
@@ -939,7 +939,7 @@ type ListLogsResponse struct {
 // ─── PXE / auto-registration types ───────────────────────────────────────────
 
 // RegisterRequest is the body for POST /api/v1/nodes/register.
-// Sent by the clonr client on first PXE boot to register itself with the server.
+// Sent by the clustr client on first PXE boot to register itself with the server.
 type RegisterRequest struct {
 	// HardwareProfile is the raw JSON from hardware.Discover().
 	HardwareProfile json.RawMessage `json:"hardware_profile"`
@@ -1016,7 +1016,7 @@ type CaptureRequest struct {
 }
 
 // BuildFromISORequest is the body for POST /api/v1/factory/build-from-iso.
-// It instructs clonr to download an installer ISO, run it in a temporary QEMU
+// It instructs clustr to download an installer ISO, run it in a temporary QEMU
 // VM with an auto-generated kickstart/autoinstall config, and capture the
 // installed OS as a deployable BaseImage.
 //
@@ -1201,7 +1201,7 @@ type DeployFailedPayload struct {
 }
 
 // VerifyBootRequest is the JSON body for POST /api/v1/nodes/:id/verify-boot.
-// Sent by the deployed OS on first boot (via clonr-verify-boot.service systemd
+// Sent by the deployed OS on first boot (via clustr-verify-boot.service systemd
 // oneshot) to confirm the bootloader, kernel, and systemd all started correctly.
 // See ADR-0008.
 type VerifyBootRequest struct {
@@ -1300,7 +1300,7 @@ const (
 )
 
 // NetworkSwitch is an inventory record for a physical switch in the cluster fabric.
-// clonr does not program switches in v1; this is documentation + SM-detection input.
+// clustr does not program switches in v1; this is documentation + SM-detection input.
 type NetworkSwitch struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
@@ -1377,7 +1377,7 @@ type NetworkProfile struct {
 }
 
 // OpenSMConfig holds the cluster-wide OpenSM configuration.
-// Only one instance exists per clonr install. When Enabled=false, no OpenSM
+// Only one instance exists per clustr install. When Enabled=false, no OpenSM
 // config is injected anywhere.
 type OpenSMConfig struct {
 	ID                string    `json:"id"`

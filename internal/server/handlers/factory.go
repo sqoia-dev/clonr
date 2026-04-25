@@ -10,10 +10,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/image"
-	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/image"
+	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 )
 
 // FactoryHandler handles image ingest operations and chroot shell sessions.
@@ -81,7 +81,7 @@ func (h *FactoryHandler) Pull(w http.ResponseWriter, r *http.Request) {
 // Import handles POST /api/v1/factory/import
 // Accepts a multipart upload: field "file" or "iso" = the image file, fields
 // "name", "version" directly in the form, or field "meta" = JSON ImportISORequest.
-// Streams the upload to CLONR_ISO_DIR (default /var/lib/clonr/iso/) and calls
+// Streams the upload to CLUSTR_ISO_DIR (default /var/lib/clustr/iso/) and calls
 // Factory.ImportISO. The temp file is cleaned up by the async import goroutine.
 // Supports large files (2-4 GB ISOs) — the 32 MiB memory limit causes the rest
 // to be spooled to disk by Go's multipart parser.
@@ -123,9 +123,9 @@ func (h *FactoryHandler) Import(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Write the upload to CLONR_ISO_DIR so it lives alongside other ISOs and is
+	// Write the upload to CLUSTR_ISO_DIR so it lives alongside other ISOs and is
 	// on the same filesystem as the image store (avoids cross-device rename issues).
-	isoDir := os.Getenv("CLONR_ISO_DIR")
+	isoDir := os.Getenv("CLUSTR_ISO_DIR")
 	if isoDir == "" {
 		isoDir = defaultISODir
 	}
@@ -135,7 +135,7 @@ func (h *FactoryHandler) Import(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmp, err := os.CreateTemp(isoDir, "clonr-upload-*.tmp")
+	tmp, err := os.CreateTemp(isoDir, "clustr-upload-*.tmp")
 	if err != nil {
 		log.Error().Err(err).Msg("factory import: create temp file")
 		writeError(w, err)
@@ -166,13 +166,13 @@ func (h *FactoryHandler) Import(w http.ResponseWriter, r *http.Request) {
 }
 
 // defaultISODir is the allowed base directory for server-local ISO imports.
-// Override with CLONR_ISO_DIR environment variable.
-const defaultISODir = "/var/lib/clonr/iso"
+// Override with CLUSTR_ISO_DIR environment variable.
+const defaultISODir = "/var/lib/clustr/iso"
 
 // ImportPath handles POST /api/v1/factory/import-path (and /factory/import-iso alias)
 // For server-local ISO imports: accepts a JSON body with "path", "name", "version".
 // Only useful when the CLI is running on the same host as the server.
-// The path must be within CLONR_ISO_DIR (default /var/lib/clonr/iso).
+// The path must be within CLUSTR_ISO_DIR (default /var/lib/clustr/iso).
 func (h *FactoryHandler) ImportPath(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path    string `json:"path"`
@@ -200,14 +200,14 @@ func (h *FactoryHandler) ImportPath(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce that the path is under the configured ISO directory to prevent
 	// arbitrary host path access.
-	isoDir := os.Getenv("CLONR_ISO_DIR")
+	isoDir := os.Getenv("CLUSTR_ISO_DIR")
 	if isoDir == "" {
 		isoDir = defaultISODir
 	}
 	isoDir = filepath.Clean(isoDir)
 	if !strings.HasPrefix(absPath, isoDir+string(filepath.Separator)) && absPath != isoDir {
 		log.Warn().Str("path", absPath).Str("iso_dir", isoDir).Msg("factory import-path: path outside allowed directory")
-		writeValidationError(w, "path must be within the configured ISO directory (CLONR_ISO_DIR)")
+		writeValidationError(w, "path must be within the configured ISO directory (CLUSTR_ISO_DIR)")
 		return
 	}
 

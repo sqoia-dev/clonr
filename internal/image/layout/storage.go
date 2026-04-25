@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sqoia-dev/clonr/internal/hardware"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // slogPartitionBytes is the size of each SLOG (ZIL) partition on an NVMe drive.
@@ -292,8 +292,8 @@ func (b *storageBuilder) buildDataPool(name string, drives []hardware.Disk) (api
 	// For multi-vdev configs we encode vdev count in a property so the deployer
 	// can split the members list accordingly.
 	if numVdevs > 1 {
-		pool.Properties["clonr:vdev_count"] = fmt.Sprintf("%d", numVdevs)
-		pool.Properties["clonr:vdev_width"] = fmt.Sprintf("%d", vdevWidth)
+		pool.Properties["clustr:vdev_count"] = fmt.Sprintf("%d", numVdevs)
+		pool.Properties["clustr:vdev_width"] = fmt.Sprintf("%d", vdevWidth)
 	}
 
 	stats := dataPoolStats{
@@ -413,8 +413,8 @@ func buildSLOGPool(slogDrives []hardware.Disk) api.ZFSPool {
 		Members:    members,
 		Mountpoint: "", // SLOG is a special device, not a filesystem mountpoint
 		Properties: map[string]string{
-			"clonr:role":           "slog",
-			"clonr:partition_size": fmt.Sprintf("%d", slogPartitionBytes),
+			"clustr:role":           "slog",
+			"clustr:partition_size": fmt.Sprintf("%d", slogPartitionBytes),
 		},
 	}
 }
@@ -438,7 +438,7 @@ func buildL2ARCPool(drives []hardware.Disk, hasSLOG bool) api.ZFSPool {
 		Members:    members,
 		Mountpoint: "", // L2ARC is a cache device, not a filesystem mountpoint
 		Properties: map[string]string{
-			"clonr:role": "l2arc",
+			"clustr:role": "l2arc",
 		},
 	}
 }

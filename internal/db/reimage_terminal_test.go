@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 func makeReimageRequest(nodeID, imageID string) api.ReimageRequest {

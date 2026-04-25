@@ -33,7 +33,7 @@ class LogStream {
 
     _attemptConnect() {
         const url = new URL('/api/v1/logs/stream', window.location.origin);
-        const tok = document.querySelector('meta[name="clonr-token"]');
+        const tok = document.querySelector('meta[name="clustr-token"]');
         if (tok && tok.content) url.searchParams.set('token', tok.content);
 
         // Apply filters as query params.

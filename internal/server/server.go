@@ -1,4 +1,4 @@
-// Package server provides the clonr-serverd HTTP API built on chi.
+// Package server provides the clustr-serverd HTTP API built on chi.
 package server
 
 import (
@@ -20,20 +20,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/image"
-	ldapmodule "github.com/sqoia-dev/clonr/internal/ldap"
-	networkmodule "github.com/sqoia-dev/clonr/internal/network"
-	slurmmodule "github.com/sqoia-dev/clonr/internal/slurm"
-	"github.com/sqoia-dev/clonr/internal/power"
-	"github.com/sqoia-dev/clonr/internal/sysaccounts"
-	ipmipower "github.com/sqoia-dev/clonr/internal/power/ipmi"
-	proxmoxpower "github.com/sqoia-dev/clonr/internal/power/proxmox"
-	"github.com/sqoia-dev/clonr/internal/reimage"
-	"github.com/sqoia-dev/clonr/internal/server/handlers"
-	"github.com/sqoia-dev/clonr/internal/server/ui"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/image"
+	ldapmodule "github.com/sqoia-dev/clustr/internal/ldap"
+	networkmodule "github.com/sqoia-dev/clustr/internal/network"
+	slurmmodule "github.com/sqoia-dev/clustr/internal/slurm"
+	"github.com/sqoia-dev/clustr/internal/power"
+	"github.com/sqoia-dev/clustr/internal/sysaccounts"
+	ipmipower "github.com/sqoia-dev/clustr/internal/power/ipmi"
+	proxmoxpower "github.com/sqoia-dev/clustr/internal/power/proxmox"
+	"github.com/sqoia-dev/clustr/internal/reimage"
+	"github.com/sqoia-dev/clustr/internal/server/handlers"
+	"github.com/sqoia-dev/clustr/internal/server/ui"
 )
 
 // BuildInfo holds build-time metadata injected via -ldflags.
@@ -118,7 +118,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		if err != nil {
 			log.Fatal().Err(err).Msg("server: failed to generate session secret")
 		}
-		log.Warn().Msg("CLONR_SESSION_SECRET not set — generated ephemeral session secret (sessions will not survive restarts)")
+		log.Warn().Msg("CLUSTR_SESSION_SECRET not set — generated ephemeral session secret (sessions will not survive restarts)")
 	}
 
 	ldapMgr := ldapmodule.New(cfg, database)
@@ -203,7 +203,7 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 
 // runVerifyTimeoutScanner ticks every 60 seconds and marks as timed-out any node
 // that has deploy_completed_preboot_at set but no deploy_verified_booted_at within
-// CLONR_VERIFY_TIMEOUT. ADR-0008.
+// CLUSTR_VERIFY_TIMEOUT. ADR-0008.
 func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 	timeout := s.cfg.VerifyTimeout
 	if timeout == 0 {
@@ -236,7 +236,7 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 					Str("node_id", n.ID).
 					Str("hostname", n.Hostname).
 					Str("timeout", timeout.String()).
-					Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clonr/node-token not written correctly",
+					Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clustr/node-token not written correctly",
 						n.ID, n.Hostname, timeout)
 			}
 		}
@@ -244,7 +244,7 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 }
 
 // runLogPurger ticks every hour and deletes log entries older than the
-// configured retention window. Retention is read from CLONR_LOG_RETENTION
+// configured retention window. Retention is read from CLUSTR_LOG_RETENTION
 // (Go duration string, e.g. "336h" for 14 days); defaults to 336h (14d).
 // Uses the server-lifetime context so it shuts down cleanly on SIGTERM.
 func (s *Server) runLogPurger(ctx context.Context) {
@@ -288,7 +288,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(apiVersionHeader) // sets API-Version: v1 on all /api/v1/* responses
 
 	if s.cfg.AuthDevMode {
-		log.Warn().Msg("CLONR_AUTH_DEV_MODE=1 — authentication is DISABLED (dev mode only, never use in production)")
+		log.Warn().Msg("CLUSTR_AUTH_DEV_MODE=1 — authentication is DISABLED (dev mode only, never use in production)")
 	}
 	// apiKeyAuth is applied only to the /api/v1 subrouter below,
 	// so that the embedded web UI at / and /ui/* is always accessible.
@@ -350,7 +350,7 @@ func (s *Server) buildRouter() chi.Router {
 	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	// Use NewFactory so the build semaphore is initialised (capacity from
-	// CLONR_MAX_CONCURRENT_BUILDS, default 4). Context is wired later via
+	// CLUSTR_MAX_CONCURRENT_BUILDS, default 4). Context is wired later via
 	// SetContext in StartBackgroundWorkers once the server-lifetime ctx exists.
 	if s.imgFactory == nil {
 		s.imgFactory = image.NewFactory(
@@ -380,8 +380,8 @@ func (s *Server) buildRouter() chi.Router {
 	initramfsH := &handlers.InitramfsHandler{
 		DB:            s.db,
 		ScriptPath:    "scripts/build-initramfs.sh", // ignored at runtime — script is embedded
-		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clonr.img",
-		ClonrBinPath:  s.cfg.ClonrBinPath, // abs path to clonr CLI binary; defaults to /usr/local/bin/clonr
+		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clustr.img",
+		ClustrBinPath:  s.cfg.ClustrBinPath, // abs path to clustr CLI binary; defaults to /usr/local/bin/clustr
 	}
 	// Prime the in-memory sha256 cache from the on-disk initramfs (if present).
 	// Non-fatal: if the file does not yet exist the cache stays empty and the
@@ -452,9 +452,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/deploy-failed", nodes.DeployFailed)
 
 		// ADR-0008: Post-reboot verification phone-home endpoint.
-		// Called by the deployed OS (via clonr-verify-boot.service systemd oneshot)
+		// Called by the deployed OS (via clustr-verify-boot.service systemd oneshot)
 		// on first boot. Node-scoped token required; admin keys are NOT accepted here.
-		// The node-scoped key written to /etc/clonr/node-token at finalize time is
+		// The node-scoped key written to /etc/clustr/node-token at finalize time is
 		// the same one minted during PXE enrollment and is reused post-boot.
 		r.With(requireNodeOwnership("id")).Post("/nodes/{id}/verify-boot", nodes.VerifyBoot)
 
@@ -471,7 +471,7 @@ func (s *Server) buildRouter() chi.Router {
 		// is only reached by node-scoped keys (requireNodeOwnership allows both).
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/self", nodes.GetNode)
 
-		// clonr-clientd WebSocket endpoint — node-scoped key required; the key's
+		// clustr-clientd WebSocket endpoint — node-scoped key required; the key's
 		// bound node_id must match the {id} URL parameter (same as verify-boot).
 		clientdH := &handlers.ClientdHandler{
 			DB:     s.db,
@@ -695,12 +695,12 @@ func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
 // the server's DB and session-signing functions. This avoids the handlers
 // package importing the server package (which would be circular).
 func (s *Server) buildAuthHandler() *handlers.AuthHandler {
-	const cookieName = "clonr_session"
+	const cookieName = "clustr_session"
 
 	// Legacy API-key login (deprecated — removed in v1.1).
 	loginWithKeyFn := func(rawKey string) (keyPrefix string, scope string, ok bool) {
 		hashInput := rawKey
-		for _, pfx := range []string{"clonr-admin-", "clonr-node-"} {
+		for _, pfx := range []string{"clustr-admin-", "clustr-node-"} {
 			if strings.HasPrefix(rawKey, pfx) {
 				hashInput = strings.TrimPrefix(rawKey, pfx)
 				break

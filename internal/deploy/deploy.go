@@ -15,8 +15,8 @@ import (
 	"sync"
 
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 )
 
 // pkgLogger is the package-level zerolog logger used by deploy helpers.
@@ -134,7 +134,7 @@ var ErrPreflightFailed = errors.New("preflight failed")
 // target disks for a BIOS deployment. A partial failure (at least one raw
 // disk succeeded) is survivable for RAID1 and is only logged as a warning.
 //
-// The caller (cmd/clonr/main.go) maps this to ExitBootloader so the
+// The caller (cmd/clustr/main.go) maps this to ExitBootloader so the
 // deploy-failed callback carries the correct exit code and phase, and the
 // deploy-complete callback is never fired.
 type BootloaderError struct {
@@ -226,14 +226,14 @@ type PhoneHomeInjector interface {
 }
 
 // ClientdInjector is an optional interface implemented by Deployers that support
-// clonr-clientd WebSocket agent injection. Callers check for this interface via
+// clustr-clientd WebSocket agent injection. Callers check for this interface via
 // type assertion and set the URL before calling Finalize.
 type ClientdInjector interface {
 	SetClientdURL(clientdURL string)
 }
 
 // ClientdBinPathSetter is an optional interface implemented by Deployers that
-// support copying the clonr-clientd binary into the deployed rootfs. Callers
+// support copying the clustr-clientd binary into the deployed rootfs. Callers
 // check for this interface via type assertion and set the path before calling
 // Finalize. Empty path triggers auto-detection (see findClientdBin).
 type ClientdBinPathSetter interface {
@@ -306,7 +306,7 @@ func backupPartitionTable(disk string) (backupPath string, isEmpty bool, err err
 		// Could be a valid MBR disk or other condition — still attempt backup.
 	}
 
-	f, err := os.CreateTemp("", "clonr-ptbackup-*.sgdisk")
+	f, err := os.CreateTemp("", "clustr-ptbackup-*.sgdisk")
 	if err != nil {
 		return "", false, fmt.Errorf("rollback: create backup temp file: %w", err)
 	}

@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/power"
+	"github.com/sqoia-dev/clustr/internal/power"
 )
 
 // Provider implements power.Provider for a single Proxmox QEMU VM.

@@ -15,7 +15,7 @@ import (
 var elfMagic = [4]byte{0x7f, 'E', 'L', 'F'}
 
 // elfHeader is the minimal ELF header fields we need.
-// e_machine is a uint16 at byte offset 18, little-endian on all targets clonr supports.
+// e_machine is a uint16 at byte offset 18, little-endian on all targets clustr supports.
 const elfEMachineOffset = 18
 
 // Known e_machine values (ELF spec table).
@@ -25,7 +25,7 @@ const (
 	elfMachineAArch64 = 0x00B7 // EM_AARCH64
 )
 
-// eMachineToArch maps ELF e_machine values to the clonr arch strings used in
+// eMachineToArch maps ELF e_machine values to the clustr arch strings used in
 // the base_images DB column and the UI.
 func eMachineToArch(eMachine uint16) (string, error) {
 	switch eMachine {
@@ -72,7 +72,7 @@ func parseELFMachine(r io.Reader) (uint16, error) {
 // directory by reading the ELF header of the first found well-known binary.
 //
 // rootfsDir is the absolute path to the extracted rootfs directory
-// (e.g. /var/lib/clonr/images/<id>/rootfs).
+// (e.g. /var/lib/clustr/images/<id>/rootfs).
 func DetectArchFromRootfsDir(rootfsDir string) (string, error) {
 	if rootfsDir == "" {
 		return "", fmt.Errorf("image arch: rootfs dir path is empty")

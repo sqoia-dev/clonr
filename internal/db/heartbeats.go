@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/clientd"
+	"github.com/sqoia-dev/clustr/internal/clientd"
 )
 
 // HeartbeatRow is the DB representation of a node heartbeat.
@@ -113,7 +113,7 @@ func (db *DB) GetHeartbeat(ctx context.Context, nodeID string) (*HeartbeatRow, e
 }
 
 // UpdateLastSeen sets node_configs.last_seen_at to the current time for nodeID.
-// This is called on every successful heartbeat and hello from clonr-clientd.
+// This is called on every successful heartbeat and hello from clustr-clientd.
 func (db *DB) UpdateLastSeen(ctx context.Context, nodeID string) error {
 	now := time.Now().Unix()
 	_, err := db.sql.ExecContext(ctx, `

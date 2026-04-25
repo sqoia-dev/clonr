@@ -27,7 +27,7 @@ var configTargets = map[string]configTarget{
 	"ntp":     {path: "/etc/ntp.conf", mode: 0644, applyAction: restartService("ntpd")},
 	"resolv":  {path: "/etc/resolv.conf", mode: 0644, applyAction: nil},
 	// sudoers: sudo re-reads drop-ins on every invocation — no restart needed.
-	"sudoers": {path: "/etc/sudoers.d/clonr-admins", mode: 0440, applyAction: nil},
+	"sudoers": {path: "/etc/sudoers.d/clustr-admins", mode: 0440, applyAction: nil},
 }
 
 const maxConfigSizeBytes = 1 << 20 // 1 MB

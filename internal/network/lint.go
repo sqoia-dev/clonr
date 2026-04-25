@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // LintWarning is a single best-practice warning returned by LintNetworkConfig.
@@ -16,7 +16,7 @@ type LintWarning struct {
 }
 
 // LintNetworkConfig inspects the current network module state and returns a
-// list of best-practice warnings. These are advisory — clonr will still deploy
+// list of best-practice warnings. These are advisory — clustr will still deploy
 // nodes when warnings are present. Admins should review and remediate.
 //
 // Checks performed:

@@ -15,10 +15,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/ipmi"
-	"github.com/sqoia-dev/clonr/internal/power"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/ipmi"
+	"github.com/sqoia-dev/clustr/internal/power"
 )
 
 // bmcTimeout caps every power management operation at 10 seconds.

@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/internal/bootassets"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/pxe"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/bootassets"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/pxe"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // BootHandler serves boot assets and dynamic iPXE scripts over HTTP.
@@ -26,7 +26,7 @@ type BootHandler struct {
 	BootDir string
 	// TFTPDir is the directory containing ipxe.efi and undionly.kpxe.
 	TFTPDir string
-	// ServerURL is the public URL of clonr-serverd (e.g. http://10.99.0.1:8080).
+	// ServerURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
 	// Used to generate the iPXE boot script.
 	ServerURL string
 	// ImageDir is the root directory where image subdirectories live.
@@ -36,10 +36,10 @@ type BootHandler struct {
 	// DB is used to look up node state by MAC for PXE boot routing.
 	// When nil the handler always returns the full boot script (safe default).
 	DB *db.DB
-	// Version is the clonr server version string displayed in boot menus.
+	// Version is the clustr server version string displayed in boot menus.
 	Version string
 	// MintNodeToken is called to generate a fresh node-scoped API key at PXE-serve
-	// time. The returned raw key is embedded in the kernel cmdline as clonr.token.
+	// time. The returned raw key is embedded in the kernel cmdline as clustr.token.
 	// When nil (e.g. in tests that don't need auth), an empty token is used.
 	MintNodeToken func(nodeID string) (rawKey string, err error)
 }
@@ -59,7 +59,7 @@ type BootHandler struct {
 //
 //   - NodeStateDeployedPreboot: sanboot from local disk -- deploy-complete was
 //     received from initramfs but the OS has not yet phoned home via
-//     POST /verify-boot. We MUST disk-boot here so clonr-verify-boot.service
+//     POST /verify-boot. We MUST disk-boot here so clustr-verify-boot.service
 //     can run and advance state to deployed_verified. Re-deploying in this
 //     state would cause an infinite deploy loop. If DeployVerifyTimeoutAt is
 //     set (scanner stamped a deadline miss) we still disk-boot and log a
@@ -70,11 +70,11 @@ type BootHandler struct {
 //     Operator intervention (manual reimage) may be required.
 //
 //   - All other states (Registered, Configured, ReimagePending, Failed, or
-//     unknown MAC): the full clonr initramfs boot script, which causes the
-//     node to run `clonr deploy --auto` and deploy or wait for assignment.
+//     unknown MAC): the full clustr initramfs boot script, which causes the
+//     node to run `clustr deploy --auto` and deploy or wait for assignment.
 //
 // For non-deployed nodes a fresh node-scoped API key is minted and embedded in
-// the kernel cmdline as clonr.token=<key> so the deploy agent can authenticate
+// the kernel cmdline as clustr.token=<key> so the deploy agent can authenticate
 // against /images/{id} and /images/{id}/blob without an admin key.
 //
 // This is the canonical pattern used by xCAT, Warewulf, and Cobbler: the PXE
@@ -108,7 +108,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, api.ErrNotFound) {
 			// DB error: log and fall through to the safe default (full boot script).
 			// A transient DB error must never cause a node to boot from disk when
-			// it should be reimaged -- fail open toward clonr deploy, not disk boot.
+			// it should be reimaged -- fail open toward clustr deploy, not disk boot.
 			log.Error().Err(err).Str("mac", mac).Msg("boot: lookup node by MAC")
 		} else if err == nil {
 			state := nodeCfg.State()
@@ -136,7 +136,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 			case api.NodeStateDeployedPreboot:
 				// ADR-0008: deploy-complete callback received from initramfs, but the OS
 				// has not yet phoned home via POST /verify-boot. Boot from disk so the
-				// deployed OS gets a chance to run clonr-verify-boot.service and phone
+				// deployed OS gets a chance to run clustr-verify-boot.service and phone
 				// home. Do NOT fall through to re-deploy -- that would cause an infinite
 				// loop: re-deploy -> deployed_preboot -> PXE boot -> re-deploy...
 				//
@@ -215,7 +215,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 
 			// Mint a fresh node-scoped token for this deploy run.
 			token := h.mintToken(r, nodeCfg.ID)
-			script, genErr := pxe.GenerateBootScript(h.ServerURL, "clonr-node-"+token)
+			script, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
 			if genErr != nil {
 				log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script")
 				http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -256,7 +256,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 					Str("node_id", created.ID).
 					Msg("boot: auto-registered unknown MAC — serving boot script with fresh token")
 				token := h.mintToken(r, created.ID)
-				autoScript, genErr := pxe.GenerateBootScript(h.ServerURL, "clonr-node-"+token)
+				autoScript, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script for auto-registered node")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -272,7 +272,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 		log.Warn().Msg("boot: iPXE script requested without ?mac= -- returning full boot script")
 	}
 
-	// Default: return the full clonr initramfs boot script with no token.
+	// Default: return the full clustr initramfs boot script with no token.
 	// Covers: requests without a MAC parameter, or auto-register failures.
 	script, err := pxe.GenerateBootScript(h.ServerURL, "")
 	if err != nil {
@@ -289,7 +289,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 // on the node's detected firmware type:
 //
 //   - BIOS: sanboot --no-describe --drive 0x80  (INT 13h, works on SeaBIOS/real BIOS)
-//   - UEFI: chain grub.efi from clonr server (reliable across OVMF and real firmware)
+//   - UEFI: chain grub.efi from clustr server (reliable across OVMF and real firmware)
 //
 // Firmware source priority: node.DetectedFirmware (set at PXE registration from
 // /sys/firmware/efi check) > image.Firmware > default "uefi".
@@ -314,8 +314,8 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw
-// key (without the clonr-node- prefix) on success, or "" on failure/unconfigured.
-// The caller prepends "clonr-node-" before embedding in the cmdline.
+// key (without the clustr-node- prefix) on success, or "" on failure/unconfigured.
+// The caller prepends "clustr-node-" before embedding in the cmdline.
 func (h *BootHandler) mintToken(r *http.Request, nodeID string) string {
 	if h.MintNodeToken == nil || nodeID == "" {
 		return ""
@@ -342,7 +342,7 @@ func (h *BootHandler) ServeInitramfs(w http.ResponseWriter, r *http.Request) {
 //
 // Serves the embedded iPXE UEFI binary (x86-64) to OVMF/UEFI HTTP boot clients.
 // This is the chainloader that UEFI HTTP boot downloads before executing the
-// clonr boot script. It is intentionally served from an embedded binary so that
+// clustr boot script. It is intentionally served from an embedded binary so that
 // the route works out-of-the-box without any on-disk file placement — the UEFI
 // HTTP boot client hits 404 and loops forever if this route returns an error.
 //
@@ -440,7 +440,7 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 // same properties (modules compiled in). In both cases insmod is a no-op when
 // the module is already present but harmless otherwise.
 func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
-	const cfg = `# grub.cfg stub served by clonr — redirects to local disk config.
+	const cfg = `# grub.cfg stub served by clustr — redirects to local disk config.
 # No insmod needed: grub.efi is built by grub2-mkimage at image-creation time
 # (or replaced by grub2-install during deploy finalization) with all required
 # modules compiled in. Modules can't be loaded over HTTP so insmod would fail.
@@ -461,7 +461,7 @@ if [ -f /grub2/grub.cfg ]; then
     configfile /grub2/grub.cfg
 fi
 
-echo "clonr: grub.cfg not found on any local partition"
+echo "clustr: grub.cfg not found on any local partition"
 echo "Dropping to GRUB shell for manual recovery."
 `
 	w.Header().Set("Content-Type", "text/plain")

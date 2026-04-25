@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (
@@ -219,7 +219,7 @@ func parseJournalLine(line, fallbackHostname, nodeMAC string) *api.LogEntry {
 		hostname = fallbackHostname
 	}
 
-	// Map PRIORITY (syslog severity, 0=emerg, 7=debug) → clonr level string.
+	// Map PRIORITY (syslog severity, 0=emerg, 7=debug) → clustr level string.
 	level := mapPriority(je.Priority)
 
 	// __REALTIME_TIMESTAMP is microseconds since the Unix epoch as a string.
@@ -236,7 +236,7 @@ func parseJournalLine(line, fallbackHostname, nodeMAC string) *api.LogEntry {
 	}
 }
 
-// mapPriority maps a syslog priority string (0-7) to a clonr log level string.
+// mapPriority maps a syslog priority string (0-7) to a clustr log level string.
 func mapPriority(p string) string {
 	switch p {
 	case "0", "1", "2": // emerg, alert, crit

@@ -1,5 +1,5 @@
 #!/bin/bash
-# install-dev-vm.sh — Bootstrap a fresh Rocky Linux 9 VM into a clonr dev host.
+# install-dev-vm.sh — Bootstrap a fresh Rocky Linux 9 VM into a clustr dev host.
 #
 # Idempotent: safe to run multiple times on the same host. Each step checks
 # whether work is already done before doing it.
@@ -11,7 +11,7 @@
 #   - Two block devices:
 #       /dev/sdb (or first disk) — OS disk (32 GB+)
 #       /dev/sda (or second disk) — data disk (100 GB+), must be XFS with
-#         LABEL=clonr-data, or will be formatted by this script
+#         LABEL=clustr-data, or will be formatted by this script
 #   - eth0: LAN/internet uplink (DHCP)
 #   - eth1: provisioning network (static 10.99.0.1/24)
 #
@@ -24,10 +24,10 @@
 #   bash scripts/setup/install-dev-vm.sh
 #
 # Environment overrides:
-#   CLONR_REPO_URL   — Git remote to clone from (default: https://github.com/sqoia-dev/clonr.git)
-#   CLONR_REPO_DIR   — Local clone destination (default: /opt/clonr)
-#   CLONR_DATA_LABEL — XFS volume label for the data disk (default: clonr-data)
-#   CLONR_DATA_MOUNT — Mount point for data disk (default: /var/lib/clonr)
+#   CLUSTR_REPO_URL   — Git remote to clone from (default: https://github.com/sqoia-dev/clustr.git)
+#   CLUSTR_REPO_DIR   — Local clone destination (default: /opt/clustr)
+#   CLUSTR_DATA_LABEL — XFS volume label for the data disk (default: clustr-data)
+#   CLUSTR_DATA_MOUNT — Mount point for data disk (default: /var/lib/clustr)
 #   GO_VERSION       — Go toolchain version to install (default: go1.24.2)
 
 set -euo pipefail
@@ -50,10 +50,10 @@ detect_os() {
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-CLONR_REPO_URL="${CLONR_REPO_URL:-https://github.com/sqoia-dev/clonr.git}"
-CLONR_REPO_DIR="${CLONR_REPO_DIR:-/opt/clonr}"
-CLONR_DATA_LABEL="${CLONR_DATA_LABEL:-clonr-data}"
-CLONR_DATA_MOUNT="${CLONR_DATA_MOUNT:-/var/lib/clonr}"
+CLUSTR_REPO_URL="${CLUSTR_REPO_URL:-https://github.com/sqoia-dev/clustr.git}"
+CLUSTR_REPO_DIR="${CLUSTR_REPO_DIR:-/opt/clustr}"
+CLUSTR_DATA_LABEL="${CLUSTR_DATA_LABEL:-clustr-data}"
+CLUSTR_DATA_MOUNT="${CLUSTR_DATA_MOUNT:-/var/lib/clustr}"
 GO_VERSION="${GO_VERSION:-go1.24.2}"
 GO_TARBALL="${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://dl.google.com/go/${GO_TARBALL}"
@@ -124,16 +124,16 @@ install_packages() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: Data disk (LABEL=clonr-data)
+# Step 2: Data disk (LABEL=clustr-data)
 # ---------------------------------------------------------------------------
 setup_data_disk() {
-    info "Checking data disk (LABEL=${CLONR_DATA_LABEL})"
+    info "Checking data disk (LABEL=${CLUSTR_DATA_LABEL})"
 
     # Find the device that carries the label, if already formatted
-    DATA_DEV="$(blkid -L "${CLONR_DATA_LABEL}" 2>/dev/null || true)"
+    DATA_DEV="$(blkid -L "${CLUSTR_DATA_LABEL}" 2>/dev/null || true)"
 
     if [[ -z "${DATA_DEV}" ]]; then
-        warn "No device with LABEL=${CLONR_DATA_LABEL} found — locating a candidate data disk"
+        warn "No device with LABEL=${CLUSTR_DATA_LABEL} found — locating a candidate data disk"
         # Pick the largest unmounted disk that is NOT the OS disk (sdb = OS in our setup)
         # In the VM: sda = data (100G), sdb = OS (32G) — but this is VM-layout dependent.
         # We look for a disk that is not mounted at / or /boot.
@@ -148,8 +148,8 @@ setup_data_disk() {
             break
         done
 
-        [[ -n "${CANDIDATE}" ]] || die "Could not locate a candidate data disk. Set CLONR_DATA_LABEL or format manually."
-        warn "Will format ${CANDIDATE} as XFS with LABEL=${CLONR_DATA_LABEL}. Ctrl-C within 5s to abort."
+        [[ -n "${CANDIDATE}" ]] || die "Could not locate a candidate data disk. Set CLUSTR_DATA_LABEL or format manually."
+        warn "Will format ${CANDIDATE} as XFS with LABEL=${CLUSTR_DATA_LABEL}. Ctrl-C within 5s to abort."
         sleep 5
 
         wipefs -a "${CANDIDATE}"
@@ -163,34 +163,34 @@ setup_data_disk() {
         [[ -b "${DATA_PART}" ]] || DATA_PART="${CANDIDATE}p1"
         [[ -b "${DATA_PART}" ]] || die "Could not find partition on ${CANDIDATE}"
 
-        mkfs.xfs -f -L "${CLONR_DATA_LABEL}" "${DATA_PART}"
+        mkfs.xfs -f -L "${CLUSTR_DATA_LABEL}" "${DATA_PART}"
         DATA_DEV="${DATA_PART}"
-        log "Formatted ${DATA_DEV} as XFS LABEL=${CLONR_DATA_LABEL}"
+        log "Formatted ${DATA_DEV} as XFS LABEL=${CLUSTR_DATA_LABEL}"
     fi
 
     # Mount point
-    mkdir -p "${CLONR_DATA_MOUNT}"
+    mkdir -p "${CLUSTR_DATA_MOUNT}"
 
     # Add to fstab if not already there
-    if ! grep -q "LABEL=${CLONR_DATA_LABEL}" /etc/fstab; then
-        echo "LABEL=${CLONR_DATA_LABEL}  ${CLONR_DATA_MOUNT}  xfs  defaults,noatime  0  2" >> /etc/fstab
+    if ! grep -q "LABEL=${CLUSTR_DATA_LABEL}" /etc/fstab; then
+        echo "LABEL=${CLUSTR_DATA_LABEL}  ${CLUSTR_DATA_MOUNT}  xfs  defaults,noatime  0  2" >> /etc/fstab
         log "Added data disk to /etc/fstab"
     fi
 
     # Mount if not already mounted
-    if ! mountpoint -q "${CLONR_DATA_MOUNT}"; then
-        mount "${CLONR_DATA_MOUNT}"
-        log "Mounted ${CLONR_DATA_MOUNT}"
+    if ! mountpoint -q "${CLUSTR_DATA_MOUNT}"; then
+        mount "${CLUSTR_DATA_MOUNT}"
+        log "Mounted ${CLUSTR_DATA_MOUNT}"
     fi
 
-    # Create clonr runtime subdirectories
+    # Create clustr runtime subdirectories
     mkdir -p \
-        "${CLONR_DATA_MOUNT}/images" \
-        "${CLONR_DATA_MOUNT}/boot" \
-        "${CLONR_DATA_MOUNT}/tftpboot" \
-        "${CLONR_DATA_MOUNT}/db"
+        "${CLUSTR_DATA_MOUNT}/images" \
+        "${CLUSTR_DATA_MOUNT}/boot" \
+        "${CLUSTR_DATA_MOUNT}/tftpboot" \
+        "${CLUSTR_DATA_MOUNT}/db"
 
-    step_done "data disk at ${CLONR_DATA_MOUNT}"
+    step_done "data disk at ${CLUSTR_DATA_MOUNT}"
 }
 
 # ---------------------------------------------------------------------------
@@ -230,53 +230,53 @@ GOPATH_SETUP
 }
 
 # ---------------------------------------------------------------------------
-# Step 4: Clone / update clonr repo
+# Step 4: Clone / update clustr repo
 # ---------------------------------------------------------------------------
 setup_repo() {
-    info "Checking clonr repo at ${CLONR_REPO_DIR}"
+    info "Checking clustr repo at ${CLUSTR_REPO_DIR}"
 
-    if [[ -d "${CLONR_REPO_DIR}/.git" ]]; then
+    if [[ -d "${CLUSTR_REPO_DIR}/.git" ]]; then
         log "Repo exists — pulling latest from origin/main"
-        cd "${CLONR_REPO_DIR}"
+        cd "${CLUSTR_REPO_DIR}"
         git fetch origin
         git reset --hard origin/main
     else
-        log "Cloning ${CLONR_REPO_URL} → ${CLONR_REPO_DIR}"
-        rm -rf "${CLONR_REPO_DIR}"
-        git clone "${CLONR_REPO_URL}" "${CLONR_REPO_DIR}"
+        log "Cloning ${CLUSTR_REPO_URL} → ${CLUSTR_REPO_DIR}"
+        rm -rf "${CLUSTR_REPO_DIR}"
+        git clone "${CLUSTR_REPO_URL}" "${CLUSTR_REPO_DIR}"
     fi
 
-    cd "${CLONR_REPO_DIR}"
+    cd "${CLUSTR_REPO_DIR}"
     log "Repo at: $(git log --oneline -1)"
-    step_done "clonr repo"
+    step_done "clustr repo"
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: Build clonr binaries
+# Step 5: Build clustr binaries
 # ---------------------------------------------------------------------------
 build_binaries() {
-    info "Building clonr binaries"
+    info "Building clustr binaries"
     export PATH=/usr/local/go/bin:$PATH
     export GOPATH=/root/go
 
-    cd "${CLONR_REPO_DIR}"
+    cd "${CLUSTR_REPO_DIR}"
 
-    GOTOOLCHAIN=auto go build -o /usr/local/bin/clonr-serverd ./cmd/clonr-serverd
-    GOTOOLCHAIN=auto go build -o /usr/local/bin/clonr          ./cmd/clonr
+    GOTOOLCHAIN=auto go build -o /usr/local/bin/clustr-serverd ./cmd/clustr-serverd
+    GOTOOLCHAIN=auto go build -o /usr/local/bin/clustr          ./cmd/clustr
 
-    log "clonr-serverd: $(ls -lh /usr/local/bin/clonr-serverd | awk '{print $5}')"
-    log "clonr:         $(ls -lh /usr/local/bin/clonr          | awk '{print $5}')"
-    step_done "clonr binaries"
+    log "clustr-serverd: $(ls -lh /usr/local/bin/clustr-serverd | awk '{print $5}')"
+    log "clustr:         $(ls -lh /usr/local/bin/clustr          | awk '{print $5}')"
+    step_done "clustr binaries"
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: Install systemd service unit for clonr-serverd
+# Step 6: Install systemd service unit for clustr-serverd
 # ---------------------------------------------------------------------------
 install_service() {
-    info "Installing clonr-serverd systemd unit"
+    info "Installing clustr-serverd systemd unit"
 
-    UNIT_SRC="${CLONR_REPO_DIR}/deploy/systemd/clonr-serverd.service"
-    UNIT_DST="/etc/systemd/system/clonr-serverd.service"
+    UNIT_SRC="${CLUSTR_REPO_DIR}/deploy/systemd/clustr-serverd.service"
+    UNIT_DST="/etc/systemd/system/clustr-serverd.service"
 
     if [[ -f "${UNIT_SRC}" ]]; then
         cp "${UNIT_SRC}" "${UNIT_DST}"
@@ -286,20 +286,20 @@ install_service() {
         warn "No unit file found at ${UNIT_SRC} — writing minimal fallback unit"
         cat > "${UNIT_DST}" << 'UNIT'
 [Unit]
-Description=clonr Server Daemon
+Description=clustr Server Daemon
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/clonr-serverd
+ExecStart=/usr/local/bin/clustr-serverd
 Restart=on-failure
 RestartSec=5s
 User=root
-WorkingDirectory=/var/lib/clonr
+WorkingDirectory=/var/lib/clustr
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=clonr-serverd
+SyslogIdentifier=clustr-serverd
 
 [Install]
 WantedBy=multi-user.target
@@ -307,20 +307,20 @@ UNIT
     fi
 
     systemctl daemon-reload
-    systemctl enable clonr-serverd
+    systemctl enable clustr-serverd
 
     # Restart if already running (picks up new binary), start if not
-    if systemctl is-active --quiet clonr-serverd; then
-        systemctl restart clonr-serverd
-        log "clonr-serverd restarted"
+    if systemctl is-active --quiet clustr-serverd; then
+        systemctl restart clustr-serverd
+        log "clustr-serverd restarted"
     else
-        systemctl start clonr-serverd
-        log "clonr-serverd started"
+        systemctl start clustr-serverd
+        log "clustr-serverd started"
     fi
 
     sleep 2
-    systemctl is-active clonr-serverd || die "clonr-serverd failed to start — check: journalctl -u clonr-serverd"
-    step_done "clonr-serverd service"
+    systemctl is-active clustr-serverd || die "clustr-serverd failed to start — check: journalctl -u clustr-serverd"
+    step_done "clustr-serverd service"
 }
 
 # ---------------------------------------------------------------------------
@@ -328,7 +328,7 @@ UNIT
 # ---------------------------------------------------------------------------
 install_autodeploy() {
     info "Installing autodeploy timer"
-    bash "${CLONR_REPO_DIR}/scripts/autodeploy/install.sh"
+    bash "${CLUSTR_REPO_DIR}/scripts/autodeploy/install.sh"
     step_done "autodeploy timer"
 }
 
@@ -395,7 +395,7 @@ configure_firewall() {
     # Masquerade is enabled by default in the external zone; ensure it's on.
     firewall-cmd --zone=external --add-masquerade --permanent 2>/dev/null || true
 
-    # Allow SSH and clonr API from LAN
+    # Allow SSH and clustr API from LAN
     firewall-cmd --zone=external --add-service=ssh --permanent
     firewall-cmd --zone=external --add-port=8080/tcp --permanent
 
@@ -438,11 +438,11 @@ setup_nat_gateway() {
     info "Configuring NAT gateway for provisioning network"
 
     # ── a) Enable IP forwarding (persistent) ─────────────────────────────────
-    cat > /etc/sysctl.d/99-clonr-ipforward.conf << 'SYSCTL'
+    cat > /etc/sysctl.d/99-clustr-ipforward.conf << 'SYSCTL'
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 SYSCTL
-    sysctl -p /etc/sysctl.d/99-clonr-ipforward.conf
+    sysctl -p /etc/sysctl.d/99-clustr-ipforward.conf
     log "IP forwarding enabled"
 
     # ── b) Install dnsmasq ────────────────────────────────────────────────────
@@ -461,8 +461,8 @@ SYSCTL
     # Write dnsmasq config — listen only on the provisioning interface so we
     # don't conflict with systemd-resolved or any other resolver on eth0.
     mkdir -p /etc/dnsmasq.d
-    cat > /etc/dnsmasq.d/clonr-provisioning.conf << 'DNSMASQ'
-# clonr provisioning network DNS forwarder
+    cat > /etc/dnsmasq.d/clustr-provisioning.conf << 'DNSMASQ'
+# clustr provisioning network DNS forwarder
 # Only listen on the provisioning interface — do not conflict with systemd-resolved
 # or other DNS on eth0.
 interface=eth1
@@ -487,8 +487,8 @@ DNSMASQ
 
         if command -v ufw &>/dev/null; then
             # Persist via ufw/before.rules if not already present
-            if ! grep -q 'clonr-masquerade' /etc/ufw/before.rules 2>/dev/null; then
-                sed -i '/^# END COMMIT/i # clonr-masquerade\n-A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE' \
+            if ! grep -q 'clustr-masquerade' /etc/ufw/before.rules 2>/dev/null; then
+                sed -i '/^# END COMMIT/i # clustr-masquerade\n-A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE' \
                     /etc/ufw/before.rules 2>/dev/null || true
                 grep -q '^DEFAULT_FORWARD_POLICY' /etc/default/ufw \
                     && sed -i 's/DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw \
@@ -569,7 +569,7 @@ install_udev_rules() {
 
         if [[ -n "${ETH0_MAC}" && -n "${ETH1_MAC}" ]]; then
             cat > "${UDEV_RULE}" << RULES
-# clonr dev VM — persistent interface names
+# clustr dev VM — persistent interface names
 # eth0: LAN (DHCP from router)
 SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="${ETH0_MAC}", NAME="eth0"
 # eth1: Provisioning network (static 10.99.0.1/24)
@@ -592,12 +592,12 @@ RULES
 print_status() {
     echo ""
     echo "========================================"
-    echo "  clonr dev VM setup complete"
+    echo "  clustr dev VM setup complete"
     echo "========================================"
     echo ""
     echo "Services:"
-    systemctl is-active clonr-serverd          && echo "  clonr-serverd:          active" || echo "  clonr-serverd:          FAILED"
-    systemctl is-active clonr-autodeploy.timer  && echo "  clonr-autodeploy.timer: active" || echo "  clonr-autodeploy.timer: FAILED"
+    systemctl is-active clustr-serverd          && echo "  clustr-serverd:          active" || echo "  clustr-serverd:          FAILED"
+    systemctl is-active clustr-autodeploy.timer  && echo "  clustr-autodeploy.timer: active" || echo "  clustr-autodeploy.timer: FAILED"
     systemctl is-active firewalld              && echo "  firewalld:              active" || echo "  firewalld:              FAILED"
     systemctl is-active dnsmasq               && echo "  dnsmasq:                active" || echo "  dnsmasq:                FAILED"
     echo ""
@@ -612,20 +612,20 @@ print_status() {
     fi
     echo ""
     echo "Disk:"
-    df -h "${CLONR_DATA_MOUNT}" /
+    df -h "${CLUSTR_DATA_MOUNT}" /
     echo ""
     echo "Network:"
     ip -4 addr show | grep -E 'inet |^[0-9]'
     echo ""
     echo "Go: $(/usr/local/go/bin/go version)"
-    echo "clonr-serverd: $(ls -lh /usr/local/bin/clonr-serverd | awk '{print $5, $NF}')"
-    echo "clonr:         $(ls -lh /usr/local/bin/clonr          | awk '{print $5, $NF}')"
+    echo "clustr-serverd: $(ls -lh /usr/local/bin/clustr-serverd | awk '{print $5, $NF}')"
+    echo "clustr:         $(ls -lh /usr/local/bin/clustr          | awk '{print $5, $NF}')"
     echo ""
     echo "Useful commands:"
-    echo "  journalctl -u clonr-serverd -f              # tail server logs"
-    echo "  journalctl -u clonr-autodeploy.service -f   # tail deploy logs"
-    echo "  systemctl start clonr-autodeploy.service    # force immediate sync"
-    echo "  systemctl stop clonr-autodeploy.timer       # pause auto-sync"
+    echo "  journalctl -u clustr-serverd -f              # tail server logs"
+    echo "  journalctl -u clustr-autodeploy.service -f   # tail deploy logs"
+    echo "  systemctl start clustr-autodeploy.service    # force immediate sync"
+    echo "  systemctl stop clustr-autodeploy.timer       # pause auto-sync"
 }
 
 # ---------------------------------------------------------------------------
@@ -634,10 +634,10 @@ print_status() {
 require_root
 detect_os
 
-log "Starting clonr dev VM bootstrap"
+log "Starting clustr dev VM bootstrap"
 log "OS: ${OS_ID} ${OS_VERSION}"
-log "Repo: ${CLONR_REPO_URL}"
-log "Data mount: ${CLONR_DATA_MOUNT} (LABEL=${CLONR_DATA_LABEL})"
+log "Repo: ${CLUSTR_REPO_URL}"
+log "Data mount: ${CLUSTR_DATA_MOUNT} (LABEL=${CLUSTR_DATA_LABEL})"
 log "Go: ${GO_VERSION}"
 echo ""
 

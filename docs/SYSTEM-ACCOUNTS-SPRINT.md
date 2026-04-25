@@ -1,4 +1,4 @@
-# clonr System Accounts Module — Sprint Plan (v1)
+# clustr System Accounts Module — Sprint Plan (v1)
 
 **Owner:** Dinesh (implementation), Richard (arch review), Gilfoyle (ops review)
 **Status:** Ready to build
@@ -8,8 +8,8 @@
 
 ## 1. Goal
 
-Add a "System Accounts" feature to clonr. When an operator defines system accounts
-and groups in the webui, clonr:
+Add a "System Accounts" feature to clustr. When an operator defines system accounts
+and groups in the webui, clustr:
 
 1. Persists the account and group definitions in the local SQLite DB.
 2. Injects them into every node's `/etc/passwd`, `/etc/group`, and `/etc/shadow`
@@ -23,7 +23,7 @@ This is the correct mechanism for service accounts that:
 - Need a fixed, consistent UID/GID across every node in the cluster.
 - Cannot wait for LDAP or any other network-based directory service.
 
-The feature is always-on once accounts are defined. A clonr install with no system
+The feature is always-on once accounts are defined. A clustr install with no system
 accounts defined must behave identically to today.
 
 ---
@@ -32,7 +32,7 @@ accounts defined must behave identically to today.
 
 | Area | Decision | Rationale |
 |---|---|---|
-| **Storage** | SQLite tables under the existing `internal/db/` layer, migration 029 | Consistent with all other clonr config; no new storage dependency. |
+| **Storage** | SQLite tables under the existing `internal/db/` layer, migration 029 | Consistent with all other clustr config; no new storage dependency. |
 | **Injection mechanism** | `useradd`/`groupadd` inside `chroot <mountRoot>` | Same pattern as the base OS package manager calls already in finalize.go. Avoids parsing `/etc/passwd` line-by-line, which is brittle and error-prone. |
 | **Groups before users** | Groups are created first; `useradd --gid <gid>` references them | Mirrors how a real sysadmin would do it; avoids `useradd` failure when the primary group does not yet exist. |
 | **Idempotency** | Check for existing UID/GID via `getent passwd <uid>` / `getent group <gid>` in chroot before invoking add commands | Re-running finalize on the same rootfs (e.g. reimage) must not produce errors when the base image already baked the account. |
@@ -221,7 +221,7 @@ All under `/api/v1/system/`, admin role required (same gate as LDAP routes).
 | PUT | `/api/v1/system/accounts/{id}` | Full replace. 409 on UID conflict with a different account. |
 | DELETE | `/api/v1/system/accounts/{id}` | Hard delete. No cascade required. |
 
-**Request/response bodies** follow the same shape as existing clonr handlers:
+**Request/response bodies** follow the same shape as existing clustr handlers:
 errors use `api.ErrorResponse{Error, Code}`, success uses the typed object directly
 or a list wrapper. Validation errors return 400 with `code: "validation_error"`.
 
@@ -480,7 +480,7 @@ the 10 other accounts from being injected. Each entry is processed independently
 Updating an account changes only the DB row. **Nodes already deployed are not
 retroactively updated** — they reflect the account definitions that were active at
 reimage time. To propagate changes, the operator must reimage affected nodes. This
-is the same model as every other clonr config change (SSH keys, network config, etc.).
+is the same model as every other clustr config change (SSH keys, network config, etc.).
 
 The UI should display a notice: "Changes take effect on next reimage."
 
@@ -497,7 +497,7 @@ body should list the conflicting account usernames so the operator knows what to
 ### 8.4 Account removal from a live node
 
 Out of scope for v1. Removing an account from a running node requires either a
-reimage (the clonr way) or manual `userdel` via SSH. Document this in the UI
+reimage (the clustr way) or manual `userdel` via SSH. Document this in the UI
 delete confirmation dialog.
 
 ### 8.5 GID referenced by `primary_gid` but not in `system_groups`
@@ -535,8 +535,8 @@ PAM passwords. This is the correct and conventional configuration.
 
 ## 9. Phased Implementation
 
-Each phase commits cleanly and pushes. CI runs the build; `clonr-autodeploy.timer`
-on the clonr VM rebuilds within 2 minutes.
+Each phase commits cleanly and pushes. CI runs the build; `clustr-autodeploy.timer`
+on the clustr VM rebuilds within 2 minutes.
 
 ### Phase 1 — DB migration + Manager skeleton + API stub
 
@@ -577,13 +577,13 @@ on the clonr VM rebuilds within 2 minutes.
 **Do NOT run `go build`, `go test`, `make`, or any compile-heavy command on the
 sqoia-dev workstation.** That host is resource-constrained; local builds OOM it.
 
-1. Write code, commit, push to `origin/main` on `sqoia-dev/clonr`.
+1. Write code, commit, push to `origin/main` on `sqoia-dev/clustr`.
 2. GitHub Actions CI (`ci.yml`) builds and tests on push. Monitor with `gh run watch`
    per the standing CI-watch rule. Fix failures before marking a phase done.
-3. `clonr-autodeploy.timer` on `192.168.1.151` polls `origin/main` every 2 minutes,
-   rebuilds binaries and initramfs, hot-restarts `clonr-serverd`. Watch with:
+3. `clustr-autodeploy.timer` on `192.168.1.151` polls `origin/main` every 2 minutes,
+   rebuilds binaries and initramfs, hot-restarts `clustr-serverd`. Watch with:
    ```
-   ssh -i ~/.ssh/id_ed25519 root@192.168.1.151 "journalctl -u clonr-autodeploy.service -f"
+   ssh -i ~/.ssh/id_ed25519 root@192.168.1.151 "journalctl -u clustr-autodeploy.service -f"
    ```
 
 ---
@@ -620,7 +620,7 @@ Push via the standard ssh-agent pattern in `CLAUDE.md`.
 
 ## 13. Acceptance Criteria
 
-- [ ] Fresh clonr install with no system accounts defined behaves identically to today.
+- [ ] Fresh clustr install with no system accounts defined behaves identically to today.
 - [ ] An admin can define a `munge` group (GID 1002) and a `munge` account (UID 1002)
       in the webui.
 - [ ] Reimaging a node causes `munge:x:1002:` to appear in the node's `/etc/group`

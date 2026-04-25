@@ -32,12 +32,12 @@ cd ipxe/src
 # Standard EFI build (UEFI chainload target):
 make bin-x86_64-efi/ipxe.efi
 
-# With embedded clonr boot script (recommended for production):
-# Create a script file, e.g. clonr.ipxe:
+# With embedded clustr boot script (recommended for production):
+# Create a script file, e.g. clustr.ipxe:
 #   #!ipxe
 #   dhcp
 #   chain http://${next-server}/boot.ipxe
-make bin-x86_64-efi/ipxe.efi EMBED=/path/to/clonr.ipxe
+make bin-x86_64-efi/ipxe.efi EMBED=/path/to/clustr.ipxe
 
 # Record the version and hash of the resulting binary:
 git -C . describe --tags
@@ -50,4 +50,4 @@ Replace `deploy/pxe/ipxe.efi` with the rebuilt binary and update
 ## TODO
 
 - Rebuild from source with a pinned iPXE commit and record the version + build flags here.
-- Embed the clonr boot script at build time rather than relying on a generic chainload.
+- Embed the clustr boot script at build time rather than relying on a generic chainload.

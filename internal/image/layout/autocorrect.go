@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (

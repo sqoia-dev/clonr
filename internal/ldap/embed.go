@@ -5,5 +5,5 @@ import "embed"
 //go:embed templates
 var templateFS embed.FS
 
-//go:embed assets/clonr-slapd.service assets/50-clonr-slapd.rules
+//go:embed assets/clustr-slapd.service assets/50-clustr-slapd.rules
 var assetFS embed.FS

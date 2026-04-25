@@ -32,11 +32,11 @@ type LDAPModuleConfig struct {
 	LastProvisionedAt   time.Time
 	LastCheckedAt       time.Time
 	LastCheckError      string
-	// SudoersEnabled indicates whether the clonr-admins LDAP group sudoers feature is active.
+	// SudoersEnabled indicates whether the clustr-admins LDAP group sudoers feature is active.
 	// Added by migration 036.
 	SudoersEnabled bool
 	// SudoersGroupCN is the CN of the LDAP group written into /etc/sudoers.d on deployed nodes.
-	// Default: "clonr-admins". Added by migration 036.
+	// Default: "clustr-admins". Added by migration 036.
 	SudoersGroupCN string
 }
 

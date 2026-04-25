@@ -43,7 +43,7 @@ type AuthHandler struct {
 	// Returns the new session token and expiry.
 	SetPassword func(userID, currentPassword, newPassword string) (token string, exp time.Time, err error)
 
-	// CookieName is the cookie name (e.g. "clonr_session").
+	// CookieName is the cookie name (e.g. "clustr_session").
 	CookieName string
 
 	// Secure sets the Secure flag on the session cookie.
@@ -131,7 +131,7 @@ func (h *AuthHandler) handlePasswordLogin(w http.ResponseWriter, r *http.Request
 	// Signal forced password change so the UI can gate access.
 	if mustChange {
 		http.SetCookie(w, &http.Cookie{
-			Name:     "clonr_force_password_change",
+			Name:     "clustr_force_password_change",
 			Value:    "1",
 			Path:     "/",
 			HttpOnly: false, // readable by JS so it can redirect
@@ -176,7 +176,7 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, h.sessionCookie("", -1))
 	// Also clear the force-change cookie.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "clonr_force_password_change",
+		Name:     "clustr_force_password_change",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: false,
@@ -293,7 +293,7 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 	http.SetCookie(w, h.sessionCookie(token, int(time.Until(exp).Seconds())))
 	// Clear force-change cookie.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "clonr_force_password_change",
+		Name:     "clustr_force_password_change",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: false,

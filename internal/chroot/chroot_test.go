@@ -152,7 +152,7 @@ func TestMountAllFailureRollsBack(t *testing.T) {
 // TestNewSession_MissingRoot verifies that NewSession returns an error for a
 // non-existent directory.
 func TestNewSession_MissingRoot(t *testing.T) {
-	_, err := NewSession("/this/does/not/exist/clonr-test")
+	_, err := NewSession("/this/does/not/exist/clustr-test")
 	if err == nil {
 		t.Fatal("expected error for missing root, got nil")
 	}

@@ -55,7 +55,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 	out := string(script)
 
-	// Must chain grub.efi from the clonr server.
+	// Must chain grub.efi from the clustr server.
 	if !strings.Contains(out, "/api/v1/boot/grub.efi") {
 		t.Errorf("UEFI disk boot script must contain grub.efi chain URL; got:\n%s", out)
 	}

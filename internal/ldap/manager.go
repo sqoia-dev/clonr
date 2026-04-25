@@ -22,9 +22,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // statusProvisioning / statusReady etc. mirror the DB status column values.
@@ -102,7 +102,7 @@ type EnableRequest struct {
 // provisioning is a no-op (returns current status).
 //
 // This method performs privileged operations (slapadd, systemctl mask, cert
-// writes to /etc/clonr/) and MUST be called with root privileges.
+// writes to /etc/clustr/) and MUST be called with root privileges.
 func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 	if req.BaseDN == "" {
 		return fmt.Errorf("ldap: base_dn is required")
@@ -200,7 +200,7 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		log.Warn().Err(err).Msg("ldap: mask distro slapd (non-fatal)")
 	}
 
-	// Install the clonr-slapd systemd unit and polkit rule, then daemon-reload.
+	// Install the clustr-slapd systemd unit and polkit rule, then daemon-reload.
 	// Runs after MaskDistroSlapd so the single reload picks up both changes.
 	log.Info().Msg("ldap: step 0b/6: installing systemd unit and polkit rule")
 	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "Installing systemd unit and polkit rule...")
@@ -210,14 +210,14 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		return
 	}
 
-	// ── Step 0c: Ensure clonr parent dirs are world-traversable ──────────────
-	// /etc/clonr and /var/lib/clonr must be 0755 root:root so unprivileged
+	// ── Step 0c: Ensure clustr parent dirs are world-traversable ──────────────
+	// /etc/clustr and /var/lib/clustr must be 0755 root:root so unprivileged
 	// daemons (slapd as uid ldap) can traverse into their subdirectories.
-	// A partial prior install may have left /etc/clonr at 0700 if MkdirAll
+	// A partial prior install may have left /etc/clustr at 0700 if MkdirAll
 	// inherited a tight umask; repair that every run before touching anything
 	// inside these trees.
 	log.Info().Msg("ldap: step 0c/6: ensuring parent dir permissions")
-	for _, d := range []string{"/etc/clonr", "/etc/clonr/ldap", "/var/lib/clonr"} {
+	for _, d := range []string{"/etc/clustr", "/etc/clustr/ldap", "/var/lib/clustr"} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			setError(fmt.Sprintf("mkdir %s failed: %v", d, err))
 			return
@@ -239,7 +239,7 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	hostname := detectHostname()
 	primaryIP := detectPrimaryIP()
 
-	caBundle, caKey, caCert, err := generateCA(fmt.Sprintf("clonr LDAP CA (%s)", dc1))
+	caBundle, caKey, caCert, err := generateCA(fmt.Sprintf("clustr LDAP CA (%s)", dc1))
 	if err != nil {
 		setError(fmt.Sprintf("cert generation failed: %v", err))
 		return
@@ -470,7 +470,7 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 			attrs: map[string][]string{
 				"objectClass":  {"top", "simpleSecurityObject", "organizationalRole"},
 				"cn":           {"node-reader"},
-				"description":  {"clonr node read-only service account (managed by clonr-serverd)"},
+				"description":  {"clustr node read-only service account (managed by clustr-serverd)"},
 				"userPassword": {servicePassword},
 			},
 			credentialed: true,

@@ -1,5 +1,5 @@
 // sudoers.go — LDAP sudoers group management.
-// Provisions and manages the clonr-admins LDAP group that grants sudo access
+// Provisions and manages the clustr-admins LDAP group that grants sudo access
 // on deployed nodes via a sudoers drop-in written during finalization.
 package ldap
 
@@ -10,15 +10,15 @@ import (
 	goldap "github.com/go-ldap/ldap/v3"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (
-	sudoersDefaultGroupCN  = "clonr-admins"
+	sudoersDefaultGroupCN  = "clustr-admins"
 	sudoersDefaultGIDNumber = 50000
 )
 
-// EnableSudoers provisions the clonr-admins LDAP group (if it does not already
+// EnableSudoers provisions the clustr-admins LDAP group (if it does not already
 // exist) and sets sudoers_enabled=1 in the DB. Idempotent: if the group already
 // exists in LDAP, the create step is silently skipped.
 func (m *Manager) EnableSudoers(ctx context.Context) error {
@@ -52,7 +52,7 @@ func (m *Manager) EnableSudoers(ctx context.Context) error {
 	addReq.Attribute("objectClass", []string{"top", "posixGroup"})
 	addReq.Attribute("cn", []string{groupCN})
 	addReq.Attribute("gidNumber", []string{fmt.Sprintf("%d", sudoersDefaultGIDNumber)})
-	addReq.Attribute("description", []string{"clonr managed sudoers group"})
+	addReq.Attribute("description", []string{"clustr managed sudoers group"})
 
 	if err := conn.Add(addReq); err != nil {
 		if !goldap.IsErrorWithCode(err, goldap.LDAPResultEntryAlreadyExists) {

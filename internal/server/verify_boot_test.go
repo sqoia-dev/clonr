@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // newVerifyBootServer creates a test server with auth enabled and a seeded node.
@@ -102,7 +102,7 @@ func doVerifyBoot(t *testing.T, ts *httptest.Server, nodeID, bearerToken string,
 
 func TestVerifyBoot_ValidNodeToken_Returns204AndUpdatesFields(t *testing.T) {
 	ts, database, nodeID, rawNodeKey := newVerifyBootServer(t)
-	nodeKey := "clonr-node-" + rawNodeKey
+	nodeKey := "clustr-node-" + rawNodeKey
 
 	payload := api.VerifyBootRequest{
 		Hostname:       "seabios-vm206",
@@ -179,7 +179,7 @@ func TestVerifyBoot_WrongNodeToken_Returns403(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateNodeScopedKey: %v", err)
 	}
-	wrongKey := "clonr-node-" + rawNode2
+	wrongKey := "clustr-node-" + rawNode2
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

@@ -3,7 +3,7 @@ package api
 import "time"
 
 // DeployProgress represents real-time progress of a deployment on a single node.
-// It is POSTed by the clonr client to /api/v1/deploy/progress and streamed to
+// It is POSTed by the clustr client to /api/v1/deploy/progress and streamed to
 // the UI via Server-Sent Events at /api/v1/deploy/progress/stream.
 type DeployProgress struct {
 	NodeMAC    string    `json:"node_mac"`

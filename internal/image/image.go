@@ -1,4 +1,4 @@
-// Package image manages clonr image metadata and lifecycle.
+// Package image manages clustr image metadata and lifecycle.
 package image
 
 import "time"

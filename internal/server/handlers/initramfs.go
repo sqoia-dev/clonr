@@ -22,9 +22,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/initramfs"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/initramfs"
 )
 
 //go:embed scripts/build-initramfs.sh
@@ -34,8 +34,8 @@ var buildInitramfsScript []byte // embedded at compile time — no on-disk depen
 type InitramfsHandler struct {
 	DB            *db.DB
 	ScriptPath    string // path to build-initramfs.sh (abs)
-	InitramfsPath string // final output path (e.g. /var/lib/clonr/boot/initramfs-clonr.img)
-	ClonrBinPath  string // path to the clonr static binary passed to the script
+	InitramfsPath string // final output path (e.g. /var/lib/clustr/boot/initramfs-clustr.img)
+	ClustrBinPath  string // path to the clustr static binary passed to the script
 
 	mu          sync.Mutex // serialises concurrent rebuild requests
 	running     bool
@@ -221,7 +221,7 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 	stagingPath := h.InitramfsPath + ".building"
 
 	// Build in a temp work dir.
-	workDir, err := os.MkdirTemp("", "clonr-initramfs-*")
+	workDir, err := os.MkdirTemp("", "clustr-initramfs-*")
 	if err != nil {
 		h.failBuild(buildID, fmt.Errorf("create work dir: %w", err))
 		writeError(w, err)
@@ -327,8 +327,8 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 	// Write the embedded script to a temp file so the binary is self-contained.
 	// The handler's ScriptPath field is ignored at runtime; the embedded bytes
 	// are always used. This fixes "exit status 127" caused by relative ScriptPath
-	// not existing in the service's WorkingDirectory (/var/lib/clonr).
-	tmpScript, err := os.CreateTemp("", "clonr-build-initramfs-*.sh")
+	// not existing in the service's WorkingDirectory (/var/lib/clustr).
+	tmpScript, err := os.CreateTemp("", "clustr-build-initramfs-*.sh")
 	if err != nil {
 		return fmt.Errorf("create temp script: %w", err)
 	}
@@ -347,16 +347,16 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 
 	scriptPath := tmpScriptPath
 
-	clonrBin := h.ClonrBinPath
-	if clonrBin == "" {
-		// Default: look for clonr-static alongside the running binary.
+	clustrBin := h.ClustrBinPath
+	if clustrBin == "" {
+		// Default: look for clustr-static alongside the running binary.
 		exe, _ := os.Executable()
-		clonrBin = filepath.Join(filepath.Dir(exe), "clonr-static")
-	} else if !filepath.IsAbs(clonrBin) {
+		clustrBin = filepath.Join(filepath.Dir(exe), "clustr-static")
+	} else if !filepath.IsAbs(clustrBin) {
 		// Relative path: resolve relative to the running binary's directory so
 		// the path is stable regardless of WorkingDirectory in the systemd unit.
 		exe, _ := os.Executable()
-		clonrBin = filepath.Join(filepath.Dir(exe), clonrBin)
+		clustrBin = filepath.Join(filepath.Dir(exe), clustrBin)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -365,8 +365,8 @@ func (h *InitramfsHandler) runScript(workDir, outputPath string, lines chan<- st
 	// build-initramfs.sh uses `sshpass -p $PASS scp user@host:/path` to pull
 	// binaries from localhost. When running on the server itself we create a
 	// sshpass shim that drops the -p flag and relies on root's SSH key via
-	// ssh-agent — same pattern as clonr-autodeploy.sh.
-	shimDir, shimErr := os.MkdirTemp("", "clonr-sshpass-shim-*")
+	// ssh-agent — same pattern as clustr-autodeploy.sh.
+	shimDir, shimErr := os.MkdirTemp("", "clustr-sshpass-shim-*")
 	if shimErr != nil {
 		return fmt.Errorf("create shim dir: %w", shimErr)
 	}
@@ -386,11 +386,11 @@ if [[ -f /root/.ssh/id_ed25519 ]]; then
     eval "$(ssh-agent -s)" > /dev/null 2>&1
     ssh-add /root/.ssh/id_ed25519 < /dev/null 2>/dev/null || true
 fi
-export CLONR_SERVER_USER=root
+export CLUSTR_SERVER_USER=root
 exec bash %q %q %q
-`, scriptPath, clonrBin, outputPath)
+`, scriptPath, clustrBin, outputPath)
 
-	wrapperFile, wErr := os.CreateTemp("", "clonr-initramfs-wrapper-*.sh")
+	wrapperFile, wErr := os.CreateTemp("", "clustr-initramfs-wrapper-*.sh")
 	if wErr != nil {
 		return fmt.Errorf("create wrapper script: %w", wErr)
 	}
@@ -412,8 +412,8 @@ exec bash %q %q %q
 		}
 	}
 	cmd.Env = append(env,
-		"CLONR_SERVER_HOST=127.0.0.1",
-		"CLONR_SERVER_USER=root",
+		"CLUSTR_SERVER_HOST=127.0.0.1",
+		"CLUSTR_SERVER_USER=root",
 	)
 
 	stdout, err := cmd.StdoutPipe()
@@ -521,7 +521,7 @@ func extractKeyPrefix(r *http.Request) string {
 	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
 		// Strip typed prefix.
 		key := after
-		for _, pfx := range []string{"clonr-admin-", "clonr-node-"} {
+		for _, pfx := range []string{"clustr-admin-", "clustr-node-"} {
 			if strings.HasPrefix(key, pfx) {
 				key = strings.TrimPrefix(key, pfx)
 				break

@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/power"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/power"
 )
 
 // defaultReimageMaxConcurrent is the default maximum number of in-flight reimages.
@@ -32,10 +32,10 @@ const defaultReimageMaxConcurrent = 20
 // enough to avoid this without materially slowing fleet reimage time.
 const defaultPowerCycleStagger = 2 * time.Second
 
-// reimageMaxConcurrent reads CLONR_REIMAGE_MAX_CONCURRENT from env, falling
+// reimageMaxConcurrent reads CLUSTR_REIMAGE_MAX_CONCURRENT from env, falling
 // back to defaultReimageMaxConcurrent.
 func reimageMaxConcurrent() int {
-	if v := os.Getenv("CLONR_REIMAGE_MAX_CONCURRENT"); v != "" {
+	if v := os.Getenv("CLUSTR_REIMAGE_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
@@ -43,10 +43,10 @@ func reimageMaxConcurrent() int {
 	return defaultReimageMaxConcurrent
 }
 
-// powerCycleStagger reads CLONR_POWER_CYCLE_STAGGER from env as a Go duration,
+// powerCycleStagger reads CLUSTR_POWER_CYCLE_STAGGER from env as a Go duration,
 // falling back to defaultPowerCycleStagger.
 func powerCycleStagger() time.Duration {
-	if v := os.Getenv("CLONR_POWER_CYCLE_STAGGER"); v != "" {
+	if v := os.Getenv("CLUSTR_POWER_CYCLE_STAGGER"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
 			return d
 		}
@@ -206,13 +206,13 @@ func (o *Orchestrator) Scheduler(ctx context.Context) {
 }
 
 // runScheduled fetches and triggers overdue scheduled requests, enforcing
-// CLONR_REIMAGE_MAX_CONCURRENT and CLONR_POWER_CYCLE_STAGGER limits.
+// CLUSTR_REIMAGE_MAX_CONCURRENT and CLUSTR_POWER_CYCLE_STAGGER limits.
 //
 // Requests beyond the concurrency cap are skipped this tick and will be
 // retried on the next 30-second scheduler tick. This keeps the scheduler
 // simple (stateless) — the DB holds all pending requests as ground truth.
 //
-// Power cycles are staggered by CLONR_POWER_CYCLE_STAGGER (default 2s) to
+// Power cycles are staggered by CLUSTR_POWER_CYCLE_STAGGER (default 2s) to
 // avoid triggering IPMI BMC firmware bugs that drop rapid successive commands.
 func (o *Orchestrator) runScheduled(ctx context.Context) {
 	reqs, err := o.DB.ListPendingScheduledRequests(ctx, time.Now())

@@ -19,9 +19,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/internal/clientd"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/clientd"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // Status values mirroring the DB status column.
@@ -165,7 +165,7 @@ func (m *Manager) seedDefaultTemplates(ctx context.Context, clusterName string, 
 
 		data := map[string]interface{}{
 			"ClusterName":        clusterName,
-			"ControllerHostname": "clonr-server",
+			"ControllerHostname": "clustr-server",
 			"Timestamp":          time.Now().UTC().Format(time.RFC3339),
 			"Nodes":              []interface{}{},
 		}
@@ -176,7 +176,7 @@ func (m *Manager) seedDefaultTemplates(ctx context.Context, clusterName string, 
 			continue
 		}
 
-		_, err = m.db.SlurmSaveConfigVersion(ctx, filename, buf.String(), "clonr-system", "Initial default template")
+		_, err = m.db.SlurmSaveConfigVersion(ctx, filename, buf.String(), "clustr-system", "Initial default template")
 		if err != nil {
 			log.Warn().Err(err).Str("file", filename).Msg("slurm: save default template version failed")
 		} else {

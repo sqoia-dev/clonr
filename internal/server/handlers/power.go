@@ -1,6 +1,6 @@
 // Package handlers — power.go implements POST /api/v1/nodes/{id}/power/flip-to-disk.
 //
-// This endpoint is called by the clonr client after a successful deploy to tell
+// This endpoint is called by the clustr client after a successful deploy to tell
 // the server to instruct the node's power provider to set the next boot device
 // to disk. An optional ?cycle=true query parameter also power-cycles the node
 // so it reboots immediately into the deployed OS.
@@ -14,9 +14,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/power"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/power"
 )
 
 // flipToDiskTimeout caps the combined SetNextBoot + optional PowerCycle call.

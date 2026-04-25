@@ -27,7 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // DepBuild describes one dependency to build.
@@ -258,9 +258,9 @@ func (m *Manager) decryptSecret(ciphertextHex string) ([]byte, error) {
 	return aesGCMDecrypt(key, ciphertextHex)
 }
 
-// secretEncryptionKey derives a 32-byte AES key from CLONR_SECRET_KEY.
+// secretEncryptionKey derives a 32-byte AES key from CLUSTR_SECRET_KEY.
 func (m *Manager) secretEncryptionKey() ([]byte, error) {
-	envKey := os.Getenv("CLONR_SECRET_KEY")
+	envKey := os.Getenv("CLUSTR_SECRET_KEY")
 	if envKey != "" {
 		raw, err := hex.DecodeString(envKey)
 		if err == nil && len(raw) == 32 {
@@ -270,8 +270,8 @@ func (m *Manager) secretEncryptionKey() ([]byte, error) {
 		h := sha256.Sum256([]byte(envKey))
 		return h[:], nil
 	}
-	log.Warn().Msg("slurm: CLONR_SECRET_KEY not set — using derived key (set CLONR_SECRET_KEY in production)")
-	h := sha256.Sum256([]byte("clonr-slurm-secrets-v1"))
+	log.Warn().Msg("slurm: CLUSTR_SECRET_KEY not set — using derived key (set CLUSTR_SECRET_KEY in production)")
+	h := sha256.Sum256([]byte("clustr-slurm-secrets-v1"))
 	return h[:], nil
 }
 

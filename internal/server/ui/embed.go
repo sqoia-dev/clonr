@@ -1,4 +1,4 @@
-// Package ui embeds the static web UI files into the clonr-serverd binary.
+// Package ui embeds the static web UI files into the clustr-serverd binary.
 package ui
 
 import "embed"

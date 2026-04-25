@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // APIKeyRecord is the persisted representation of an API key (hash only, never the raw key).

@@ -218,7 +218,7 @@ const LDAPPages = {
                 </div>
                 <div style="padding:16px 20px;" id="ldap-sudoers-body">
                     <p style="margin:0;color:var(--text-secondary);font-size:13px;">
-                        Grant LDAP users sudo access on all deployed nodes via the <code>clonr-admins</code> posixGroup.
+                        Grant LDAP users sudo access on all deployed nodes via the <code>clustr-admins</code> posixGroup.
                         SSSD resolves group membership at sudo time — no per-user file push needed.
                     </p>
                     <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
@@ -510,7 +510,7 @@ const LDAPPages = {
                 <table class="table" aria-label="LDAP Users">
                     <thead>
                         <tr>
-                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th title="Sudo access via clonr-admins LDAP group">Sudo</th><th>Actions</th>
+                            <th>UID</th><th>Full Name</th><th>UID Number</th><th>GID Number</th><th>Last Login</th><th>Shell</th><th title="Sudo access via clustr-admins LDAP group">Sudo</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -1467,7 +1467,7 @@ const LDAPPages = {
         try {
             const st = await API.ldap.sudoersStatus();
             const enabled  = !!(st && st.enabled);
-            const groupCN  = (st && st.group_cn) || 'clonr-admins';
+            const groupCN  = (st && st.group_cn) || 'clustr-admins';
             const members  = (st && Array.isArray(st.members)) ? st.members : [];
             const isAdmin  = typeof Auth !== 'undefined' && Auth._role === 'admin';
 
@@ -1502,7 +1502,7 @@ const LDAPPages = {
     async _sudoersEnable() {
         try {
             await API.ldap.sudoersEnable();
-            App.toast('Sudoers group enabled — clonr-admins created in LDAP', 'success');
+            App.toast('Sudoers group enabled — clustr-admins created in LDAP', 'success');
             await LDAPPages._loadSudoersCard();
         } catch (e) {
             App.toast('Enable failed: ' + e.message, 'error');
@@ -1630,7 +1630,7 @@ const LDAPPages = {
 
             // Build the SSE stream URL for the LDAP log endpoint.
             const url = new URL('/api/v1/ldap/logs/stream', window.location.origin);
-            const tok = document.querySelector('meta[name="clonr-token"]');
+            const tok = document.querySelector('meta[name="clustr-token"]');
             if (tok && tok.content) url.searchParams.set('token', tok.content);
 
             // Swap LogStream's internal URL by monkey-patching _attemptConnect

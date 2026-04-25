@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // phaseOrder maps phase names to their 1-based ordinal.
@@ -21,7 +21,7 @@ var phaseOrder = map[string]int{
 
 const totalPhases = 6
 
-// ProgressReporter sends DeployProgress updates to the clonr server.
+// ProgressReporter sends DeployProgress updates to the clustr server.
 // It is safe for concurrent use and rate-limits POSTs to at most once per second
 // (or on phase changes) to avoid flooding the server during fast operations.
 type ProgressReporter struct {

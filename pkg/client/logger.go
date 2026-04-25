@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (
@@ -56,17 +56,17 @@ func WithComponent(component string) RemoteLogWriterOption {
 // NewRemoteLogWriter creates and starts a RemoteLogWriter.
 //
 // Tunable via environment:
-//   - CLONR_LOG_BUFFER_SIZE   (int, default 50)
-//   - CLONR_LOG_FLUSH_INTERVAL (duration string, default "2s")
+//   - CLUSTR_LOG_BUFFER_SIZE   (int, default 50)
+//   - CLUSTR_LOG_FLUSH_INTERVAL (duration string, default "2s")
 func NewRemoteLogWriter(c *Client, nodeMAC, hostname string, opts ...RemoteLogWriterOption) *RemoteLogWriter {
 	bufSize := defaultBufferSize
-	if v := os.Getenv("CLONR_LOG_BUFFER_SIZE"); v != "" {
+	if v := os.Getenv("CLUSTR_LOG_BUFFER_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			bufSize = n
 		}
 	}
 	flushEvery := defaultFlushInterval
-	if v := os.Getenv("CLONR_LOG_FLUSH_INTERVAL"); v != "" {
+	if v := os.Getenv("CLUSTR_LOG_FLUSH_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			flushEvery = d
 		}

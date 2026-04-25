@@ -1,4 +1,4 @@
-// Package db provides the SQLite persistence layer for clonr.
+// Package db provides the SQLite persistence layer for clustr.
 // It uses modernc.org/sqlite (pure-Go, CGO_ENABLED=0 compatible).
 package db
 
@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
 
@@ -25,7 +25,7 @@ var migrationsFS embed.FS
 // ErrExpired is returned by LookupAPIKey when a key exists but its TTL has elapsed.
 var ErrExpired = fmt.Errorf("api key expired")
 
-// DB wraps sql.DB with typed clonr operations.
+// DB wraps sql.DB with typed clustr operations.
 type DB struct {
 	sql *sql.DB
 
@@ -147,15 +147,15 @@ func (db *DB) SQL() *sql.DB {
 //
 //  2. If a bad migration ships to production, operators must manually intervene
 //     using the SQLite CLI:
-//     a. Stop clonr-serverd.
-//     b. Open the database: sqlite3 /var/lib/clonr/clonr.db
+//     a. Stop clustr-serverd.
+//     b. Open the database: sqlite3 /var/lib/clustr/clustr.db
 //     c. Reverse the schema change manually (DROP TABLE, ALTER TABLE, etc.).
 //     d. Remove the migration record: DELETE FROM schema_migrations WHERE name = '<file>';
-//     e. Restart clonr-serverd (the fixed migration will be re-applied on startup).
+//     e. Restart clustr-serverd (the fixed migration will be re-applied on startup).
 //
 //  3. Always test migrations on a copy of the production database before shipping.
-//     Use: sqlite3 /var/lib/clonr/clonr.db ".backup /tmp/clonr-test.db" and run
-//     the server against /tmp/clonr-test.db first to validate the migration.
+//     Use: sqlite3 /var/lib/clustr/clustr.db ".backup /tmp/clustr-test.db" and run
+//     the server against /tmp/clustr-test.db first to validate the migration.
 func (db *DB) migrate() error {
 	// Ensure tracking table exists.
 	if _, err := db.sql.Exec(`
@@ -850,7 +850,7 @@ func (db *DB) RecordVerifyBooted(ctx context.Context, nodeID string) error {
 }
 
 // RecordVerifyTimeout sets deploy_verify_timeout_at = now() for nodes that did
-// not phone home within CLONR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
+// not phone home within CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
 // Called by the background scanner goroutine. ADR-0008.
 func (db *DB) RecordVerifyTimeout(ctx context.Context, nodeID string) error {
 	now := time.Now().Unix()

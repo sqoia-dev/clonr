@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/bootassets"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/bootassets"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // TestServeIPXEEFI_EmbeddedBinary verifies that GET /api/v1/boot/ipxe.efi
@@ -174,7 +174,7 @@ func assertInitramfsBoot(t *testing.T, w *httptest.ResponseRecorder, label strin
 // TestServeIPXEScript_DeployedPreboot_DiskBoots is the primary regression test for
 // ADR-0008: a node in deployed_preboot state (deploy-complete received from initramfs,
 // OS not yet verified) MUST receive a disk-boot (sanboot) script so that
-// clonr-verify-boot.service can run and phone home. Falling through to re-deploy
+// clustr-verify-boot.service can run and phone home. Falling through to re-deploy
 // would cause an infinite loop.
 func TestServeIPXEScript_DeployedPreboot_DiskBoots(t *testing.T) {
 	d := openTestDB(t)

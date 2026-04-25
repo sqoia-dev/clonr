@@ -1,4 +1,4 @@
-// Package image provides the core image management primitives for clonr.
+// Package image provides the core image management primitives for clustr.
 package image
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 // ImageMetadata is the JSON sidecar stored alongside the rootfs tarball at
-// /var/lib/clonr/images/<image-id>/metadata.json.
+// /var/lib/clustr/images/<image-id>/metadata.json.
 //
 // Schema version history:
 //
@@ -54,7 +54,7 @@ type ImageMetadata struct {
 	FirmwareSupport []string `json:"firmware_support"`
 
 	// ContentSHA256 is the hex-encoded sha256 of the rootfs tarball.
-	// Matches the X-Clonr-Blob-SHA256 header served by GET /images/:id/blob.
+	// Matches the X-Clustr-Blob-SHA256 header served by GET /images/:id/blob.
 	ContentSHA256 string `json:"content_sha256"`
 
 	// ContentSizeBytes is the byte length of the rootfs tarball.
@@ -84,7 +84,7 @@ type ImageMetadata struct {
 
 	// PostInstallScripts lists paths within the rootfs that the deployer should
 	// execute inside a chroot after the rootfs is laid down (e.g.
-	// "/usr/local/sbin/clonr-firstboot.sh"). Omitted when empty.
+	// "/usr/local/sbin/clustr-firstboot.sh"). Omitted when empty.
 	PostInstallScripts []string `json:"post_install_scripts,omitempty"`
 }
 
@@ -120,7 +120,7 @@ const MetadataSchemaVersion = 1
 const metadataFileName = "metadata.json"
 
 // MetadataPath returns the on-disk path of the metadata sidecar for imageID.
-// imageDir is the root image storage directory (e.g. /var/lib/clonr/images).
+// imageDir is the root image storage directory (e.g. /var/lib/clustr/images).
 func MetadataPath(imageDir, imageID string) string {
 	return filepath.Join(imageDir, imageID, metadataFileName)
 }

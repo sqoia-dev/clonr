@@ -47,7 +47,7 @@ type whitelistEntry struct {
 	allowedArgs []string
 }
 
-// execWhitelist defines every command that clonr-clientd will execute on behalf
+// execWhitelist defines every command that clustr-clientd will execute on behalf
 // of an admin. Commands are matched by exact name; arguments are validated
 // against the per-command allowed list. No shell is ever invoked.
 var execWhitelist = []whitelistEntry{

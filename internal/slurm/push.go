@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/internal/clientd"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/clientd"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (
@@ -430,7 +430,7 @@ func (m *Manager) pushToNode(ctx context.Context, opID, applyAction string, w no
 			nodeID: w.nodeID,
 			result: api.SlurmNodeResult{
 				OK:    false,
-				Error: "node offline (clonr-clientd not connected)",
+				Error: "node offline (clustr-clientd not connected)",
 			},
 		}
 	}

@@ -654,7 +654,7 @@ func (c *ditClient) RemoveGroupMember(groupCN, uid string) error {
 //   - Delete("pwdReset", [])             — tolerates NoSuchAttribute
 //   - Delete("pwdAccountLockedTime", []) — tolerates NoSuchAttribute
 //
-// This guarantees that after any clonr-driven write to a service account's
+// This guarantees that after any clustr-driven write to a service account's
 // password the entry is in a clean ppolicy state: no must-change wall and no
 // lockout.
 //

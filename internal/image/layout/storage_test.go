@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 )
 
 // ─── Hardware fixtures ────────────────────────────────────────────────────────

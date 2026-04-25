@@ -13,7 +13,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // RenderContext holds all data available to templates during rendering.
@@ -22,7 +22,7 @@ type RenderContext struct {
 	// ClusterName is the Slurm cluster name from module config.
 	ClusterName string
 	// ControllerHostname is the hostname of the node with role "controller".
-	// Falls back to "clonr-server" when no controller node is registered.
+	// Falls back to "clustr-server" when no controller node is registered.
 	ControllerHostname string
 	// Nodes holds all compute + controller nodes for the NodeName block in slurm.conf.
 	Nodes []NodeRenderData
@@ -37,7 +37,7 @@ type RenderContext struct {
 // NodeRenderData represents one node's hardware parameters for the slurm.conf
 // NodeName line. Field names must match the existing slurm.conf.tmpl markers.
 type NodeRenderData struct {
-	// NodeID is the internal clonr node UUID.
+	// NodeID is the internal clustr node UUID.
 	NodeID string
 	// NodeName is the hostname used in slurm.conf NodeName= directives.
 	NodeName string
@@ -166,7 +166,7 @@ func (m *Manager) buildRenderContext(ctx context.Context, nodeID string) (*Rende
 
 	// Build NodeRenderData for each node that has a Slurm role (excluding RoleNone/login-only).
 	var nodes []NodeRenderData
-	controllerHostname := "clonr-server"
+	controllerHostname := "clustr-server"
 
 	for _, entry := range roleEntries {
 		// Skip nodes with no meaningful compute roles.

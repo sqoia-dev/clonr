@@ -1,4 +1,4 @@
-// api.js — thin fetch wrapper around the clonr-serverd REST API.
+// api.js — thin fetch wrapper around the clustr-serverd REST API.
 // All methods return parsed JSON or throw an Error with a message from the API.
 
 const API = {
@@ -8,7 +8,7 @@ const API = {
     // for any CLI/scripted use that injected a Bearer token via the old modal).
     // Session-cookie auth does not need this — the browser sends the cookie automatically.
     _token() {
-        try { return localStorage.getItem('clonr_admin_key') || ''; } catch (_) { return ''; }
+        try { return localStorage.getItem('clustr_admin_key') || ''; } catch (_) { return ''; }
     },
 
     _headers(extra = {}) {
@@ -30,7 +30,7 @@ const API = {
         if (!resp.ok) {
             // 401/403 — session expired or no auth. Redirect to login page.
             if (resp.status === 401 || resp.status === 403) {
-                try { localStorage.removeItem('clonr_admin_key'); } catch (_) {}
+                try { localStorage.removeItem('clustr_admin_key'); } catch (_) {}
                 API._redirectToLogin();
                 // Throw so callers don't proceed with undefined data.
                 throw new Error('session expired — redirecting to login');

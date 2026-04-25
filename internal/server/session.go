@@ -136,7 +136,7 @@ func hmacSign(secret []byte, data string) string {
 }
 
 // generateSessionSecret generates a 32-byte random secret and returns its
-// hex encoding. Used when CLONR_SESSION_SECRET is not set.
+// hex encoding. Used when CLUSTR_SESSION_SECRET is not set.
 func generateSessionSecret() ([]byte, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

@@ -52,11 +52,11 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Build clonr (static, linux/amd64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clonr ./cmd/clonr
+      - name: Build clustr (static, linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr ./cmd/clustr
 
-      - name: Build clonr-serverd
-        run: go build -trimpath -o bin/clonr-serverd ./cmd/clonr-serverd
+      - name: Build clustr-serverd
+        run: go build -trimpath -o bin/clustr-serverd ./cmd/clustr-serverd
 
       - name: Verify static linking
-        run: file bin/clonr | grep -q "statically linked"
+        run: file bin/clustr | grep -q "statically linked"

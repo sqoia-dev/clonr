@@ -23,8 +23,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/internal/clientd"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/clientd"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ func (m *Manager) ValidateUpgrade(ctx context.Context, req UpgradeRequest) (*Upg
 		allSlurmNodes := collectAllPlanNodes(plan)
 		for _, nodeID := range allSlurmNodes {
 			if !m.hub.IsConnected(nodeID) {
-				v.Warnings = append(v.Warnings, fmt.Sprintf("node %s is offline (clonr-clientd not connected)", nodeID))
+				v.Warnings = append(v.Warnings, fmt.Sprintf("node %s is offline (clustr-clientd not connected)", nodeID))
 			}
 		}
 	}
@@ -509,11 +509,11 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 
 		// Step 1: Drain batch nodes via controller.
 		if controllerID != "" {
-			slurmNodeNames := m.clonrIDsToSlurmNames(ctx, batch)
+			slurmNodeNames := m.clustrIDsToSlurmNames(ctx, batch)
 			if err := m.sendAdminCmd(execCtx, controllerID, clientd.SlurmAdminCmdPayload{
 				Command: "drain",
 				Nodes:   slurmNodeNames,
-				Reason:  "clonr-upgrade",
+				Reason:  "clustr-upgrade",
 			}); err != nil {
 				log.Warn().Err(err).Int("batch", batchIdx+1).Msg("slurm: upgrade: drain failed for batch")
 				// Don't abort — drain failure is non-fatal; nodes may already be idle.
@@ -562,7 +562,7 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 
 		// Step 4: Resume batch nodes (even if some failed, to avoid permanent drain).
 		if controllerID != "" {
-			slurmNodeNames := m.clonrIDsToSlurmNames(ctx, batch)
+			slurmNodeNames := m.clustrIDsToSlurmNames(ctx, batch)
 			if err := m.sendAdminCmd(execCtx, controllerID, clientd.SlurmAdminCmdPayload{
 				Command: "resume",
 				Nodes:   slurmNodeNames,
@@ -638,7 +638,7 @@ func (m *Manager) pushBinaryToNode(ctx context.Context, opID, nodeID string, bui
 		return UpgradeNodeResult{OK: false, Error: "hub not available"}
 	}
 	if !m.hub.IsConnected(nodeID) {
-		return UpgradeNodeResult{OK: false, Error: "node offline (clonr-clientd not connected)"}
+		return UpgradeNodeResult{OK: false, Error: "node offline (clustr-clientd not connected)"}
 	}
 
 	// Generate a signed artifact URL for the node to download.
@@ -891,11 +891,11 @@ func collectAllPlanNodes(plan *UpgradePlan) []string {
 	return all
 }
 
-// clonrIDsToSlurmNames maps clonr node UUIDs to Slurm node names.
+// clustrIDsToSlurmNames maps clustr node UUIDs to Slurm node names.
 // For now, we use the node hostname (from the nodes table via heartbeat) or
 // fall back to the UUID if the hostname is not available.
 // This assumes Slurm NodeName matches the hostname recorded at deploy time.
-func (m *Manager) clonrIDsToSlurmNames(ctx context.Context, nodeIDs []string) []string {
+func (m *Manager) clustrIDsToSlurmNames(ctx context.Context, nodeIDs []string) []string {
 	names := make([]string, 0, len(nodeIDs))
 	for _, id := range nodeIDs {
 		hostname, err := m.db.NodeGetHostname(ctx, id)

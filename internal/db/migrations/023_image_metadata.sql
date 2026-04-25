@@ -1,7 +1,7 @@
 -- 021_image_metadata.sql
 -- Adds a nullable metadata_json TEXT column to base_images that mirrors the
 -- content-only image metadata sidecar file
--- (/var/lib/clonr/images/<id>/metadata.json) for fast DB queries without disk
+-- (/var/lib/clustr/images/<id>/metadata.json) for fast DB queries without disk
 -- I/O (ADR-0009 Sprint 3 prep).
 --
 -- The column is populated by the image build pipeline when it writes the sidecar

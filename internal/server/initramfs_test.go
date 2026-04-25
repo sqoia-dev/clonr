@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/config"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // newInitramfsTestServer creates a test server with auth dev mode enabled.
@@ -116,7 +116,7 @@ func TestRebuildInitramfs_GuardActiveDeployRejects(t *testing.T) {
 // overwrite the existing initramfs until the rename succeeds.
 func TestRebuildInitramfs_AtomicRename(t *testing.T) {
 	bootDir := t.TempDir()
-	finalPath := filepath.Join(bootDir, "initramfs-clonr.img")
+	finalPath := filepath.Join(bootDir, "initramfs-clustr.img")
 	stagingPath := finalPath + ".building"
 
 	// Write a sentinel file to the final path.

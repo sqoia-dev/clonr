@@ -23,10 +23,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
-	"github.com/sqoia-dev/clonr/internal/image/isoinstaller/comps"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
+	"github.com/sqoia-dev/clustr/internal/image/isoinstaller/comps"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // CaptureRequest describes a live-node SSH+rsync capture operation.
@@ -75,7 +75,7 @@ func (noopBuildHandle) AddStderrLine(_ string)      {}
 func (noopBuildHandle) Fail(_ string)               {}
 func (noopBuildHandle) Complete()                   {}
 
-// defaultMaxConcurrentBuilds is used when CLONR_MAX_CONCURRENT_BUILDS is unset.
+// defaultMaxConcurrentBuilds is used when CLUSTR_MAX_CONCURRENT_BUILDS is unset.
 const defaultMaxConcurrentBuilds = 4
 
 // Factory turns raw inputs into finalized BaseImages stored under ImageDir.
@@ -88,11 +88,11 @@ type Factory struct {
 	// Wire in *server.BuildProgressStore via an adapter (see server.go).
 	BuildProgress BuildProgressReporter
 	// ISOCacheDir is the directory where downloaded ISOs are cached keyed by
-	// sha256(url). Defaults to /var/lib/clonr/iso-cache if empty.
+	// sha256(url). Defaults to /var/lib/clustr/iso-cache if empty.
 	ISOCacheDir string
 
 	// buildSem limits the number of concurrent async builds (pull, importISO,
-	// capture, buildFromISO). Capacity is set from CLONR_MAX_CONCURRENT_BUILDS
+	// capture, buildFromISO). Capacity is set from CLUSTR_MAX_CONCURRENT_BUILDS
 	// (default 4). Initialized by NewFactory or SetContext.
 	buildSem chan struct{}
 	// ctx is the server-lifetime context. Async methods return early when it is
@@ -108,10 +108,10 @@ func defaultIfEmpty(val, fallback string) string {
 }
 
 // NewFactory constructs a Factory with a bounded build semaphore.
-// Capacity is read from CLONR_MAX_CONCURRENT_BUILDS (default 4).
+// Capacity is read from CLUSTR_MAX_CONCURRENT_BUILDS (default 4).
 func NewFactory(store *db.DB, imageDir string, logger zerolog.Logger, progress BuildProgressReporter, isoCacheDir string) *Factory {
 	cap_ := defaultMaxConcurrentBuilds
-	if v := os.Getenv("CLONR_MAX_CONCURRENT_BUILDS"); v != "" {
+	if v := os.Getenv("CLUSTR_MAX_CONCURRENT_BUILDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cap_ = n
 		}
@@ -158,7 +158,7 @@ func (f *Factory) releaseSem() {
 	}
 }
 
-const defaultISOCacheDir = "/var/lib/clonr/iso-cache"
+const defaultISOCacheDir = "/var/lib/clustr/iso-cache"
 
 // isoCachePath returns the deterministic cache path and partial path for the
 // given URL. The directory is created (0o755) if it does not already exist.
@@ -267,7 +267,7 @@ func (f *Factory) pullAndExtract(ctx context.Context, imageID, url string) (root
 	}
 
 	// Download to a temp file.
-	tmpFile, err := os.CreateTemp("", "clonr-pull-*"+urlExt(url))
+	tmpFile, err := os.CreateTemp("", "clustr-pull-*"+urlExt(url))
 	if err != nil {
 		return "", 0, "", fmt.Errorf("create temp file: %w", err)
 	}
@@ -368,7 +368,7 @@ func (f *Factory) extractRaw(ctx context.Context, imageID, rawPath, rootfsPath s
 	}
 
 	// Mount the partition.
-	mnt, err := os.MkdirTemp("", "clonr-mount-*")
+	mnt, err := os.MkdirTemp("", "clustr-mount-*")
 	if err != nil {
 		return fmt.Errorf("create mount point: %w", err)
 	}
@@ -471,7 +471,7 @@ func (f *Factory) extractISO(ctx context.Context, imageID, isoPath string) (root
 	}
 
 	// Mount the ISO.
-	isomnt, err := os.MkdirTemp("", "clonr-iso-*")
+	isomnt, err := os.MkdirTemp("", "clustr-iso-*")
 	if err != nil {
 		return "", 0, "", fmt.Errorf("create iso mount: %w", err)
 	}
@@ -503,7 +503,7 @@ func (f *Factory) extractISO(ctx context.Context, imageID, isoPath string) (root
 // extractLiveOS handles the Rocky/RHEL LiveOS format:
 // squashfs.img → unsquash → rootfs.img → mount → rsync.
 func (f *Factory) extractLiveOS(ctx context.Context, imageID, squashPath, rootfsPath string) error {
-	squashMnt, err := os.MkdirTemp("", "clonr-squash-*")
+	squashMnt, err := os.MkdirTemp("", "clustr-squash-*")
 	if err != nil {
 		return fmt.Errorf("create squashfs mount: %w", err)
 	}
@@ -522,7 +522,7 @@ func (f *Factory) extractLiveOS(ctx context.Context, imageID, squashPath, rootfs
 		return rsyncDir(ctx, squashMnt+"/", rootfsPath)
 	}
 
-	rootfsMnt, err := os.MkdirTemp("", "clonr-rootfs-*")
+	rootfsMnt, err := os.MkdirTemp("", "clustr-rootfs-*")
 	if err != nil {
 		return fmt.Errorf("create rootfs mount: %w", err)
 	}
@@ -878,9 +878,9 @@ func init() {
 
 // validatePullURL checks that the URL is safe to fetch: only http/https schemes
 // and no private/loopback IP addresses (SSRF prevention). Set the environment
-// variable CLONR_ALLOW_PRIVATE_URLS=true to bypass this check in lab environments.
+// variable CLUSTR_ALLOW_PRIVATE_URLS=true to bypass this check in lab environments.
 func validatePullURL(rawURL string) error {
-	if os.Getenv("CLONR_ALLOW_PRIVATE_URLS") == "true" {
+	if os.Getenv("CLUSTR_ALLOW_PRIVATE_URLS") == "true" {
 		return nil
 	}
 
@@ -909,7 +909,7 @@ func validatePullURL(rawURL string) error {
 		for _, block := range privateIPNets {
 			if block.Contains(ip) {
 				return fmt.Errorf("pull URL resolves to private/internal IP %s — "+
-					"set CLONR_ALLOW_PRIVATE_URLS=true to allow this in lab environments", ipStr)
+					"set CLUSTR_ALLOW_PRIVATE_URLS=true to allow this in lab environments", ipStr)
 			}
 		}
 	}
@@ -1331,7 +1331,7 @@ func (f *Factory) BuildFromISO(ctx context.Context, req api.BuildFromISORequest)
 	missing := isoinstaller.EnsureDependencies()
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("factory: ISO build requires missing host tools: %s — "+
-			"install them on the clonr-server host (e.g. dnf install qemu-kvm qemu-img genisoimage)",
+			"install them on the clustr-server host (e.g. dnf install qemu-kvm qemu-img genisoimage)",
 			strings.Join(missing, ", "))
 	}
 
@@ -1530,7 +1530,7 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 	ph.SetPhase("generating_config")
 
 	// ── Create work directory ─────────────────────────────────────────────
-	workDir, err := os.MkdirTemp("", "clonr-iso-build-*")
+	workDir, err := os.MkdirTemp("", "clustr-iso-build-*")
 	if err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: create work dir")
 		failBuild("create work dir", err)
@@ -1566,8 +1566,8 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
-		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
-		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
+		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clustr"),
+		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clustr"),
 		Firmware:        req.Firmware,
 		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
 		BaseEnvironment: req.BaseEnvironment, // empty → kickstart.go defaults to "minimal-environment"
@@ -1831,7 +1831,7 @@ func (f *Factory) buildFromISOFile(
 		cpus = 2
 	}
 
-	workDir, err := os.MkdirTemp("", "clonr-iso-build-*")
+	workDir, err := os.MkdirTemp("", "clustr-iso-build-*")
 	if err != nil {
 		return "", 0, "", fmt.Errorf("create work dir: %w", err)
 	}
@@ -1854,8 +1854,8 @@ func (f *Factory) buildFromISOFile(
 		CustomKickstart: req.CustomKickstart,
 		RoleIDs:         req.RoleIDs,
 		InstallUpdates:  req.InstallUpdates,
-		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clonr"),
-		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clonr"),
+		DefaultUsername: defaultIfEmpty(req.DefaultUsername, "clustr"),
+		DefaultPassword: defaultIfEmpty(req.DefaultPassword, "clustr"),
 		SELinuxMode:     defaultIfEmpty(req.SELinuxMode, "disabled"),
 		BaseEnvironment: req.BaseEnvironment, // empty → kickstart.go defaults to "minimal-environment"
 	}

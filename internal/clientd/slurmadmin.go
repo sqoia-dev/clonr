@@ -57,7 +57,7 @@ func adminDrain(nodes []string, reason string) SlurmAdminCmdResult {
 		return adminCmdError("drain: no nodes specified")
 	}
 	if reason == "" {
-		reason = "clonr-upgrade"
+		reason = "clustr-upgrade"
 	}
 
 	nodeArg := "NodeName=" + strings.Join(nodes, ",")

@@ -70,7 +70,7 @@ func PrepareKernelBoot(isoPath, workDir string, log zerolog.Logger) (*KernelBoot
 // ReadISOVolumeLabel returns the ISO 9660 volume label using isoinfo or blkid.
 // This is the same label Anaconda uses for inst.stage2=hd:LABEL=<label>.
 func ReadISOVolumeLabel(isoPath string) (string, error) {
-	// Try isoinfo first (part of genisoimage / cdrtools — already a clonr dep).
+	// Try isoinfo first (part of genisoimage / cdrtools — already a clustr dep).
 	if path, err := exec.LookPath("isoinfo"); err == nil {
 		out, err := exec.Command(path, "-d", "-i", isoPath).CombinedOutput()
 		if err == nil {

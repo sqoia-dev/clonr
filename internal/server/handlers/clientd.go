@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/internal/clientd"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/clientd"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ClientdDBIface defines the database operations used by the clientd handler.
@@ -50,7 +50,7 @@ type ClientdHubIface interface {
 	DeliverExecResult(msgID string, payload clientd.ExecResultPayload) bool
 }
 
-// ClientdHandler handles the clonr-clientd WebSocket endpoint and related REST queries.
+// ClientdHandler handles the clustr-clientd WebSocket endpoint and related REST queries.
 type ClientdHandler struct {
 	DB     ClientdDBIface
 	Hub    ClientdHubIface
@@ -308,7 +308,7 @@ func (h *ClientdHandler) ConfigPush(w http.ResponseWriter, r *http.Request) {
 
 	if !h.Hub.IsConnected(nodeID) {
 		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
-			Error: "node is not connected (clonr-clientd offline)",
+			Error: "node is not connected (clustr-clientd offline)",
 			Code:  "node_offline",
 		})
 		return
@@ -569,7 +569,7 @@ func (h *ClientdHandler) ExecOnNode(w http.ResponseWriter, r *http.Request) {
 
 	if !h.Hub.IsConnected(nodeID) {
 		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
-			Error: "node is not connected (clonr-clientd offline)",
+			Error: "node is not connected (clustr-clientd offline)",
 			Code:  "node_offline",
 		})
 		return

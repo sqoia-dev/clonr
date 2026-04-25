@@ -20,7 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // BuildConfig is the input for a Slurm build.
@@ -31,10 +31,10 @@ type BuildConfig struct {
 }
 
 // slurmBuildsDir is the permanent artifact storage directory.
-const slurmBuildsDir = "/var/lib/clonr/slurm-builds"
+const slurmBuildsDir = "/var/lib/clustr/slurm-builds"
 
 // slurmWorkspaceBase is the root for per-build workspaces.
-const slurmWorkspaceBase = "/var/lib/clonr/builds"
+const slurmWorkspaceBase = "/var/lib/clustr/builds"
 
 // StartBuild kicks off an async build. Creates the DB record (status: "building")
 // and returns the build ID immediately. Compilation runs in a background goroutine.

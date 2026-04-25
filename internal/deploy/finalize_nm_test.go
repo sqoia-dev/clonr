@@ -6,20 +6,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
-// TestWriteClonrDHCPProfile_WritesCorrectly verifies that writeClonrDHCPProfile
+// TestWriteClustrDHCPProfile_WritesCorrectly verifies that writeClustrDHCPProfile
 // writes the NM connection file with correct content and mandatory 0600 permissions.
 // NetworkManager silently ignores connection files that are not 0600.
-func TestWriteClonrDHCPProfile_WritesCorrectly(t *testing.T) {
+func TestWriteClustrDHCPProfile_WritesCorrectly(t *testing.T) {
 	root := t.TempDir()
 
-	if err := writeClonrDHCPProfile(root); err != nil {
-		t.Fatalf("writeClonrDHCPProfile: %v", err)
+	if err := writeClustrDHCPProfile(root); err != nil {
+		t.Fatalf("writeClustrDHCPProfile: %v", err)
 	}
 
-	profilePath := filepath.Join(root, "etc", "NetworkManager", "system-connections", "clonr-dhcp.nmconnection")
+	profilePath := filepath.Join(root, "etc", "NetworkManager", "system-connections", "clustr-dhcp.nmconnection")
 
 	data, err := os.ReadFile(profilePath)
 	if err != nil {
@@ -29,8 +29,8 @@ func TestWriteClonrDHCPProfile_WritesCorrectly(t *testing.T) {
 	content := string(data)
 
 	// Must contain the connection section with correct id and type.
-	if !strings.Contains(content, "id=clonr-dhcp") {
-		t.Errorf("profile missing id=clonr-dhcp; got:\n%s", content)
+	if !strings.Contains(content, "id=clustr-dhcp") {
+		t.Errorf("profile missing id=clustr-dhcp; got:\n%s", content)
 	}
 	if !strings.Contains(content, "type=ethernet") {
 		t.Errorf("profile missing type=ethernet; got:\n%s", content)
@@ -57,15 +57,15 @@ func TestWriteClonrDHCPProfile_WritesCorrectly(t *testing.T) {
 	}
 }
 
-// TestWriteClonrDHCPProfile_Idempotent verifies that calling writeClonrDHCPProfile
+// TestWriteClustrDHCPProfile_Idempotent verifies that calling writeClustrDHCPProfile
 // twice does not fail (second call overwrites the first without error).
-func TestWriteClonrDHCPProfile_Idempotent(t *testing.T) {
+func TestWriteClustrDHCPProfile_Idempotent(t *testing.T) {
 	root := t.TempDir()
 
-	if err := writeClonrDHCPProfile(root); err != nil {
+	if err := writeClustrDHCPProfile(root); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if err := writeClonrDHCPProfile(root); err != nil {
+	if err := writeClustrDHCPProfile(root); err != nil {
 		t.Fatalf("second call (idempotency): %v", err)
 	}
 }

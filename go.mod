@@ -1,4 +1,4 @@
-module github.com/sqoia-dev/clonr
+module github.com/sqoia-dev/clustr
 
 go 1.25.0
 

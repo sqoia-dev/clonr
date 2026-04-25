@@ -49,18 +49,18 @@ jobs:
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -trimpath \
               -ldflags="-s -w -X main.version=${TAG}" \
-              -o clonr-${{ matrix.goos }}-${{ matrix.goarch }} \
-              ./cmd/clonr
+              -o clustr-${{ matrix.goos }}-${{ matrix.goarch }} \
+              ./cmd/clustr
 
       - name: SHA256 checksum
-        run: sha256sum clonr-${{ matrix.goos }}-${{ matrix.goarch }} > clonr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+        run: sha256sum clustr-${{ matrix.goos }}-${{ matrix.goarch }} > clustr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: client-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            clonr-${{ matrix.goos }}-${{ matrix.goarch }}
-            clonr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+            clustr-${{ matrix.goos }}-${{ matrix.goarch }}
+            clustr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
 
   build-server:
     name: Build server (linux/amd64)
@@ -80,18 +80,18 @@ jobs:
         run: |
           go build -trimpath \
             -ldflags="-s -w -X main.version=${TAG}" \
-            -o clonr-serverd-linux-amd64 \
-            ./cmd/clonr-serverd
+            -o clustr-serverd-linux-amd64 \
+            ./cmd/clustr-serverd
 
       - name: SHA256 checksum
-        run: sha256sum clonr-serverd-linux-amd64 > clonr-serverd-linux-amd64.sha256
+        run: sha256sum clustr-serverd-linux-amd64 > clustr-serverd-linux-amd64.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: server-linux-amd64
           path: |
-            clonr-serverd-linux-amd64
-            clonr-serverd-linux-amd64.sha256
+            clustr-serverd-linux-amd64
+            clustr-serverd-linux-amd64.sha256
 
   release:
     name: Publish Release
@@ -113,19 +113,19 @@ jobs:
 
             ### Client (static binary, runs in initramfs)
             ```sh
-            curl -sL https://github.com/sqoia-dev/clonr/releases/download/${{ github.ref_name }}/clonr-linux-amd64 -o /usr/local/bin/clonr
-            chmod +x /usr/local/bin/clonr
+            curl -sL https://github.com/sqoia-dev/clustr/releases/download/${{ github.ref_name }}/clustr-linux-amd64 -o /usr/local/bin/clustr
+            chmod +x /usr/local/bin/clustr
             ```
 
             ### Server
             ```sh
-            curl -sL https://github.com/sqoia-dev/clonr/releases/download/${{ github.ref_name }}/clonr-serverd-linux-amd64 -o /usr/local/bin/clonr-serverd
-            chmod +x /usr/local/bin/clonr-serverd
+            curl -sL https://github.com/sqoia-dev/clustr/releases/download/${{ github.ref_name }}/clustr-serverd-linux-amd64 -o /usr/local/bin/clustr-serverd
+            chmod +x /usr/local/bin/clustr-serverd
             ```
           files: |
-            clonr-linux-amd64
-            clonr-linux-amd64.sha256
-            clonr-linux-arm64
-            clonr-linux-arm64.sha256
-            clonr-serverd-linux-amd64
-            clonr-serverd-linux-amd64.sha256
+            clustr-linux-amd64
+            clustr-linux-amd64.sha256
+            clustr-linux-arm64
+            clustr-linux-arm64.sha256
+            clustr-serverd-linux-amd64
+            clustr-serverd-linux-amd64.sha256

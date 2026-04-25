@@ -29,9 +29,9 @@ func TestInjectPhoneHome_NoOp(t *testing.T) {
 	}
 
 	// Confirm nothing was written.
-	clonrDir := filepath.Join(rootfs, "etc", "clonr")
-	if _, err := os.Stat(clonrDir); !os.IsNotExist(err) {
-		t.Fatalf("expected /etc/clonr to not exist, stat returned: %v", err)
+	clustrDir := filepath.Join(rootfs, "etc", "clustr")
+	if _, err := os.Stat(clustrDir); !os.IsNotExist(err) {
+		t.Fatalf("expected /etc/clustr to not exist, stat returned: %v", err)
 	}
 }
 
@@ -42,8 +42,8 @@ func TestInjectPhoneHome_NoOp(t *testing.T) {
 func TestInjectPhoneHome_Writes(t *testing.T) {
 	rootfs := t.TempDir()
 
-	token := "clonr-node-tok-abc123"
-	verifyURL := "http://clonr-server:8080/api/v1/nodes/node-id-xyz/verify-boot"
+	token := "clustr-node-tok-abc123"
+	verifyURL := "http://clustr-server:8080/api/v1/nodes/node-id-xyz/verify-boot"
 
 	if err := injectPhoneHome(rootfs, token, verifyURL); err != nil {
 		t.Fatalf("injectPhoneHome: %v", err)
@@ -61,7 +61,7 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 	// Simulates a stale symlink from a broken previous deploy pointing to a
 	// different target. The new code must remove it and create the correct one.
 	wantsDirForStale := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
-	staleLinkPath := filepath.Join(wantsDirForStale, "clonr-verify-boot.service")
+	staleLinkPath := filepath.Join(wantsDirForStale, "clustr-verify-boot.service")
 	if err := os.Remove(staleLinkPath); err != nil {
 		t.Fatalf("setup stale symlink: remove existing: %v", err)
 	}
@@ -76,14 +76,14 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readlink after stale replacement: %v", err)
 	}
-	if correctedTarget != "../clonr-verify-boot.service" {
-		t.Errorf("after stale replacement: symlink target = %q, want %q", correctedTarget, "../clonr-verify-boot.service")
+	if correctedTarget != "../clustr-verify-boot.service" {
+		t.Errorf("after stale replacement: symlink target = %q, want %q", correctedTarget, "../clustr-verify-boot.service")
 	}
 
 	multiUserWantsDir := filepath.Join(rootfs, "etc", "systemd", "system", "multi-user.target.wants")
 
-	// ── Assert /etc/clonr/node-token ─────────────────────────────────────────
-	tokenPath := filepath.Join(rootfs, "etc", "clonr", "node-token")
+	// ── Assert /etc/clustr/node-token ─────────────────────────────────────────
+	tokenPath := filepath.Join(rootfs, "etc", "clustr", "node-token")
 	fi, err := os.Stat(tokenPath)
 	if err != nil {
 		t.Fatalf("node-token not found: %v", err)
@@ -99,8 +99,8 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		t.Errorf("node-token content = %q, want %q", string(got), token)
 	}
 
-	// ── Assert /etc/clonr/verify-boot-url ────────────────────────────────────
-	urlPath := filepath.Join(rootfs, "etc", "clonr", "verify-boot-url")
+	// ── Assert /etc/clustr/verify-boot-url ────────────────────────────────────
+	urlPath := filepath.Join(rootfs, "etc", "clustr", "verify-boot-url")
 	if _, err := os.Stat(urlPath); err != nil {
 		t.Fatalf("verify-boot-url not found: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		t.Errorf("verify-boot-url content = %q, want %q", string(gotURL), verifyURL)
 	}
 
-	// ── Assert /etc/systemd/system/clonr-verify-boot.service ─────────────────
-	unitPath := filepath.Join(rootfs, "etc", "systemd", "system", "clonr-verify-boot.service")
+	// ── Assert /etc/systemd/system/clustr-verify-boot.service ─────────────────
+	unitPath := filepath.Join(rootfs, "etc", "systemd", "system", "clustr-verify-boot.service")
 	unitInfo, err := os.Stat(unitPath)
 	if err != nil {
 		t.Fatalf("unit file not found: %v", err)
@@ -126,10 +126,10 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		t.Fatalf("read unit file: %v", err)
 	}
 	for _, want := range []string{
-		"clonr-verify-boot",
+		"clustr-verify-boot",
 		"network-online.target",
-		"ConditionPathExists=/etc/clonr/node-token",
-		"ConditionPathExists=/etc/clonr/verify-boot-url",
+		"ConditionPathExists=/etc/clustr/node-token",
+		"ConditionPathExists=/etc/clustr/verify-boot-url",
 		"WantedBy=multi-user.target",
 	} {
 		if !containsString(string(unitContent), want) {
@@ -137,8 +137,8 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 		}
 	}
 
-	// ── Assert /usr/local/bin/clonr-verify-boot ──────────────────────────────
-	scriptPath := filepath.Join(rootfs, "usr", "local", "bin", "clonr-verify-boot")
+	// ── Assert /usr/local/bin/clustr-verify-boot ──────────────────────────────
+	scriptPath := filepath.Join(rootfs, "usr", "local", "bin", "clustr-verify-boot")
 	scriptInfo, err := os.Stat(scriptPath)
 	if err != nil {
 		t.Fatalf("script not found: %v", err)
@@ -152,8 +152,8 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"#!/bin/sh",
-		"/etc/clonr/node-token",
-		"/etc/clonr/verify-boot-url",
+		"/etc/clustr/node-token",
+		"/etc/clustr/verify-boot-url",
 		"curl",
 		"Authorization: Bearer",
 	} {
@@ -164,7 +164,7 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 
 	// ── Assert multi-user.target.wants symlink ───────────────────────────────
 	// injectPhoneHome creates the symlink directly via os.Symlink — no systemctl.
-	symlinkPath := filepath.Join(multiUserWantsDir, "clonr-verify-boot.service")
+	symlinkPath := filepath.Join(multiUserWantsDir, "clustr-verify-boot.service")
 	symlinkInfo, err := os.Lstat(symlinkPath)
 	if err != nil {
 		t.Fatalf("WantedBy symlink not created: %v", err)
@@ -176,8 +176,8 @@ func TestInjectPhoneHome_Writes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readlink %s: %v", symlinkPath, err)
 	}
-	if target != "../clonr-verify-boot.service" {
-		t.Errorf("symlink target = %q, want %q", target, "../clonr-verify-boot.service")
+	if target != "../clustr-verify-boot.service" {
+		t.Errorf("symlink target = %q, want %q", target, "../clustr-verify-boot.service")
 	}
 }
 

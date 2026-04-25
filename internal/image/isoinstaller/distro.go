@@ -1,6 +1,6 @@
 // Package isoinstaller runs an OS installer ISO inside a temporary QEMU VM,
 // captures the installed root filesystem, and returns it ready for use as a
-// clonr BaseImage. Think Packer, but purpose-built and embedded in the server.
+// clustr BaseImage. Think Packer, but purpose-built and embedded in the server.
 package isoinstaller
 
 import (

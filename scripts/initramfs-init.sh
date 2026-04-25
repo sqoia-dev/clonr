@@ -1,14 +1,14 @@
 #!/bin/sh
-# initramfs-init.sh — PID 1 init script for the clonr deploy initramfs.
+# initramfs-init.sh — PID 1 init script for the clustr deploy initramfs.
 #
 # This file is a template: build-initramfs.sh substitutes placeholders at
 # build time via sed before writing the final /init into the cpio archive.
 #
 # Placeholders substituted by build-initramfs.sh:
-#   ${CLONR_SERVER}      — default server URL (e.g. http://10.99.0.1:8080)
-#   ${CLONR_STATIC_BIN}  — path to the clonr static binary being embedded
+#   ${CLUSTR_SERVER}      — default server URL (e.g. http://10.99.0.1:8080)
+#   ${CLUSTR_STATIC_BIN}  — path to the clustr static binary being embedded
 #
-# All other shell variables (${CLONR_TOKEN}, ${LOG}, etc.) are runtime
+# All other shell variables (${CLUSTR_TOKEN}, ${LOG}, etc.) are runtime
 # variables resolved when the init script executes inside the initramfs.
 
 # ── Step 0: create /tmp and start logging to /tmp/init.log ───────────────────
@@ -38,7 +38,7 @@ log() {
 # ── Step 1: virtual filesystems already mounted in Step 0 ────────────────────
 
 log "============================================"
-log " clonr initramfs init started"
+log " clustr initramfs init started"
 log "============================================"
 
 # ── Step 1b: register mdev as the kernel hotplug handler ─────────────────────
@@ -55,16 +55,16 @@ log "cmdline: $(cat /proc/cmdline)"
 log "kernel : $(uname -r)"
 
 # ── Step 3: parse kernel command line ─────────────────────────────────────────
-CLONR_SERVER=""
-CLONR_MAC=""
+CLUSTR_SERVER=""
+CLUSTR_MAC=""
 for arg in $(cat /proc/cmdline); do
     case $arg in
-        clonr.server=*) CLONR_SERVER="${arg#clonr.server=}" ;;
-        clonr.mac=*)    CLONR_MAC="${arg#clonr.mac=}" ;;
+        clustr.server=*) CLUSTR_SERVER="${arg#clustr.server=}" ;;
+        clustr.mac=*)    CLUSTR_MAC="${arg#clustr.mac=}" ;;
     esac
 done
-log "server : ${CLONR_SERVER:-not set}"
-log "mac    : ${CLONR_MAC:-auto-detect}"
+log "server : ${CLUSTR_SERVER:-not set}"
+log "mac    : ${CLUSTR_MAC:-auto-detect}"
 
 # ── Step 4: load virtio NIC modules ───────────────────────────────────────────
 # Dependency order: failover → net_failover → virtio_net
@@ -145,7 +145,7 @@ log "lsblk test (full cols): $(/usr/bin/lsblk --json --bytes --output NAME,SIZE,
 # This is critical in initramfs environments — devtmpfs creates /dev/sda but
 # partition nodes (/dev/sda1 etc.) may not appear until mdev scans /sys/class/block/.
 # We run mdev twice: once now (for base disk nodes), and again after partprobe
-# (handled by the clonr deploy code itself).
+# (handled by the clustr deploy code itself).
 /bin/mdev -s 2>/dev/null || true
 log "mdev -s ran — dev nodes after mdev: $(ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null | tr '\n' ' ' || echo none)"
 log "loaded: $(cat /proc/modules 2>/dev/null | grep -E 'virtio|failover|xfs|ext4' | cut -d' ' -f1 | tr '\n' ' ')"
@@ -185,7 +185,7 @@ done
 
 if [ -z "$IFACE_UP" ]; then
     log "WARNING: DHCP failed on all interfaces — assigning static fallback IP"
-    # Assign static IP so clonr-server can reach us to pull /tmp/init.log
+    # Assign static IP so clustr-server can reach us to pull /tmp/init.log
     for iface_path in /sys/class/net/*/; do
         iface=$(basename "$iface_path")
         [ "$iface" = "lo" ] && continue
@@ -211,9 +211,9 @@ log "curl connect test:"
 curl -v --max-time 5 "http://10.99.0.1:8080/" 2>&1 | head -20 >> "$LOG"
 log "=== END CONNECTIVITY TEST ==="
 
-# ── Step 7: start log server so clonr-server can pull diagnostics ─────────────
+# ── Step 7: start log server so clustr-server can pull diagnostics ─────────────
 # Serve /tmp/init.log via busybox httpd on port 9999.
-# From clonr-server: curl http://10.99.0.100:9999/init.log
+# From clustr-server: curl http://10.99.0.100:9999/init.log
 mkdir -p /tmp/www
 ln -sf "$LOG" /tmp/www/init.log
 httpd -p 9999 -h /tmp/www 2>/dev/null &
@@ -222,52 +222,52 @@ HTTPPID=$!
 (while true; do cat "$LOG" | nc -l -p 9998 2>/dev/null; done) &
 log "log server: httpd :9999 (pid $HTTPPID), nc :9998"
 
-# ── Step 8: run clonr deploy --auto ───────────────────────────────────────────
+# ── Step 8: run clustr deploy --auto ───────────────────────────────────────────
 # Ensure PATH includes /usr/bin so exec.Command("lsblk",...) in Go can find it.
 # busybox sh may not set a complete PATH by default, which would cause Go's
 # os/exec.LookPath to fail silently, returning no disks.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export CLONR_SERVER="${CLONR_SERVER:-http://10.99.0.1:8080}"
+export CLUSTR_SERVER="${CLUSTR_SERVER:-http://10.99.0.1:8080}"
 
-# Parse clonr.token from /proc/cmdline — the PXE boot handler embeds a fresh
+# Parse clustr.token from /proc/cmdline — the PXE boot handler embeds a fresh
 # node-scoped API key here at PXE-serve time. The deploy agent reads it via
-# CLONR_TOKEN so that GetImage and DownloadBlob calls are authenticated.
+# CLUSTR_TOKEN so that GetImage and DownloadBlob calls are authenticated.
 # Bail out loudly if no token is present; silent unauthenticated fallback is
 # exactly how we ended up with the v0.1.0 auth gap — do not allow it.
-CLONR_TOKEN_RAW=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clonr.token=' | cut -d= -f2- | tr -d '[:space:]')
-if [ -z "$CLONR_TOKEN_RAW" ]; then
-    log "FATAL: clonr.token not found in /proc/cmdline — refusing to deploy without auth"
+CLUSTR_TOKEN_RAW=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.token=' | cut -d= -f2- | tr -d '[:space:]')
+if [ -z "$CLUSTR_TOKEN_RAW" ]; then
+    log "FATAL: clustr.token not found in /proc/cmdline — refusing to deploy without auth"
     log "cmdline: $(cat /proc/cmdline)"
-    log "This node needs a fresh PXE boot from a server running clonr v0.2.0+ which"
+    log "This node needs a fresh PXE boot from a server running clustr v0.2.0+ which"
     log "embeds a node-scoped token at PXE-serve time."
     while true; do sleep 3600; done
 fi
-export CLONR_TOKEN="$CLONR_TOKEN_RAW"
-log "clonr.token parsed from cmdline (length=${#CLONR_TOKEN_RAW})"
+export CLUSTR_TOKEN="$CLUSTR_TOKEN_RAW"
+log "clustr.token parsed from cmdline (length=${#CLUSTR_TOKEN_RAW})"
 
 log "PATH: $PATH"
 log "lsblk location: $(which lsblk 2>&1 || echo NOT_FOUND)"
 
 # ── Step 8a: check for deferred deploy-complete flag ─────────────────────────
-# If the previous boot's clonr wrote /tmp/clonr-deploy-success, the node was
+# If the previous boot's clustr wrote /tmp/clustr-deploy-success, the node was
 # fully deployed on disk but the server state was not updated (transient network
 # or server error). Re-send the deploy-complete report now, before running
 # deploy --auto, so the server transitions to NodeStateDeployed and the PXE
 # boot handler returns "exit" rather than triggering another deploy loop.
-if [ -f /tmp/clonr-deploy-success ]; then
-    NODE_ID=$(cat /tmp/clonr-deploy-success | tr -d '[:space:]')
-    log "found /tmp/clonr-deploy-success (node_id=${NODE_ID}) — re-sending deploy-complete before entering deploy loop"
+if [ -f /tmp/clustr-deploy-success ]; then
+    NODE_ID=$(cat /tmp/clustr-deploy-success | tr -d '[:space:]')
+    log "found /tmp/clustr-deploy-success (node_id=${NODE_ID}) — re-sending deploy-complete before entering deploy loop"
     RETRY=0
     REPORTED=0
     while [ $RETRY -lt 5 ]; do
         HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${CLONR_TOKEN}" \
-            "${CLONR_SERVER}/api/v1/nodes/${NODE_ID}/deploy-complete" 2>/dev/null)
+            -H "Authorization: Bearer ${CLUSTR_TOKEN}" \
+            "${CLUSTR_SERVER}/api/v1/nodes/${NODE_ID}/deploy-complete" 2>/dev/null)
         log "deploy-complete retry ${RETRY}: HTTP ${HTTP_STATUS}"
         if [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "204" ] || [ "${HTTP_STATUS}" = "201" ]; then
             log "deploy-complete re-send succeeded — removing flag file"
-            rm -f /tmp/clonr-deploy-success
+            rm -f /tmp/clustr-deploy-success
             REPORTED=1
             break
         fi
@@ -276,26 +276,26 @@ if [ -f /tmp/clonr-deploy-success ]; then
     done
     if [ $REPORTED -eq 0 ]; then
         log "WARNING: deploy-complete re-send failed after 5 attempts — proceeding with deploy --auto"
-        log "(server may still transition the node; clonr register will handle it)"
+        log "(server may still transition the node; clustr register will handle it)"
     fi
 fi
 
-log "running: /usr/bin/clonr deploy --auto --server ${CLONR_SERVER} --token <redacted>"
+log "running: /usr/bin/clustr deploy --auto --server ${CLUSTR_SERVER} --token <redacted>"
 
-/usr/bin/clonr deploy --auto --server "${CLONR_SERVER}" --token "${CLONR_TOKEN}" >> "$LOG" 2>&1
-CLONR_EXIT=$?
+/usr/bin/clustr deploy --auto --server "${CLUSTR_SERVER}" --token "${CLUSTR_TOKEN}" >> "$LOG" 2>&1
+CLUSTR_EXIT=$?
 
-log "clonr exit: $CLONR_EXIT"
+log "clustr exit: $CLUSTR_EXIT"
 
-if [ "$CLONR_EXIT" -eq 0 ]; then
+if [ "$CLUSTR_EXIT" -eq 0 ]; then
     log "deployment succeeded — rebooting into deployed OS in 3s"
     sync
     sleep 3
     # reboot triggers PXE again (net0 is always first in boot order).
-    # clonr serves an iPXE disk-boot script that chains grub.efi from the server.
+    # clustr serves an iPXE disk-boot script that chains grub.efi from the server.
     reboot -f
 else
-    log "deployment failed (exit $CLONR_EXIT) — sleeping to allow log collection"
+    log "deployment failed (exit $CLUSTR_EXIT) — sleeping to allow log collection"
     log "(pull log: nc <node-ip> 9999)"
     # ── Step 9: loop on failure — PID 1 must not exit ─────────────────────────
     while true; do

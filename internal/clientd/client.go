@@ -27,8 +27,8 @@ const (
 	backoffMax     = 5 * time.Minute
 )
 
-// Client is the clonr-clientd WebSocket client. It maintains a persistent
-// connection to clonr-serverd, sending heartbeats and dispatching server messages.
+// Client is the clustr-clientd WebSocket client. It maintains a persistent
+// connection to clustr-serverd, sending heartbeats and dispatching server messages.
 type Client struct {
 	serverURL string
 	tokenPath string
@@ -44,20 +44,20 @@ type Client struct {
 
 	// nodeMAC is read from the token file path context; populated lazily.
 	// For journal entries we need a MAC address to stamp on each LogEntry.
-	// We derive it from /etc/clonr/node-mac if present, falling back to empty string.
+	// We derive it from /etc/clustr/node-mac if present, falling back to empty string.
 	nodeMAC string
 }
 
 // New creates a Client. serverURL is the full ws:// or wss:// URL for the
 // clientd endpoint (e.g. ws://192.168.1.10:8080/api/v1/nodes/abc123/clientd/ws).
-// tokenPath is the path to the node-token file (default /etc/clonr/node-token).
+// tokenPath is the path to the node-token file (default /etc/clustr/node-token).
 // version is the binary version string injected at build time.
 func New(serverURL, tokenPath, version string) (*Client, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("clientd: serverURL is required")
 	}
 	if tokenPath == "" {
-		tokenPath = "/etc/clonr/node-token"
+		tokenPath = "/etc/clustr/node-token"
 	}
 
 	// Extract node ID from the URL path: .../nodes/{id}/clientd/ws
@@ -66,10 +66,10 @@ func New(serverURL, tokenPath, version string) (*Client, error) {
 		return nil, fmt.Errorf("clientd: could not extract node ID from URL %q: %w", serverURL, err)
 	}
 
-	// Read node MAC from /etc/clonr/node-mac if present.
+	// Read node MAC from /etc/clustr/node-mac if present.
 	// Not fatal — missing MAC means journal entries omit node_mac until server fills it in.
 	var nodeMAC string
-	if data, err := os.ReadFile("/etc/clonr/node-mac"); err == nil {
+	if data, err := os.ReadFile("/etc/clustr/node-mac"); err == nil {
 		nodeMAC = strings.TrimSpace(string(data))
 	}
 
@@ -195,7 +195,7 @@ func (c *Client) connect(ctx context.Context) error {
 		// Parent context cancelled — send goodbye and close cleanly.
 		_ = conn.WriteControl(
 			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseGoingAway, "clonr-clientd shutting down"),
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "clustr-clientd shutting down"),
 			time.Now().Add(writeTimeout),
 		)
 		return nil
@@ -818,8 +818,8 @@ func (c *Client) readToken() (string, error) {
 // (idempotent), so this is safe to call on every reconnect attempt.
 func (c *Client) verifyBoot(token string) {
 	// Read the verify-boot URL written by the deploy agent.
-	// It lives at /etc/clonr/verify-boot-url, placed there by injectPhoneHome.
-	verifyBootURL, err := os.ReadFile("/etc/clonr/verify-boot-url")
+	// It lives at /etc/clustr/verify-boot-url, placed there by injectPhoneHome.
+	verifyBootURL, err := os.ReadFile("/etc/clustr/verify-boot-url")
 	if err != nil {
 		// File not present means this node was not deployed with phone-home injection
 		// (e.g. manual install, or an older deploy). Skip silently.

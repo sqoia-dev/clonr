@@ -87,7 +87,7 @@ const SlurmPages = {
             <div style="margin-top:20px;padding:20px;border:2px dashed var(--border);border-radius:8px;background:var(--bg-secondary);max-width:480px;">
                 <div style="font-size:15px;font-weight:700;margin-bottom:6px;">Enable Slurm Management</div>
                 <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px;">
-                    clonr will manage Slurm config files, scripts, munge keys, and rolling upgrades
+                    clustr will manage Slurm config files, scripts, munge keys, and rolling upgrades
                     for all nodes in this cluster.
                 </p>
                 <form id="slurm-enable-form" style="display:flex;flex-direction:column;gap:10px;">
@@ -110,7 +110,7 @@ const SlurmPages = {
             <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);">
                 <h3 style="font-size:14px;font-weight:600;margin:0 0 8px;color:var(--text-secondary);">Danger Zone</h3>
                 <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">
-                    Disabling the Slurm module stops clonr from managing Slurm configs. It does <strong>not</strong> remove configs from deployed nodes.
+                    Disabling the Slurm module stops clustr from managing Slurm configs. It does <strong>not</strong> remove configs from deployed nodes.
                 </p>
                 <button id="slurm-disable-btn" class="btn btn-danger" style="font-size:13px;padding:6px 16px;">
                     Disable Module
@@ -270,7 +270,7 @@ const SlurmPages = {
         { name: '{{.ClusterName}}',     desc: 'Cluster name from settings' },
         { name: '{{.Hostname}}',        desc: 'Node hostname' },
         { name: '{{.FQDN}}',            desc: 'Node FQDN' },
-        { name: '{{.NodeID}}',          desc: 'clonr node UUID' },
+        { name: '{{.NodeID}}',          desc: 'clustr node UUID' },
         { name: '{{.CPUs}}',            desc: 'Override: CPU count' },
         { name: '{{.Sockets}}',         desc: 'Override: socket count' },
         { name: '{{.CoresPerSocket}}',  desc: 'Override: cores per socket' },
@@ -846,7 +846,7 @@ const SlurmPages = {
 
         return cardWrap('Slurm Scripts', `
             <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px;">
-                Slurm hook scripts (Prolog, Epilog, HealthCheckProgram, etc.) managed by clonr.
+                Slurm hook scripts (Prolog, Epilog, HealthCheckProgram, etc.) managed by clustr.
                 Scripts are pushed with 0755 permissions and do not require <code>scontrol reconfigure</code> unless the path in slurm.conf changes.
             </p>
             <table style="width:100%;border-collapse:collapse;">

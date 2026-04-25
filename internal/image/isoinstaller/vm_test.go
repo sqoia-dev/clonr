@@ -114,16 +114,16 @@ func TestWrapQEMUInScope_WithSystemdRun(t *testing.T) {
 	if bin != "systemd-run" {
 		t.Errorf("expected bin=systemd-run, got %q", bin)
 	}
-	// args should contain --scope, --slice=clonr-builders.slice, unit name, and qemu args.
+	// args should contain --scope, --slice=clustr-builders.slice, unit name, and qemu args.
 	found := map[string]bool{}
 	for _, a := range args {
 		if a == "--scope" {
 			found["scope"] = true
 		}
-		if a == "--slice=clonr-builders.slice" {
+		if a == "--slice=clustr-builders.slice" {
 			found["slice"] = true
 		}
-		if a == "--unit=clonr-iso-build-build-abc123.scope" {
+		if a == "--unit=clustr-iso-build-build-abc123.scope" {
 			found["unit"] = true
 		}
 		if a == "/usr/bin/qemu-kvm" {

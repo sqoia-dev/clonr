@@ -3,7 +3,7 @@
 
 -- ── Switch registry ───────────────────────────────────────────────────────────
 -- Records managed and unmanaged switches in the fabric. v1 is inventory-only:
--- clonr does not program switches via SNMP. Fields are documentation for admins.
+-- clustr does not program switches via SNMP. Fields are documentation for admins.
 CREATE TABLE network_switches (
     id          TEXT    PRIMARY KEY,        -- UUID
     name        TEXT    NOT NULL UNIQUE,    -- "mgmt-sw-01", "data-sw-01", "ib-sw-01"

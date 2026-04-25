@@ -17,8 +17,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // imageAccessCacheEntry is a single cached result from requireImageAccess.
@@ -108,7 +108,7 @@ func actorLabel(ctx context.Context) string {
 }
 
 // apiKeyAuth returns a middleware that resolves the auth scope from either:
-//  1. The session cookie (clonr_session) validated via HMAC — cookie takes precedence.
+//  1. The session cookie (clustr_session) validated via HMAC — cookie takes precedence.
 //  2. The Authorization: Bearer token — SHA-256 hash lookup against api_keys table.
 //
 // This middleware does NOT reject unauthenticated requests — it is a resolver.
@@ -117,10 +117,10 @@ func actorLabel(ctx context.Context) string {
 // When a session cookie is valid and needs sliding, the middleware re-signs and
 // re-issues the cookie transparently before passing to the next handler.
 //
-// Dev-mode escape hatch: if CLONR_AUTH_DEV_MODE=1 is explicitly set,
+// Dev-mode escape hatch: if CLUSTR_AUTH_DEV_MODE=1 is explicitly set,
 // all requests are treated as admin scope. Never the default.
 func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecure bool) func(http.Handler) http.Handler {
-	const cookieName = "clonr_session"
+	const cookieName = "clustr_session"
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if devMode {
@@ -193,12 +193,12 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 				return
 			}
 
-			// Strip the typed prefix (clonr-admin- / clonr-node-) before hashing.
+			// Strip the typed prefix (clustr-admin- / clustr-node-) before hashing.
 			// The DB stores sha256(<raw-hex>) where raw-hex is the bare entropy;
-			// the full Bearer token is clonr-<scope>-<raw-hex>, so we strip the
+			// the full Bearer token is clustr-<scope>-<raw-hex>, so we strip the
 			// well-known prefixes before computing the lookup hash.
 			hashInput := raw
-			for _, pfx := range []string{"clonr-admin-", "clonr-node-"} {
+			for _, pfx := range []string{"clustr-admin-", "clustr-node-"} {
 				if strings.HasPrefix(raw, pfx) {
 					hashInput = strings.TrimPrefix(raw, pfx)
 					break
@@ -462,9 +462,9 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 //
 // Allowed origins are determined as follows:
 //  1. The request Origin header is always echoed back when it matches an allowed origin.
-//  2. CLONR_CORS_ORIGINS is a comma-separated list of additional allowed origins
+//  2. CLUSTR_CORS_ORIGINS is a comma-separated list of additional allowed origins
 //     (e.g. "https://admin.example.com,https://dashboard.example.com").
-//  3. When CLONR_CORS_ORIGINS is unset, only same-origin requests (no Origin header)
+//  3. When CLUSTR_CORS_ORIGINS is unset, only same-origin requests (no Origin header)
 //     and requests from the same scheme+host as the server are permitted.
 //
 // Preflight OPTIONS requests are handled and short-circuited with 204 No Content.
@@ -472,7 +472,7 @@ func writeForbidden(w http.ResponseWriter, msg string) {
 func corsMiddleware(next http.Handler) http.Handler {
 	// Parse the allowed-origins list once at middleware construction time.
 	allowedOrigins := map[string]struct{}{}
-	if raw := os.Getenv("CLONR_CORS_ORIGINS"); raw != "" {
+	if raw := os.Getenv("CLUSTR_CORS_ORIGINS"); raw != "" {
 		for _, o := range strings.Split(raw, ",") {
 			o = strings.TrimSpace(o)
 			if o != "" {
@@ -512,7 +512,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 // apiVersionHeader returns a middleware that sets API-Version: v1 on all responses
 // under /api/v1/* and enforces Accept header tolerance (accepts both
-// application/vnd.clonr.v1+json and the standard application/json).
+// application/vnd.clustr.v1+json and the standard application/json).
 func apiVersionHeader(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/v1") {
@@ -526,14 +526,14 @@ func apiVersionHeader(next http.Handler) http.Handler {
 			if accept != "" &&
 				accept != "*/*" &&
 				!strings.Contains(accept, "application/json") &&
-				!strings.Contains(accept, "application/vnd.clonr.v1+json") &&
+				!strings.Contains(accept, "application/vnd.clustr.v1+json") &&
 				!strings.Contains(accept, "text/event-stream") &&
 				!strings.Contains(accept, "text/plain") &&
 				!strings.Contains(accept, "*/*") {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusNotAcceptable)
 				_ = json.NewEncoder(w).Encode(api.ErrorResponse{
-					Error: "Accept header must include application/json or application/vnd.clonr.v1+json",
+					Error: "Accept header must include application/json or application/vnd.clustr.v1+json",
 					Code:  "not_acceptable",
 				})
 				return

@@ -1,4 +1,4 @@
-// app.js — clonr-serverd web UI. Hash-based SPA routing, no frameworks.
+// app.js — clustr-serverd web UI. Hash-based SPA routing, no frameworks.
 
 // ─── Router ───────────────────────────────────────────────────────────────
 
@@ -335,7 +335,7 @@ function nodeBadge(node) {
     if (node.deploy_verify_timeout_at)
         return `<span class="badge badge-error" title="OS never phoned home within verify timeout. Possible bootloader or kernel failure.">Verify Timeout</span>`;
     if (node.deploy_completed_preboot_at && !node.last_deploy_succeeded_at)
-        return `<span class="badge badge-warning" title="clonr-static completed successfully. Waiting for OS boot confirmation.">Deploy Unverified</span>`;
+        return `<span class="badge badge-warning" title="clustr-static completed successfully. Waiting for OS boot confirmation.">Deploy Unverified</span>`;
     if (node._deployStatus === 'success') return `<span class="badge badge-deployed">Deployed</span>`;
     if (node._deployStatus === 'error')   return `<span class="badge badge-error">Failed</span>`;
     if (node.base_image_id)               return `<span class="badge badge-info">Configured</span>`;
@@ -1197,7 +1197,7 @@ const Pages = {
                                 <div id="pull-iso-hint" style="display:none;margin-top:6px;padding:8px 10px;
                                     background:var(--bg-tertiary,#1e2a3a);border-radius:6px;font-size:12px;
                                     color:var(--text-secondary)">
-                                    Installer ISO detected — clonr will run the installer in a temporary
+                                    Installer ISO detected — clustr will run the installer in a temporary
                                     QEMU VM and capture the result as a base image (5-30 min).
                                     KVM acceleration is used when available.
                                 </div>
@@ -1748,7 +1748,7 @@ const Pages = {
                             <div id="ssh-auth-key">
                                 <div class="form-group">
                                     <label>Key Path <span style="font-size:11px;color:var(--text-secondary)">(absolute path on the server)</span></label>
-                                    <input type="text" name="ssh_key_path" placeholder="/etc/clonr/keys/golden_key">
+                                    <input type="text" name="ssh_key_path" placeholder="/etc/clustr/keys/golden_key">
                                 </div>
                             </div>
                             <div id="ssh-auth-pwd" style="display:none">
@@ -2123,12 +2123,12 @@ const Pages = {
 
         ws.onerror = () => {
             this._setShellStatus('disconnected', 'Connection error');
-            term.writeln('\r\n\x1b[31m[clonr] WebSocket error\x1b[0m');
+            term.writeln('\r\n\x1b[31m[clustr] WebSocket error\x1b[0m');
         };
 
         ws.onclose = () => {
             this._setShellStatus('disconnected', 'Disconnected');
-            term.writeln('\r\n\x1b[90m[clonr] Session closed\x1b[0m');
+            term.writeln('\r\n\x1b[90m[clustr] Session closed\x1b[0m');
         };
 
         // Pipe keystrokes to WebSocket.
@@ -2369,14 +2369,14 @@ const Pages = {
         const hostnameHtml = (n.hostname && n.hostname !== '(none)')
             ? `${escHtml(n.hostname)}${n.hostname_auto ? ' <span class="badge badge-neutral badge-sm" title="Auto-generated hostname">auto</span>' : ''}`
             : `<span class="text-dim" style="font-style:italic">Unassigned</span>`;
-        // Show a green "Live" badge when clonr-clientd has reported a heartbeat
+        // Show a green "Live" badge when clustr-clientd has reported a heartbeat
         // within the last 2 minutes (last_seen_at is updated on every heartbeat).
         const liveBadge = (() => {
             if (!n.last_seen_at) return '';
             const seenMs = new Date(n.last_seen_at).getTime();
             const ageMs = Date.now() - seenMs;
             return ageMs < 2 * 60 * 1000
-                ? ' <span class="badge badge-success badge-sm" title="clonr-clientd is connected and sending heartbeats">Live</span>'
+                ? ' <span class="badge badge-success badge-sm" title="clustr-clientd is connected and sending heartbeats">Live</span>'
                 : '';
         })();
         return `<tr data-key="${escHtml(n.id)}">
@@ -3025,7 +3025,7 @@ const Pages = {
         if (!input) return;
         // Generate a random 4-character hex suffix (not MAC-derived, so it's clearly new).
         const suffix = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
-        input.value = 'clonr-' + suffix;
+        input.value = 'clustr-' + suffix;
         input.focus();
     },
 
@@ -3162,13 +3162,13 @@ const Pages = {
                         Deploy succeeded pre-boot but the OS never phoned home
                         (timeout at ${fmtDate(node.deploy_verify_timeout_at)}).
                         Node may not be bootable — possible causes: bootloader failure, kernel panic,
-                        network misconfiguration, or <code>/etc/clonr/node-token</code> not written correctly.
+                        network misconfiguration, or <code>/etc/clustr/node-token</code> not written correctly.
                         Attach serial console to investigate or <button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Re-deploy</button>
                     </div>` : ''}
                     ${(node.deploy_completed_preboot_at && !node.deploy_verified_booted_at && !node.deploy_verify_timeout_at) ? `
                     <div class="alert alert-warning" style="margin-bottom:12px">
                         <strong>Awaiting boot confirmation.</strong>
-                        This node has not confirmed boot. clonr-static completed successfully, but the OS has not phoned home yet.
+                        This node has not confirmed boot. clustr-static completed successfully, but the OS has not phoned home yet.
                         Attach serial console to verify if the deploy is stalled.
                     </div>` : ''}
                     <div id="tab-save-bar-overview" class="tab-save-bar" style="display:none">
@@ -3181,7 +3181,7 @@ const Pages = {
                                 <div class="form-group">
                                     <label>Hostname</label>
                                     <input type="text" id="ov-hostname" value="${escHtml(node.hostname || '')}"
-                                        placeholder="clonr-node" pattern="^[a-zA-Z0-9][a-zA-Z0-9.-]*$"
+                                        placeholder="clustr-node" pattern="^[a-zA-Z0-9][a-zA-Z0-9.-]*$"
                                         oninput="Pages._tabMarkDirty('overview')">
                                 </div>
                                 <div class="form-group">
@@ -3238,7 +3238,7 @@ const Pages = {
                                 </div></div>
                                 <div class="kv-item"><div class="kv-key">Last Deploy OK</div><div class="kv-value">${node.last_deploy_succeeded_at ? fmtDate(node.last_deploy_succeeded_at) : '—'}</div></div>
                                 <div class="kv-item"><div class="kv-key">Last Deploy Failed</div><div class="kv-value">${node.last_deploy_failed_at ? fmtDate(node.last_deploy_failed_at) : '—'}</div></div>
-                                <div class="kv-item"><div class="kv-key">Deploy Complete (pre-boot)</div><div class="kv-value" title="Set when clonr-static finishes in the PXE initramfs. Proves rootfs written; not that OS boots.">${node.deploy_completed_preboot_at ? fmtRelative(node.deploy_completed_preboot_at) : '—'}</div></div>
+                                <div class="kv-item"><div class="kv-key">Deploy Complete (pre-boot)</div><div class="kv-value" title="Set when clustr-static finishes in the PXE initramfs. Proves rootfs written; not that OS boots.">${node.deploy_completed_preboot_at ? fmtRelative(node.deploy_completed_preboot_at) : '—'}</div></div>
                                 <div class="kv-item"><div class="kv-key">Boot Verified</div><div class="kv-value" title="Set when the deployed OS phones home post-boot. Proves bootloader, kernel, and systemd all started.">${node.deploy_verified_booted_at ? fmtRelative(node.deploy_verified_booted_at) : (node.deploy_completed_preboot_at ? '<span class="badge badge-warning">Pending</span>' : '—')}</div></div>
                                 ${node.deploy_verify_timeout_at ? `<div class="kv-item" style="grid-column:1/-1"><div class="kv-key">Verify Timeout</div><div class="kv-value text-danger">${fmtDate(node.deploy_verify_timeout_at)}</div></div>` : ''}
                                 ${node.last_seen_at ? `<div class="kv-item"><div class="kv-key">Last Seen</div><div class="kv-value">${fmtRelative(node.last_seen_at)}</div></div>` : ''}
@@ -3248,7 +3248,7 @@ const Pages = {
 
                     ${cardWrap('Heartbeat', (() => {
                         if (!heartbeatResp) {
-                            return emptyState('No heartbeat received', 'clonr-clientd is not connected or has not sent a heartbeat yet.');
+                            return emptyState('No heartbeat received', 'clustr-clientd is not connected or has not sent a heartbeat yet.');
                         }
                         const hb = heartbeatResp;
                         const receivedAt = hb.ReceivedAt || hb.received_at;
@@ -3632,7 +3632,7 @@ const Pages = {
                     return `<div id="tab-configpush" class="tab-panel">
                     ${cardWrap('Config Push', (() => {
                         if (!nodeIsLive) {
-                            return emptyState('Node offline', 'Config push is only available when clonr-clientd is connected (Live).');
+                            return emptyState('Node offline', 'Config push is only available when clustr-clientd is connected (Live).');
                         }
                         return `<p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
                                 Push a whitelisted config file to this node atomically. The node validates the checksum,
@@ -3729,7 +3729,7 @@ const Pages = {
                     return `<div id="tab-diagnostics" class="tab-panel">
                     ${cardWrap('Diagnostics', `
                         <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary)">
-                            Run read-only diagnostic commands on this node via clonr-clientd.
+                            Run read-only diagnostic commands on this node via clustr-clientd.
                             Only whitelisted commands are permitted — no shell, no pipes.
                         </p>
 
@@ -7878,7 +7878,7 @@ const Auth = {
         } catch (_) {
             // Best-effort; redirect regardless.
         }
-        try { localStorage.removeItem('clonr_admin_key'); } catch (_) {}
+        try { localStorage.removeItem('clustr_admin_key'); } catch (_) {}
         window.location.href = '/login';
     },
 
@@ -7899,7 +7899,7 @@ const Auth = {
     // No session / expired → redirect to /login.
     async boot() {
         // If the server flagged a forced password change, redirect immediately.
-        if (document.cookie.split(';').some(c => c.trim().startsWith('clonr_force_password_change='))) {
+        if (document.cookie.split(';').some(c => c.trim().startsWith('clustr_force_password_change='))) {
             window.location.href = '/set-password';
             return;
         }

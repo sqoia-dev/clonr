@@ -1,35 +1,35 @@
 #!/bin/bash
-# Build a minimal initramfs containing the clonr static binary.
+# Build a minimal initramfs containing the clustr static binary.
 # The initramfs boots, brings up networking via DHCP, then runs
-# 'clonr deploy --auto' to register with the server and deploy an image.
+# 'clustr deploy --auto' to register with the server and deploy an image.
 #
 # Usage:
-#   ./scripts/build-initramfs.sh <clonr-binary> [output-path]
+#   ./scripts/build-initramfs.sh <clustr-binary> [output-path]
 #
 # Prerequisites:
-#   - clonr binary must be statically compiled (CGO_ENABLED=0)
+#   - clustr binary must be statically compiled (CGO_ENABLED=0)
 #   - busybox-static package OR internet access to download busybox
 #   - cpio, gzip
-#   - sshpass + access to clonr-server (192.168.1.151) for kernel modules
+#   - sshpass + access to clustr-server (192.168.1.151) for kernel modules
 #     (virtio_net, net_failover, failover required for virtio NIC in initramfs)
 #
 # Example:
-#   CGO_ENABLED=0 go build -o bin/clonr ./cmd/clonr
-#   ./scripts/build-initramfs.sh bin/clonr initramfs-clonr.img
+#   CGO_ENABLED=0 go build -o bin/clustr ./cmd/clustr
+#   ./scripts/build-initramfs.sh bin/clustr initramfs-clustr.img
 
 set -euo pipefail
 
-CLONR_BIN="${1:?Usage: build-initramfs.sh <clonr-binary> [output]}"
-OUTPUT="${2:-initramfs-clonr.img}"
+CLUSTR_BIN="${1:?Usage: build-initramfs.sh <clustr-binary> [output]}"
+OUTPUT="${2:-initramfs-clustr.img}"
 
-# clonr-server SSH credentials — used to pull kernel modules.
+# clustr-server SSH credentials — used to pull kernel modules.
 # The initramfs kernel version must match the modules being loaded.
-CLONR_SERVER_HOST="${CLONR_SERVER_HOST:-192.168.1.151}"
-CLONR_SERVER_USER="${CLONR_SERVER_USER:-clonr}"
-CLONR_SERVER_PASS="${CLONR_SERVER_PASS:-clonr}"
+CLUSTR_SERVER_HOST="${CLUSTR_SERVER_HOST:-192.168.1.151}"
+CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:-clustr}"
+CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:-clustr}"
 
 # Detect local mode — skip SSH when building on the server itself.
-if [[ "$CLONR_SERVER_HOST" == "127.0.0.1" || "$CLONR_SERVER_HOST" == "localhost" || "$CLONR_SERVER_HOST" == "::1" ]]; then
+if [[ "$CLUSTR_SERVER_HOST" == "127.0.0.1" || "$CLUSTR_SERVER_HOST" == "localhost" || "$CLUSTR_SERVER_HOST" == "::1" ]]; then
     LOCAL_MODE=1
 else
     LOCAL_MODE=0
@@ -74,8 +74,8 @@ remote_exec() {
     if [[ "$LOCAL_MODE" -eq 1 ]]; then
         bash -c "$1" 2>/dev/null
     else
-        sshpass -p "$CLONR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}" "$1" 2>/dev/null
+        sshpass -p "$CLUSTR_SERVER_PASS" ssh -o StrictHostKeyChecking=no \
+            "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}" "$1" 2>/dev/null
     fi
 }
 
@@ -84,8 +84,8 @@ remote_copy() {
     if [[ "$LOCAL_MODE" -eq 1 ]]; then
         cp -f "$src" "$dst" 2>/dev/null
     else
-        sshpass -p "$CLONR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
+        sshpass -p "$CLUSTR_SERVER_PASS" scp -o StrictHostKeyChecking=no \
+            "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
     fi
 }
 
@@ -94,8 +94,8 @@ remote_copy_r() {
     if [[ "$LOCAL_MODE" -eq 1 ]]; then
         cp -rf "$src" "$dst" 2>/dev/null
     else
-        sshpass -p "$CLONR_SERVER_PASS" scp -r -o StrictHostKeyChecking=no \
-            "${CLONR_SERVER_USER}@${CLONR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
+        sshpass -p "$CLUSTR_SERVER_PASS" scp -r -o StrictHostKeyChecking=no \
+            "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}:${src}" "$dst" 2>/dev/null
     fi
 }
 
@@ -139,8 +139,8 @@ ensure_tool_installed() {
 }
 
 # Verify the binary exists and is executable.
-if [[ ! -f "$CLONR_BIN" ]]; then
-    echo "ERROR: clonr binary not found: $CLONR_BIN" >&2
+if [[ ! -f "$CLUSTR_BIN" ]]; then
+    echo "ERROR: clustr binary not found: $CLUSTR_BIN" >&2
     exit 1
 fi
 
@@ -174,7 +174,7 @@ for tool in "${REQUIRED_TOOLS[@]}"; do
 done
 
 # Create temp root and ensure cleanup on exit.
-WORKDIR=$(mktemp -d /tmp/clonr-initramfs.XXXXXXXX)
+WORKDIR=$(mktemp -d /tmp/clustr-initramfs.XXXXXXXX)
 trap "rm -rf '$WORKDIR'" EXIT
 
 echo "Building initramfs in $WORKDIR..."
@@ -199,25 +199,25 @@ mknod -m 640 "$WORKDIR/dev/tty0"    c 4 0 2>/dev/null || true
 mknod -m 640 "$WORKDIR/dev/tty1"    c 4 1 2>/dev/null || true
 mkdir -p "$WORKDIR/dev/pts"
 
-# Install clonr binary.
-# The binary is ALWAYS installed as exactly /usr/bin/clonr regardless of the
-# source name (e.g. clonr-static, clonr-linux-amd64).  The init script exec
-# line is hardcoded to /usr/bin/clonr — any mismatch here would cause the
+# Install clustr binary.
+# The binary is ALWAYS installed as exactly /usr/bin/clustr regardless of the
+# source name (e.g. clustr-static, clustr-linux-amd64).  The init script exec
+# line is hardcoded to /usr/bin/clustr — any mismatch here would cause the
 # deploy agent to not be found at runtime.
-CLONR_INSTALLED_PATH="$WORKDIR/usr/bin/clonr"
-cp "$CLONR_BIN" "$CLONR_INSTALLED_PATH"
-chmod 755 "$CLONR_INSTALLED_PATH"
+CLUSTR_INSTALLED_PATH="$WORKDIR/usr/bin/clustr"
+cp "$CLUSTR_BIN" "$CLUSTR_INSTALLED_PATH"
+chmod 755 "$CLUSTR_INSTALLED_PATH"
 
-echo "  [+] Installed clonr binary as /usr/bin/clonr ($(du -h "$CLONR_BIN" | cut -f1), src=$(basename "$CLONR_BIN"))"
+echo "  [+] Installed clustr binary as /usr/bin/clustr ($(du -h "$CLUSTR_BIN" | cut -f1), src=$(basename "$CLUSTR_BIN"))"
 
-# Install clonr-clientd binary (node agent, copied into deployed rootfs during finalize).
-CLONR_CLIENTD_SRC="$(dirname "$CLONR_BIN")/clonr-clientd"
-if [ -f "$CLONR_CLIENTD_SRC" ]; then
-    cp "$CLONR_CLIENTD_SRC" "$WORKDIR/usr/bin/clonr-clientd"
-    chmod 755 "$WORKDIR/usr/bin/clonr-clientd"
-    echo "  [+] Installed clonr-clientd as /usr/bin/clonr-clientd ($(du -h "$CLONR_CLIENTD_SRC" | cut -f1))"
+# Install clustr-clientd binary (node agent, copied into deployed rootfs during finalize).
+CLUSTR_CLIENTD_SRC="$(dirname "$CLUSTR_BIN")/clustr-clientd"
+if [ -f "$CLUSTR_CLIENTD_SRC" ]; then
+    cp "$CLUSTR_CLIENTD_SRC" "$WORKDIR/usr/bin/clustr-clientd"
+    chmod 755 "$WORKDIR/usr/bin/clustr-clientd"
+    echo "  [+] Installed clustr-clientd as /usr/bin/clustr-clientd ($(du -h "$CLUSTR_CLIENTD_SRC" | cut -f1))"
 else
-    echo "  [!] clonr-clientd not found at $CLONR_CLIENTD_SRC — node agent will not be available in initramfs"
+    echo "  [!] clustr-clientd not found at $CLUSTR_CLIENTD_SRC — node agent will not be available in initramfs"
 fi
 
 # Install busybox for shell and basic utilities.
@@ -257,13 +257,13 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 # Install lsblk.
 #
-# lsblk is not a busybox applet — it comes from util-linux. Without it, clonr's
+# lsblk is not a busybox applet — it comes from util-linux. Without it, clustr's
 # hardware discovery returns an empty disk list and disk selection during deploy
-# fails. We fetch the binary directly from the clonr-server, which already has
+# fails. We fetch the binary directly from the clustr-server, which already has
 # util-linux installed.
 #
 # Strategy (in order):
-#   1. Fetch static lsblk from clonr-server at /usr/bin/lsblk (preferred).
+#   1. Fetch static lsblk from clustr-server at /usr/bin/lsblk (preferred).
 #   2. If the server binary is dynamically linked, copy it plus its required
 #      shared libraries from the server.
 #   3. If sshpass/server is unavailable, check the local system for a static
@@ -274,7 +274,7 @@ echo "  [+] Installing lsblk..."
 LSBLK_INSTALLED=false
 LSBLK_DEST="$WORKDIR/usr/bin/lsblk"
 
-# Helper: try to fetch lsblk from the clonr-server.
+# Helper: try to fetch lsblk from the clustr-server.
 fetch_lsblk_from_server() {
     if [[ "$LOCAL_MODE" -eq 0 ]] && ! command -v sshpass &>/dev/null; then
         echo "      sshpass not found — cannot fetch lsblk from server" >&2
@@ -283,7 +283,7 @@ fetch_lsblk_from_server() {
 
     # Copy the binary.
     if ! remote_copy "/usr/bin/lsblk" "$LSBLK_DEST"; then
-        echo "      failed to copy lsblk from ${CLONR_SERVER_HOST}" >&2
+        echo "      failed to copy lsblk from ${CLUSTR_SERVER_HOST}" >&2
         return 1
     fi
     chmod 755 "$LSBLK_DEST"
@@ -291,7 +291,7 @@ fetch_lsblk_from_server() {
     # Determine if the binary is statically linked.
     LSBLK_FILE_INFO=$(file "$LSBLK_DEST" 2>/dev/null || echo "")
     if echo "$LSBLK_FILE_INFO" | grep -q "statically linked"; then
-        echo "      fetched static lsblk from ${CLONR_SERVER_HOST}"
+        echo "      fetched static lsblk from ${CLUSTR_SERVER_HOST}"
         return 0
     fi
 
@@ -321,7 +321,7 @@ fetch_lsblk_from_server() {
         fi
     fi
 
-    echo "      fetched dynamic lsblk + libs from ${CLONR_SERVER_HOST}"
+    echo "      fetched dynamic lsblk + libs from ${CLUSTR_SERVER_HOST}"
     return 0
 }
 
@@ -347,7 +347,7 @@ else
 
     # Last resort: attempt to install lsblk via package manager on the target host.
     if [[ "$LSBLK_INSTALLED" == "false" ]]; then
-        echo "      lsblk not available locally — attempting auto-install on ${CLONR_SERVER_HOST}..."
+        echo "      lsblk not available locally — attempting auto-install on ${CLUSTR_SERVER_HOST}..."
         if ensure_tool_installed lsblk; then
             if remote_copy "/usr/bin/lsblk" "$LSBLK_DEST"; then
                 chmod 755 "$LSBLK_DEST"
@@ -362,11 +362,11 @@ if [[ "$LSBLK_INSTALLED" == "true" ]]; then
     echo "  [+] lsblk installed at /usr/bin/lsblk ($(du -h "$LSBLK_DEST" | cut -f1))"
 else
     echo "  [!] WARNING: lsblk could not be installed — disk discovery will return empty results" >&2
-    echo "               Run: sshpass -p clonr scp clonr@192.168.1.151:/usr/bin/lsblk initramfs-lsblk && rebuild" >&2
+    echo "               Run: sshpass -p clustr scp clustr@192.168.1.151:/usr/bin/lsblk initramfs-lsblk && rebuild" >&2
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Install deployment tools from clonr-server.
+# Install deployment tools from clustr-server.
 #
 # The initramfs must be able to partition disks and create filesystems during
 # deployment. Without these binaries, sgdisk/mkfs calls fail silently and the
@@ -384,10 +384,10 @@ fi
 #   blockdev      — get disk size (from util-linux)
 #   mkswap        — swap partition creation (from util-linux)
 #
-# Strategy: SSH to clonr-server, copy binaries + their shared libraries.
+# Strategy: SSH to clustr-server, copy binaries + their shared libraries.
 # We use ldd on the server to find all required .so files and scp them over.
 # ──────────────────────────────────────────────────────────────────────────────
-echo "  [+] Installing deployment tools from ${CLONR_SERVER_HOST}..."
+echo "  [+] Installing deployment tools from ${CLUSTR_SERVER_HOST}..."
 
 if [[ "$LOCAL_MODE" -eq 0 ]] && ! command -v sshpass &>/dev/null; then
     echo "  [!] WARNING: sshpass not found — cannot fetch deployment tools from server" >&2
@@ -486,7 +486,7 @@ ${transitive}"
             ensure_tool_installed "$bin_name" || return 1
             remote_path=$(remote_exec "which ${bin_name} 2>/dev/null || command -v ${bin_name} 2>/dev/null" || echo "")
             if [[ -z "$remote_path" ]]; then
-                echo "      WARNING: ${bin_name} not found on ${CLONR_SERVER_HOST}" >&2
+                echo "      WARNING: ${bin_name} not found on ${CLUSTR_SERVER_HOST}" >&2
                 return 1
             fi
         fi
@@ -519,7 +519,7 @@ ${transitive}"
     done
 
     # ── util-linux mount/umount → /usr/sbin ──────────────────────────────────────
-    # busybox umount does NOT support -R (recursive unmount). clonr's unmountAll()
+    # busybox umount does NOT support -R (recursive unmount). clustr's unmountAll()
     # calls `umount -R <mountRoot>` which requires util-linux's umount. Without it,
     # busybox silently ignores -R and returns exit 0, leaving XFS partitions mounted
     # and causing all subsequent finalize operations to fail with EBUSY.
@@ -536,9 +536,9 @@ ${transitive}"
     # headers. GNU tar at /usr/bin/tar overrides the busybox symlink at /bin/tar.
     # gzip: similarly, GNU gzip handles multi-stream and large files correctly.
     # pigz: parallel gzip — uses all CPU cores for decompression of .tar.gz images.
-    #       clonr's streamExtract() prefers pigz over gzip when available.
+    #       clustr's streamExtract() prefers pigz over gzip when available.
     # zstd: zstandard — 3-5x faster decompression than gzip at similar ratio.
-    #       clonr stores new captures as .tar.zst and detects the magic bytes at
+    #       clustr stores new captures as .tar.zst and detects the magic bytes at
     #       deploy time. zstd binary must be in PATH for .tar.zst extraction.
     # rsync: used for incremental deploys; not in busybox.
     # udevadm: 'udevadm settle' flushes kernel uevents after partprobe so that
@@ -570,7 +570,7 @@ ${transitive}"
     # scp -r <host>:<dir> <local_parent>  — copies the dir INTO local_parent,
     # creating local_parent/<basename(dir)>/. We scp to the PARENT of the target
     # so the directory structure is preserved correctly.
-    echo "      fetching grub2 module data from ${CLONR_SERVER_HOST}..."
+    echo "      fetching grub2 module data from ${CLUSTR_SERVER_HOST}..."
     for grub_dir in /usr/lib/grub /usr/share/grub; do
         # Parent dir inside initramfs (e.g. $WORKDIR/usr/lib for /usr/lib/grub)
         local_parent="$WORKDIR$(dirname "$grub_dir")"
@@ -609,20 +609,20 @@ echo "  [+] Installed busybox and symlinks"
 # ──────────────────────────────────────────────────────────────────────────────
 # Kernel modules for virtio NIC support.
 #
-# The Rocky 9 kernel served by clonr-server has virtio_pci built-in but
+# The Rocky 9 kernel served by clustr-server has virtio_pci built-in but
 # virtio_net (+ its deps net_failover, failover) as loadable modules.
 # Without these, the NIC won't appear in the initramfs and DHCP won't work.
 #
-# We pull the modules from the clonr-server (same kernel version as the PXE
+# We pull the modules from the clustr-server (same kernel version as the PXE
 # kernel) and embed them. The init script calls modprobe before udhcpc.
 # ──────────────────────────────────────────────────────────────────────────────
-echo "  [+] Fetching kernel modules from clonr-server ${CLONR_SERVER_HOST}..."
+echo "  [+] Fetching kernel modules from clustr-server ${CLUSTR_SERVER_HOST}..."
 
 # Discover the kernel version from the server.
 KVER=$(remote_exec "uname -r" 2>/dev/null)
 
 if [[ -z "$KVER" ]]; then
-    echo "WARNING: cannot reach clonr-server — skipping kernel modules." >&2
+    echo "WARNING: cannot reach clustr-server — skipping kernel modules." >&2
     echo "         virtio_net will not be loaded; DHCP may fail on virtio NICs." >&2
     KVER="unknown"
 else
@@ -826,7 +826,7 @@ chmod 755 "$WORKDIR/usr/share/udhcpc/default.script"
 #      on the serial socket. This must happen AFTER devtmpfs mount or the node
 #      might not exist yet.
 #   3. All output also tee'd to /tmp/init.log for post-mortem retrieval.
-#   4. After insmod attempts, assign static IP (10.99.0.100/24) so clonr-server
+#   4. After insmod attempts, assign static IP (10.99.0.100/24) so clustr-server
 #      can pull /tmp/init.log via netcat even if DHCP fails.
 cat > "$WORKDIR/init" << INIT_EOF
 #!/bin/sh
@@ -858,7 +858,7 @@ log() {
 # ── Step 1: virtual filesystems already mounted in Step 0 ────────────────────
 
 log "============================================"
-log " clonr initramfs init started"
+log " clustr initramfs init started"
 log "============================================"
 
 # ── Step 1b: register mdev as the kernel hotplug handler ─────────────────────
@@ -875,16 +875,16 @@ log "cmdline: \$(cat /proc/cmdline)"
 log "kernel : \$(uname -r)"
 
 # ── Step 3: parse kernel command line ─────────────────────────────────────────
-CLONR_SERVER=""
-CLONR_MAC=""
+CLUSTR_SERVER=""
+CLUSTR_MAC=""
 for arg in \$(cat /proc/cmdline); do
     case \$arg in
-        clonr.server=*) CLONR_SERVER="\${arg#clonr.server=}" ;;
-        clonr.mac=*)    CLONR_MAC="\${arg#clonr.mac=}" ;;
+        clustr.server=*) CLUSTR_SERVER="\${arg#clustr.server=}" ;;
+        clustr.mac=*)    CLUSTR_MAC="\${arg#clustr.mac=}" ;;
     esac
 done
-log "server : \${CLONR_SERVER:-not set}"
-log "mac    : \${CLONR_MAC:-auto-detect}"
+log "server : \${CLUSTR_SERVER:-not set}"
+log "mac    : \${CLUSTR_MAC:-auto-detect}"
 
 # ── Step 4: load virtio NIC modules ───────────────────────────────────────────
 # Dependency order: failover → net_failover → virtio_net
@@ -965,7 +965,7 @@ log "lsblk test (full cols): \$(/usr/bin/lsblk --json --bytes --output NAME,SIZE
 # This is critical in initramfs environments — devtmpfs creates /dev/sda but
 # partition nodes (/dev/sda1 etc.) may not appear until mdev scans /sys/class/block/.
 # We run mdev twice: once now (for base disk nodes), and again after partprobe
-# (handled by the clonr deploy code itself).
+# (handled by the clustr deploy code itself).
 /bin/mdev -s 2>/dev/null || true
 log "mdev -s ran — dev nodes after mdev: \$(ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null | tr '\n' ' ' || echo none)"
 log "loaded: \$(cat /proc/modules 2>/dev/null | grep -E 'virtio|failover|xfs|ext4' | cut -d' ' -f1 | tr '\n' ' ')"
@@ -1005,7 +1005,7 @@ done
 
 if [ -z "\$IFACE_UP" ]; then
     log "WARNING: DHCP failed on all interfaces — assigning static fallback IP"
-    # Assign static IP so clonr-server can reach us to pull /tmp/init.log
+    # Assign static IP so clustr-server can reach us to pull /tmp/init.log
     for iface_path in /sys/class/net/*/; do
         iface=\$(basename "\$iface_path")
         [ "\$iface" = "lo" ] && continue
@@ -1031,9 +1031,9 @@ log "curl connect test:"
 curl -v --max-time 5 "http://10.99.0.1:8080/" 2>&1 | head -20 >> "\$LOG"
 log "=== END CONNECTIVITY TEST ==="
 
-# ── Step 7: start log server so clonr-server can pull diagnostics ─────────────
+# ── Step 7: start log server so clustr-server can pull diagnostics ─────────────
 # Serve /tmp/init.log via busybox httpd on port 9999.
-# From clonr-server: curl http://10.99.0.100:9999/init.log
+# From clustr-server: curl http://10.99.0.100:9999/init.log
 mkdir -p /tmp/www
 ln -sf "\$LOG" /tmp/www/init.log
 httpd -p 9999 -h /tmp/www 2>/dev/null &
@@ -1042,52 +1042,52 @@ HTTPPID=\$!
 (while true; do cat "\$LOG" | nc -l -p 9998 2>/dev/null; done) &
 log "log server: httpd :9999 (pid \$HTTPPID), nc :9998"
 
-# ── Step 8: run clonr deploy --auto ───────────────────────────────────────────
+# ── Step 8: run clustr deploy --auto ───────────────────────────────────────────
 # Ensure PATH includes /usr/bin so exec.Command("lsblk",...) in Go can find it.
 # busybox sh may not set a complete PATH by default, which would cause Go's
 # os/exec.LookPath to fail silently, returning no disks.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export CLONR_SERVER="\${CLONR_SERVER:-http://10.99.0.1:8080}"
+export CLUSTR_SERVER="\${CLUSTR_SERVER:-http://10.99.0.1:8080}"
 
-# Parse clonr.token from /proc/cmdline — the PXE boot handler embeds a fresh
+# Parse clustr.token from /proc/cmdline — the PXE boot handler embeds a fresh
 # node-scoped API key here at PXE-serve time. The deploy agent reads it via
-# CLONR_TOKEN so that GetImage and DownloadBlob calls are authenticated.
+# CLUSTR_TOKEN so that GetImage and DownloadBlob calls are authenticated.
 # Bail out loudly if no token is present; silent unauthenticated fallback is
 # exactly how we ended up with the v0.1.0 auth gap — do not allow it.
-CLONR_TOKEN_RAW=\$(cat /proc/cmdline | tr ' ' '\n' | grep '^clonr.token=' | cut -d= -f2- | tr -d '[:space:]')
-if [ -z "\$CLONR_TOKEN_RAW" ]; then
-    log "FATAL: clonr.token not found in /proc/cmdline — refusing to deploy without auth"
+CLUSTR_TOKEN_RAW=\$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.token=' | cut -d= -f2- | tr -d '[:space:]')
+if [ -z "\$CLUSTR_TOKEN_RAW" ]; then
+    log "FATAL: clustr.token not found in /proc/cmdline — refusing to deploy without auth"
     log "cmdline: \$(cat /proc/cmdline)"
-    log "This node needs a fresh PXE boot from a server running clonr v0.2.0+ which"
+    log "This node needs a fresh PXE boot from a server running clustr v0.2.0+ which"
     log "embeds a node-scoped token at PXE-serve time."
     while true; do sleep 3600; done
 fi
-export CLONR_TOKEN="\$CLONR_TOKEN_RAW"
-log "clonr.token parsed from cmdline (length=\${#CLONR_TOKEN_RAW})"
+export CLUSTR_TOKEN="\$CLUSTR_TOKEN_RAW"
+log "clustr.token parsed from cmdline (length=\${#CLUSTR_TOKEN_RAW})"
 
 log "PATH: \$PATH"
 log "lsblk location: \$(which lsblk 2>&1 || echo NOT_FOUND)"
 
 # ── Step 8a: check for deferred deploy-complete flag ─────────────────────────
-# If the previous boot's clonr wrote /tmp/clonr-deploy-success, the node was
+# If the previous boot's clustr wrote /tmp/clustr-deploy-success, the node was
 # fully deployed on disk but the server state was not updated (transient network
 # or server error). Re-send the deploy-complete report now, before running
 # deploy --auto, so the server transitions to NodeStateDeployed and the PXE
 # boot handler returns "exit" rather than triggering another deploy loop.
-if [ -f /tmp/clonr-deploy-success ]; then
-    NODE_ID=\$(cat /tmp/clonr-deploy-success | tr -d '[:space:]')
-    log "found /tmp/clonr-deploy-success (node_id=\${NODE_ID}) — re-sending deploy-complete before entering deploy loop"
+if [ -f /tmp/clustr-deploy-success ]; then
+    NODE_ID=\$(cat /tmp/clustr-deploy-success | tr -d '[:space:]')
+    log "found /tmp/clustr-deploy-success (node_id=\${NODE_ID}) — re-sending deploy-complete before entering deploy loop"
     RETRY=0
     REPORTED=0
     while [ \$RETRY -lt 5 ]; do
         HTTP_STATUS=\$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer \${CLONR_TOKEN}" \
-            "\${CLONR_SERVER}/api/v1/nodes/\${NODE_ID}/deploy-complete" 2>/dev/null)
+            -H "Authorization: Bearer \${CLUSTR_TOKEN}" \
+            "\${CLUSTR_SERVER}/api/v1/nodes/\${NODE_ID}/deploy-complete" 2>/dev/null)
         log "deploy-complete retry \${RETRY}: HTTP \${HTTP_STATUS}"
         if [ "\${HTTP_STATUS}" = "200" ] || [ "\${HTTP_STATUS}" = "204" ] || [ "\${HTTP_STATUS}" = "201" ]; then
             log "deploy-complete re-send succeeded — removing flag file"
-            rm -f /tmp/clonr-deploy-success
+            rm -f /tmp/clustr-deploy-success
             REPORTED=1
             break
         fi
@@ -1096,18 +1096,18 @@ if [ -f /tmp/clonr-deploy-success ]; then
     done
     if [ \$REPORTED -eq 0 ]; then
         log "WARNING: deploy-complete re-send failed after 5 attempts — proceeding with deploy --auto"
-        log "(server may still transition the node; clonr register will handle it)"
+        log "(server may still transition the node; clustr register will handle it)"
     fi
 fi
 
-log "running: /usr/bin/clonr deploy --auto --server \${CLONR_SERVER} --token <redacted>"
+log "running: /usr/bin/clustr deploy --auto --server \${CLUSTR_SERVER} --token <redacted>"
 
-/usr/bin/clonr deploy --auto --server "\${CLONR_SERVER}" --token "\${CLONR_TOKEN}" >> "\$LOG" 2>&1
-CLONR_EXIT=\$?
+/usr/bin/clustr deploy --auto --server "\${CLUSTR_SERVER}" --token "\${CLUSTR_TOKEN}" >> "\$LOG" 2>&1
+CLUSTR_EXIT=\$?
 
-log "clonr exit: \$CLONR_EXIT"
+log "clustr exit: \$CLUSTR_EXIT"
 
-if [ "\$CLONR_EXIT" -eq 0 ]; then
+if [ "\$CLUSTR_EXIT" -eq 0 ]; then
     log "deployment succeeded — rebooting into deployed OS in 3s"
     sync
     sleep 3
@@ -1115,7 +1115,7 @@ if [ "\$CLONR_EXIT" -eq 0 ]; then
     # with scsi0 first in boot order, the next boot loads GRUB from the disk.
     reboot -f
 else
-    log "deployment failed (exit \$CLONR_EXIT) — sleeping to allow log collection"
+    log "deployment failed (exit \$CLUSTR_EXIT) — sleeping to allow log collection"
     log "(pull log: nc <node-ip> 9999)"
     # ── Step 9: loop on failure — PID 1 must not exit ─────────────────────────
     while true; do
@@ -1127,14 +1127,14 @@ chmod 755 "$WORKDIR/init"
 
 echo "  [+] Generated init script"
 
-# Verify clonr binary is statically linked (best effort check on Linux).
+# Verify clustr binary is statically linked (best effort check on Linux).
 if command -v file &>/dev/null; then
-    FILE_OUT="$(file "$CLONR_BIN")"
+    FILE_OUT="$(file "$CLUSTR_BIN")"
     if echo "$FILE_OUT" | grep -q "dynamically linked"; then
         echo ""
-        echo "WARNING: clonr binary appears to be dynamically linked." >&2
+        echo "WARNING: clustr binary appears to be dynamically linked." >&2
         echo "         Build with CGO_ENABLED=0 for a self-contained initramfs binary." >&2
-        echo "         Command: CGO_ENABLED=0 go build -o $CLONR_BIN ./cmd/clonr" >&2
+        echo "         Command: CGO_ENABLED=0 go build -o $CLUSTR_BIN ./cmd/clustr" >&2
         echo ""
     fi
 fi
@@ -1184,7 +1184,7 @@ REQUIRED_CMDS=(
     "lsblk:/usr/bin/lsblk"
     "curl:/usr/bin/curl"
     "mdadm:/usr/sbin/mdadm,/sbin/mdadm"
-    "clonr:/usr/bin/clonr"
+    "clustr:/usr/bin/clustr"
 )
 
 for entry in "${REQUIRED_CMDS[@]}"; do
@@ -1244,10 +1244,10 @@ echo ""
 echo "Built initramfs: $OUTPUT ($SIZE)"
 echo ""
 echo "Deploy to boot server:"
-echo "  cp $OUTPUT /var/lib/clonr/boot/initramfs.img"
+echo "  cp $OUTPUT /var/lib/clustr/boot/initramfs.img"
 echo ""
 echo "Download kernel:"
 echo "  # Rocky Linux 9 kernel (example):"
 echo "  dnf download --resolve kernel-core"
 echo "  rpm2cpio kernel-core-*.rpm | cpio -id ./boot/vmlinuz-*"
-echo "  cp boot/vmlinuz-* /var/lib/clonr/boot/vmlinuz"
+echo "  cp boot/vmlinuz-* /var/lib/clustr/boot/vmlinuz"

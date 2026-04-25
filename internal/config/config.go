@@ -1,4 +1,4 @@
-// Package config manages clonr runtime configuration.
+// Package config manages clustr runtime configuration.
 package config
 
 import (
@@ -9,68 +9,68 @@ import (
 	"time"
 )
 
-// ServerConfig holds all runtime configuration for clonr-serverd.
+// ServerConfig holds all runtime configuration for clustr-serverd.
 // Values can be loaded from a JSON file or from environment variables.
 type ServerConfig struct {
 	ListenAddr      string        `json:"listen_addr"`      // default ":8080"
-	ImageDir        string        `json:"image_dir"`        // default "/var/lib/clonr/images"
-	DBPath          string        `json:"db_path"`          // default "/var/lib/clonr/db/clonr.db"
-	AuthToken       string        `json:"auth_token"`       // legacy: from CLONR_AUTH_TOKEN; superseded by api_keys table
-	AuthDevMode     bool          `json:"auth_dev_mode"`    // from CLONR_AUTH_DEV_MODE=1; bypasses auth for local dev ONLY
-	SessionSecret   string        `json:"session_secret"`   // CLONR_SESSION_SECRET: HMAC key for browser session tokens (32+ bytes)
-	SessionSecure   bool          `json:"session_secure"`   // CLONR_SESSION_SECURE=1: set Secure flag on session cookie (requires TLS)
+	ImageDir        string        `json:"image_dir"`        // default "/var/lib/clustr/images"
+	DBPath          string        `json:"db_path"`          // default "/var/lib/clustr/db/clustr.db"
+	AuthToken       string        `json:"auth_token"`       // legacy: from CLUSTR_AUTH_TOKEN; superseded by api_keys table
+	AuthDevMode     bool          `json:"auth_dev_mode"`    // from CLUSTR_AUTH_DEV_MODE=1; bypasses auth for local dev ONLY
+	SessionSecret   string        `json:"session_secret"`   // CLUSTR_SESSION_SECRET: HMAC key for browser session tokens (32+ bytes)
+	SessionSecure   bool          `json:"session_secure"`   // CLUSTR_SESSION_SECURE=1: set Secure flag on session cookie (requires TLS)
 	LogLevel        string        `json:"log_level"`        // debug, info, warn, error — default "info"
-	LogRetention    time.Duration `json:"log_retention"`    // from CLONR_LOG_RETENTION; default 14d
-	ClonrBinPath    string        `json:"clonr_bin_path"`   // CLONR_BIN_PATH: abs path to clonr CLI binary baked into initramfs; default /usr/local/bin/clonr
-	ClientdBinPath  string        `json:"clientd_bin_path"` // CLONR_CLIENTD_BIN_PATH: abs path to clonr-clientd binary copied into deployed rootfs; auto-detected when empty
+	LogRetention    time.Duration `json:"log_retention"`    // from CLUSTR_LOG_RETENTION; default 14d
+	ClustrBinPath    string        `json:"clustr_bin_path"`   // CLUSTR_BIN_PATH: abs path to clustr CLI binary baked into initramfs; default /usr/local/bin/clustr
+	ClientdBinPath  string        `json:"clientd_bin_path"` // CLUSTR_CLIENTD_BIN_PATH: abs path to clustr-clientd binary copied into deployed rootfs; auto-detected when empty
 	// VerifyTimeout is the duration after deploy_completed_preboot_at within which
 	// the deployed OS must phone home via POST /verify-boot. ADR-0008.
-	// From CLONR_VERIFY_TIMEOUT (Go duration string, e.g. "5m"). Default: 5 minutes.
-	VerifyTimeout   time.Duration `json:"verify_timeout"`   // CLONR_VERIFY_TIMEOUT; default 5m
+	// From CLUSTR_VERIFY_TIMEOUT (Go duration string, e.g. "5m"). Default: 5 minutes.
+	VerifyTimeout   time.Duration `json:"verify_timeout"`   // CLUSTR_VERIFY_TIMEOUT; default 5m
 	PXE             PXEConfig     `json:"pxe"`
 
 	// LDAP module directories.
 	// LDAPDataDir is the root for slapd mdb files and backups.
-	// Default: /var/lib/clonr/ldap
-	LDAPDataDir   string `json:"ldap_data_dir"`   // CLONR_LDAP_DATA_DIR
+	// Default: /var/lib/clustr/ldap
+	LDAPDataDir   string `json:"ldap_data_dir"`   // CLUSTR_LDAP_DATA_DIR
 	// LDAPConfigDir is where the slapd.d cn=config tree and TLS certs live.
-	// Default: /etc/clonr/ldap
-	LDAPConfigDir string `json:"ldap_config_dir"` // CLONR_LDAP_CONFIG_DIR
+	// Default: /etc/clustr/ldap
+	LDAPConfigDir string `json:"ldap_config_dir"` // CLUSTR_LDAP_CONFIG_DIR
 	// LDAPPKIDir is where the CA key and certificate are stored.
-	// Default: /etc/clonr/pki
-	LDAPPKIDir    string `json:"ldap_pki_dir"`    // CLONR_LDAP_PKI_DIR
+	// Default: /etc/clustr/pki
+	LDAPPKIDir    string `json:"ldap_pki_dir"`    // CLUSTR_LDAP_PKI_DIR
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
 type PXEConfig struct {
-	// Enabled activates the PXE server on startup (CLONR_PXE_ENABLED).
+	// Enabled activates the PXE server on startup (CLUSTR_PXE_ENABLED).
 	Enabled bool `json:"enabled"`
 	// Interface is the network interface to bind the DHCP server to
-	// (CLONR_PXE_INTERFACE). Empty means auto-detect.
+	// (CLUSTR_PXE_INTERFACE). Empty means auto-detect.
 	Interface string `json:"interface"`
-	// IPRange is the DHCP pool as "start-end" (CLONR_PXE_RANGE).
+	// IPRange is the DHCP pool as "start-end" (CLUSTR_PXE_RANGE).
 	// Default: "10.99.0.100-10.99.0.200".
 	IPRange string `json:"ip_range"`
 	// ServerIP is the IP advertised as next-server in DHCP offers
-	// (CLONR_PXE_SERVER_IP). Auto-detected from Interface when empty.
+	// (CLUSTR_PXE_SERVER_IP). Auto-detected from Interface when empty.
 	ServerIP string `json:"server_ip"`
 	// BootDir is where the kernel and initramfs are stored
-	// (CLONR_BOOT_DIR). Default: "/var/lib/clonr/boot".
+	// (CLUSTR_BOOT_DIR). Default: "/var/lib/clustr/boot".
 	BootDir string `json:"boot_dir"`
 	// TFTPDir is where TFTP-served boot files (ipxe.efi, undionly.kpxe)
-	// live (CLONR_TFTP_DIR). Default: "/var/lib/clonr/tftpboot".
+	// live (CLUSTR_TFTP_DIR). Default: "/var/lib/clustr/tftpboot".
 	TFTPDir string `json:"tftp_dir"`
 	// SubnetCIDR is the prefix length of the provisioning subnet advertised via
 	// DHCP Option 1 (subnet mask). Must be between 1 and 30 inclusive.
-	// Configured via CLONR_PXE_SUBNET_CIDR. Default: 24.
+	// Configured via CLUSTR_PXE_SUBNET_CIDR. Default: 24.
 	SubnetCIDR int `json:"subnet_cidr"`
-	// HTTPPort is the port the clonr-serverd HTTP API listens on, used by the
+	// HTTPPort is the port the clustr-serverd HTTP API listens on, used by the
 	// DHCP server when building the iPXE chainload URL. Populated at runtime
 	// from ListenAddr — not a user-facing config field.
 	HTTPPort string `json:"-"`
 }
 
-// Config holds the full runtime configuration for clonr components.
+// Config holds the full runtime configuration for clustr components.
 // Kept for JSON-file based loading compatibility.
 type Config struct {
 	Server ServerConfig `json:"server"`
@@ -80,26 +80,26 @@ type Config struct {
 // sensible production defaults. Environment variables take precedence over defaults.
 func LoadServerConfig() ServerConfig {
 	return ServerConfig{
-		ListenAddr:    envOrDefault("CLONR_LISTEN_ADDR", ":8080"),
-		ImageDir:      envOrDefault("CLONR_IMAGE_DIR", "/var/lib/clonr/images"),
-		DBPath:        envOrDefault("CLONR_DB_PATH", "/var/lib/clonr/db/clonr.db"),
-		AuthToken:     os.Getenv("CLONR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
-		AuthDevMode:   os.Getenv("CLONR_AUTH_DEV_MODE") == "1",
-		SessionSecret: os.Getenv("CLONR_SESSION_SECRET"),
-		SessionSecure: os.Getenv("CLONR_SESSION_SECURE") == "1",
-		LogLevel:      envOrDefault("CLONR_LOG_LEVEL", "info"),
+		ListenAddr:    envOrDefault("CLUSTR_LISTEN_ADDR", ":8080"),
+		ImageDir:      envOrDefault("CLUSTR_IMAGE_DIR", "/var/lib/clustr/images"),
+		DBPath:        envOrDefault("CLUSTR_DB_PATH", "/var/lib/clustr/db/clustr.db"),
+		AuthToken:     os.Getenv("CLUSTR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
+		AuthDevMode:   os.Getenv("CLUSTR_AUTH_DEV_MODE") == "1",
+		SessionSecret: os.Getenv("CLUSTR_SESSION_SECRET"),
+		SessionSecure: os.Getenv("CLUSTR_SESSION_SECURE") == "1",
+		LogLevel:      envOrDefault("CLUSTR_LOG_LEVEL", "info"),
 		LogRetention:  parseLogRetention(),
-		ClonrBinPath:   envOrDefault("CLONR_BIN_PATH", "/usr/local/bin/clonr"),
-		ClientdBinPath: os.Getenv("CLONR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
+		ClustrBinPath:   envOrDefault("CLUSTR_BIN_PATH", "/usr/local/bin/clustr"),
+		ClientdBinPath: os.Getenv("CLUSTR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
 		VerifyTimeout: parseVerifyTimeout(),
 		PXE:           LoadPXEConfig(),
-		LDAPDataDir:   envOrDefault("CLONR_LDAP_DATA_DIR", "/var/lib/clonr/ldap"),
-		LDAPConfigDir: envOrDefault("CLONR_LDAP_CONFIG_DIR", "/etc/clonr/ldap"),
-		LDAPPKIDir:    envOrDefault("CLONR_LDAP_PKI_DIR", "/etc/clonr/pki"),
+		LDAPDataDir:   envOrDefault("CLUSTR_LDAP_DATA_DIR", "/var/lib/clustr/ldap"),
+		LDAPConfigDir: envOrDefault("CLUSTR_LDAP_CONFIG_DIR", "/etc/clustr/ldap"),
+		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
 	}
 }
 
-// parseVerifyTimeout parses CLONR_VERIFY_TIMEOUT as a Go duration string.
+// parseVerifyTimeout parses CLUSTR_VERIFY_TIMEOUT as a Go duration string.
 // Minimum: 2m (to allow slow hardware POST sequences). Maximum: 30m.
 // Falls back to 5m on parse error or when the env var is not set.
 // ADR-0008.
@@ -108,7 +108,7 @@ func parseVerifyTimeout() time.Duration {
 	const minTimeout = 2 * time.Minute
 	const maxTimeout = 30 * time.Minute
 
-	v := os.Getenv("CLONR_VERIFY_TIMEOUT")
+	v := os.Getenv("CLUSTR_VERIFY_TIMEOUT")
 	if v == "" {
 		return defaultTimeout
 	}
@@ -125,11 +125,11 @@ func parseVerifyTimeout() time.Duration {
 	return d
 }
 
-// parseLogRetention parses CLONR_LOG_RETENTION as a Go duration string.
+// parseLogRetention parses CLUSTR_LOG_RETENTION as a Go duration string.
 // Falls back to 0 (meaning "use the server default") on parse error or
 // when the env var is not set. The server's runLogPurger treats 0 as 14d.
 func parseLogRetention() time.Duration {
-	v := os.Getenv("CLONR_LOG_RETENTION")
+	v := os.Getenv("CLUSTR_LOG_RETENTION")
 	if v == "" {
 		return 0
 	}
@@ -143,21 +143,21 @@ func parseLogRetention() time.Duration {
 // LoadPXEConfig populates PXEConfig from environment variables.
 func LoadPXEConfig() PXEConfig {
 	return PXEConfig{
-		Enabled:    os.Getenv("CLONR_PXE_ENABLED") == "true",
-		Interface:  os.Getenv("CLONR_PXE_INTERFACE"),
-		IPRange:    envOrDefault("CLONR_PXE_RANGE", "10.99.0.100-10.99.0.200"),
-		ServerIP:   os.Getenv("CLONR_PXE_SERVER_IP"),
-		BootDir:    envOrDefault("CLONR_BOOT_DIR", "/var/lib/clonr/boot"),
-		TFTPDir:    envOrDefault("CLONR_TFTP_DIR", "/var/lib/clonr/tftpboot"),
+		Enabled:    os.Getenv("CLUSTR_PXE_ENABLED") == "true",
+		Interface:  os.Getenv("CLUSTR_PXE_INTERFACE"),
+		IPRange:    envOrDefault("CLUSTR_PXE_RANGE", "10.99.0.100-10.99.0.200"),
+		ServerIP:   os.Getenv("CLUSTR_PXE_SERVER_IP"),
+		BootDir:    envOrDefault("CLUSTR_BOOT_DIR", "/var/lib/clustr/boot"),
+		TFTPDir:    envOrDefault("CLUSTR_TFTP_DIR", "/var/lib/clustr/tftpboot"),
 		SubnetCIDR: parsePXESubnetCIDR(),
 	}
 }
 
-// parsePXESubnetCIDR reads CLONR_PXE_SUBNET_CIDR and returns its value,
+// parsePXESubnetCIDR reads CLUSTR_PXE_SUBNET_CIDR and returns its value,
 // validated to [1, 30]. Falls back to 24 if the variable is unset or invalid.
 func parsePXESubnetCIDR() int {
 	const defaultCIDR = 24
-	v := os.Getenv("CLONR_PXE_SUBNET_CIDR")
+	v := os.Getenv("CLUSTR_PXE_SUBNET_CIDR")
 	if v == "" {
 		return defaultCIDR
 	}
@@ -173,8 +173,8 @@ func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
 			ListenAddr: ":8080",
-			ImageDir:   "/var/lib/clonr/images",
-			DBPath:     "/var/lib/clonr/db/clonr.db",
+			ImageDir:   "/var/lib/clustr/images",
+			DBPath:     "/var/lib/clustr/db/clustr.db",
 			LogLevel:   "info",
 		},
 	}

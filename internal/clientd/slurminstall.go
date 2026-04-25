@@ -46,7 +46,7 @@ func applySlurmBinary(ctx context.Context, baseURL string, payload SlurmBinaryPu
 	}
 
 	// Create a temp directory for the download.
-	tmpDir, err := os.MkdirTemp("", "clonr-slurm-install-*")
+	tmpDir, err := os.MkdirTemp("", "clustr-slurm-install-*")
 	if err != nil {
 		return binaryAckError(payload.BuildID, fmt.Errorf("mkdir temp: %w", err))
 	}

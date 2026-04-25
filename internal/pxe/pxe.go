@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/internal/bootassets"
-	"github.com/sqoia-dev/clonr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/bootassets"
+	"github.com/sqoia-dev/clustr/internal/config"
 )
 
 // Server orchestrates the DHCP and TFTP sub-servers that make up the PXE stack.

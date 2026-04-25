@@ -1,4 +1,4 @@
-// logs.go — SSE handler that streams the clonr-slapd.service systemd journal.
+// logs.go — SSE handler that streams the clustr-slapd.service systemd journal.
 // Transport: Server-Sent Events, mirroring the existing /api/v1/logs/stream handler.
 package ldap
 
@@ -21,11 +21,11 @@ const (
 	// defaultJournalLines is how many historical lines to send for a non-follow request.
 	defaultJournalLines = 200
 	// slapdUnit is the systemd unit whose journal is streamed.
-	slapdUnit = "clonr-slapd.service"
+	slapdUnit = "clustr-slapd.service"
 )
 
 // handleLogs handles GET /api/v1/ldap/logs
-// Returns the last N lines of the clonr-slapd.service journal as newline-delimited
+// Returns the last N lines of the clustr-slapd.service journal as newline-delimited
 // JSON objects. Query params: lines (default 200).
 func (m *Manager) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if err := m.requireEnabled(r.Context()); err != nil {
@@ -40,7 +40,7 @@ func (m *Manager) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// journalctl -u clonr-slapd.service -o short-iso --no-pager -n N
+	// journalctl -u clustr-slapd.service -o short-iso --no-pager -n N
 	cmd := exec.CommandContext(r.Context(),
 		"journalctl",
 		"-u", slapdUnit,
@@ -83,7 +83,7 @@ func (m *Manager) handleLogs(w http.ResponseWriter, r *http.Request) {
 // handleLogsStream handles GET /api/v1/ldap/logs/stream
 // Streams new journal lines as SSE events using:
 //
-//	journalctl -u clonr-slapd.service -f -o short-iso --no-pager
+//	journalctl -u clustr-slapd.service -f -o short-iso --no-pager
 //
 // Each SSE event carries the raw journal line as {"line":"...","timestamp":"..."}.
 func (m *Manager) handleLogsStream(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,7 @@
 ## Problem
 
 The stock `ipxe.efi` committed in this directory was built without colour
-support. The `cpair` iPXE command (used in clonr boot scripts to set foreground
+support. The `cpair` iPXE command (used in clustr boot scripts to set foreground
 and background colour pairs) is gated behind the `COLOUR_CMD` compile-time
 feature flag. Attempting to call `cpair` in a boot script against this binary
 produces:
@@ -71,13 +71,13 @@ Then build without `EXTRA_CFLAGS`:
 make bin-x86_64-efi/ipxe.efi
 ```
 
-## Embed the clonr Boot Script (Recommended for Production)
+## Embed the clustr Boot Script (Recommended for Production)
 
 Embedding the boot script avoids an extra TFTP/HTTP round-trip at boot time:
 
 ```bash
 # Create a minimal chainload script, e.g.:
-cat > /tmp/clonr.ipxe << 'EOF'
+cat > /tmp/clustr.ipxe << 'EOF'
 #!ipxe
 dhcp
 chain http://${next-server}/boot.ipxe
@@ -85,7 +85,7 @@ EOF
 
 make bin-x86_64-efi/ipxe.efi \
     EXTRA_CFLAGS="-DCOLOUR_CMD -DIMAGE_PNG -DCONSOLE_CMD" \
-    EMBED=/tmp/clonr.ipxe
+    EMBED=/tmp/clustr.ipxe
 ```
 
 ## Replace the Committed Binary

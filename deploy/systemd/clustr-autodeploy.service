@@ -1,0 +1,40 @@
+[Unit]
+Description=clustr auto-deploy: sync /opt/clustr to origin/main and rebuild
+# WARNING: This unit stomps local uncommitted changes on this host.
+# If you need to test uncommitted work, stop the timer first:
+#   systemctl stop clustr-autodeploy.timer
+# Resume with:
+#   systemctl start clustr-autodeploy.timer
+Documentation=https://github.com/sqoia-dev/clustr/blob/main/scripts/autodeploy/
+After=network-online.target
+Wants=network-online.target
+# Prevent concurrent runs if a previous build is still running
+After=clustr-serverd.service
+
+[Service]
+Type=oneshot
+# Script is installed to /usr/local/sbin/ (NOT the repo path) so it survives
+# git reset --hard operations. The install.sh copies it there. When the script
+# updates itself (via git pull), the new version takes effect on the next cycle
+# because install.sh is re-run as part of any manual upgrade path.
+#
+# NOTE: The script in /opt/clustr/ is the source of truth, but the installed
+# copy at /usr/local/sbin/clustr-autodeploy.sh is what runs. If the script
+# logic changes, re-run scripts/autodeploy/install.sh to update the installed copy.
+ExecStart=/usr/local/sbin/clustr-autodeploy.sh
+# Run as root: needs to write to /usr/local/bin, restart clustr-serverd,
+# and write to /var/lib/clustr (owned by clustr user but root can write)
+User=root
+
+# Output goes to journal — tail with:
+#   journalctl -u clustr-autodeploy.service -f
+StandardOutput=journal
+StandardError=journal
+
+# Allow a generous timeout for builds on this lab box (initramfs build
+# includes cpio/gzip which can take 30-60s on slow storage)
+TimeoutStartSec=10min
+
+# Do not restart on failure — the timer will fire again in 2 minutes.
+# Exit non-zero is used to signal "retry next cycle" intentionally.
+Restart=no

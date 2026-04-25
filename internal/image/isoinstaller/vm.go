@@ -150,8 +150,8 @@ func init() {
 }
 
 // wrapQEMUInScope wraps qemuBin + qemuArgs in a systemd-run --scope invocation
-// so QEMU runs in its own cgroup (clonr-builders.slice) rather than inheriting
-// clonr-serverd's MemoryMax. This prevents the OOM killer from hitting QEMU
+// so QEMU runs in its own cgroup (clustr-builders.slice) rather than inheriting
+// clustr-serverd's MemoryMax. This prevents the OOM killer from hitting QEMU
 // when the parent service unit has a tight MemoryMax.
 //
 // When systemd-run is unavailable (dev machines without systemd), it returns
@@ -160,10 +160,10 @@ func wrapQEMUInScope(buildID, qemuBin string, qemuArgs []string) (bin string, ar
 	if !systemdRunAvailable {
 		return qemuBin, qemuArgs
 	}
-	unitName := "clonr-iso-build-" + buildID + ".scope"
+	unitName := "clustr-iso-build-" + buildID + ".scope"
 	wrappedArgs := []string{
 		"--scope",
-		"--slice=clonr-builders.slice",
+		"--slice=clustr-builders.slice",
 		"--unit=" + unitName,
 		"--quiet",
 		"--",
@@ -289,13 +289,13 @@ func Build(ctx context.Context, opts BuildOptions) (*BuildResult, error) {
 	}
 
 	// Wrap QEMU in a dedicated systemd-run scope so it inherits
-	// clonr-builders.slice resource limits rather than clonr-serverd's
+	// clustr-builders.slice resource limits rather than clustr-serverd's
 	// MemoryMax. Falls back to direct exec when systemd-run is unavailable.
 	launchBin, launchArgs := wrapQEMUInScope(opts.BuildID, qemuBin, qemuArgs)
 	if systemdRunAvailable {
 		log.Info().
-			Str("unit", "clonr-iso-build-"+opts.BuildID+".scope").
-			Str("slice", "clonr-builders.slice").
+			Str("unit", "clustr-iso-build-"+opts.BuildID+".scope").
+			Str("slice", "clustr-builders.slice").
 			Msg("isoinstaller: launching QEMU inside systemd-run scope")
 	} else {
 		log.Warn().Msg("isoinstaller: systemd-run unavailable — launching QEMU directly (no cgroup isolation)")
@@ -673,9 +673,9 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 		// i440fx (pc) machine type in all current QEMU versions.
 		"-machine", "q35,accel=kvm:tcg", // prefer KVM, fall back to TCG automatically
 		// -cpu host passes through all available host CPU features to the guest.
-		// Previously included +vmx for nested virt, but when clonr-server runs
+		// Previously included +vmx for nested virt, but when clustr-server runs
 		// inside a VM (as in our Proxmox lab), the parent hypervisor doesn't
-		// expose vmx to clonr-server's CPU, so QEMU exits immediately with
+		// expose vmx to clustr-server's CPU, so QEMU exits immediately with
 		// "CPU feature vmx not available". Bare -cpu host is correct for all
 		// deployment topologies — the install VM doesn't need nested virt to
 		// run Anaconda or cloud-init.
@@ -795,7 +795,7 @@ func writeSeedISO(workDir, seedISOPath string, cfg *AutoInstallConfig) error {
 		}
 		metaData := cfg.MetaDataContent
 		if metaData == "" {
-			metaData = "instance-id: clonr-build\nlocal-hostname: generic\n"
+			metaData = "instance-id: clustr-build\nlocal-hostname: generic\n"
 		}
 		if err := os.WriteFile(filepath.Join(stageDir, "meta-data"), []byte(metaData), 0o644); err != nil {
 			return fmt.Errorf("write meta-data: %w", err)
@@ -851,7 +851,7 @@ func buildISO(srcDir, dstPath, label string) error {
 		return nil
 	}
 
-	return fmt.Errorf("neither genisoimage nor xorriso found; install one of them on the clonr-server host")
+	return fmt.Errorf("neither genisoimage nor xorriso found; install one of them on the clustr-server host")
 }
 
 // ── QMP monitoring ────────────────────────────────────────────────────────────

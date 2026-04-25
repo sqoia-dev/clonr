@@ -10,9 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/chroot"
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/chroot"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // nspawnSystemdRunAvailable is true when systemd-run(1) is present on PATH.
@@ -22,8 +22,8 @@ var nspawnSystemdRunAvailable = func() bool {
 }()
 
 // nspawnCommand returns a *exec.Cmd for running systemd-nspawn, wrapping it in
-// a systemd-run --scope --slice=clonr-shells.slice when systemd-run is available.
-// This escapes the clonr-serverd cgroup's NoNewPrivileges=true restriction so
+// a systemd-run --scope --slice=clustr-shells.slice when systemd-run is available.
+// This escapes the clustr-serverd cgroup's NoNewPrivileges=true restriction so
 // nspawn can call pivot_root(2) and create mount namespaces.
 func nspawnCommand(ctx context.Context, scopeID string, nspawnArgs []string) *exec.Cmd {
 	if !nspawnSystemdRunAvailable {
@@ -31,8 +31,8 @@ func nspawnCommand(ctx context.Context, scopeID string, nspawnArgs []string) *ex
 	}
 	args := []string{
 		"--scope",
-		"--slice=clonr-shells.slice",
-		"--unit=clonr-shell-" + scopeID + ".scope",
+		"--slice=clustr-shells.slice",
+		"--unit=clustr-shell-" + scopeID + ".scope",
 		"--quiet",
 		"--",
 		"systemd-nspawn",

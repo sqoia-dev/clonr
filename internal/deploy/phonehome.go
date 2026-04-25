@@ -9,21 +9,21 @@ import (
 	"path/filepath"
 )
 
-//go:embed embedded/clonr-verify-boot.service
+//go:embed embedded/clustr-verify-boot.service
 var verifyBootServiceUnit []byte
 
-//go:embed embedded/clonr-verify-boot.sh
+//go:embed embedded/clustr-verify-boot.sh
 var verifyBootScript []byte
 
 // injectPhoneHome writes the post-reboot verification phone-home components into
 // the deployed rootfs at mountRoot. ADR-0008.
 //
 // It:
-//  1. Creates /etc/clonr/ (0755) in the chroot.
-//  2. Writes /etc/clonr/node-token (0600) with nodeToken.
-//  3. Writes /etc/clonr/verify-boot-url (0644) with verifyBootURL.
-//  4. Writes /etc/systemd/system/clonr-verify-boot.service from the embedded unit.
-//  5. Writes /usr/local/bin/clonr-verify-boot from the embedded shell script (0755).
+//  1. Creates /etc/clustr/ (0755) in the chroot.
+//  2. Writes /etc/clustr/node-token (0600) with nodeToken.
+//  3. Writes /etc/clustr/verify-boot-url (0644) with verifyBootURL.
+//  4. Writes /etc/systemd/system/clustr-verify-boot.service from the embedded unit.
+//  5. Writes /usr/local/bin/clustr-verify-boot from the embedded shell script (0755).
 //  6. Creates the WantedBy=multi-user.target symlink directly inside the chroot
 //     (equivalent to `systemctl --root enable`, but without requiring systemctl).
 //
@@ -40,20 +40,20 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 
 	log := logger()
 
-	// ── 1. Create /etc/clonr/ ────────────────────────────────────────────────
-	clonrDir := filepath.Join(mountRoot, "etc", "clonr")
-	if err := os.MkdirAll(clonrDir, 0o755); err != nil {
-		return fmt.Errorf("phonehome: mkdir /etc/clonr: %w", err)
+	// ── 1. Create /etc/clustr/ ────────────────────────────────────────────────
+	clustrDir := filepath.Join(mountRoot, "etc", "clustr")
+	if err := os.MkdirAll(clustrDir, 0o755); err != nil {
+		return fmt.Errorf("phonehome: mkdir /etc/clustr: %w", err)
 	}
 
 	// ── 2. Write node-token (0600) ───────────────────────────────────────────
-	tokenPath := filepath.Join(clonrDir, "node-token")
+	tokenPath := filepath.Join(clustrDir, "node-token")
 	if err := os.WriteFile(tokenPath, []byte(nodeToken), 0o600); err != nil {
 		return fmt.Errorf("phonehome: write node-token: %w", err)
 	}
 
 	// ── 3. Write verify-boot-url (0644) ─────────────────────────────────────
-	urlPath := filepath.Join(clonrDir, "verify-boot-url")
+	urlPath := filepath.Join(clustrDir, "verify-boot-url")
 	if err := os.WriteFile(urlPath, []byte(verifyBootURL), 0o644); err != nil {
 		return fmt.Errorf("phonehome: write verify-boot-url: %w", err)
 	}
@@ -63,9 +63,9 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
 		return fmt.Errorf("phonehome: mkdir systemd/system: %w", err)
 	}
-	unitPath := filepath.Join(systemdDir, "clonr-verify-boot.service")
+	unitPath := filepath.Join(systemdDir, "clustr-verify-boot.service")
 	if err := os.WriteFile(unitPath, verifyBootServiceUnit, 0o644); err != nil {
-		return fmt.Errorf("phonehome: write clonr-verify-boot.service: %w", err)
+		return fmt.Errorf("phonehome: write clustr-verify-boot.service: %w", err)
 	}
 
 	// ── 5. Write verify-boot script (0755) ──────────────────────────────────
@@ -73,9 +73,9 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return fmt.Errorf("phonehome: mkdir usr/local/bin: %w", err)
 	}
-	scriptPath := filepath.Join(binDir, "clonr-verify-boot")
+	scriptPath := filepath.Join(binDir, "clustr-verify-boot")
 	if err := os.WriteFile(scriptPath, verifyBootScript, 0o755); err != nil {
-		return fmt.Errorf("phonehome: write clonr-verify-boot script: %w", err)
+		return fmt.Errorf("phonehome: write clustr-verify-boot script: %w", err)
 	}
 
 	// ── 6. Enable the unit via direct symlink ────────────────────────────────
@@ -83,13 +83,13 @@ func injectPhoneHome(mountRoot, nodeToken, verifyBootURL string) error {
 	// (systemctl is not staged in build-initramfs.sh). We replicate the exact
 	// action systemctl would take: create the WantedBy symlink directly.
 	// The unit declares WantedBy=multi-user.target, so the symlink target is
-	// ../clonr-verify-boot.service (relative to the wants directory).
+	// ../clustr-verify-boot.service (relative to the wants directory).
 	wantsDir := filepath.Join(mountRoot, "etc", "systemd", "system", "multi-user.target.wants")
 	if err := os.MkdirAll(wantsDir, 0o755); err != nil {
 		return fmt.Errorf("phonehome: mkdir multi-user.target.wants: %w", err)
 	}
-	linkPath := filepath.Join(wantsDir, "clonr-verify-boot.service")
-	const wantTarget = "../clonr-verify-boot.service"
+	linkPath := filepath.Join(wantsDir, "clustr-verify-boot.service")
+	const wantTarget = "../clustr-verify-boot.service"
 
 	// Idempotent: if a symlink already exists with the correct target, nothing
 	// to do. If the path exists as anything else (stale symlink with wrong

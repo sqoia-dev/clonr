@@ -3,7 +3,7 @@
 -- Extends node_configs with timestamps for the two-phase deploy lifecycle:
 --
 --   deploy_completed_preboot_at  — replaces last_deploy_succeeded_at semantically.
---     Set when clonr-static POSTs deploy-complete from inside the PXE initramfs.
+--     Set when clustr-static POSTs deploy-complete from inside the PXE initramfs.
 --     Proves the rootfs was written; does NOT prove the OS boots.
 --
 --   deploy_verified_booted_at   — new. Set when the deployed OS phones home via
@@ -11,7 +11,7 @@
 --     kernel, and systemd all started successfully.
 --
 --   deploy_verify_timeout_at    — set by the server scanner when verify-boot is
---     not received within CLONR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
+--     not received within CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at.
 --
 --   last_seen_at                — updated on every verify-boot call (heartbeat).
 --

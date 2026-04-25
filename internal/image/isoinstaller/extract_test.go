@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/image/isoinstaller"
+	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 )
 
 // TestExtractSubcommand creates a small loop-backed ext4 disk image with a few
 // files, then calls ExtractViaSubprocess (which re-invokes the current test
-// binary as "clonr-serverd extract" using os.Executable).  Because the test
-// binary is NOT clonr-serverd, this path is not normally exercisable in unit
+// binary as "clustr-serverd extract" using os.Executable).  Because the test
+// binary is NOT clustr-serverd, this path is not normally exercisable in unit
 // tests — so we test ExtractRootfs directly here as the unit-level check, and
 // leave the full subprocess round-trip to the integration tag below.
 //
@@ -141,7 +141,7 @@ func TestExtractViaSubprocess_MissingBinary(t *testing.T) {
 		RootfsDestDir: t.TempDir(),
 	}
 
-	// We don't have the full clonr-serverd binary in the test binary, so
+	// We don't have the full clustr-serverd binary in the test binary, so
 	// ExtractViaSubprocess will re-exec os.Executable which is the test
 	// binary — which doesn't implement "extract", so cobra will error.
 	// Either way, the error should propagate back non-nil.

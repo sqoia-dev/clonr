@@ -26,11 +26,11 @@ func init() {
 }
 
 // ExtractViaSubprocess runs rootfs extraction in a subprocess via
-// "clonr-serverd extract ..." so that losetup/mount operations happen outside
-// clonr-serverd's own hardened unit (NoNewPrivileges, tight capabilities, etc.).
+// "clustr-serverd extract ..." so that losetup/mount operations happen outside
+// clustr-serverd's own hardened unit (NoNewPrivileges, tight capabilities, etc.).
 //
 // When systemd-run is available the subprocess is placed in
-// clonr-builders.slice, which has the capability grants and device permissions
+// clustr-builders.slice, which has the capability grants and device permissions
 // required for block-device work.  When systemd-run is unavailable (dev
 // machines, containers) the subprocess is exec'd directly — it still runs as
 // the same user but inherits a less-restricted environment than the parent
@@ -58,7 +58,7 @@ func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptio
 
 	// Run extract directly as a child process. The server runs as root so the
 	// subprocess inherits full capabilities for losetup/mount. Previously this
-	// used systemd-run --scope --slice=clonr-builders.slice, but the slice's
+	// used systemd-run --scope --slice=clustr-builders.slice, but the slice's
 	// CapabilityBoundingSet restricts rather than grants, causing losetup EPERM.
 	// The QEMU builder still uses the slice (via the factory's systemd-run call);
 	// only the extract step runs directly.
@@ -160,7 +160,7 @@ type ExtractOptions struct {
 //  5. The first xfs/ext4 partition before root (if present) is treated as /boot.
 //
 // This is intentionally simple — the kickstart template uses a fixed layout
-// (biosboot + /boot + /) so the heuristic is reliable for clonr-generated images.
+// (biosboot + /boot + /) so the heuristic is reliable for clustr-generated images.
 // Admins using custom kickstarts with unusual layouts should use CaptureNode instead.
 func ExtractRootfs(opts ExtractOptions) error {
 	// ── Loop-attach the raw disk ─────────────────────────────────────────
@@ -231,7 +231,7 @@ func ExtractRootfs(opts ExtractOptions) error {
 	}
 
 	// ── Mount and rsync root partition ───────────────────────────────────
-	rootMnt, err := os.MkdirTemp("", "clonr-root-*")
+	rootMnt, err := os.MkdirTemp("", "clustr-root-*")
 	if err != nil {
 		return fmt.Errorf("create root mount: %w", err)
 	}
@@ -283,7 +283,7 @@ func ExtractRootfs(opts ExtractOptions) error {
 		return err
 	}
 
-	// Copy grubx64.efi to a known location alongside the rootfs so the clonr
+	// Copy grubx64.efi to a known location alongside the rootfs so the clustr
 	// server can serve it directly for UEFI iPXE chain-boot (ADR-0010).
 	// We search candidate distro-specific paths in order of preference.
 	copyGrubEFI(rootMnt, opts.RootfsDestDir)
@@ -305,7 +305,7 @@ var grubEFICandidates = []string{
 
 // buildStandaloneGrubEFI uses grub2-mkimage to build a standalone EFI binary
 // with all required modules compiled in and a disk-search config embedded.
-// This is the binary served by the clonr server for UEFI iPXE chain-boot.
+// This is the binary served by the clustr server for UEFI iPXE chain-boot.
 //
 // rootMnt is the mounted rootfs of the extracted image (for accessing its
 // /usr/lib/grub/x86_64-efi/ module directory — using the image's own modules
@@ -337,7 +337,7 @@ func buildStandaloneGrubEFI(rootMnt, destPath string) error {
 	// Embedded grub.cfg — searches local disks for the OS-installed grub.cfg
 	// and loads it via configfile. No HTTP/network modules needed because the
 	// search logic is built into the binary.
-	embeddedCfg := `# Embedded by clonr at image build time.
+	embeddedCfg := `# Embedded by clustr at image build time.
 # Searches local disks for the OS-installed grub.cfg and loads it.
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then
@@ -360,11 +360,11 @@ if [ -f /grub2/grub.cfg ]; then
     configfile /grub2/grub.cfg
 fi
 
-echo "clonr: grub.cfg not found on any local partition"
+echo "clustr: grub.cfg not found on any local partition"
 echo "Dropping to GRUB shell for manual recovery."
 `
 
-	cfgFile, err := os.CreateTemp("", "clonr-grub-embedded-*.cfg")
+	cfgFile, err := os.CreateTemp("", "clustr-grub-embedded-*.cfg")
 	if err != nil {
 		return fmt.Errorf("create embedded cfg temp file: %w", err)
 	}
@@ -479,7 +479,7 @@ func probeMountPoint(dev string) string {
 	}
 
 	// Last resort: mount read-only and look for /etc/os-release (root marker).
-	mnt, err := os.MkdirTemp("", "clonr-probe-*")
+	mnt, err := os.MkdirTemp("", "clustr-probe-*")
 	if err != nil {
 		return ""
 	}

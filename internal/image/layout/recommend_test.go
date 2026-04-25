@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 )
 
 // minimalHW returns a hardware.SystemInfo with a single 500 GB SATA disk,

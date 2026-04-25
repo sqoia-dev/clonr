@@ -52,7 +52,7 @@ type templateData struct {
 	DefaultPasswordHash string
 }
 
-const defaultRootPasswordHash = "$6$rounds=4096$clonr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1"
+const defaultRootPasswordHash = "$6$rounds=4096$clustr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1"
 
 // hashPassword hashes a plaintext password with SHA-512 crypt using
 // openssl passwd -6, which is available on all modern Linux systems.
@@ -143,12 +143,12 @@ func joinStrings(sep string, elems []string) string { return strings.Join(elems,
 var kickstartTemplate = template.Must(template.New("ks").Funcs(template.FuncMap{
 	"join": func(elems []string, sep string) string { return strings.Join(elems, sep) },
 	"eq":   func(a, b string) bool { return a == b },
-}).Parse(`# clonr auto-generated kickstart
+}).Parse(`# clustr auto-generated kickstart
 # Distro:   {{.Distro}}
 # Roles:    {{join .RoleIDs ", "}}
 # Firmware: {{.Firmware}}
 # This kickstart produces a minimal, identity-scrubbed base image suitable
-# for capture as a clonr BaseImage. It is NOT intended as a production kickstart.
+# for capture as a clustr BaseImage. It is NOT intended as a production kickstart.
 cdrom
 lang en_US.UTF-8
 keyboard us
@@ -221,17 +221,17 @@ dnf install -y beegfs-storage beegfs-meta --nogpgcheck || true
 {{end -}}
 {{- if .NeedsOpenSM}}
 # ── OpenSM (InfiniBand Subnet Manager, head node only) ────────────────────
-# opensm.conf is injected by clonr finalize for clusters with unmanaged IB switches.
+# opensm.conf is injected by clustr finalize for clusters with unmanaged IB switches.
 # Enable the service here so it starts on first boot if opensm.conf is present.
 systemctl enable opensm || true
 {{end}}
 # ── Enable SSH password authentication ────────────────────────────────────
 # RHEL 10 / Rocky 10 changed the OpenSSH compiled-in default to
-# PasswordAuthentication no. Write a drop-in so clonr users can log in
-# with the default clonr/clonr credentials after deployment.
+# PasswordAuthentication no. Write a drop-in so clustr users can log in
+# with the default clustr/clustr credentials after deployment.
 mkdir -p /etc/ssh/sshd_config.d
-echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
-chmod 600 /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
+echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-clustr-password-auth.conf
+chmod 600 /etc/ssh/sshd_config.d/60-clustr-password-auth.conf
 {{- if .HasDefaultUser}}
 # ── Fix password last-changed date ───────────────────────────────────────
 # Anaconda's user --iscrypted leaves the shadow last-changed field empty on
@@ -240,7 +240,7 @@ chmod 600 /etc/ssh/sshd_config.d/60-clonr-password-auth.conf
 chage -d "$(date +%Y-%m-%d)" {{.DefaultUser}}
 chage -d "$(date +%Y-%m-%d)" root
 {{- end}}
-# ── Strip node identity — regenerated on first boot by clonr finalize ──────
+# ── Strip node identity — regenerated on first boot by clustr finalize ──────
 rm -f /etc/machine-id
 touch /etc/machine-id
 rm -f /etc/ssh/ssh_host_*
@@ -300,7 +300,7 @@ func generateKickstart(distro Distro, data templateData, opts BuildOptions, cust
 		NeedsBeeGFS:     hasRole(opts.RoleIDs, "storage"),
 		// NeedsOpenSM: head-node role ships with the opensm package and the service
 		// must be enabled unconditionally so it starts on first boot when
-		// opensm.conf is injected by clonr finalize. Operators without IB hardware
+		// opensm.conf is injected by clustr finalize. Operators without IB hardware
 		// can disable opensm.service manually; it exits cleanly when no IB ports
 		// are found.
 		NeedsOpenSM:     hasRole(opts.RoleIDs, "head-node"),
@@ -390,14 +390,14 @@ func generateUbuntuAutoInstall(data templateData, opts BuildOptions) (*AutoInsta
 	return &AutoInstallConfig{
 		Format:           FormatAutoInstall,
 		KickstartContent: udBuf.String(),
-		MetaDataContent:  "instance-id: clonr-build\nlocal-hostname: generic\n",
+		MetaDataContent:  "instance-id: clustr-build\nlocal-hostname: generic\n",
 		ISOLabel:         "CIDATA",
 	}, nil
 }
 
 // ── Debian (preseed) ─────────────────────────────────────────────────────────
 
-var debianPreseedTemplate = template.Must(template.New("debian-preseed").Parse(`# clonr auto-generated Debian preseed
+var debianPreseedTemplate = template.Must(template.New("debian-preseed").Parse(`# clustr auto-generated Debian preseed
 d-i debian-installer/locale string en_US.UTF-8
 d-i keyboard-configuration/xkb-keymap select us
 d-i netcfg/choose_interface select auto
@@ -502,7 +502,7 @@ var autoYaSTTemplate = template.Must(template.New("autoyast").Parse(`<?xml versi
   <scripts>
     <post-scripts config:type="list">
       <script>
-        <filename>clonr-scrub.sh</filename>
+        <filename>clustr-scrub.sh</filename>
         <interpreter>shell</interpreter>
         <source><![CDATA[
 #!/bin/bash

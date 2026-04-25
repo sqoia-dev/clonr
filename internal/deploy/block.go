@@ -12,8 +12,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 )
 
 // BlockDeployer deploys a raw block image directly to a disk.
@@ -28,26 +28,26 @@ type BlockDeployer struct {
 	layout     api.DiskLayout
 	targetDisk string
 
-	// NodeToken is the node-scoped Bearer token written to /etc/clonr/node-token
+	// NodeToken is the node-scoped Bearer token written to /etc/clustr/node-token
 	// inside the deployed rootfs during Finalize. ADR-0008.
 	// Leave empty to skip phone-home injection (e.g. in tests or non-auto mode).
 	NodeToken string
 
 	// VerifyBootURL is the full URL for the verify-boot endpoint, e.g.
-	// "http://clonr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
-	// Written to /etc/clonr/verify-boot-url inside the deployed rootfs. ADR-0008.
+	// "http://clustr-server:8080/api/v1/nodes/<nodeID>/verify-boot".
+	// Written to /etc/clustr/verify-boot-url inside the deployed rootfs. ADR-0008.
 	VerifyBootURL string
 
-	// ClientdURL is the WebSocket URL for clonr-clientd, e.g.
-	// "ws://clonr-server:8080/api/v1/nodes/<nodeID>/clientd/ws".
-	// Written to /etc/clonr/clonrd-url inside the deployed rootfs.
+	// ClientdURL is the WebSocket URL for clustr-clientd, e.g.
+	// "ws://clustr-server:8080/api/v1/nodes/<nodeID>/clientd/ws".
+	// Written to /etc/clustr/clustrd-url inside the deployed rootfs.
 	// Leave empty to skip clientd injection.
 	ClientdURL string
 
-	// ClientdBinPath is the filesystem path to the clonr-clientd binary that
-	// is copied into the deployed rootfs at /usr/local/bin/clonr-clientd.
+	// ClientdBinPath is the filesystem path to the clustr-clientd binary that
+	// is copied into the deployed rootfs at /usr/local/bin/clustr-clientd.
 	// Empty means auto-detect via findClientdBin (searches alongside os.Args[0],
-	// /opt/clonr/bin/, and /usr/local/bin/).
+	// /opt/clustr/bin/, and /usr/local/bin/).
 	ClientdBinPath string
 }
 
@@ -63,12 +63,12 @@ func (d *BlockDeployer) SetPhoneHome(nodeToken, verifyBootURL string) {
 }
 
 // SetClientdURL implements ClientdInjector. Call before Finalize to enable
-// clonr-clientd WebSocket agent injection.
+// clustr-clientd WebSocket agent injection.
 func (d *BlockDeployer) SetClientdURL(clientdURL string) {
 	d.ClientdURL = clientdURL
 }
 
-// SetClientdBinPath sets the path to the clonr-clientd binary copied into the
+// SetClientdBinPath sets the path to the clustr-clientd binary copied into the
 // deployed rootfs. Call before Finalize. Empty means auto-detect.
 func (d *BlockDeployer) SetClientdBinPath(p string) {
 	d.ClientdBinPath = p
@@ -342,7 +342,7 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		return fmt.Errorf("deploy/block: finalize: phone-home injection: %w", err)
 	}
 
-	// ── clonr-clientd injection ───────────────────────────────────────────────
+	// ── clustr-clientd injection ───────────────────────────────────────────────
 	// Non-fatal: clientd missing means no live heartbeat, but the node boots fine.
 	if err := injectClientd(mountRoot, d.ClientdURL, d.ClientdBinPath); err != nil {
 		logger().Warn().Err(err).Msg("WARNING: finalize: clientd injection failed (non-fatal)")

@@ -1,4 +1,4 @@
-// Package layout provides disk layout recommendation and validation for clonr nodes.
+// Package layout provides disk layout recommendation and validation for clustr nodes.
 //
 // Recommend() produces a DiskLayout from discovered hardware so admins do not
 // need to craft partition tables by hand. The reasoning behind each decision is
@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/hardware"
 )
 
 const (

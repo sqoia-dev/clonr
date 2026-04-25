@@ -1,7 +1,7 @@
--- Sprint 1: clonr-clientd heartbeat persistence.
+-- Sprint 1: clustr-clientd heartbeat persistence.
 --
 -- node_heartbeats stores the most recent heartbeat received from each node's
--- clonr-clientd daemon. One row per node (upserted on every heartbeat).
+-- clustr-clientd daemon. One row per node (upserted on every heartbeat).
 -- disk_usage and services are JSON arrays serialized as TEXT.
 
 CREATE TABLE IF NOT EXISTS node_heartbeats (

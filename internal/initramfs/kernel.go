@@ -1,4 +1,4 @@
-// Package initramfs provides helpers for inspecting clonr initramfs images.
+// Package initramfs provides helpers for inspecting clustr initramfs images.
 package initramfs
 
 import (
@@ -28,7 +28,7 @@ func ExtractKernelVersion(path string) (string, error) {
 	}
 
 	// We pipe zcat output into cpio via the shell.  The shell is always
-	// present on the target host (it runs clonr-serverd via systemd).
+	// present on the target host (it runs clustr-serverd via systemd).
 	cmd := exec.Command("sh", "-c", //nolint:gosec
 		"zcat "+shellQuote(path)+" | cpio -it 2>/dev/null",
 	)
@@ -70,7 +70,7 @@ func ExtractKernelVersion(path string) (string, error) {
 
 // shellQuote returns a single-quoted shell-safe version of s.
 // Single quotes are safe for file paths that do not themselves contain single
-// quotes (initramfs paths on clonr hosts never do).
+// quotes (initramfs paths on clustr hosts never do).
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

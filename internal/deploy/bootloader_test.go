@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // TestRawDiskFromDevice verifies that rawDiskFromDevice strips trailing

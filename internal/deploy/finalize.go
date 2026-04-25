@@ -14,8 +14,8 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/ipmi"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/ipmi"
 )
 
 // ifaceNameRe validates that a network interface name contains only safe
@@ -171,17 +171,17 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 			Msgf("finalize: wrote /etc/NetworkManager/system-connections/%s.nmconnection", iface.Name)
 	}
 
-	// Inject a high-priority DHCP fallback profile so clonr-verify-boot.service
+	// Inject a high-priority DHCP fallback profile so clustr-verify-boot.service
 	// has network connectivity to phone home even when the node has static NM
 	// profiles that may not cover the interface that comes up first after reboot.
 	// autoconnect-priority=100 ensures this profile wins over the static config
 	// if needed; it is intentionally generic (no interface-name pinning) so it
 	// works on any hardware with any NIC naming scheme.
-	if err := writeClonrDHCPProfile(mountRoot); err != nil {
+	if err := writeClustrDHCPProfile(mountRoot); err != nil {
 		// Non-fatal: static NM profiles may still provide connectivity.
-		log.Warn().Err(err).Msg("WARNING finalize: could not write clonr-dhcp NM profile (non-fatal)")
+		log.Warn().Err(err).Msg("WARNING finalize: could not write clustr-dhcp NM profile (non-fatal)")
 	} else {
-		log.Info().Msg("finalize: wrote clonr-dhcp NetworkManager DHCP fallback profile")
+		log.Info().Msg("finalize: wrote clustr-dhcp NetworkManager DHCP fallback profile")
 	}
 
 	if len(cfg.SSHKeys) > 0 {
@@ -229,7 +229,7 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 	}
 
 	// LDAP module — write sssd.conf, ldap.conf, and CA bundle into the deployed
-	// filesystem so the node can authenticate users via the clonr LDAP server.
+	// filesystem so the node can authenticate users via the clustr LDAP server.
 	if cfg.LDAPConfig != nil {
 		log.Info().Str("base_dn", cfg.LDAPConfig.BaseDN).Msg("finalize: writing LDAP client configuration")
 		if err := writeLDAPConfig(ctx, mountRoot, cfg.LDAPConfig); err != nil {
@@ -545,13 +545,13 @@ func writeHostname(mountRoot, hostname, fqdn string) error {
 }
 
 const (
-	clusterHostsBegin = "# --- clonr cluster hosts (auto-generated) ---"
-	clusterHostsEnd   = "# --- end clonr cluster hosts ---"
+	clusterHostsBegin = "# --- clustr cluster hosts (auto-generated) ---"
+	clusterHostsEnd   = "# --- end clustr cluster hosts ---"
 )
 
 // writeClusterHosts writes a clearly delimited block of cluster host entries
 // into the deployed filesystem's /etc/hosts. The block is idempotent: if a
-// clonr cluster block already exists (from a previous deploy), it is replaced.
+// clustr cluster block already exists (from a previous deploy), it is replaced.
 // Standard localhost entries are preserved; only the cluster block is managed.
 func writeClusterHosts(mountRoot string, hosts []api.HostEntry) error {
 	hostsFile := filepath.Join(mountRoot, "etc", "hosts")
@@ -653,22 +653,22 @@ method=ignore
 	return nil
 }
 
-// writeClonrDHCPProfile writes a minimal NetworkManager connection profile that
+// writeClustrDHCPProfile writes a minimal NetworkManager connection profile that
 // auto-connects via DHCP on the first available ethernet interface. This ensures
-// clonr-verify-boot.service can reach the server after reboot even when all other
+// clustr-verify-boot.service can reach the server after reboot even when all other
 // NM profiles have static IPs or are bound to a specific interface name.
 //
 // File permissions MUST be 0600 — NetworkManager silently ignores world-readable
 // connection files. The high autoconnect-priority (100) means this profile is
 // preferred over NM's built-in defaults but yields to operator-created profiles
 // (which should specify interface-name= to pin to a specific NIC).
-func writeClonrDHCPProfile(mountRoot string) error {
+func writeClustrDHCPProfile(mountRoot string) error {
 	nmDir := filepath.Join(mountRoot, "etc", "NetworkManager", "system-connections")
 	if err := os.MkdirAll(nmDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir NM connections: %w", err)
 	}
 	profile := `[connection]
-id=clonr-dhcp
+id=clustr-dhcp
 type=ethernet
 autoconnect=true
 autoconnect-priority=100
@@ -679,7 +679,7 @@ method=auto
 [ipv6]
 method=auto
 `
-	profilePath := filepath.Join(nmDir, "clonr-dhcp.nmconnection")
+	profilePath := filepath.Join(nmDir, "clustr-dhcp.nmconnection")
 	return os.WriteFile(profilePath, []byte(profile), 0o600)
 }
 
@@ -1066,7 +1066,7 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 //
 //  1. Generate a fresh machine-id and write to /etc/machine-id +
 //     /var/lib/dbus/machine-id.
-//  2. Write /etc/fstab.d/00-clonr-os.fstab with OS-disk mounts, assemble
+//  2. Write /etc/fstab.d/00-clustr-os.fstab with OS-disk mounts, assemble
 //     /etc/fstab from all fstab.d files in lexicographic order (§5A split).
 //  3. Generate BLS entries from scratch under /boot/loader/entries/ using the
 //     new machine-id and target root UUID.
@@ -1117,13 +1117,13 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	log.Info().Str("machine_id", machineID).Msg("finalize/boot: fresh machine-id generated and written")
 
 	// ── 2. Generate fstab (§5A ownership split) ──────────────────────────────
-	// Write OS-disk mounts to /etc/fstab.d/00-clonr-os.fstab, then assemble
+	// Write OS-disk mounts to /etc/fstab.d/00-clustr-os.fstab, then assemble
 	// /etc/fstab from all fstab.d files in lexicographic order.
 	// Paths matching /etc/fstab.d/9*-*.fstab are owned by the image overlay and
 	// are never overwritten here.
 	reportStep("Writing filesystem table")
 	log.Info().Msg("  → Writing fstab...")
-	log.Info().Msg("finalize/boot: generating /etc/fstab.d/00-clonr-os.fstab")
+	log.Info().Msg("finalize/boot: generating /etc/fstab.d/00-clustr-os.fstab")
 	if err := writeFstabD(ctx, mountRoot, layout, partDevs); err != nil {
 		return fmt.Errorf("finalize/boot: fstab generation: %w", err)
 	}
@@ -1299,7 +1299,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	}
 
 	// ── 7. Delete all BLS entries — hand-crafted grub.cfg is sole boot authority ─
-	// Option A: clonr writes grub.cfg, clonr controls entry order, production
+	// Option A: clustr writes grub.cfg, clustr controls entry order, production
 	// kernel is always set default=0. Rocky's GRUB2 has BLS auto-scan compiled
 	// in and cannot be disabled without rebuilding GRUB. Without nuking all BLS
 	// entries, rescue entries (sorted "0-rescue-" prefix) appear before the
@@ -1365,7 +1365,7 @@ func generateMachineID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// writeFstabD writes /etc/fstab.d/00-clonr-os.fstab with OS-disk mounts only
+// writeFstabD writes /etc/fstab.d/00-clustr-os.fstab with OS-disk mounts only
 // (root, /boot, swap, /boot/efi), then assembles /etc/fstab by concatenating
 // all fstab.d files in lexicographic order (ADR-0009 §5A ownership split).
 //
@@ -1380,7 +1380,7 @@ func writeFstabD(ctx context.Context, mountRoot string, layout api.DiskLayout, p
 	}
 
 	var sb strings.Builder
-	sb.WriteString("# /etc/fstab.d/00-clonr-os.fstab — OS-disk mounts generated by clonr\n")
+	sb.WriteString("# /etc/fstab.d/00-clustr-os.fstab — OS-disk mounts generated by clustr\n")
 	sb.WriteString("# DO NOT EDIT: regenerated on every reimage\n")
 	sb.WriteString("# <device>  <mountpoint>  <fstype>  <options>  <dump>  <pass>\n\n")
 
@@ -1424,9 +1424,9 @@ func writeFstabD(ctx context.Context, mountRoot string, layout api.DiskLayout, p
 			Str("device", partDevs[i]).Msg("finalize/boot: fstab.d entry written")
 	}
 
-	osFstabPath := filepath.Join(fstabDDir, "00-clonr-os.fstab")
+	osFstabPath := filepath.Join(fstabDDir, "00-clustr-os.fstab")
 	if err := os.WriteFile(osFstabPath, []byte(sb.String()), 0o644); err != nil {
-		return fmt.Errorf("write 00-clonr-os.fstab: %w", err)
+		return fmt.Errorf("write 00-clustr-os.fstab: %w", err)
 	}
 
 	// Assemble /etc/fstab from all fstab.d files in lexicographic order.
@@ -1437,7 +1437,7 @@ func writeFstabD(ctx context.Context, mountRoot string, layout api.DiskLayout, p
 	}
 
 	var assembled strings.Builder
-	assembled.WriteString("# /etc/fstab — assembled by clonr from /etc/fstab.d/*.fstab\n\n")
+	assembled.WriteString("# /etc/fstab — assembled by clustr from /etc/fstab.d/*.fstab\n\n")
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".fstab") {
 			continue
@@ -1669,7 +1669,7 @@ func writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID string, layout api.Di
 	}
 
 	var cfg strings.Builder
-	cfg.WriteString("# /boot/grub2/grub.cfg — generated by clonr (content-only deploy)\n")
+	cfg.WriteString("# /boot/grub2/grub.cfg — generated by clustr (content-only deploy)\n")
 	cfg.WriteString("# DO NOT EDIT: regenerated on every reimage\n\n")
 	// set default=0: the hand-crafted menuentry below is always entry 0 and is
 	// the sole boot entry. All BLS entries are deleted before this file is written
@@ -1724,8 +1724,8 @@ func prepareDracutForRAID(mountRoot string, layout api.DiskLayout) error {
 		return fmt.Errorf("mkdir dracut.conf.d: %w", err)
 	}
 
-	dracutRAIDConf := filepath.Join(dracutConfDir, "10-clonr-mdraid.conf")
-	confContent := `# Written by clonr during deployment for RAID layouts.
+	dracutRAIDConf := filepath.Join(dracutConfDir, "10-clustr-mdraid.conf")
+	confContent := `# Written by clustr during deployment for RAID layouts.
 # Forces mdraid dracut module to be included in the initramfs so the OS can
 # assemble its md RAID arrays before mounting root on first boot.
 add_dracutmodules+=" mdraid "
@@ -1849,7 +1849,7 @@ func applyExtraMounts(ctx context.Context, mountRoot string, mounts []api.FstabE
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "\n# Additional mounts from clonr NodeConfig.ExtraMounts\n")
+	fmt.Fprintf(f, "\n# Additional mounts from clustr NodeConfig.ExtraMounts\n")
 
 	written := 0
 	for _, m := range mounts {
@@ -2046,17 +2046,17 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 	if err := os.MkdirAll(sysAnchorDir, 0o755); err != nil {
 		return fmt.Errorf("ldap finalize: mkdir ca-trust anchors: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(sysAnchorDir, "clonr-ca.crt"), caPEM, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sysAnchorDir, "clustr-ca.crt"), caPEM, 0o644); err != nil {
 		return fmt.Errorf("ldap finalize: write system CA: %w", err)
 	}
 
 	// 2. OpenLDAP certs dir.
-	if err := os.WriteFile(filepath.Join(openldapCertsDir, "clonr-ca.pem"), caPEM, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(openldapCertsDir, "clustr-ca.pem"), caPEM, 0o644); err != nil {
 		return fmt.Errorf("ldap finalize: write openldap CA: %w", err)
 	}
 
 	// 3. sssd PKI dir.
-	if err := os.WriteFile(filepath.Join(sssdPKIDir, "clonr-ca.pem"), caPEM, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sssdPKIDir, "clustr-ca.pem"), caPEM, 0o644); err != nil {
 		return fmt.Errorf("ldap finalize: write sssd CA: %w", err)
 	}
 
@@ -2250,8 +2250,8 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 // renderSSSDConf renders the sssd.conf content for a node.
 // Inline template instead of file-based to avoid importing the ldap package from deploy.
 func renderSSSDConf(cfg *api.LDAPNodeConfig, domain string) string {
-	return fmt.Sprintf(`# sssd.conf — generated by clonr-serverd
-# DO NOT EDIT — managed by clonr. Regenerated on each reimage.
+	return fmt.Sprintf(`# sssd.conf — generated by clustr-serverd
+# DO NOT EDIT — managed by clustr. Regenerated on each reimage.
 
 [sssd]
 services = nss, pam
@@ -2293,7 +2293,7 @@ ldap_group_gid_number = gidNumber
 ldap_group_member = memberUid
 
 ldap_tls_reqcert = demand
-ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clonr-ca.crt
+ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clustr-ca.crt
 
 ldap_account_expire_policy = shadow
 ldap_access_order = ppolicy, expire
@@ -2313,12 +2313,12 @@ entry_cache_timeout = 300
 
 // renderLDAPConf renders the /etc/openldap/ldap.conf content for a node.
 func renderLDAPConf(cfg *api.LDAPNodeConfig) string {
-	return fmt.Sprintf(`# /etc/openldap/ldap.conf — generated by clonr-serverd
-# DO NOT EDIT — managed by clonr.
+	return fmt.Sprintf(`# /etc/openldap/ldap.conf — generated by clustr-serverd
+# DO NOT EDIT — managed by clustr.
 
 URI     %s
 BASE    %s
-TLS_CACERT /etc/openldap/certs/clonr-ca.pem
+TLS_CACERT /etc/openldap/certs/clustr-ca.pem
 TLS_REQCERT demand
 `, cfg.ServerURI, cfg.BaseDN)
 }

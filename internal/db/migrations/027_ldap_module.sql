@@ -14,7 +14,7 @@ CREATE TABLE ldap_module_config (
     -- ca_key_pem stores the CA private key in PEM form.
     -- V2 hardening item: encrypt this at rest using a secrets facility.
     -- For v1, stored plaintext with the understanding that access to the DB
-    -- file requires filesystem-level access to the clonr server host.
+    -- file requires filesystem-level access to the clustr server host.
     ca_key_pem TEXT NOT NULL DEFAULT '',
     ca_cert_fingerprint TEXT NOT NULL DEFAULT '',
     server_cert_pem TEXT NOT NULL DEFAULT '',

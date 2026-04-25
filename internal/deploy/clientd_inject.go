@@ -9,33 +9,33 @@ import (
 	"path/filepath"
 )
 
-// clientdServiceUnit is the systemd unit file for clonr-clientd on deployed nodes.
+// clientdServiceUnit is the systemd unit file for clustr-clientd on deployed nodes.
 // It starts after network-online.target and restarts on failure with an exponential
 // backoff (handled in the client itself; RestartSec here is just the floor).
 const clientdServiceUnit = `[Unit]
-Description=clonr node agent (clientd)
-Documentation=https://github.com/sqoia-dev/clonr
+Description=clustr node agent (clientd)
+Documentation=https://github.com/sqoia-dev/clustr
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/etc/clonr/node-token
-ConditionPathExists=/etc/clonr/clonrd-url
+ConditionPathExists=/etc/clustr/node-token
+ConditionPathExists=/etc/clustr/clustrd-url
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/clonr-clientd
+ExecStart=/usr/local/bin/clustr-clientd
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=clonr-clientd
+SyslogIdentifier=clustr-clientd
 
 [Install]
 WantedBy=multi-user.target
 `
 
-// clientdDefaultConf is the default configuration written to /etc/clonr/clientd.conf.
+// clientdDefaultConf is the default configuration written to /etc/clustr/clientd.conf.
 // In later sprints the daemon will reload this file on SIGHUP.
-const clientdDefaultConf = `# clonr-clientd configuration — managed by clonr-serverd
+const clientdDefaultConf = `# clustr-clientd configuration — managed by clustr-serverd
 # Do not edit manually; changes may be overwritten during config push.
 
 heartbeat_interval = 60
@@ -45,12 +45,12 @@ heartbeat_interval = 60
 services = sssd,munge,slurmd,slurmctld,sshd,chronyd
 `
 
-// findClientdBin resolves the path to the clonr-clientd binary using a priority
+// findClientdBin resolves the path to the clustr-clientd binary using a priority
 // search:
-//  1. hint — caller-supplied path (e.g. from CLONR_CLIENTD_BIN_PATH env).
-//  2. Alongside the running binary: filepath.Dir(os.Args[0]) + "/clonr-clientd".
-//  3. /opt/clonr/bin/clonr-clientd
-//  4. /usr/local/bin/clonr-clientd
+//  1. hint — caller-supplied path (e.g. from CLUSTR_CLIENTD_BIN_PATH env).
+//  2. Alongside the running binary: filepath.Dir(os.Args[0]) + "/clustr-clientd".
+//  3. /opt/clustr/bin/clustr-clientd
+//  4. /usr/local/bin/clustr-clientd
 //
 // Returns the first path that exists and is a regular file, or "" if none found.
 func findClientdBin(hint string) string {
@@ -61,15 +61,15 @@ func findClientdBin(hint string) string {
 	}
 
 	// Resolve path relative to the running binary (works in both initramfs and
-	// production server layouts where clientd lives alongside serverd/clonr-static).
+	// production server layouts where clientd lives alongside serverd/clustr-static).
 	if len(os.Args) > 0 {
-		candidates = append(candidates, filepath.Join(filepath.Dir(os.Args[0]), "clonr-clientd"))
+		candidates = append(candidates, filepath.Join(filepath.Dir(os.Args[0]), "clustr-clientd"))
 	}
 
 	candidates = append(candidates,
-		"/opt/clonr/bin/clonr-clientd",
-		"/usr/local/bin/clonr-clientd",
-		"/usr/bin/clonr-clientd",
+		"/opt/clustr/bin/clustr-clientd",
+		"/usr/local/bin/clustr-clientd",
+		"/usr/bin/clustr-clientd",
 	)
 
 	for _, p := range candidates {
@@ -84,7 +84,7 @@ func findClientdBin(hint string) string {
 	return ""
 }
 
-// copyClientdBin copies the clonr-clientd binary from src to dst with mode 0755.
+// copyClientdBin copies the clustr-clientd binary from src to dst with mode 0755.
 func copyClientdBin(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -108,17 +108,17 @@ func copyClientdBin(src, dst string) error {
 	return out.Close()
 }
 
-// injectClientd writes the clonr-clientd configuration, systemd unit, and binary
+// injectClientd writes the clustr-clientd configuration, systemd unit, and binary
 // into the deployed rootfs at mountRoot.
 //
 // It:
-//  1. Copies the clonr-clientd binary to mountRoot/usr/local/bin/clonr-clientd (mode 0755).
-//  2. Writes /etc/clonr/clonrd-url (0644) — the WebSocket endpoint for clientd.
-//  3. Writes /etc/clonr/clientd.conf (0644) — default daemon config.
-//  4. Writes /etc/systemd/system/clonr-clientd.service (0644).
+//  1. Copies the clustr-clientd binary to mountRoot/usr/local/bin/clustr-clientd (mode 0755).
+//  2. Writes /etc/clustr/clustrd-url (0644) — the WebSocket endpoint for clientd.
+//  3. Writes /etc/clustr/clientd.conf (0644) — default daemon config.
+//  4. Writes /etc/systemd/system/clustr-clientd.service (0644).
 //  5. Enables the service by creating the WantedBy=multi-user.target symlink.
 //
-// clientdBinHint is the caller-supplied binary path (e.g. from CLONR_CLIENTD_BIN_PATH
+// clientdBinHint is the caller-supplied binary path (e.g. from CLUSTR_CLIENTD_BIN_PATH
 // env). Pass "" to rely on auto-detection.
 //
 // This is a no-op when clientdURL is empty (caller opts out by leaving it blank).
@@ -131,15 +131,15 @@ func injectClientd(mountRoot, clientdURL, clientdBinHint string) error {
 
 	log := logger()
 
-	// Ensure /etc/clonr/ exists (created by injectPhoneHome, but be idempotent).
-	clonrDir := filepath.Join(mountRoot, "etc", "clonr")
-	if err := os.MkdirAll(clonrDir, 0o755); err != nil {
-		return fmt.Errorf("clientd inject: mkdir /etc/clonr: %w", err)
+	// Ensure /etc/clustr/ exists (created by injectPhoneHome, but be idempotent).
+	clustrDir := filepath.Join(mountRoot, "etc", "clustr")
+	if err := os.MkdirAll(clustrDir, 0o755); err != nil {
+		return fmt.Errorf("clientd inject: mkdir /etc/clustr: %w", err)
 	}
 
-	// ── 1. Copy clonr-clientd binary ─────────────────────────────────────────
+	// ── 1. Copy clustr-clientd binary ─────────────────────────────────────────
 	clientdBinSrc := findClientdBin(clientdBinHint)
-	clientdBinDst := filepath.Join(mountRoot, "usr", "local", "bin", "clonr-clientd")
+	clientdBinDst := filepath.Join(mountRoot, "usr", "local", "bin", "clustr-clientd")
 	if clientdBinSrc != "" {
 		if err := copyClientdBin(clientdBinSrc, clientdBinDst); err != nil {
 			// Non-fatal: the node still boots and reports via verify-boot.
@@ -148,27 +148,27 @@ func injectClientd(mountRoot, clientdURL, clientdBinHint string) error {
 			log.Warn().Err(err).
 				Str("src", clientdBinSrc).
 				Str("dst", clientdBinDst).
-				Msg("finalize: failed to copy clonr-clientd binary (non-fatal)")
+				Msg("finalize: failed to copy clustr-clientd binary (non-fatal)")
 		} else {
 			log.Info().
 				Str("src", clientdBinSrc).
 				Str("dst", clientdBinDst).
-				Msg("finalize: clonr-clientd binary installed")
+				Msg("finalize: clustr-clientd binary installed")
 		}
 	} else {
 		log.Warn().
 			Str("hint", clientdBinHint).
-			Msg("finalize: clonr-clientd binary not found — service unit will be written but binary is missing; node-agent will not start until binary is delivered")
+			Msg("finalize: clustr-clientd binary not found — service unit will be written but binary is missing; node-agent will not start until binary is delivered")
 	}
 
-	// ── 3. Write clonrd-url ──────────────────────────────────────────────────
-	urlPath := filepath.Join(clonrDir, "clonrd-url")
+	// ── 3. Write clustrd-url ──────────────────────────────────────────────────
+	urlPath := filepath.Join(clustrDir, "clustrd-url")
 	if err := os.WriteFile(urlPath, []byte(clientdURL+"\n"), 0o644); err != nil {
-		return fmt.Errorf("clientd inject: write clonrd-url: %w", err)
+		return fmt.Errorf("clientd inject: write clustrd-url: %w", err)
 	}
 
 	// ── 4. Write clientd.conf ────────────────────────────────────────────────
-	confPath := filepath.Join(clonrDir, "clientd.conf")
+	confPath := filepath.Join(clustrDir, "clientd.conf")
 	if err := os.WriteFile(confPath, []byte(clientdDefaultConf), 0o644); err != nil {
 		return fmt.Errorf("clientd inject: write clientd.conf: %w", err)
 	}
@@ -178,9 +178,9 @@ func injectClientd(mountRoot, clientdURL, clientdBinHint string) error {
 	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
 		return fmt.Errorf("clientd inject: mkdir systemd/system: %w", err)
 	}
-	unitPath := filepath.Join(systemdDir, "clonr-clientd.service")
+	unitPath := filepath.Join(systemdDir, "clustr-clientd.service")
 	if err := os.WriteFile(unitPath, []byte(clientdServiceUnit), 0o644); err != nil {
-		return fmt.Errorf("clientd inject: write clonr-clientd.service: %w", err)
+		return fmt.Errorf("clientd inject: write clustr-clientd.service: %w", err)
 	}
 
 	// ── 6. Enable the unit via direct symlink ────────────────────────────────
@@ -188,8 +188,8 @@ func injectClientd(mountRoot, clientdURL, clientdBinHint string) error {
 	if err := os.MkdirAll(wantsDir, 0o755); err != nil {
 		return fmt.Errorf("clientd inject: mkdir multi-user.target.wants: %w", err)
 	}
-	linkPath := filepath.Join(wantsDir, "clonr-clientd.service")
-	const wantTarget = "../clonr-clientd.service"
+	linkPath := filepath.Join(wantsDir, "clustr-clientd.service")
+	const wantTarget = "../clustr-clientd.service"
 
 	// Idempotent: remove stale/wrong symlink before creating the correct one.
 	if existing, lstatErr := os.Lstat(linkPath); lstatErr == nil {
@@ -210,7 +210,7 @@ symlinkDone:
 	log.Info().
 		Str("clientd_url", clientdURL).
 		Str("unit_path", unitPath).
-		Msg("finalize: clonr-clientd systemd unit installed and enabled")
+		Msg("finalize: clustr-clientd systemd unit installed and enabled")
 
 	return nil
 }

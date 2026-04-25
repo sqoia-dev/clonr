@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/deploy/testutil"
+	"github.com/sqoia-dev/clustr/internal/deploy/testutil"
 )
 
 // TestExtractSmoke is the proof-of-concept integration test for pkg/deploy.

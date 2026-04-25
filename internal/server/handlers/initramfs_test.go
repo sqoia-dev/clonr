@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clonr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // makeInitramfsGzCpio creates a minimal gzipped newc cpio archive at dest

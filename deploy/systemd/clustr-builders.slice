@@ -1,0 +1,45 @@
+[Unit]
+Description=Clustr ISO builder and rootfs extract scope slice
+Documentation=https://github.com/sqoia-dev/clustr
+# This slice is the resource envelope for all clustr ISO build QEMU processes
+# and rootfs extraction subprocesses.  systemd-run --scope --slice=clustr-builders.slice
+# places each child (QEMU, clustr-serverd extract) here, isolating it from
+# clustr-serverd's own MemoryMax and capability restrictions.
+#
+# Raise MemoryMax here when building very large distros or enabling InstallUpdates.
+# 12G gives headroom for concurrent builds on a moderately sized host.
+#
+# The capability grants below are required by the rootfs extraction subprocess
+# (losetup, mount, rsync -aAXH).  QEMU does not need them but they are harmless.
+
+[Slice]
+MemoryMax=12G
+CPUWeight=100
+IOWeight=100
+
+# Capabilities needed by losetup + mount + rsync for rootfs extraction.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_NET_BIND_SERVICE
+
+# Allow access to loop devices so losetup --find --partscan works.
+# block-loop   = major 7: the raw /dev/loop<N> block devices.
+# block-blkext = major 259: the "extended" major used for partition devices
+#                created by --partscan (e.g. /dev/loop0p1, /dev/loop0p2).
+#                These are NOT covered by block-loop and mount(2) will return
+#                EPERM without this entry even with CAP_SYS_ADMIN.
+# /dev/loop-control = char device (major 10, minor 237), needed by losetup -f.
+DeviceAllow=block-loop rw
+DeviceAllow=block-blkext rw
+DeviceAllow=/dev/loop-control rw
+
+# QEMU (KVM-accelerated installer VM) requires /dev/kvm.
+# /dev/kvm is a char device (major 10, minor 232). DeviceAllow must be
+# explicit here because child scopes do not inherit the parent service's
+# DeviceAllow rules — each scope/slice cgroup has its own device policy.
+DeviceAllow=/dev/kvm rwm
+
+# /dev/net/tun required by QEMU virtio-net (user mode networking).
+DeviceAllow=/dev/net/tun rwm
+
+# Extraction needs real block device access and kernel module use (loop, ext4, xfs).
+PrivateDevices=no
+ProtectKernelModules=no

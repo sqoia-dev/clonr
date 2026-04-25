@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# lab-validate.sh — Proxmox lab validation gate for clonr pre-release
+# lab-validate.sh — Proxmox lab validation gate for clustr pre-release
 #
 # What this does:
-#   1. Deploys the current HEAD of clonr-serverd to 192.168.1.151
-#   2. Rebuilds initramfs via the clonr API
+#   1. Deploys the current HEAD of clustr-serverd to 192.168.1.151
+#   2. Rebuilds initramfs via the clustr API
 #   3. Reimages lab VMs 201, 202, 206, 207 concurrently
 #   4. Waits for each VM to reach a serial console login prompt
 #   5. Exits 0 only if all 4 VMs show "<hostname> login:" within 5 minutes
@@ -19,12 +19,12 @@
 #   2 — setup/deploy step failed (pre-validation failure)
 #
 # Environment variables (required):
-#   CLONR_SERVER_URL     — e.g. http://10.99.0.1:8080
-#   CLONR_ADMIN_KEY      — admin API key
+#   CLUSTR_SERVER_URL     — e.g. http://10.99.0.1:8080
+#   CLUSTR_ADMIN_KEY      — admin API key
 #   PROXMOX_HOST         — e.g. 192.168.1.223
 #   PROXMOX_SSH_KEY      — path to SSH key for Proxmox host (root access)
-#   LAB_SSH_KEY          — path to SSH key for clonr-server VM (192.168.1.151, root access)
-#   LAB_SERVER_IP        — clonr server VM IP (default: 192.168.1.151)
+#   LAB_SSH_KEY          — path to SSH key for clustr-server VM (192.168.1.151, root access)
+#   LAB_SERVER_IP        — clustr server VM IP (default: 192.168.1.151)
 #   ARTIFACT_DIR         — directory for output artifacts (default: /tmp/lab-validate-artifacts)
 #   BOOT_TIMEOUT         — seconds to wait for login prompt per VM (default: 300)
 
@@ -33,8 +33,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-CLONR_SERVER_URL="${CLONR_SERVER_URL:-http://10.99.0.1:8080}"
-CLONR_ADMIN_KEY="${CLONR_ADMIN_KEY:?CLONR_ADMIN_KEY is required}"
+CLUSTR_SERVER_URL="${CLUSTR_SERVER_URL:-http://10.99.0.1:8080}"
+CLUSTR_ADMIN_KEY="${CLUSTR_ADMIN_KEY:?CLUSTR_ADMIN_KEY is required}"
 PROXMOX_HOST="${PROXMOX_HOST:-192.168.1.223}"
 PROXMOX_SSH_KEY="${PROXMOX_SSH_KEY:?PROXMOX_SSH_KEY is required}"
 LAB_SSH_KEY="${LAB_SSH_KEY:?LAB_SSH_KEY is required}"
@@ -61,47 +61,47 @@ ssh_lab() {
         root@"$LAB_SERVER_IP" "$@"
 }
 
-clonr_api() {
+clustr_api() {
     local method="$1" path="$2"
     shift 2
     curl -sf -X "$method" \
-        -H "Authorization: Bearer $CLONR_ADMIN_KEY" \
+        -H "Authorization: Bearer $CLUSTR_ADMIN_KEY" \
         -H "Content-Type: application/json" \
-        "$CLONR_SERVER_URL$path" "$@"
+        "$CLUSTR_SERVER_URL$path" "$@"
 }
 
 mkdir -p "$ARTIFACT_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 1: Deploy HEAD to clonr-server VM
+# Step 1: Deploy HEAD to clustr-server VM
 # ---------------------------------------------------------------------------
-log "Step 1: Building and deploying clonr-serverd from HEAD"
+log "Step 1: Building and deploying clustr-serverd from HEAD"
 DEPLOY_LOG="$ARTIFACT_DIR/deploy-server.log"
 
 # Determine the binary to copy (built by CI before this script runs,
 # or build here if running locally)
-if [[ -f "./bin/clonr-serverd" ]]; then
-    BINARY="./bin/clonr-serverd"
-elif [[ -f "/tmp/clonr-serverd" ]]; then
-    BINARY="/tmp/clonr-serverd"
+if [[ -f "./bin/clustr-serverd" ]]; then
+    BINARY="./bin/clustr-serverd"
+elif [[ -f "/tmp/clustr-serverd" ]]; then
+    BINARY="/tmp/clustr-serverd"
 else
     log "No pre-built binary found — building from source"
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o /tmp/clonr-serverd ./cmd/clonr-serverd 2>>"$DEPLOY_LOG" \
+    GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o /tmp/clustr-serverd ./cmd/clustr-serverd 2>>"$DEPLOY_LOG" \
         || die "Build failed — see $DEPLOY_LOG"
-    BINARY="/tmp/clonr-serverd"
+    BINARY="/tmp/clustr-serverd"
 fi
 
 log "Copying binary to lab server"
-scp -o StrictHostKeyChecking=no -i "$LAB_SSH_KEY" "$BINARY" root@"$LAB_SERVER_IP":/tmp/clonr-serverd.new >> "$DEPLOY_LOG" 2>&1 \
+scp -o StrictHostKeyChecking=no -i "$LAB_SSH_KEY" "$BINARY" root@"$LAB_SERVER_IP":/tmp/clustr-serverd.new >> "$DEPLOY_LOG" 2>&1 \
     || die "scp failed"
 
-log "Installing and restarting clonr-serverd"
+log "Installing and restarting clustr-serverd"
 ssh_lab 'bash -s' >> "$DEPLOY_LOG" 2>&1 << 'REMOTE'
 set -euo pipefail
-systemctl stop clonr-serverd
-install -m 0755 /tmp/clonr-serverd.new /usr/local/bin/clonr-serverd
-rm -f /tmp/clonr-serverd.new
-systemctl start clonr-serverd
+systemctl stop clustr-serverd
+install -m 0755 /tmp/clustr-serverd.new /usr/local/bin/clustr-serverd
+rm -f /tmp/clustr-serverd.new
+systemctl start clustr-serverd
 # Wait up to 10s for health check
 for i in $(seq 1 20); do
     if curl -sf http://localhost:8080/api/v1/health >/dev/null 2>&1; then
@@ -113,13 +113,13 @@ done
 echo "Health check failed after 10s"
 exit 1
 REMOTE
-log "clonr-serverd deployed and healthy"
+log "clustr-serverd deployed and healthy"
 
 # ---------------------------------------------------------------------------
 # Step 2: Rebuild initramfs via API
 # ---------------------------------------------------------------------------
 log "Step 2: Rebuilding initramfs"
-INITRAMFS_JOB=$(clonr_api POST /api/v1/initramfs/rebuild 2>>"$ARTIFACT_DIR/initramfs.log" \
+INITRAMFS_JOB=$(clustr_api POST /api/v1/initramfs/rebuild 2>>"$ARTIFACT_DIR/initramfs.log" \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null || echo "")
 
 if [[ -z "$INITRAMFS_JOB" ]]; then
@@ -127,7 +127,7 @@ if [[ -z "$INITRAMFS_JOB" ]]; then
 else
     log "Initramfs rebuild job: $INITRAMFS_JOB — waiting for completion"
     for i in $(seq 1 60); do
-        STATUS=$(clonr_api GET "/api/v1/initramfs/rebuild/$INITRAMFS_JOB" 2>/dev/null \
+        STATUS=$(clustr_api GET "/api/v1/initramfs/rebuild/$INITRAMFS_JOB" 2>/dev/null \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
         if [[ "$STATUS" == "complete" ]]; then
             log "Initramfs rebuild complete"
@@ -145,9 +145,9 @@ fi
 log "Step 3: Reimaging VMs ${VM_IDS[*]} concurrently"
 
 # Get the first available image ID
-IMAGE_ID=$(clonr_api GET /api/v1/images 2>/dev/null \
+IMAGE_ID=$(clustr_api GET /api/v1/images 2>/dev/null \
     | python3 -c "import sys,json; imgs=json.load(sys.stdin); print(imgs[0]['id'] if imgs else '')" 2>/dev/null || echo "")
-[[ -n "$IMAGE_ID" ]] || die "No images available in clonr — cannot reimage"
+[[ -n "$IMAGE_ID" ]] || die "No images available in clustr — cannot reimage"
 log "Using image ID: $IMAGE_ID"
 
 reimage_vm() {
@@ -159,13 +159,13 @@ reimage_vm() {
     ssh_proxmox "qm set ${vmid} --boot order=net0 2>/dev/null; qm stop ${vmid} --skiplock 2>/dev/null; sleep 2; qm start ${vmid}" >> "$deploy_log" 2>&1 \
         || { log "VM${vmid}: failed to power cycle"; return 1; }
 
-    # Get node ID by hostname/MAC lookup from clonr API (best effort)
+    # Get node ID by hostname/MAC lookup from clustr API (best effort)
     local node_id
-    node_id=$(clonr_api GET /api/v1/nodes 2>/dev/null \
+    node_id=$(clustr_api GET /api/v1/nodes 2>/dev/null \
         | python3 -c "import sys,json; nodes=json.load(sys.stdin); n=[x for x in nodes if x.get('vm_id')==${vmid} or 'node-0${vmid}' in x.get('hostname','')]; print(n[0]['id'] if n else '')" 2>/dev/null || echo "")
     if [[ -n "$node_id" ]]; then
         # Trigger deploy via API
-        clonr_api POST "/api/v1/nodes/${node_id}/deploy" \
+        clustr_api POST "/api/v1/nodes/${node_id}/deploy" \
             -d "{\"image_id\":\"${IMAGE_ID}\"}" >> "$deploy_log" 2>&1 || true
         log "VM${vmid}: deploy triggered for node $node_id"
     else

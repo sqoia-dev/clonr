@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ReconcileStuckBuilds finds all images in "building" state in the database and
@@ -83,7 +83,7 @@ func (s *Server) ReconcileStuckInitramfsBuilds(ctx context.Context) error {
 	return nil
 }
 
-// AutoResumeBuilds is called at startup when CLONR_BUILD_AUTO_RESUME=1 is set.
+// AutoResumeBuilds is called at startup when CLUSTR_BUILD_AUTO_RESUME=1 is set.
 // It scans for resumable=true builds and re-submits them to the factory.
 // The factory field is injected so this function doesn't import pkg/image (would be circular).
 func (s *Server) AutoResumeBuilds(ctx context.Context, resumeFn func(imageID, phase string)) error {

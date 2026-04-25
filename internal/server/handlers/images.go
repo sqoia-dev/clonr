@@ -22,9 +22,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
-	"github.com/sqoia-dev/clonr/internal/db"
-	"github.com/sqoia-dev/clonr/internal/image"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/image"
 )
 
 // defaultBlobMaxConcurrent is the default maximum number of simultaneous blob
@@ -49,13 +49,13 @@ type ImagesHandler struct {
 }
 
 // blobSemaphore returns the blob concurrency semaphore, reading
-// CLONR_BLOB_MAX_CONCURRENT from the environment on first call.
+// CLUSTR_BLOB_MAX_CONCURRENT from the environment on first call.
 // Initialization is protected by sync.Once to prevent data races when
 // multiple concurrent requests hit DownloadBlob simultaneously.
 func (h *ImagesHandler) blobSemaphore() chan struct{} {
 	h.blobSemOnce.Do(func() {
 		cap := defaultBlobMaxConcurrent
-		if v := os.Getenv("CLONR_BLOB_MAX_CONCURRENT"); v != "" {
+		if v := os.Getenv("CLUSTR_BLOB_MAX_CONCURRENT"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cap = n
 			}
@@ -354,14 +354,14 @@ func (h *ImagesHandler) PutDiskLayout(w http.ResponseWriter, r *http.Request) {
 }
 
 // defaultBlobMaxBytes is the default upload size cap (50 GiB).
-// Override via CLONR_BLOB_MAX_SIZE (bytes).
+// Override via CLUSTR_BLOB_MAX_SIZE (bytes).
 const defaultBlobMaxBytes = 50 * 1024 * 1024 * 1024 // 50 GiB
 
 // blobMaxBytes returns the effective upload size limit by reading
-// CLONR_BLOB_MAX_SIZE from the environment on every call (cheap string parse,
+// CLUSTR_BLOB_MAX_SIZE from the environment on every call (cheap string parse,
 // avoids package-level init ordering issues).
 func blobMaxBytes() int64 {
-	if v := os.Getenv("CLONR_BLOB_MAX_SIZE"); v != "" {
+	if v := os.Getenv("CLUSTR_BLOB_MAX_SIZE"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			return n
 		}
@@ -373,7 +373,7 @@ func blobMaxBytes() int64 {
 // Streams the request body to disk and finalizes the image record.
 // The SHA256 is always computed server-side from the bytes as they stream in;
 // if the client supplied X-Checksum-SHA256, we compare and reject on mismatch.
-// Upload size is capped at CLONR_BLOB_MAX_SIZE (default 50 GiB) to prevent
+// Upload size is capped at CLUSTR_BLOB_MAX_SIZE (default 50 GiB) to prevent
 // OOM and disk exhaustion from unbounded uploads.
 func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -543,7 +543,7 @@ func (h *ImagesHandler) DownloadBlob(w http.ResponseWriter, r *http.Request) {
 	// For block images, the DB checksum covers the blob file bytes directly —
 	// safe to advertise to the client for end-to-end integrity verification.
 	if img.Checksum != "" {
-		w.Header().Set("X-Clonr-Blob-SHA256", img.Checksum)
+		w.Header().Set("X-Clustr-Blob-SHA256", img.Checksum)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, filepath.Base(blobPath), stat.ModTime(), f)
@@ -655,7 +655,7 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		"--exclude=./proc/*",
 		"--exclude=./sys/*",
 		"--exclude=./dev/*",
-		"--exclude=./.clonr-state",
+		"--exclude=./.clustr-state",
 		// Shadow / credential files — intentionally 000 or 640 root:shadow.
 		// tar exits 2 trying to read these under NoNewPrivileges=yes.
 		// The deployed node regenerates shadow from passwd + firstboot config.
@@ -684,9 +684,9 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		"--exclude=./etc/sssd",
 		// polkit rules — mode 700 on strict SELinux systems; unreadable by tar.
 		"--exclude=./etc/polkit-1/rules.d",
-		// Home directory for the clonr deploy agent — should not be in the image
-		// rootfs; exclude it so the deployed node gets a clean /home/clonr on setup.
-		"--exclude=./home/clonr",
+		// Home directory for the clustr deploy agent — should not be in the image
+		// rootfs; exclude it so the deployed node gets a clean /home/clustr on setup.
+		"--exclude=./home/clustr",
 		// staprun (SystemTap) — SUID root binary (mode 4110), unreadable under
 		// NoNewPrivileges=yes; excluded to prevent tar exit 2.
 		"--exclude=./usr/bin/staprun",
@@ -757,7 +757,7 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		}
 		// Tar finished cleanly with a small output — write headers and flush.
 		if cachedTarChecksum != "" {
-			w.Header().Set("X-Clonr-Blob-SHA256", cachedTarChecksum)
+			w.Header().Set("X-Clustr-Blob-SHA256", cachedTarChecksum)
 		}
 		w.Header().Set("Content-Type", "application/x-tar")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
@@ -793,7 +793,7 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
 	if cachedTarChecksum != "" {
-		w.Header().Set("X-Clonr-Blob-SHA256", cachedTarChecksum)
+		w.Header().Set("X-Clustr-Blob-SHA256", cachedTarChecksum)
 	}
 	w.WriteHeader(http.StatusOK)
 
@@ -877,7 +877,7 @@ func (h *ImagesHandler) streamFilesystemBlob(w http.ResponseWriter, r *http.Requ
 		Msg("blob stream: tar complete")
 
 	// On the first successful stream, persist the tar checksum sidecar so
-	// subsequent downloads can serve X-Clonr-Blob-SHA256 and clients can
+	// subsequent downloads can serve X-Clustr-Blob-SHA256 and clients can
 	// verify end-to-end integrity.
 	if computeTarChecksum {
 		checksum := hex.EncodeToString(tarHasher.Sum(nil))

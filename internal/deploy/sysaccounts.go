@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ErrUIDConflict is returned when the deployed image already has an account at

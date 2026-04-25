@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ─── Groups ───────────────────────────────────────────────────────────────────

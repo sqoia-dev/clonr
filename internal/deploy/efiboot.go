@@ -224,7 +224,7 @@ func parseBootOrder(output string) []string {
 
 // SetPXEBootFirst reorders the NVRAM BootOrder so the first PXE entry (IPv4 or
 // IPv6) precedes any OS boot entries. This is called after finalize to ensure
-// that OVMF/EDK2 and physical UEFI firmware come back to clonr's PXE server on
+// that OVMF/EDK2 and physical UEFI firmware come back to clustr's PXE server on
 // the next reboot, allowing the server to confirm state before routing the node
 // to disk via iPXE exit.
 //
@@ -277,7 +277,7 @@ func SetPXEBootFirst(ctx context.Context) error {
 		// No PXE entry in NVRAM — common on fresh OVMF VMs where PXE is dynamic
 		// and not persisted. The OS entry is already first in BootOrder from
 		// FixEFIBoot, which is a valid state: the node boots OS, phones home, and
-		// clonr manages future boot order from there.
+		// clustr manages future boot order from there.
 		return nil
 	}
 

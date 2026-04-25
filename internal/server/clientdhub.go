@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/internal/clientd"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/internal/clientd"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 const (
@@ -72,7 +72,7 @@ type pendingExecResult struct {
 	ch chan clientd.ExecResultPayload
 }
 
-// ClientdHub tracks all active clonr-clientd WebSocket connections, keyed by node ID.
+// ClientdHub tracks all active clustr-clientd WebSocket connections, keyed by node ID.
 // It is safe for concurrent use.
 //
 // It implements handlers.ClientdHubIface (RegisterConn, Unregister, ConnectedNodes,

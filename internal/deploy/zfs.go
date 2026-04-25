@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // CreateZFSPools creates all ZFS zpools defined in the layout.
@@ -208,7 +208,7 @@ func WriteZFSFstab(layout api.DiskLayout, mountRoot string) error {
 		if pool.Mountpoint == "/" {
 			options = "x-systemd.requires=zfs-mount.service"
 		}
-		line := fmt.Sprintf("%s\t%s\tzfs\t%s\t0\t0\t# managed by clonr",
+		line := fmt.Sprintf("%s\t%s\tzfs\t%s\t0\t0\t# managed by clustr",
 			ds, pool.Mountpoint, options)
 		lines = append(lines, line)
 	}

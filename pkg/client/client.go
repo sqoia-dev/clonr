@@ -1,4 +1,4 @@
-// Package client provides an HTTP client for clonr CLI → clonr-serverd communication.
+// Package client provides an HTTP client for clustr CLI → clustr-serverd communication.
 package client
 
 import (
@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
-// Client is the HTTP client used by the clonr CLI to talk to clonr-serverd.
+// Client is the HTTP client used by the clustr CLI to talk to clustr-serverd.
 type Client struct {
 	BaseURL   string
 	AuthToken string
@@ -102,7 +102,7 @@ func (c *Client) GetSelfNode(ctx context.Context, id string) (*api.NodeConfig, e
 // DownloadBlobResult holds the result of a blob download including any
 // server-advertised checksum for integrity verification.
 type DownloadBlobResult struct {
-	// ServerChecksum is the sha256 hex string from X-Clonr-Blob-SHA256, or ""
+	// ServerChecksum is the sha256 hex string from X-Clustr-Blob-SHA256, or ""
 	// if the server did not advertise one (e.g. first stream of a filesystem image).
 	ServerChecksum string
 }
@@ -130,7 +130,7 @@ func (c *Client) DownloadBlob(ctx context.Context, imageID string, w io.Writer) 
 		return nil, c.decodeError(resp)
 	}
 
-	serverChecksum := resp.Header.Get("X-Clonr-Blob-SHA256")
+	serverChecksum := resp.Header.Get("X-Clustr-Blob-SHA256")
 
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		return nil, fmt.Errorf("client: read blob: %w", err)
@@ -158,7 +158,7 @@ func (c *Client) CaptureNode(ctx context.Context, req api.CaptureRequest) (*api.
 	return c.CaptureImage(ctx, req)
 }
 
-// CaptureImage instructs clonr-serverd to SSH into the source host and stream its
+// CaptureImage instructs clustr-serverd to SSH into the source host and stream its
 // filesystem into a new BaseImage via rsync. Returns immediately with status "building".
 // The server must be able to reach source_host; progress is visible via the image status
 // and server logs. Poll with GetImage(ctx, img.ID) until status is "ready" or "error".
@@ -201,7 +201,7 @@ func (c *Client) ExecInSession(ctx context.Context, imageID, sessionID, command 
 }
 
 // RegisterNode calls POST /api/v1/nodes/register with the given hardware profile JSON.
-// Used by clonr in --auto mode on PXE boot to register itself with the server.
+// Used by clustr in --auto mode on PXE boot to register itself with the server.
 func (c *Client) RegisterNode(ctx context.Context, req api.RegisterRequest) (*api.RegisterResponse, error) {
 	var resp api.RegisterResponse
 	if err := c.post(ctx, "/api/v1/nodes/register", req, &resp); err != nil {
@@ -223,7 +223,7 @@ func (c *Client) FlipToDisk(ctx context.Context, nodeID string, cycle bool) erro
 }
 
 // ReportDeployComplete calls POST /api/v1/nodes/:id/deploy-complete.
-// Called by the clonr CLI after a successful deployment finalize. The server
+// Called by the clustr CLI after a successful deployment finalize. The server
 // sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
 // node to NodeStateDeployed so subsequent PXE boots return "exit" (disk boot).
 func (c *Client) ReportDeployComplete(ctx context.Context, nodeID string) error {
@@ -259,7 +259,7 @@ func (c *Client) ReportDeployCompleteWithRetry(ctx context.Context, nodeID strin
 }
 
 // ReportDeployFailed calls POST /api/v1/nodes/:id/deploy-failed.
-// Called by the clonr CLI after a deployment failure. The server sets
+// Called by the clustr CLI after a deployment failure. The server sets
 // last_deploy_failed_at, transitioning the node to NodeStateFailed.
 // The payload carries classified exit code detail for the reimage record.
 func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string, payload api.DeployFailedPayload) error {
@@ -268,7 +268,7 @@ func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string, payload 
 
 // BuildVerifyBootPayload constructs a VerifyBootRequest from the provided system
 // information fields. ADR-0008. Used by test harnesses and integration tests.
-// Production phone-home is performed by the clonr-verify-boot shell script
+// Production phone-home is performed by the clustr-verify-boot shell script
 // injected into the deployed rootfs by pkg/deploy/phonehome.go (injectPhoneHome).
 func BuildVerifyBootPayload(hostname, kernelVersion, systemctlState, osRelease string, uptimeSeconds float64) api.VerifyBootRequest {
 	return api.VerifyBootRequest{
@@ -282,7 +282,7 @@ func BuildVerifyBootPayload(hostname, kernelVersion, systemctlState, osRelease s
 
 // ReportVerifyBoot calls POST /api/v1/nodes/:id/verify-boot with the given payload.
 // ADR-0008: Used by test harnesses and the optional Go-based verify-boot caller.
-// The primary caller in production is the clonr-verify-boot shell script injected
+// The primary caller in production is the clustr-verify-boot shell script injected
 // into the deployed rootfs during the finalize phase (pkg/deploy/phonehome.go).
 func (c *Client) ReportVerifyBoot(ctx context.Context, nodeID string, payload api.VerifyBootRequest) error {
 	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/verify-boot", payload, nil)

@@ -14,7 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clonr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // systemdRunAvailable returns true if systemd-run(1) is present on PATH.
@@ -25,8 +25,8 @@ var systemdRunAvailable = func() bool {
 }()
 
 // wrapNspawnInScope wraps a systemd-nspawn invocation in a systemd-run
-// --scope --slice=clonr-shells.slice so the nspawn process runs outside the
-// clonr-serverd cgroup and is not subject to its NoNewPrivileges=true or
+// --scope --slice=clustr-shells.slice so the nspawn process runs outside the
+// clustr-serverd cgroup and is not subject to its NoNewPrivileges=true or
 // CapabilityBoundingSet restrictions.  Without this wrapping, nspawn fails
 // with "Failed to move root directory: Operation not permitted" because it
 // cannot call pivot_root(2) without CAP_SYS_ADMIN.
@@ -37,10 +37,10 @@ func wrapNspawnInScope(sessionID string, nspawnArgs []string) *exec.Cmd {
 	if !systemdRunAvailable {
 		return exec.Command("systemd-nspawn", nspawnArgs...)
 	}
-	scopeName := "clonr-shell-" + sessionID + ".scope"
+	scopeName := "clustr-shell-" + sessionID + ".scope"
 	args := []string{
 		"--scope",
-		"--slice=clonr-shells.slice",
+		"--slice=clustr-shells.slice",
 		"--unit=" + scopeName,
 		"--quiet",
 		"--",
@@ -169,8 +169,8 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 	// the shell from inheriting the management server's hostname and avoids
 	// the need to manually bind-mount /proc, /sys, /dev, etc.
 	//
-	// Wrap in systemd-run --scope --slice=clonr-shells.slice so the nspawn
-	// process runs outside the clonr-serverd cgroup and is not subject to its
+	// Wrap in systemd-run --scope --slice=clustr-shells.slice so the nspawn
+	// process runs outside the clustr-serverd cgroup and is not subject to its
 	// NoNewPrivileges=true restriction. Without this, pivot_root(2) fails with
 	// "Operation not permitted" because CAP_SYS_ADMIN cannot be used through
 	// a NoNewPrivileges boundary.
@@ -265,7 +265,7 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 
 // writeWSError sends an error message to the WebSocket client as terminal output.
 func writeWSError(conn *websocket.Conn, msg string) {
-	_ = conn.WriteJSON(wsMsg{Type: "data", Data: "\r\n\033[31m[clonr] " + msg + "\033[0m\r\n"})
+	_ = conn.WriteJSON(wsMsg{Type: "data", Data: "\r\n\033[31m[clustr] " + msg + "\033[0m\r\n"})
 }
 
 // ActiveDeploys handles GET /api/v1/images/:id/active-deploys
