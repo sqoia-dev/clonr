@@ -213,6 +213,16 @@ chmod 755 "$CLONR_INSTALLED_PATH"
 
 echo "  [+] Installed clonr binary as /usr/bin/clonr ($(du -h "$CLONR_BIN" | cut -f1), src=$(basename "$CLONR_BIN"))"
 
+# Install clonr-clientd binary (node agent, copied into deployed rootfs during finalize).
+CLONR_CLIENTD_SRC="$(dirname "$CLONR_BIN")/clonr-clientd"
+if [ -f "$CLONR_CLIENTD_SRC" ]; then
+    cp "$CLONR_CLIENTD_SRC" "$WORKDIR/usr/bin/clonr-clientd"
+    chmod 755 "$WORKDIR/usr/bin/clonr-clientd"
+    echo "  [+] Installed clonr-clientd as /usr/bin/clonr-clientd ($(du -h "$CLONR_CLIENTD_SRC" | cut -f1))"
+else
+    echo "  [!] clonr-clientd not found at $CLONR_CLIENTD_SRC — node agent will not be available in initramfs"
+fi
+
 # Install busybox for shell and basic utilities.
 # Prefer a musl static build from busybox.net (most complete applet set).
 # Fall back to the system busybox if the download fails.
