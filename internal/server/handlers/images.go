@@ -506,7 +506,37 @@ func (h *ImagesHandler) DownloadBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// For filesystem images, check whether a pre-baked tar exists (blob_path
+	// points to a file). If so, serve it directly — the DB checksum is the tar's
+	// sha256, so the client's integrity check passes by construction.
+	// Fall back to streamFilesystemBlob for legacy images whose blob_path still
+	// points to the rootfs directory (built before this fix was deployed).
 	if img.Format == api.ImageFormatFilesystem {
+		blobPath, bpErr := h.DB.GetBlobPath(r.Context(), id)
+		if bpErr == nil && blobPath != "" {
+			if st, statErr := os.Stat(blobPath); statErr == nil && !st.IsDir() {
+				// Pre-baked tar — serve as a static file.
+				f, openErr := os.Open(blobPath)
+				if openErr != nil {
+					if os.IsNotExist(openErr) {
+						writeError(w, api.ErrNotFound)
+						return
+					}
+					log.Error().Err(openErr).Str("path", blobPath).Msg("open pre-baked tar blob")
+					writeError(w, openErr)
+					return
+				}
+				defer f.Close()
+				if img.Checksum != "" {
+					w.Header().Set("X-Clustr-Blob-SHA256", img.Checksum)
+				}
+				w.Header().Set("Content-Type", "application/x-tar")
+				w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar"`, img.ID))
+				http.ServeContent(w, r, filepath.Base(blobPath), st.ModTime(), f)
+				return
+			}
+		}
+		// Legacy path: blob_path is a directory or unset — stream tar on the fly.
 		h.streamFilesystemBlob(w, r, img)
 		return
 	}

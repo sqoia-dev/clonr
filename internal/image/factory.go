@@ -233,27 +233,35 @@ func (f *Factory) pullAsync(imageID, url string) {
 
 	ctx := f.ctx
 
-	rootfs, size, checksum, err := f.pullAndExtract(ctx, imageID, url)
+	rootfs, _, _, err := f.pullAndExtract(ctx, imageID, url)
 	if err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: pull failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.SetBlobPath(ctx, imageID, rootfs); err != nil {
+	imageRoot := filepath.Join(f.ImageDir, imageID)
+	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", size).
-		Str("checksum", checksum).Msg("factory: pull complete")
+	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", tarSize).
+		Str("checksum", tarChecksum).Msg("factory: pull complete")
 }
 
 // pullAndExtract downloads url, detects its format, extracts the root
@@ -441,26 +449,34 @@ func (f *Factory) importISOAsync(imageID, isoPath string) {
 		}
 	}()
 
-	rootfs, size, checksum, err := f.extractISO(ctx, imageID, isoPath)
+	rootfs, _, _, err := f.extractISO(ctx, imageID, isoPath)
 	if err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: import ISO failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.SetBlobPath(ctx, imageID, rootfs); err != nil {
+	imageRoot := filepath.Join(f.ImageDir, imageID)
+	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
+	if err != nil {
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
+		return
+	}
+
+	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize ISO failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", size).Msg("factory: import ISO complete")
+	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", tarSize).Msg("factory: import ISO complete")
 }
 
 func (f *Factory) extractISO(ctx context.Context, imageID, isoPath string) (rootfsPath string, sizeBytes int64, checksum string, err error) {
@@ -779,21 +795,21 @@ func (f *Factory) captureAsync(imageID string, req CaptureRequest, sshUser strin
 		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
 	}
 
-	f.Logger.Info().Str("image_id", imageID).Msg("factory: computing rootfs checksum")
-	size, checksum, err := checksumDir(rootfs)
+	imageRoot := filepath.Join(f.ImageDir, imageID)
+	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
 	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: checksum failed")
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.SetBlobPath(ctx, imageID, rootfs); err != nil {
+	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
 	}
 
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
 		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
 		return
@@ -802,7 +818,7 @@ func (f *Factory) captureAsync(imageID string, req CaptureRequest, sshUser strin
 	success = true
 	f.Logger.Info().
 		Str("image_id", imageID).
-		Int64("size_bytes", size).
+		Int64("size_bytes", tarSize).
 		Msg("factory: capture complete -- image is ready")
 }
 
@@ -1192,6 +1208,92 @@ func rsyncDir(ctx context.Context, src, dst string) error {
 		return fmt.Errorf("rsync: %w\noutput: %s", err, string(out))
 	}
 	return nil
+}
+
+// bakeDeterministicTar builds a deterministic uncompressed tar of rootfsDir and
+// writes it to <imageRoot>/rootfs.tar. It returns the tar file path, its
+// sha256 hex string, and its size in bytes.
+//
+// Determinism flags passed to GNU tar:
+//   --sort=name          — lexical entry order (same across kernel readdir orderings)
+//   --mtime=@0           — normalise all timestamps to UNIX epoch 0
+//   --owner=0 --group=0  — zero ownership numerically
+//   --numeric-owner      — suppress name lookups (host-independent)
+//   --pax-option=...     — strip pax extended atime/ctime headers (timestamp leakage)
+//
+// The tar excludes the same runtime/security paths that streamFilesystemBlob
+// excludes so the sha256 matches what the deploy agent would verify.
+//
+// Requires GNU tar on the host (gtar or tar with --sort support).
+func (f *Factory) bakeDeterministicTar(ctx context.Context, imageID, imageRoot, rootfsDir string) (tarPath string, sha256hex string, sizeBytes int64, err error) {
+	tarPath = filepath.Join(imageRoot, "rootfs.tar")
+
+	f.Logger.Info().Str("image_id", imageID).Str("rootfs", rootfsDir).Str("tar", tarPath).
+		Msg("factory: baking deterministic rootfs tar")
+
+	cmd := exec.CommandContext(ctx, "tar", //nolint:gosec
+		"--sort=name",
+		"--mtime=@0",
+		"--owner=0", "--group=0", "--numeric-owner",
+		"--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime",
+		// Exclude the same runtime/security paths as streamFilesystemBlob so
+		// the tar sha256 is stable and matches what deploy agents verify.
+		"--exclude=./proc/*",
+		"--exclude=./sys/*",
+		"--exclude=./dev/*",
+		"--exclude=./.clustr-state",
+		"--exclude=./etc/shadow",
+		"--exclude=./etc/shadow-",
+		"--exclude=./etc/gshadow",
+		"--exclude=./etc/gshadow-",
+		"--exclude=./etc/security/opasswd",
+		"--exclude=./var/lib/sss",
+		"--exclude=./var/lib/nslcd",
+		"--exclude=./var/lib/chrony",
+		"--exclude=./var/log/sssd",
+		"--exclude=./var/log/chrony",
+		"--exclude=./usr/bin/sudo",
+		"--exclude=./usr/bin/sudoreplay",
+		"--exclude=./usr/libexec/sudo/sesh",
+		"--exclude=./etc/sssd",
+		"--exclude=./etc/polkit-1/rules.d",
+		"--exclude=./home/clustr",
+		"--exclude=./usr/bin/staprun",
+		"-C", rootfsDir,
+		"-cf", tarPath,
+		".",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", "", 0, fmt.Errorf("factory: bake tar: %w\noutput: %s", err, string(out))
+	}
+
+	sha256hex, sizeBytes, err = sha256OfFile(tarPath)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("factory: sha256 tar: %w", err)
+	}
+
+	f.Logger.Info().Str("image_id", imageID).Str("tar", tarPath).
+		Str("sha256", sha256hex).Int64("size_bytes", sizeBytes).
+		Msg("factory: deterministic tar baked")
+
+	return tarPath, sha256hex, sizeBytes, nil
+}
+
+// sha256OfFile reads the file at path, computes its SHA-256, and returns the
+// hex-encoded digest along with the file size in bytes.
+func sha256OfFile(path string) (hexDigest string, sizeBytes int64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, fmt.Errorf("sha256: open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, fmt.Errorf("sha256: read %s: %w", path, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
 // checksumDir walks the rootfs directory, accumulates the total size, and
@@ -1635,23 +1737,23 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
 	}
 
-	// ── Checksum ──────────────────────────────────────────────────────────
+	// ── Bake deterministic tar + checksum ────────────────────────────────
 	ph.SetPhase("finalizing")
-	f.Logger.Info().Str("image_id", imageID).Msg("factory: computing rootfs checksum")
-	size, checksum, err := checksumDir(rootfsPath)
+	f.Logger.Info().Str("image_id", imageID).Msg("factory: baking deterministic rootfs tar")
+	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfsPath)
 	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: checksum failed")
-		failBuild("checksum rootfs", err)
+		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
+		failBuild("bake tar", err)
 		return
 	}
 
-	if err := f.Store.SetBlobPath(ctx, imageID, rootfsPath); err != nil {
+	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
 		failBuild("set blob path", err)
 		return
 	}
 
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
 		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
 		failBuild("finalize image", err)
 		return
@@ -1660,16 +1762,16 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 	// ── Write image metadata sidecar (ADR-0009 content-only schema) ─────────
 	// Written AFTER FinalizeBaseImage so the sidecar content_sha256 is always
 	// consistent with the sealed rootfs state stored in the DB. Non-fatal.
-	f.writeImageMetadataSidecar(ctx, imageID, req.Name, time.Now().UTC(), rootfsPath, string(distro), checksum, size, "iso")
+	f.writeImageMetadataSidecar(ctx, imageID, req.Name, time.Now().UTC(), rootfsPath, string(distro), tarChecksum, tarSize, "iso")
 
 	// ── Persist build manifest ────────────────────────────────────────────
-	_ = writeBuildManifest(imageRoot, imageID, string(distro), req.RoleIDs, size, checksum, result.ElapsedTime)
+	_ = writeBuildManifest(imageRoot, imageID, string(distro), req.RoleIDs, tarSize, tarChecksum, result.ElapsedTime)
 
 	ph.Complete()
 	f.Logger.Info().
 		Str("image_id", imageID).
-		Int64("size_bytes", size).
-		Str("checksum", checksum).
+		Int64("size_bytes", tarSize).
+		Str("checksum", tarChecksum).
 		Str("distro", string(distro)).
 		Dur("install_time", result.ElapsedTime.Round(time.Second)).
 		Msg("factory: ISO build complete — image is ready")
@@ -1976,23 +2078,23 @@ func (f *Factory) resumeFinalize(ctx context.Context, imageID, imageRoot, rootfs
 	}
 
 	ph.SetPhase("finalizing")
-	size, checksum, err := checksumDir(rootfsPath)
+	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfsPath)
 	if err != nil {
-		failBuild("checksum rootfs", err)
+		failBuild("bake tar", err)
 		return
 	}
-	if err := f.Store.SetBlobPath(ctx, imageID, rootfsPath); err != nil {
+	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
 		failBuild("set blob path", err)
 		return
 	}
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, size, checksum); err != nil {
+	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
 		failBuild("finalize image", err)
 		return
 	}
-	_ = writeBuildManifest(imageRoot, imageID, "", nil, size, checksum, 0)
+	_ = writeBuildManifest(imageRoot, imageID, "", nil, tarSize, tarChecksum, 0)
 	ph.Complete()
 	f.Logger.Info().
-		Str("image_id", imageID).Int64("size_bytes", size).Str("checksum", checksum).
+		Str("image_id", imageID).Int64("size_bytes", tarSize).Str("checksum", tarChecksum).
 		Msg("factory: resume finalize complete — image is ready")
 }
 
