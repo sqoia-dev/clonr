@@ -2345,6 +2345,28 @@ func (db *DB) GetImageMetadataJSON(ctx context.Context, imageID string) (string,
 	return raw.String, nil
 }
 
+// IsIPReservedForOtherNode reports whether any node_config OTHER than the one
+// identified by mac has the given IP configured in its interfaces JSON column.
+// It matches both bare IPs ("192.168.1.50") and CIDR notation ("192.168.1.50/24").
+// Returns false on sql.ErrNoRows (no conflicting reservation found).
+func (db *DB) IsIPReservedForOtherNode(ctx context.Context, ip, mac string) (bool, error) {
+	mac = strings.ToLower(mac)
+	var count int
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM node_configs, json_each(node_configs.interfaces) AS iface
+		WHERE primary_mac != ?
+		  AND (
+		        json_extract(iface.value, '$.ip_address') = ?
+		     OR json_extract(iface.value, '$.ip_address') LIKE ? || '/%'
+		  )
+	`, mac, ip, ip).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("db: IsIPReservedForOtherNode: %w", err)
+	}
+	return count > 0, nil
+}
+
 // requireOneRow returns ErrNotFound if no rows were affected.
 func requireOneRow(res sql.Result, table, id string) error {
 	n, err := res.RowsAffected()

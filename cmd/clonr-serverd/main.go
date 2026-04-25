@@ -276,6 +276,19 @@ func runServer(cmd *cobra.Command, args []string) error {
 			// Registered node but no IP configured — fall through to pool allocation.
 			return nil
 		}
+		// Wire DB-backed pool guard: before handing out a pool IP, confirm it
+		// isn't already reserved as a static address for a different registered node.
+		// Fail-open: if the DB query errors, allow the assignment rather than
+		// blocking DHCP entirely.
+		pxeSrv.DHCPServer.IsIPReservedByOtherMAC = func(ip string, mac string) bool {
+			reserved, err := database.IsIPReservedForOtherNode(context.Background(), ip, strings.ToLower(mac))
+			if err != nil {
+				log.Warn().Err(err).Str("ip", ip).Str("mac", mac).
+					Msg("DHCP: IP reservation check failed — allowing pool assignment (fail-open)")
+				return false
+			}
+			return reserved
+		}
 		// Wire DHCP lease lookup into the registration handler so it can
 		// auto-populate node interfaces from the DHCP-assigned IP on first boot.
 		srv.SetDHCPLeaseLookup(pxeSrv.DHCPServer.GetLeaseIP)

@@ -56,6 +56,13 @@ type DHCPServer struct {
 	// implements DHCP reservations for nodes that have a static IP configured
 	// in their InterfaceConfig. May be nil — if so, reservation lookup is skipped.
 	ResolveReservedIP func(mac string) net.IP
+
+	// IsIPReservedByOtherMAC reports whether the given IP is already configured
+	// as a static address on a different node (i.e. a node with a different MAC).
+	// Used during pool scan to prevent assigning a pool IP that is reserved for
+	// another registered node. Fail-open: if nil or returns false, allocation
+	// proceeds normally. May be nil — if so, the check is skipped.
+	IsIPReservedByOtherMAC func(ip string, mac string) bool
 }
 
 // detectSwitch inspects a DHCP Option 60 vendor class string and returns
@@ -380,15 +387,36 @@ func (d *DHCPServer) acquireOrAssignIP(mac string) net.IP {
 
 	// Pick first free IP from pool.
 	for _, ip := range d.pool {
-		if !inUse[ip.String()] {
-			d.leases[mac] = leaseEntry{
-				IP:        ip,
-				ExpiresAt: now.Add(d.leaseDur),
-			}
-			log.Info().Str("mac", mac).Str("ip", ip.String()).
-				Msg("DHCP: serving pool IP for unregistered or unconfigured node")
-			return ip
+		ipStr := ip.String()
+		if inUse[ipStr] {
+			continue
 		}
+
+		// If the DB-backed callback is wired, check whether this pool IP is
+		// already reserved for a different registered node. The callback may
+		// block on a DB query, so we release the mutex around the call.
+		if d.IsIPReservedByOtherMAC != nil {
+			d.mu.Unlock()
+			reservedElsewhere := d.IsIPReservedByOtherMAC(ipStr, mac)
+			d.mu.Lock()
+
+			// Re-check inUse after re-acquiring the lock in case another
+			// goroutine assigned this IP while the lock was released.
+			if inUse[ipStr] {
+				continue
+			}
+			if reservedElsewhere {
+				continue
+			}
+		}
+
+		d.leases[mac] = leaseEntry{
+			IP:        ip,
+			ExpiresAt: now.Add(d.leaseDur),
+		}
+		log.Info().Str("mac", mac).Str("ip", ipStr).
+			Msg("DHCP: serving pool IP for unregistered or unconfigured node")
+		return ip
 	}
 	return nil
 }
