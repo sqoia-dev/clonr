@@ -380,7 +380,7 @@ function cardWrap(title, body, actions = '') {
                 <h2 class="card-title">${title}</h2>
                 <div class="flex gap-8">${actions}</div>
             </div>
-            <div>${body}</div>
+            <div class="card-body">${body}</div>
         </div>`;
 }
 
@@ -1894,33 +1894,30 @@ const Pages = {
                 ${img.status === 'building' ? Pages._isoBuildInProgress(img) : ''}
 
                 ${cardWrap('Image Details', `
-                    <div class="card-body">
-                        <div class="kv-grid">
-                            <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value">${escHtml(img.id)}</div></div>
-                            <div class="kv-item"><div class="kv-key">Name</div><div class="kv-value">${escHtml(img.name)}</div></div>
-                            <div class="kv-item"><div class="kv-key">Version</div><div class="kv-value">${escHtml(img.version || '—')}</div></div>
-                            <div class="kv-item"><div class="kv-key">OS</div><div class="kv-value">${escHtml(img.os || '—')}</div></div>
-                            <div class="kv-item"><div class="kv-key">Arch</div><div class="kv-value">${escHtml(img.arch || '—')}</div></div>
-                            <div class="kv-item"><div class="kv-key">Format</div><div class="kv-value">${escHtml(img.format || '—')}</div></div>
-                            <div class="kv-item"><div class="kv-key">Firmware</div><div class="kv-value">${img.firmware === 'bios' ? '<span class="badge badge-warning badge-sm">BIOS (legacy)</span>' : '<span class="badge badge-neutral badge-sm">UEFI</span>'}</div></div>
-                            <div class="kv-item"><div class="kv-key">Size</div><div class="kv-value">${fmtBytes(img.size_bytes)}</div></div>
-                            <div class="kv-item"><div class="kv-key">Checksum (sha256)</div><div class="kv-value" style="font-size:11px">${escHtml(img.checksum || '—')}</div></div>
-                            <div class="kv-item" style="grid-column:1/-1"><div class="kv-key">Source URL</div>
-                                <div class="kv-value" style="font-size:12px">${img.source_url
-                                    ? `<a href="${escHtml(img.source_url)}" target="_blank" rel="noreferrer">${escHtml(img.source_url)}</a>`
-                                    : '—'}</div>
-                            </div>
-                            <div class="kv-item"><div class="kv-key">Tags</div><div class="kv-value">${tagsHtml}</div></div>
-                            <div class="kv-item"><div class="kv-key">Notes</div><div class="kv-value">${escHtml(img.notes || '—')}</div></div>
-                            <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(img.created_at)}</div></div>
-                            <div class="kv-item"><div class="kv-key">Finalized</div><div class="kv-value">${fmtDate(img.finalized_at)}</div></div>
+                    <div class="kv-grid">
+                        <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value">${escHtml(img.id)}</div></div>
+                        <div class="kv-item"><div class="kv-key">Name</div><div class="kv-value">${escHtml(img.name)}</div></div>
+                        <div class="kv-item"><div class="kv-key">Version</div><div class="kv-value">${escHtml(img.version || '—')}</div></div>
+                        <div class="kv-item"><div class="kv-key">OS</div><div class="kv-value">${escHtml(img.os || '—')}</div></div>
+                        <div class="kv-item"><div class="kv-key">Arch</div><div class="kv-value">${escHtml(img.arch || '—')}</div></div>
+                        <div class="kv-item"><div class="kv-key">Format</div><div class="kv-value">${escHtml(img.format || '—')}</div></div>
+                        <div class="kv-item"><div class="kv-key">Firmware</div><div class="kv-value">${img.firmware === 'bios' ? '<span class="badge badge-warning badge-sm">BIOS (legacy)</span>' : '<span class="badge badge-neutral badge-sm">UEFI</span>'}</div></div>
+                        <div class="kv-item"><div class="kv-key">Size</div><div class="kv-value">${fmtBytes(img.size_bytes)}</div></div>
+                        <div class="kv-item"><div class="kv-key">Checksum (sha256)</div><div class="kv-value" style="font-size:11px">${escHtml(img.checksum || '—')}</div></div>
+                        <div class="kv-item" style="grid-column:1/-1"><div class="kv-key">Source URL</div>
+                            <div class="kv-value" style="font-size:12px">${img.source_url
+                                ? `<a href="${escHtml(img.source_url)}" target="_blank" rel="noreferrer">${escHtml(img.source_url)}</a>`
+                                : '—'}</div>
                         </div>
+                        <div class="kv-item"><div class="kv-key">Tags</div><div class="kv-value">${tagsHtml}</div></div>
+                        <div class="kv-item"><div class="kv-key">Notes</div><div class="kv-value">${escHtml(img.notes || '—')}</div></div>
+                        <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(img.created_at)}</div></div>
+                        <div class="kv-item"><div class="kv-key">Finalized</div><div class="kv-value">${fmtDate(img.finalized_at)}</div></div>
                     </div>`)}
 
                 ${img.disk_layout ? cardWrap('Disk Layout', `
-                    <div class="card-body">
-                        ${this._renderDiskLayout(img.disk_layout)}
-                    </div>`) : ''}
+                    ${this._renderDiskLayout(img.disk_layout)}
+                `) : ''}
 
                 <div id="shell-hint-area"></div>
             `);
@@ -3178,8 +3175,7 @@ const Pages = {
                         <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveOverview('${node.id}')" id="tab-save-overview">Save</button>
                     </div>
                     ${cardWrap('Node Details', `
-                        <div class="card-body">
-                            <div class="form-grid" style="margin-bottom:0">
+                        <div class="form-grid" style="margin-bottom:0">
                                 <div class="form-group">
                                     <label>Hostname</label>
                                     <input type="text" id="ov-hostname" value="${escHtml(node.hostname || '')}"
@@ -3223,12 +3219,10 @@ const Pages = {
                                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Request Reimage</button>`}
                                     </div>
                                 </div>
-                            </div>
-                        </div>`)}
+                            </div>`)}
 
                     ${cardWrap('Node Info', `
-                        <div class="card-body">
-                            <div class="kv-grid">
+                        <div class="kv-grid">
                                 <div class="kv-item"><div class="kv-key">ID</div><div class="kv-value">${escHtml(node.id)}</div></div>
                                 <div class="kv-item"><div class="kv-key">Primary MAC</div><div class="kv-value text-mono">${escHtml(node.primary_mac)}</div></div>
                                 <div class="kv-item"><div class="kv-key">Status</div><div class="kv-value">${nodeBadge(node)}</div></div>
@@ -3248,12 +3242,11 @@ const Pages = {
                                 ${node.last_seen_at ? `<div class="kv-item"><div class="kv-key">Last Seen</div><div class="kv-value">${fmtRelative(node.last_seen_at)}</div></div>` : ''}
                                 <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(node.created_at)}</div></div>
                                 <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(node.updated_at)}</div></div>
-                            </div>
-                        </div>`)}
+                            </div>`)}
 
                     ${cardWrap('Heartbeat', (() => {
                         if (!heartbeatResp) {
-                            return `<div class="card-body">${emptyState('No heartbeat received', 'clonr-clientd is not connected or has not sent a heartbeat yet.')}</div>`;
+                            return emptyState('No heartbeat received', 'clonr-clientd is not connected or has not sent a heartbeat yet.');
                         }
                         const hb = heartbeatResp;
                         const receivedAt = hb.ReceivedAt || hb.received_at;
@@ -3300,7 +3293,7 @@ const Pages = {
                             return `<span class="badge ${cls} badge-sm" title="${escHtml(state)}">${escHtml(name)}</span>`;
                         }).join(' ');
 
-                        return `<div class="card-body">
+                        return `
                             <div class="kv-grid" style="margin-bottom:12px">
                                 <div class="kv-item"><div class="kv-key">Received</div><div class="kv-value">${receivedAt ? fmtRelative(receivedAt) : '—'}</div></div>
                                 <div class="kv-item"><div class="kv-key">Uptime</div><div class="kv-value">${fmtUptime(uptime)}</div></div>
@@ -3322,14 +3315,13 @@ const Pages = {
                                 </table>` : ''}
                             ${services.length > 0 ? `
                                 <div class="text-dim text-sm" style="margin-bottom:6px;font-weight:500">Services</div>
-                                <div style="display:flex;flex-wrap:wrap;gap:6px">${svcBadges}</div>` : ''}
-                        </div>`;
+                                <div style="display:flex;flex-wrap:wrap;gap:6px">${svcBadges}</div>` : ''}`;
                     })())}
 
                     ${cardWrap('Reimage History', (() => {
                         const recent = reimageHistory.slice(0, 10);
                         if (recent.length === 0) {
-                            return `<div class="card-body">${emptyState('No reimage history', 'Reimage requests appear here after the first deploy.')}</div>`;
+                            return emptyState('No reimage history', 'Reimage requests appear here after the first deploy.');
                         }
                         const statusBadge = (s) => {
                             const cls = {
@@ -3357,17 +3349,15 @@ const Pages = {
                                 <td class="text-sm text-dim">${escHtml(r.phase || '—')}</td>
                             </tr>`;
                         }).join('');
-                        return `<div class="card-body" style="padding:0">
-                            <table style="width:100%;border-collapse:collapse;font-size:13px">
-                                <thead><tr style="border-bottom:1px solid var(--border)">
-                                    <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">ID</th>
-                                    <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Status</th>
-                                    <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">When</th>
-                                    <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Phase</th>
-                                </tr></thead>
-                                <tbody>${rows}</tbody>
-                            </table>
-                        </div>`;
+                        return `<table class="card-table" style="width:100%;border-collapse:collapse;font-size:13px">
+                            <thead><tr style="border-bottom:1px solid var(--border)">
+                                <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">ID</th>
+                                <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Status</th>
+                                <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">When</th>
+                                <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Phase</th>
+                            </tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>`;
                     })())}
                 </div>
 
@@ -3391,16 +3381,14 @@ const Pages = {
                         <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveNetwork('${node.id}')" id="tab-save-network">Save</button>
                     </div>
                     ${cardWrap('Network Interfaces', `
-                        <div class="card-body">
-                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                                <span class="text-dim" style="font-size:12px">Configure logical interfaces. Discovered interfaces are shown read-only on the Hardware tab.</span>
-                                <button type="button" class="btn btn-secondary btn-sm" data-macs="${escHtml(discoveredMACsJSON)}" onclick="Pages._netAddInterface(JSON.parse(this.dataset.macs))">+ Add Interface</button>
-                            </div>
-                            <div id="net-interfaces-list">
-                                ${(node.interfaces || []).length === 0
-                                    ? `<div id="net-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No interfaces configured</div>`
-                                    : (node.interfaces || []).map((iface, i) => Pages._netInterfaceRowHTML(i, iface, discoveredMACs)).join('')}
-                            </div>
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                            <span class="text-dim" style="font-size:12px">Configure logical interfaces. Discovered interfaces are shown read-only on the Hardware tab.</span>
+                            <button type="button" class="btn btn-secondary btn-sm" data-macs="${escHtml(discoveredMACsJSON)}" onclick="Pages._netAddInterface(JSON.parse(this.dataset.macs))">+ Add Interface</button>
+                        </div>
+                        <div id="net-interfaces-list">
+                            ${(node.interfaces || []).length === 0
+                                ? `<div id="net-empty" style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px">No interfaces configured</div>`
+                                : (node.interfaces || []).map((iface, i) => Pages._netInterfaceRowHTML(i, iface, discoveredMACs)).join('')}
                         </div>`)}
                 </div>
 
@@ -3408,67 +3396,59 @@ const Pages = {
                 <div id="tab-bmc" class="tab-panel">
                     ${(node.bmc && node.bmc.ip_address) || (node.power_provider && node.power_provider.type) ? `
                     ${node.bmc && node.bmc.ip_address ? cardWrap('Power Status',
-                        `<div class="card-body">
-                            <div id="power-status-panel" style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
-                                <div id="power-indicator" style="width:18px;height:18px;border-radius:50%;background:var(--border);flex-shrink:0"></div>
-                                <div>
-                                    <div id="power-label" style="font-weight:600;font-size:15px">Checking…</div>
-                                    <div id="power-last-checked" class="text-dim text-sm"></div>
-                                </div>
-                                <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="Pages._refreshPowerStatus('${node.id}')">Refresh</button>
+                        `<div id="power-status-panel" style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+                            <div id="power-indicator" style="width:18px;height:18px;border-radius:50%;background:var(--border);flex-shrink:0"></div>
+                            <div>
+                                <div id="power-label" style="font-weight:600;font-size:15px">Checking…</div>
+                                <div id="power-last-checked" class="text-dim text-sm"></div>
                             </div>
-                            <div id="power-error-msg" style="display:none" class="alert alert-error"></div>
-                        </div>`,
+                            <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="Pages._refreshPowerStatus('${node.id}')">Refresh</button>
+                        </div>
+                        <div id="power-error-msg" style="display:none" class="alert alert-error"></div>`,
                         ''
                     ) : ''}
 
                     ${node.bmc && node.bmc.ip_address ? cardWrap('Power Controls',
-                        `<div class="card-body">
-                            <div class="flex gap-8" style="flex-wrap:wrap;margin-bottom:8px">
-                                <button id="btn-power-on"    class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'on')">Power On</button>
-                                <button id="btn-power-off"   class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'off',   'Power Off', 'This will immediately cut power to the node.')">Power Off</button>
-                                <button id="btn-power-cycle" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'cycle', 'Power Cycle', 'This will hard-cycle the node (power off then on).')">Power Cycle</button>
-                                <button id="btn-power-reset" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'reset', 'Reset', 'This will issue a hard reset. The node will reboot immediately.')">Reset</button>
-                            </div>
-                            <div class="flex gap-8" style="flex-wrap:wrap">
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._confirmPowerAction('${node.id}', 'pxe',  'Boot to PXE', 'Sets next boot to PXE and power-cycles the node.')">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
-                                    PXE Boot
-                                </button>
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'disk')">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-                                    Boot to Disk
-                                </button>
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-                                    Flip Next Boot → Disk
-                                </button>
-                                <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                                    Flip → Disk + Reboot
-                                </button>
-                            </div>
-                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>
-                        </div>`,
+                        `<div class="flex gap-8" style="flex-wrap:wrap;margin-bottom:8px">
+                            <button id="btn-power-on"    class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'on')">Power On</button>
+                            <button id="btn-power-off"   class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'off',   'Power Off', 'This will immediately cut power to the node.')">Power Off</button>
+                            <button id="btn-power-cycle" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'cycle', 'Power Cycle', 'This will hard-cycle the node (power off then on).')">Power Cycle</button>
+                            <button id="btn-power-reset" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'reset', 'Reset', 'This will issue a hard reset. The node will reboot immediately.')">Reset</button>
+                        </div>
+                        <div class="flex gap-8" style="flex-wrap:wrap">
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._confirmPowerAction('${node.id}', 'pxe',  'Boot to PXE', 'Sets next boot to PXE and power-cycles the node.')">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                                PXE Boot
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'disk')">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                Boot to Disk
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                                Flip Next Boot → Disk
+                            </button>
+                            <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                Flip → Disk + Reboot
+                            </button>
+                        </div>
+                        <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>`,
                         ''
                     ) : (node.power_provider && node.power_provider.type ? cardWrap('Power Actions',
-                        `<div class="card-body">
-                            <div class="flex gap-8">
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">Flip Next Boot → Disk</button>
-                                <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">Flip → Disk + Reboot</button>
-                            </div>
-                            <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>
-                        </div>`, ''
+                        `<div class="flex gap-8">
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">Flip Next Boot → Disk</button>
+                            <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">Flip → Disk + Reboot</button>
+                        </div>
+                        <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>`, ''
                     ) : '')}
 
                     ${node.bmc && node.bmc.ip_address ? cardWrap('BMC Information',
-                        `<div class="card-body">
-                            <div class="kv-grid">
-                                <div class="kv-item"><div class="kv-key">IP Address</div><div class="kv-value text-mono">${escHtml(node.bmc.ip_address || '—')}</div></div>
-                                <div class="kv-item"><div class="kv-key">Netmask</div><div class="kv-value text-mono">${escHtml(node.bmc.netmask || '—')}</div></div>
-                                <div class="kv-item"><div class="kv-key">Gateway</div><div class="kv-value text-mono">${escHtml(node.bmc.gateway || '—')}</div></div>
-                                <div class="kv-item"><div class="kv-key">Username</div><div class="kv-value text-mono">${escHtml(node.bmc.username || '—')}</div></div>
-                            </div>
+                        `<div class="kv-grid">
+                            <div class="kv-item"><div class="kv-key">IP Address</div><div class="kv-value text-mono">${escHtml(node.bmc.ip_address || '—')}</div></div>
+                            <div class="kv-item"><div class="kv-key">Netmask</div><div class="kv-value text-mono">${escHtml(node.bmc.netmask || '—')}</div></div>
+                            <div class="kv-item"><div class="kv-key">Gateway</div><div class="kv-value text-mono">${escHtml(node.bmc.gateway || '—')}</div></div>
+                            <div class="kv-item"><div class="kv-key">Username</div><div class="kv-value text-mono">${escHtml(node.bmc.username || '—')}</div></div>
                         </div>`,
                         ''
                     ) : ''}
@@ -3486,8 +3466,7 @@ const Pages = {
                         <button class="btn btn-primary btn-sm" onclick="Pages._tabSavePower('${node.id}')" id="tab-save-bmc">Save</button>
                     </div>
                     ${cardWrap('Power Provider Configuration', `
-                        <div class="card-body">
-                            <div class="form-grid">
+                        <div class="form-grid">
                                 <div class="form-group" style="grid-column:1/-1">
                                     <label>Provider Type</label>
                                     <select id="pp-type" onchange="Pages._onPowerProviderInlineTypeChange(this.value);Pages._tabMarkDirty('bmc')">
@@ -3559,8 +3538,7 @@ const Pages = {
                                         <label for="pp-pve-insecure" style="margin:0;font-weight:400;cursor:pointer">Skip TLS verification (self-signed certs)</label>
                                     </div>
                                 </div>
-                            </div>
-                        </div>`)}
+                            </div>`)}
                 </div>
 
                 <!-- Disk Layout tab — Richard's existing inline editor, untouched -->
@@ -3590,42 +3568,36 @@ const Pages = {
                         <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveConfig('${node.id}')" id="tab-save-config">Save</button>
                     </div>
                     ${cardWrap('SSH Authorized Keys', `
-                        <div class="card-body">
-                            <div class="form-group" style="margin-bottom:0">
-                                <label>One key per line</label>
-                                <textarea id="cfg-ssh-keys" rows="6"
-                                    placeholder="ssh-ed25519 AAAA…&#10;ssh-rsa AAAA…"
-                                    oninput="Pages._tabMarkDirty('config')"
-                                    style="font-family:var(--font-mono);font-size:12px">${escHtml((node.ssh_keys || []).join('\n'))}</textarea>
-                                <div id="cfg-ssh-keys-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
-                            </div>
+                        <div class="form-group" style="margin-bottom:0">
+                            <label>One key per line</label>
+                            <textarea id="cfg-ssh-keys" rows="6"
+                                placeholder="ssh-ed25519 AAAA…&#10;ssh-rsa AAAA…"
+                                oninput="Pages._tabMarkDirty('config')"
+                                style="font-family:var(--font-mono);font-size:12px">${escHtml((node.ssh_keys || []).join('\n'))}</textarea>
+                            <div id="cfg-ssh-keys-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
                         </div>`)}
 
                     ${cardWrap('Kernel Arguments', `
-                        <div class="card-body">
-                            <div class="form-group" style="margin-bottom:0">
-                                <label>Extra kernel cmdline args appended at boot</label>
-                                <input type="text" id="cfg-kernel-args" value="${escHtml(node.kernel_args || '')}"
-                                    placeholder="quiet splash"
-                                    oninput="Pages._tabMarkDirty('config')">
-                                <div id="cfg-kernel-args-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
-                            </div>
+                        <div class="form-group" style="margin-bottom:0">
+                            <label>Extra kernel cmdline args appended at boot</label>
+                            <input type="text" id="cfg-kernel-args" value="${escHtml(node.kernel_args || '')}"
+                                placeholder="quiet splash"
+                                oninput="Pages._tabMarkDirty('config')">
+                            <div id="cfg-kernel-args-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
                         </div>`)}
 
                     ${cardWrap('Custom Variables', `
-                        <div class="card-body">
-                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-                                <span class="text-dim" style="font-size:12px">Key/value pairs available as template variables during deployment</span>
-                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._cfgAddVar()">+ Add Variable</button>
-                            </div>
-                            <div id="cfg-vars-list">
-                                ${Object.keys(node.custom_vars || {}).length === 0
-                                    ? `<div id="cfg-vars-empty" style="text-align:center;padding:12px;color:var(--text-dim);font-size:12px">No custom variables</div>`
-                                    : Object.entries(node.custom_vars || {}).map(([k, v], i) => Pages._cfgVarRowHTML(i, k, v)).join('')}
-                            </div>
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                            <span class="text-dim" style="font-size:12px">Key/value pairs available as template variables during deployment</span>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._cfgAddVar()">+ Add Variable</button>
+                        </div>
+                        <div id="cfg-vars-list">
+                            ${Object.keys(node.custom_vars || {}).length === 0
+                                ? `<div id="cfg-vars-empty" style="text-align:center;padding:12px;color:var(--text-dim);font-size:12px">No custom variables</div>`
+                                : Object.entries(node.custom_vars || {}).map(([k, v], i) => Pages._cfgVarRowHTML(i, k, v)).join('')}
                         </div>`)}
 
-                    ${cardWrap('Raw JSON', `<div class="card-body"><pre class="json-block">${escHtml(JSON.stringify(node, null, 2))}</pre></div>`)}
+                    ${cardWrap('Raw JSON', `<pre class="json-block">${escHtml(JSON.stringify(node, null, 2))}</pre>`)}
                 </div>
 
                 <!-- Logs tab -->
@@ -3658,10 +3630,9 @@ const Pages = {
                     return `<div id="tab-configpush" class="tab-panel">
                     ${cardWrap('Config Push', (() => {
                         if (!nodeIsLive) {
-                            return `<div class="card-body">${emptyState('Node offline', 'Config push is only available when clonr-clientd is connected (Live).')}</div>`;
+                            return emptyState('Node offline', 'Config push is only available when clonr-clientd is connected (Live).');
                         }
-                        return `<div class="card-body" style="padding:16px">
-                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                        return `<p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
                                 Push a whitelisted config file to this node atomically. The node validates the checksum,
                                 backs up the existing file, writes the new content, and restarts the associated service if needed.
                             </p>
@@ -3681,8 +3652,7 @@ const Pages = {
                                     style="font-family:monospace;font-size:12px;resize:vertical"
                                     placeholder="Paste file content here…"></textarea>
                             </div>
-                            <div id="configpush-result" style="display:none;margin-bottom:12px" role="status" aria-live="polite"></div>
-                        </div>`;
+                            <div id="configpush-result" style="display:none;margin-bottom:12px" role="status" aria-live="polite"></div>`;
                     })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" onclick="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
                 </div>`;
                 })()}
@@ -3690,52 +3660,46 @@ const Pages = {
                 <!-- Slurm Role tab -->
                 <div id="tab-slurm" class="tab-panel">
                     ${cardWrap('Slurm Role', `
-                        <div class="card-body" style="padding:16px">
-                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
-                                Assign Slurm roles to this node. The role determines which config files
-                                are deployed and which systemd services are enabled during imaging.
-                            </p>
-                            <div id="slurm-role-current" style="margin-bottom:12px;font-size:13px;color:var(--text-secondary)">
-                                Loading current role&hellip;
-                            </div>
-                            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-                                    <input type="checkbox" id="slurm-role-controller" value="controller"> Controller
-                                </label>
-                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-                                    <input type="checkbox" id="slurm-role-compute" value="compute"> Compute
-                                </label>
-                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-                                    <input type="checkbox" id="slurm-role-login" value="login"> Login
-                                </label>
-                                <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-                                    <input type="checkbox" id="slurm-role-dbd" value="dbd"> DBD
-                                </label>
-                            </div>
-                            <div id="slurm-role-save-row" style="display:flex;align-items:center;gap:10px">
-                                <button class="btn btn-primary btn-sm" id="slurm-role-save-btn"
-                                    onclick="Pages._saveSlurmRole('${escHtml(node.id)}')">Save Role</button>
-                                <span id="slurm-role-save-status" style="font-size:12px;color:var(--text-secondary)"></span>
-                            </div>
+                        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                            Assign Slurm roles to this node. The role determines which config files
+                            are deployed and which systemd services are enabled during imaging.
+                        </p>
+                        <div id="slurm-role-current" style="margin-bottom:12px;font-size:13px;color:var(--text-secondary)">
+                            Loading current role&hellip;
+                        </div>
+                        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                <input type="checkbox" id="slurm-role-controller" value="controller"> Controller
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                <input type="checkbox" id="slurm-role-compute" value="compute"> Compute
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                <input type="checkbox" id="slurm-role-login" value="login"> Login
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+                                <input type="checkbox" id="slurm-role-dbd" value="dbd"> DBD
+                            </label>
+                        </div>
+                        <div id="slurm-role-save-row" style="display:flex;align-items:center;gap:10px">
+                            <button class="btn btn-primary btn-sm" id="slurm-role-save-btn"
+                                onclick="Pages._saveSlurmRole('${escHtml(node.id)}')">Save Role</button>
+                            <span id="slurm-role-save-status" style="font-size:12px;color:var(--text-secondary)"></span>
                         </div>
                     `)}
                     ${cardWrap('Sync Status', `
-                        <div class="card-body" style="padding:16px">
-                            <div id="slurm-node-sync-status">Loading…</div>
-                            <div style="margin-top:12px;">
-                                <button class="btn btn-primary btn-sm" onclick="Pages._pushToSingleNode('${escHtml(node.id)}')">Push to This Node</button>
-                                <a href="#/slurm/sync" style="font-size:13px;color:var(--accent);margin-left:12px;">View all sync status</a>
-                            </div>
+                        <div id="slurm-node-sync-status">Loading…</div>
+                        <div style="margin-top:12px;">
+                            <button class="btn btn-primary btn-sm" onclick="Pages._pushToSingleNode('${escHtml(node.id)}')">Push to This Node</button>
+                            <a href="#/slurm/sync" style="font-size:13px;color:var(--accent);margin-left:12px;">View all sync status</a>
                         </div>
                     `)}
                     ${cardWrap('Node Overrides', `
-                        <div class="card-body" style="padding:16px">
-                            <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
-                                Override Slurm node parameters for this specific node. These values are injected
-                                into the config template during rendering, overriding cluster defaults.
-                            </p>
-                            <div id="slurm-node-overrides">Loading…</div>
-                        </div>
+                        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                            Override Slurm node parameters for this specific node. These values are injected
+                            into the config template during rendering, overriding cluster defaults.
+                        </p>
+                        <div id="slurm-node-overrides">Loading…</div>
                     `)}
                 </div>
 
@@ -3762,11 +3726,10 @@ const Pages = {
                     ];
                     return `<div id="tab-diagnostics" class="tab-panel">
                     ${cardWrap('Diagnostics', `
-                        <div class="card-body" style="padding:16px">
-                            <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary)">
-                                Run read-only diagnostic commands on this node via clonr-clientd.
-                                Only whitelisted commands are permitted — no shell, no pipes.
-                            </p>
+                        <p style="margin:0 0 16px;font-size:13px;color:var(--text-secondary)">
+                            Run read-only diagnostic commands on this node via clonr-clientd.
+                            Only whitelisted commands are permitted — no shell, no pipes.
+                        </p>
 
                             <div style="margin-bottom:20px">
                                 <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);margin-bottom:8px">Quick Commands</div>
@@ -3819,7 +3782,6 @@ const Pages = {
                             <div id="diag-running" style="display:none;font-size:13px;color:var(--text-secondary);padding:8px 0">
                                 <span class="spinner" style="width:14px;height:14px;display:inline-block;margin-right:6px"></span>Running&hellip; (up to 30s)
                             </div>
-                        </div>
                     `)}
                 </div>`;
                 })()}
@@ -4945,8 +4907,7 @@ const Pages = {
                 const noGroupMsg = groupId
                     ? `<div class="text-dim" style="padding:12px;font-size:13px">No mounts defined on the assigned group.</div>`
                     : `<div class="text-dim" style="padding:12px;font-size:13px">Node is not assigned to a group.</div>`;
-                return cardWrap('Inherited from Group',
-                    `<div class="card-body">${noGroupMsg}</div>`);
+                return cardWrap('Inherited from Group', noGroupMsg);
             }
             const rows = groupMounts.map(m => `<tr>
                 <td class="mono">${escHtml(m.source_device||m.source||'—')}</td>
@@ -4957,19 +4918,17 @@ const Pages = {
                 <td class="dim" style="font-size:11px">${escHtml(m.comment||'—')}</td>
             </tr>`).join('');
             return cardWrap('Inherited from Group',
-                `<div class="card-body">
-                    <p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
-                        These mounts come from the node's group and cannot be edited here.
-                        Node-level entries with the same mount point will override the group entry.
-                    </p>
-                    <div class="table-wrap"><table>
-                        <thead><tr>
-                            <th>Source</th><th>Mount Point</th><th>FS Type</th>
-                            <th>Options</th><th>Auto-mkdir</th><th>Comment</th>
-                        </tr></thead>
-                        <tbody>${rows}</tbody>
-                    </table></div>
-                </div>`);
+                `<p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
+                    These mounts come from the node's group and cannot be edited here.
+                    Node-level entries with the same mount point will override the group entry.
+                </p>
+                <div class="table-wrap"><table>
+                    <thead><tr>
+                        <th>Source</th><th>Mount Point</th><th>FS Type</th>
+                        <th>Options</th><th>Auto-mkdir</th><th>Comment</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table></div>`);
         })();
 
         // ── Section 2: Node-level mounts (editable) ──────────────────────────
@@ -4979,43 +4938,41 @@ const Pages = {
             : '';
 
         const nodeSection = cardWrap('Node-Level Mounts',
-            `<div class="card-body">
-                <p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
-                    Added to <code>/etc/fstab</code> during deployment.
-                    These entries override group entries when the mount point matches.
-                </p>
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                    <select id="mounts-preset-select" class="form-select" style="font-size:12px;padding:4px 8px;width:auto">
-                        <option value="">— Apply preset —</option>
-                        <option value="nfs-home">NFS home</option>
-                        <option value="lustre">Lustre scratch</option>
-                        <option value="beegfs">BeeGFS data</option>
-                        <option value="cifs">CIFS / Samba</option>
-                        <option value="bind">Bind mount</option>
-                        <option value="tmpfs">tmpfs</option>
-                    </select>
-                    <button type="button" class="btn btn-secondary btn-sm"
-                        onclick="Pages._mountsApplyPreset()">Apply</button>
-                    <button type="button" class="btn btn-secondary btn-sm"
-                        onclick="Pages._mountsAddRow()">+ Add Mount</button>
+            `<p style="margin:0 0 10px;color:var(--text-secondary);font-size:12px">
+                Added to <code>/etc/fstab</code> during deployment.
+                These entries override group entries when the mount point matches.
+            </p>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <select id="mounts-preset-select" class="form-select" style="font-size:12px;padding:4px 8px;width:auto">
+                    <option value="">— Apply preset —</option>
+                    <option value="nfs-home">NFS home</option>
+                    <option value="lustre">Lustre scratch</option>
+                    <option value="beegfs">BeeGFS data</option>
+                    <option value="cifs">CIFS / Samba</option>
+                    <option value="bind">Bind mount</option>
+                    <option value="tmpfs">tmpfs</option>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="Pages._mountsApplyPreset()">Apply</button>
+                <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="Pages._mountsAddRow()">+ Add Mount</button>
+            </div>
+            <div id="mounts-node-table-wrap">
+                <div class="table-wrap" style="overflow-x:auto${nodeMounts.length === 0 ? ';display:none' : ''}">
+                    <table id="mounts-node-table" style="width:100%;font-size:12px;border-collapse:collapse">
+                        <thead><tr style="border-bottom:1px solid var(--border)">
+                            <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Source</th>
+                            <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Mount Point</th>
+                            <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">FS Type</th>
+                            <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Options</th>
+                            <th style="text-align:center;padding:4px 6px;font-weight:500;color:var(--text-secondary)" title="Auto-create mount point directory">mkd</th>
+                            <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Comment</th>
+                            <th style="padding:4px"></th>
+                        </tr></thead>
+                        <tbody id="mounts-node-tbody">${nodeRows}</tbody>
+                    </table>
                 </div>
-                <div id="mounts-node-table-wrap">
-                    <div class="table-wrap" style="overflow-x:auto${nodeMounts.length === 0 ? ';display:none' : ''}">
-                        <table id="mounts-node-table" style="width:100%;font-size:12px;border-collapse:collapse">
-                            <thead><tr style="border-bottom:1px solid var(--border)">
-                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Source</th>
-                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Mount Point</th>
-                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">FS Type</th>
-                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Options</th>
-                                <th style="text-align:center;padding:4px 6px;font-weight:500;color:var(--text-secondary)" title="Auto-create mount point directory">mkd</th>
-                                <th style="text-align:left;padding:4px 6px;font-weight:500;color:var(--text-secondary)">Comment</th>
-                                <th style="padding:4px"></th>
-                            </tr></thead>
-                            <tbody id="mounts-node-tbody">${nodeRows}</tbody>
-                        </table>
-                    </div>
-                    ${emptyRow}
-                </div>
+                ${emptyRow}
             </div>`);
 
         return `${groupSection}${nodeSection}`;
@@ -5250,9 +5207,7 @@ const Pages = {
             const src = sourceLabel[effective.source] || `<span class="badge badge-neutral">${escHtml(effective.source)}</span>`;
             effectiveSection = cardWrap(
                 `Current Effective Layout &nbsp;${src}`,
-                `<div class="card-body">
-                    ${layoutToTable(effective.layout)}
-                </div>`,
+                layoutToTable(effective.layout),
                 `<div class="flex gap-8">
                     <button class="btn btn-secondary btn-sm" onclick='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
                         Edit Override
@@ -5268,16 +5223,14 @@ const Pages = {
                 `<div class="alert alert-warning" style="margin:4px 0;font-size:12px">${escHtml(w)}</div>`).join('');
             recSection = cardWrap(
                 'Recommended Layout',
-                `<div class="card-body">
-                    ${layoutToTable(rec.layout)}
-                    ${warnings}
-                    ${rec.reasoning ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Reasoning</summary><pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;color:var(--text-secondary)">${escHtml(rec.reasoning)}</pre></details>` : ''}
-                </div>`,
+                `${layoutToTable(rec.layout)}
+                ${warnings}
+                ${rec.reasoning ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Reasoning</summary><pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;color:var(--text-secondary)">${escHtml(rec.reasoning)}</pre></details>` : ''}`,
                 `<button class="btn btn-primary btn-sm" onclick='Pages._applyRecommendedLayout(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(rec.layout))})'>Apply Recommended Layout</button>`
             );
         } else if (rec === null) {
             recSection = cardWrap('Recommended Layout',
-                `<div class="card-body">${emptyState('No recommendation available', 'Hardware profile not yet discovered (node must PXE-boot to register hardware).')}</div>`);
+                emptyState('No recommendation available', 'Hardware profile not yet discovered (node must PXE-boot to register hardware).'));
         }
 
         return effectiveSection + recSection;
@@ -5657,7 +5610,7 @@ const Pages = {
                 }).join('');
             }
 
-            sections.push(cardWrap('Disk Topology', `<div class="card-body">${diskHtml}</div>`));
+            sections.push(cardWrap('Disk Topology', diskHtml));
         }
 
         if (hw.IBDevices && hw.IBDevices.length) {
@@ -5685,7 +5638,7 @@ const Pages = {
                         </tbody>
                     </table></div>` : ''}
                 </div>`).join('');
-            sections.push(cardWrap('InfiniBand Devices', `<div class="card-body">${ibHtml}</div>`));
+            sections.push(cardWrap('InfiniBand Devices', ibHtml));
         }
 
         if (hw.NICs && hw.NICs.length) {
@@ -5702,15 +5655,15 @@ const Pages = {
                 </tr>`).join('')}
                 </tbody>
             </table></div>`;
-            sections.push(cardWrap('NICs', `<div class="card-body">${nicHtml}</div>`));
+            sections.push(cardWrap('NICs', nicHtml));
         }
 
         if (hw.BMC) {
-            const bmcHtml = `<div class="card-body"><div class="kv-grid">
+            const bmcHtml = `<div class="kv-grid">
                 <div class="kv-item"><div class="kv-key">IP</div><div class="kv-value">${escHtml(hw.BMC.IPAddress || '—')}</div></div>
                 <div class="kv-item"><div class="kv-key">Firmware</div><div class="kv-value">${escHtml(hw.BMC.FirmwareVersion || '—')}</div></div>
                 <div class="kv-item"><div class="kv-key">Manufacturer</div><div class="kv-value">${escHtml(hw.BMC.Manufacturer || '—')}</div></div>
-            </div></div>`;
+            </div>`;
             sections.push(cardWrap('BMC / IPMI (Discovered)', bmcHtml));
         }
 
@@ -5952,9 +5905,9 @@ const Pages = {
                     <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(group.updated_at)}</div></div>
                 </div>
 
-                ${cardWrap('Nodes in this Group', `<div class="card-body">${nodesHtml}</div>`)}
-                ${cardWrap('Disk Layout Override', `<div class="card-body">${layoutHtml}</div>`)}
-                ${cardWrap('Extra Mounts', `<div class="card-body">${mountsHtml}</div>`)}
+                ${cardWrap('Nodes in this Group', nodesHtml)}
+                ${cardWrap('Disk Layout Override', layoutHtml)}
+                ${cardWrap('Extra Mounts', mountsHtml)}
             `);
         } catch (e) {
             App.render(alertBox(`Failed to load group: ${e.message}`));

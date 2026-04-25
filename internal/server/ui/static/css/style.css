@@ -438,6 +438,15 @@ a:hover {
     padding: 20px;
 }
 
+/* Full-bleed table inside a card-body — breakout of the 20px padding so the
+   table touches the card edges, matching the design system convention.
+   Use .card-table on tables that should span edge-to-edge within a card. */
+.card-body > table.card-table {
+    margin: -20px;
+    width: calc(100% + 40px);
+    border-collapse: collapse;
+}
+
 /* ─── Stats grid ─────────────────────────────────────────────────────────── */
 
 .stats-grid {
