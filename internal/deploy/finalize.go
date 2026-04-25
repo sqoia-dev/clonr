@@ -901,6 +901,13 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 		}
 	}()
 
+	// Ensure /dev/fd exists inside the chroot — dracut and other tools use
+	// bash process substitution which requires /dev/fd → /proc/self/fd.
+	devFD := filepath.Join(mountRoot, "dev", "fd")
+	if _, err := os.Lstat(devFD); os.IsNotExist(err) {
+		_ = os.Symlink("/proc/self/fd", devFD)
+	}
+
 	// Copy the host's /etc/resolv.conf into the chroot so dnf can reach the network.
 	resolvSrc := "/etc/resolv.conf"
 	resolvDst := filepath.Join(mountRoot, "etc", "resolv.conf")
@@ -1021,6 +1028,13 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 			_ = exec.Command("umount", "-l", binds[i].dst).Run()
 		}
 	}()
+
+	// Ensure /dev/fd exists inside the chroot — dracut and other tools use
+	// bash process substitution which requires /dev/fd → /proc/self/fd.
+	devFD := filepath.Join(mountRoot, "dev", "fd")
+	if _, err := os.Lstat(devFD); os.IsNotExist(err) {
+		_ = os.Symlink("/proc/self/fd", devFD)
+	}
 
 	// Inside the chroot, /boot/efi is the ESP (already mounted by mountPartitions)
 	// and /boot is the boot partition. Paths are chroot-relative.
@@ -1226,6 +1240,13 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 			_ = exec.Command("umount", "-l", mountedPaths[i]).Run()
 		}
 	}()
+
+	// Ensure /dev/fd exists inside the chroot — dracut and other tools use
+	// bash process substitution which requires /dev/fd → /proc/self/fd.
+	devFD := filepath.Join(mountRoot, "dev", "fd")
+	if _, err := os.Lstat(devFD); os.IsNotExist(err) {
+		_ = os.Symlink("/proc/self/fd", devFD)
+	}
 
 	// Rocky 10+ dracut with BLS Type 2 layout writes kernel+initramfs into
 	// /boot/efi/<machine-id>/<kernel-version>/. Create the directory tree
