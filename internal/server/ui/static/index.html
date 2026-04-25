@@ -7,7 +7,7 @@
     <title>clustr</title>
     <link rel="stylesheet" href="/ui/css/style.css">
     <link rel="stylesheet" href="/ui/css/xterm.css">
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233b82f6'/><text x='5' y='23' font-size='20' font-family='monospace' font-weight='bold' fill='white'>c</text></svg>">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233b82f6'/><g transform='translate(4,4) scale(1)' fill='none' stroke='white' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'><line x1='12' y1='12' x2='6' y2='5'/><line x1='12' y1='12' x2='19' y2='7'/><line x1='12' y1='12' x2='8' y2='20'/><line x1='12' y1='12' x2='19' y2='18'/><circle cx='12' cy='12' r='2.6' fill='white'/><circle cx='6' cy='5' r='1.7' fill='white'/><circle cx='19' cy='7' r='1.7' fill='white'/><circle cx='8' cy='20' r='1.7' fill='white'/><circle cx='19' cy='18' r='1.7' fill='white'/></g></svg>">
 </head>
 <body>
 <div id="app">
@@ -17,13 +17,20 @@
     <aside class="sidebar" aria-label="Site">
         <div class="sidebar-logo">
             <div class="sidebar-logo-mark">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                    <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                    <line x1="12" y1="12" x2="6" y2="5"/><line x1="12" y1="12" x2="19" y2="7"/><line x1="12" y1="12" x2="8" y2="20"/><line x1="12" y1="12" x2="19" y2="18"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/><circle cx="6" cy="5" r="1.7" fill="currentColor"/><circle cx="19" cy="7" r="1.7" fill="currentColor"/><circle cx="8" cy="20" r="1.7" fill="currentColor"/><circle cx="19" cy="18" r="1.7" fill="currentColor"/>
                 </svg>
             </div>
             <div>
                 <div class="sidebar-logo-text">clustr</div>
             </div>
+        </div>
+
+        <!-- Cluster status strip (populated by JS) -->
+        <div class="cluster-strip" id="cluster-strip">
+            <span class="live-dot"></span>
+            <span class="cluster-name" id="cluster-name">cluster</span>
+            <span class="cluster-meta" id="cluster-meta"></span>
         </div>
 
         <nav class="sidebar-nav" role="navigation" aria-label="Main navigation">
@@ -190,25 +197,20 @@
             </div>
         </nav>
 
-        <div class="sidebar-footer" aria-label="Settings and status">
-            <a href="#/settings" class="nav-item" id="nav-settings" style="width:100%;margin-bottom:6px;">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                    <circle cx="12" cy="12" r="3"/>
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                </svg>
-                <span>Settings</span>
-            </a>
-            <div style="display:flex;align-items:center;width:100%;">
-                <span class="health-dot" id="health-dot"></span>
-                <span class="health-label" id="health-label" role="status" aria-live="polite">checking…</span>
-                <button id="logout-btn" title="Sign out" aria-label="Sign out" style="margin-left:auto;background:transparent;border:none;cursor:pointer;color:var(--text-sidebar);opacity:0.6;padding:4px;display:flex;align-items:center;" onclick="Auth.logout()">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="16" height="16">
-                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-                    </svg>
-                </button>
+        <div class="sidebar-footer" aria-label="User and status">
+            <div class="user-avatar" id="user-avatar"></div>
+            <div class="user-info">
+                <span class="user-name" id="user-name">operator</span>
+                <span class="user-role" id="user-role">admin</span>
             </div>
+            <button class="footer-btn" id="settings-btn" title="Settings" aria-label="Settings" onclick="window.location.hash='#/settings'">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+            <button class="footer-btn" id="logout-btn" title="Sign out" aria-label="Sign out" onclick="Auth.logout()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="16" height="16"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </button>
         </div>
-        <!-- Session expiry banner (injected by JS) -->
+        <!-- Session expiry banner -->
         <div id="session-expiry-banner" style="display:none;background:#f59e0b;color:#1e293b;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;text-align:center;" onclick="Auth.extendSession()"></div>
     </aside>
 

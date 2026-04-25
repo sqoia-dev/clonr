@@ -114,7 +114,23 @@ const App = {
         this._mainEl = document.getElementById('main-content');
         this._initRoutes();
         this._watchHealth();
+        this._updateClusterStrip();
         Router.start();
+    },
+
+    async _updateClusterStrip() {
+        try {
+            const [nodes, images] = await Promise.all([
+                API.nodes.list().catch(() => []),
+                API.images.list().catch(() => [])
+            ]);
+            const meta = document.getElementById('cluster-meta');
+            if (meta) {
+                const online = Array.isArray(nodes) ? nodes.filter(n => n.status === 'deployed' || n.status === 'online').length : 0;
+                const total = Array.isArray(nodes) ? nodes.length : 0;
+                meta.textContent = `${online}/${total} nodes`;
+            }
+        } catch (_) {}
     },
 
     _initRoutes() {
@@ -219,16 +235,13 @@ const App = {
     },
 
     _watchHealth() {
-        const dot   = document.getElementById('health-dot');
-        const label = document.getElementById('health-label');
+        const dot = document.querySelector('.cluster-strip .live-dot');
         const check = async () => {
             try {
                 await API.health.get();
-                if (dot)   { dot.classList.remove('offline'); }
-                if (label) { label.textContent = 'online'; }
+                if (dot) { dot.style.background = '#6ee7b7'; }
             } catch (_) {
-                if (dot)   { dot.classList.add('offline'); }
-                if (label) { label.textContent = 'offline'; }
+                if (dot) { dot.style.background = 'var(--error)'; }
             }
         };
 
@@ -257,7 +270,7 @@ const App = {
 
         check();
         checkSession();
-        setInterval(check, 30000);
+        setInterval(() => { check(); this._updateClusterStrip(); }, 30000);
         setInterval(checkSession, 60000);
     },
 };
@@ -7946,6 +7959,16 @@ const Auth = {
             // Also check the response — if the session is key-based, role may be missing.
             const me = await resp.json().catch(() => ({}));
             Auth._role = me.role || 'admin';
+
+            // Populate sidebar footer with user info
+            const userAvatar = document.getElementById('user-avatar');
+            const userName = document.getElementById('user-name');
+            const userRole = document.getElementById('user-role');
+            if (me.username) {
+                if (userAvatar) userAvatar.textContent = me.username.substring(0, 2).toUpperCase();
+                if (userName) userName.textContent = me.username;
+            }
+            if (userRole) userRole.textContent = Auth._role;
         } catch (_) {
             // Network error — still try to start the app; api.js will redirect on 401.
         }
