@@ -1084,13 +1084,23 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 // everything topology-specific is generated fresh from the target partition UUIDs.
 //
 // partDevs must be in the same order as layout.Partitions (index i → device i+1).
-func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout api.DiskLayout, partDevs []string) error {
+func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout api.DiskLayout, partDevs []string, progress ProgressMessenger) error {
 	log := logger()
+
+	// reportStep sends a human-readable sub-step description to the UI and console.
+	// The zerolog server journal already has detail; this surfaces it to the operator.
+	reportStep := func(msg string) {
+		log.Info().Msg("finalize/boot: " + msg)
+		if progress != nil {
+			progress.SetMessage(msg)
+		}
+	}
 
 	// ── 1. Generate fresh machine-id ────────────────────────────────────────
 	// Content-only images carry an empty /etc/machine-id placeholder.
 	// Generate a 128-bit random hex string and write it now so that BLS entry
 	// filenames (which embed the machine-id) are deterministic within this deploy.
+	reportStep("Generating machine identity")
 	log.Info().Msg("  → Generating machine ID...")
 	machineID, err := generateMachineID()
 	if err != nil {
@@ -1111,6 +1121,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// /etc/fstab from all fstab.d files in lexicographic order.
 	// Paths matching /etc/fstab.d/9*-*.fstab are owned by the image overlay and
 	// are never overwritten here.
+	reportStep("Writing filesystem table")
 	log.Info().Msg("  → Writing fstab...")
 	log.Info().Msg("finalize/boot: generating /etc/fstab.d/00-clonr-os.fstab")
 	if err := writeFstabD(ctx, mountRoot, layout, partDevs); err != nil {
@@ -1119,6 +1130,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	log.Info().Msg("finalize/boot: /etc/fstab assembled from fstab.d")
 
 	// Get the root UUID now — needed for BLS entries and grub.cfg.
+	reportStep("Resolving partition UUIDs")
 	log.Info().Msg("  → Resolving partition UUIDs...")
 	var rootUUID, bootUUID string
 	for i, p := range layout.Partitions {
@@ -1154,6 +1166,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// Content-only images have an empty /boot/, so BLS generation and grub.cfg
 	// both fail with "no kernel found". Copy any missing kernels into /boot now
 	// so that all subsequent steps (BLS, dracut, grub.cfg) can find them.
+	reportStep("Copying kernel to boot partition")
 	log.Info().Msg("  → Copying kernel to /boot...")
 	modulesDir := filepath.Join(mountRoot, "usr", "lib", "modules")
 	if modEntries, modErr := os.ReadDir(modulesDir); modErr == nil {
@@ -1273,6 +1286,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// a PXE initramfs environment with different hardware than the target node.
 	// --force: overwrite any existing initramfs images without prompting.
 	// --regenerate-all: rebuild for every installed kernel version.
+	reportStep("Rebuilding initramfs")
 	log.Info().Msg("  → Rebuilding initramfs with dracut...")
 	log.Info().Msg("finalize/boot: rebuilding initramfs via dracut --no-hostonly --regenerate-all")
 	dracutCmd := exec.CommandContext(ctx, "chroot", mountRoot,
@@ -1311,6 +1325,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// fail on BIOS RAID (diskfilter writes are not supported) and injects
 	// unnecessary multi-boot / rescue complexity. We generate a minimal config
 	// directly from the discovered kernels and target UUIDs.
+	reportStep("Writing bootloader configuration")
 	log.Info().Msg("  → Writing grub.cfg...")
 	log.Info().Msg("finalize/boot: writing minimal hand-crafted grub.cfg")
 	if err := writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID, layout); err != nil {
@@ -1323,6 +1338,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// ── 9. SSH host key scrub ────────────────────────────────────────────────
 	// Remove host keys baked into the image so sshd regenerates unique keys
 	// on first boot via the ssh-keygen firstboot unit.
+	reportStep("Scrubbing SSH host keys")
 	log.Info().Msg("  → Scrubbing SSH host keys...")
 	hostKeys, _ := filepath.Glob(filepath.Join(mountRoot, "etc", "ssh", "ssh_host_*"))
 	for _, k := range hostKeys {

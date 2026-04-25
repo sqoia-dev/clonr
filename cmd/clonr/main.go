@@ -643,13 +643,23 @@ PXE-booted nodes running from initramfs.`,
 			if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 				bs.SetClientdBinPath(cfg.ClientdBinPath)
 			}
+			// Wire progress reporter and serial console callback so Finalize can
+			// stream sub-step descriptions to the UI and console in real time.
+			if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
+				fd.Progress = progressReporter
+				fd.ConsoleCallback = func(msg string) {
+					printPhaseUpdate("Finalizing", msg)
+				}
+			}
 			if err := deployer.Finalize(ctx, *nodeCfg, mountRoot); err != nil {
+				consolePrintln("") // close the in-progress \r line
 				printPhase(phaseFailed, "Finalize")
 				printDeployError("finalize", err.Error())
 				deployLog.Error().Str("component", "chroot").Err(err).Msg("finalize failed")
 				progressReporter.EndPhase(err.Error())
 				return fmt.Errorf("finalize: %w", err)
 			}
+			consolePrintln("") // advance past the \r sub-step line
 			printPhase(phaseDone, "Node configuration applied")
 			deployLog.Info().Str("component", "chroot").Msg("node configuration applied")
 			progressReporter.EndPhase("")
@@ -1122,13 +1132,23 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 		bs.SetClientdBinPath(cfg.ClientdBinPath)
 	}
+	// Wire progress reporter and serial console callback so Finalize can
+	// stream sub-step descriptions to the UI and console in real time.
+	if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
+		fd.Progress = reporter
+		fd.ConsoleCallback = func(msg string) {
+			printPhaseUpdate("Finalizing", msg)
+		}
+	}
 	if err := deployer.Finalize(ctx, nodeCfg, mountRoot); err != nil {
+		consolePrintln("") // close the in-progress \r line
 		printPhase(phaseFailed, "Finalize")
 		printDeployError("finalize", err.Error())
 		deployLog.Error().Err(err).Msg("finalize failed")
 		reporter.EndPhase(err.Error())
 		return Wrap(ExitFinalize, "finalize", fmt.Errorf("finalize: %w", err))
 	}
+	consolePrintln("") // advance past the \r sub-step line
 	printPhase(phaseDone, "Node configuration applied")
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("node configuration applied")
 	reporter.EndPhase("")

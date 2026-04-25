@@ -33,7 +33,10 @@ type ProgressReporter struct {
 	bytesDone    int64
 	bytesTotal   int64
 	lastSend     time.Time
-	mu           sync.Mutex
+	// message is the current human-readable sub-step description.
+	// It is included in every progress update while set.
+	message string
+	mu      sync.Mutex
 }
 
 // NewProgressReporter creates a ProgressReporter attached to the given client and node.
@@ -63,6 +66,17 @@ func (r *ProgressReporter) StartPhase(phase string, total int64) {
 	r.phaseStart = time.Now()
 	r.bytesDone = 0
 	r.bytesTotal = total
+	r.message = ""
+	r.sendLocked("", true)
+}
+
+// SetMessage updates the human-readable sub-step description and sends
+// an immediate progress update. The message persists until the next
+// SetMessage or StartPhase call (which clears it).
+func (r *ProgressReporter) SetMessage(msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.message = msg
 	r.sendLocked("", true)
 }
 
@@ -153,6 +167,7 @@ func (r *ProgressReporter) sendLocked(errMsg string, force bool) {
 		BytesTotal: r.bytesTotal,
 		Speed:      speed,
 		ETA:        int(eta),
+		Message:    r.message,
 		UpdatedAt:  now.UTC(),
 		Error:      errMsg,
 	}

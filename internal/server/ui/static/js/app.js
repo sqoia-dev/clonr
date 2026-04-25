@@ -781,6 +781,8 @@ const Pages = {
                         </div>
                         <span class="text-dim text-sm" style="white-space:nowrap">${pct}% &nbsp;${fmtBytes(p.bytes_done)} / ${fmtBytes(p.bytes_total)}</span>
                     </div>`;
+                } else if (p.message) {
+                    progressCell = `<span class="text-dim text-sm">${escHtml(p.message)}</span>`;
                 } else {
                     progressCell = `<span class="text-dim text-sm">—</span>`;
                 }

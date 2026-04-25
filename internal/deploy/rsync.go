@@ -25,6 +25,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ProgressMessenger is an optional interface for sending human-readable
+// sub-step descriptions to the UI during deployment. The deploy engine
+// uses this to report what it's doing (e.g., "Installing UEFI bootloader")
+// without coupling to the client package.
+type ProgressMessenger interface {
+	SetMessage(msg string)
+}
+
 // partitionEntry pairs a PartitionSpec with its original index in the layout.
 // Used internally by partitionDisk and expandTargetMapForRAIDMembers.
 // origIdx == -1 indicates a synthesised entry (not from the user-supplied layout).
@@ -74,6 +82,18 @@ type FilesystemDeployer struct {
 	// ImageID is the ID of the base image being deployed. Used together with
 	// ImageDir to construct the destination path for the grub.efi copy-back.
 	ImageID string
+
+	// Progress is an optional messenger that receives human-readable sub-step
+	// descriptions during Finalize. Set to a *client.ProgressReporter (or any
+	// ProgressMessenger implementation) to stream finalization steps to the UI.
+	// Leave nil to skip (default for non-reporter deploys).
+	Progress ProgressMessenger
+
+	// ConsoleCallback is an optional function called with each finalization
+	// sub-step message for display on the serial console. Typically calls
+	// printPhaseUpdate("Finalizing", msg) on the PXE node's stderr.
+	// Leave nil to skip.
+	ConsoleCallback func(string)
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -560,6 +580,20 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 			Msgf("═══ Phase %d/%d: %s ═══", phaseNum, totalPhases, title)
 	}
 
+	// reportStep sends a human-readable sub-step description to the UI progress
+	// reporter and the serial console callback (if set). The zerolog server journal
+	// already has detailed logs — this surfaces them to the operator's console and
+	// browser in real time.
+	reportStep := func(msg string) {
+		logger().Info().Msg("finalize: " + msg)
+		if d.Progress != nil {
+			d.Progress.SetMessage(msg)
+		}
+		if d.ConsoleCallback != nil {
+			d.ConsoleCallback(msg)
+		}
+	}
+
 	// Re-create the partition device list from the stored layout, using the same
 	// per-target counter logic as createFilesystems so partition numbers are
 	// consistent across both phases.
@@ -567,6 +601,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 	// Re-mount all partitions so applyNodeConfig can write into the filesystem.
 	logPhase("Mounting partitions")
+	reportStep("Mounting partitions")
 	if err := d.mountPartitions(ctx, partDevs, mountRoot); err != nil {
 		return fmt.Errorf("deploy: finalize: re-mount partitions: %w", err)
 	}
@@ -590,6 +625,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	}
 
 	logPhase("Applying node configuration")
+	reportStep("Applying node identity (hostname, network, users)")
 	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
 		return err
 	}
@@ -613,6 +649,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	}
 	if hasBIOSGrub {
 		logPhase("Installing BIOS bootloader")
+		reportStep("Installing BIOS bootloader")
 		log := logger()
 		bootDir := filepath.Join(mountRoot, "boot")
 
@@ -765,6 +802,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 		// Confirm the ESP is actually mounted. mountPartitions already ran above
 		// but we verify here so a misconfigured layout fails loudly.
+		reportStep("Verifying EFI system partition")
 		log.Info().Msg("  → Verifying ESP mount point...")
 		if _, err := os.Stat(efiDir); err != nil {
 			return fmt.Errorf("deploy: finalize: UEFI ESP mount point %s not accessible: %w", efiDir, err)
@@ -805,6 +843,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// NVRAM entries are absent — critical for VMs whose pflash vars are reset on reimage).
 		// --no-nvram skips grub2-install's own NVRAM write; FixEFIBoot (step 5) handles
 		// NVRAM via efibootmgr so we have full control over label and loader path.
+		reportStep("Running GRUB installer in chroot")
 		log.Info().Msg("  → Running grub2-install --target=x86_64-efi in chroot...")
 		log.Info().Str("disk", d.targetDisk).Msg("finalize: running grub2-install --target=x86_64-efi inside chroot")
 		if err := runGrub2InstallEFIInChroot(ctx, mountRoot); err != nil {
@@ -818,6 +857,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// Step 4: verify grubx64.efi exists post-install. grub2-install can exit 0
 		// but silently skip writing the binary in some edge cases (missing modules,
 		// wrong chroot state). A missing binary means OVMF will loop at the picker.
+		reportStep("Verifying bootloader binary")
 		if _, err := os.Stat(grubx64Path); err != nil {
 			return &BootloaderError{
 				Targets: []string{d.targetDisk},
@@ -829,6 +869,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 		// Copy the grub2-install-built EFI binary (with compiled-in modules) back
 		// to the image directory so the server serves it for future UEFI chain-boots.
+		reportStep("Updating server boot binary")
 		log.Info().Msg("  → Updating server-side grub.efi for chain-boot...")
 		if d.ImageDir != "" && d.ImageID != "" {
 			serverGrubPath := filepath.Join(d.ImageDir, d.ImageID, "grub.efi")
@@ -847,6 +888,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// Step 5: create/repair the NVRAM boot entry so OVMF knows to load our EFI
 		// binary. FixEFIBoot removes stale entries and creates a fresh one pointing
 		// to \EFI\rocky\grubx64.efi on the ESP.
+		reportStep("Configuring UEFI boot entry")
 		log.Info().Msg("  → Creating NVRAM boot entry...")
 		if err := FixEFIBoot(ctx, d.targetDisk, espPartNum, "Rocky Linux", `\EFI\rocky\grubx64.efi`); err != nil {
 			return &BootloaderError{
@@ -868,6 +910,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	// we write boot-critical files.
 	if len(d.layout.RAIDArrays) > 0 {
 		logPhase("Waiting for RAID sync")
+		reportStep("Waiting for RAID array sync")
 		waitForRAIDSync(ctx)
 	}
 
@@ -899,7 +942,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	if targets := grubInstallTargets(d.targetDisk, d.layout); len(targets) > 0 {
 		bootConfigDisk = targets[0]
 	}
-	if err := applyBootConfig(ctx, mountRoot, bootConfigDisk, d.layout, partDevs); err != nil {
+	if err := applyBootConfig(ctx, mountRoot, bootConfigDisk, d.layout, partDevs, d.Progress); err != nil {
 		return fmt.Errorf("deploy: finalize: boot config: %w", err)
 	}
 
@@ -917,12 +960,14 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	// so the deployed OS phones home on first boot to verify the bootloader+kernel
 	// are functional. Fatal on failure: a deploy without phone-home is false-green.
 	logPhase("Injecting phone-home and clientd")
+	reportStep("Injecting phone-home service")
 	if err := injectPhoneHome(mountRoot, d.NodeToken, d.VerifyBootURL); err != nil {
 		return fmt.Errorf("deploy: finalize: phone-home injection: %w", err)
 	}
 
 	// ── clonr-clientd injection ───────────────────────────────────────────────
 	// Non-fatal: clientd missing means no live heartbeat, but the node boots fine.
+	reportStep("Injecting node agent")
 	if err := injectClientd(mountRoot, d.ClientdURL, d.ClientdBinPath); err != nil {
 		logger().Warn().Err(err).Msg("WARNING: finalize: clientd injection failed (non-fatal)")
 	}
