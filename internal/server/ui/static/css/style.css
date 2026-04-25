@@ -362,7 +362,6 @@ a:hover {
     overflow-y: auto;
     background: var(--bg-primary);
     padding: 28px 32px;
-    max-width: 1400px;
 }
 
 /* ─── Page title ─────────────────────────────────────────────────────────── */
@@ -1553,6 +1552,7 @@ td.dim {
 
 .page-enter {
     animation: pageIn 0.18s ease;
+    max-width: 1400px;
 }
 
 @keyframes pageIn {
