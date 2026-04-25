@@ -249,6 +249,8 @@ const API = {
         get(id)                             { return API.get(`/reimage/${id}`); },
         cancel(id)                          { return API.del(`/reimage/${id}`); },
         retry(id)                           { return API.post(`/reimage/${id}/retry`, {}); },
+        // cancelAllActive cancels every non-terminal reimage (pending, triggered, in_progress).
+        cancelAllActive()                   { return API.post('/reimage/cancel-all-active', {}); },
     },
     health: {
         get()                 { return API.get('/health'); },

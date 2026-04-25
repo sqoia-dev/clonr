@@ -1001,6 +1001,9 @@ const Pages = {
             <div class="card-header">
                 <h2 class="card-title">System Initramfs</h2>
                 <div class="flex gap-8">
+                    <button class="btn btn-secondary btn-sm" style="color:var(--error);border-color:var(--error)" onclick="Pages.cancelAllActiveDeploys()" title="Cancel all pending/running/triggered reimage requests — unblocks initramfs rebuild">
+                        Cancel All Active Deploys
+                    </button>
                     <button class="btn btn-secondary btn-sm" onclick="Pages.showRebuildInitramfsModal()">
                         Rebuild
                     </button>
@@ -1101,7 +1104,21 @@ const Pages = {
         } catch (e) {
             if (resultDiv) {
                 resultDiv.style.display = 'block';
-                resultDiv.innerHTML = `<div class="alert alert-error" style="background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:6px;padding:12px;color:var(--error)">Rebuild failed: ${escHtml(e.message)}</div>`;
+                // deploy_active: surface a cancel-all button so the operator can unblock.
+                const isDeployActive = e.message && (
+                    e.message.includes('active deployment') || e.message.includes('deploy_active')
+                );
+                if (isDeployActive) {
+                    resultDiv.innerHTML = `<div class="alert alert-error" style="background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:6px;padding:12px;color:var(--error)">
+                        <div style="margin-bottom:8px"><strong>Blocked:</strong> ${escHtml(e.message)}</div>
+                        <button class="btn btn-secondary btn-sm" style="color:var(--error);border-color:var(--error)"
+                            onclick="Pages.cancelAllActiveDeploys().then(() => { document.getElementById('rebuild-initramfs-modal')?.remove(); Pages.images(); })">
+                            Cancel All Active Deploys
+                        </button>
+                    </div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="alert alert-error" style="background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:6px;padding:12px;color:var(--error)">Rebuild failed: ${escHtml(e.message)}</div>`;
+                }
             }
             if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
         }
@@ -3325,6 +3342,7 @@ const Pages = {
                         if (recent.length === 0) {
                             return emptyState('No reimage history', 'Reimage requests appear here after the first deploy.');
                         }
+                        const TERMINAL = new Set(['complete', 'succeeded', 'failed', 'canceled']);
                         const statusBadge = (s) => {
                             const cls = {
                                 complete:    'badge-success',
@@ -3344,11 +3362,16 @@ const Pages = {
                             const errTip = r.error_message
                                 ? `title="${escHtml(r.error_message)}"`
                                 : '';
+                            const cancelBtn = !TERMINAL.has(r.status)
+                                ? `<button class="btn btn-xs" style="padding:2px 6px;font-size:11px;color:var(--error);background:transparent;border:1px solid var(--error);border-radius:4px;cursor:pointer;line-height:1.2"
+                                       onclick="Pages._cancelReimage('${escHtml(r.id)}','${escHtml(node.id)}')" title="Cancel this reimage">Cancel</button>`
+                                : '';
                             return `<tr>
                                 <td class="text-mono text-sm" ${errTip}>${escHtml(r.id.slice(0,8))}</td>
                                 <td>${statusBadge(r.status)}${failDetail}</td>
                                 <td class="text-sm">${r.completed_at ? fmtDate(r.completed_at) : (r.created_at ? fmtDate(r.created_at) : '—')}</td>
                                 <td class="text-sm text-dim">${escHtml(r.phase || '—')}</td>
+                                <td style="width:70px;text-align:center">${cancelBtn}</td>
                             </tr>`;
                         }).join('');
                         return `<table class="card-table" style="width:100%;border-collapse:collapse;font-size:13px">
@@ -3357,6 +3380,7 @@ const Pages = {
                                 <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Status</th>
                                 <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">When</th>
                                 <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)">Phase</th>
+                                <th style="padding:8px 16px;text-align:left;font-weight:500;color:var(--text-secondary)"></th>
                             </tr></thead>
                             <tbody>${rows}</tbody>
                         </table>`;
@@ -4510,6 +4534,33 @@ const Pages = {
             Pages.nodeDetail(nodeId);
         } catch (e) {
             alert(`Trigger reimage failed: ${e.message}`);
+        }
+    },
+
+    // ── Cancel a single reimage request ──────────────────────────────────────
+
+    async _cancelReimage(reimageId, nodeId) {
+        if (!confirm('Cancel this reimage request?\n\nThe node\'s reimage_pending flag will be cleared so PXE boots route to disk.')) return;
+        try {
+            await API.reimages.cancel(reimageId);
+            App.toast('Reimage request canceled', 'success');
+            Pages.nodeDetail(nodeId);
+        } catch (e) {
+            alert(`Cancel failed: ${e.message}`);
+        }
+    },
+
+    // ── Cancel all non-terminal reimage requests ──────────────────────────────
+
+    async cancelAllActiveDeploys() {
+        if (!confirm('Cancel ALL active reimage requests (pending, triggered, in_progress)?\n\nThis will clear reimage_pending on all affected nodes.')) return;
+        try {
+            const result = await API.reimages.cancelAllActive();
+            const n = result && result.canceled != null ? result.canceled : '?';
+            App.toast(`${n} reimage request${n === 1 ? '' : 's'} canceled`, 'success');
+            Pages.images();
+        } catch (e) {
+            alert(`Cancel all failed: ${e.message}`);
         }
     },
 

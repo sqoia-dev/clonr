@@ -613,6 +613,9 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/nodes/{id}/reimage", reimageH.ListForNode)
 			r.Get("/reimage/{id}", reimageH.Get)
 			r.Delete("/reimage/{id}", reimageH.Cancel)
+			// cancel-all-active must be registered before /{id}/retry so chi's
+			// radix tree matches the literal segment before the wildcard.
+			r.Post("/reimage/cancel-all-active", reimageH.CancelAllActive)
 			r.Post("/reimage/{id}/retry", reimageH.Retry)
 			r.Get("/reimages", reimageH.List)
 

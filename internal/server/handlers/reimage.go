@@ -193,7 +193,7 @@ func (h *ReimageHandler) Get(w http.ResponseWriter, r *http.Request) {
 // ─── DELETE /api/v1/reimage/{id} ─────────────────────────────────────────────
 
 // Cancel handles DELETE /api/v1/reimage/{id}.
-// Only requests in "pending" status can be canceled.
+// Cancels any request that is not already in a terminal status (complete, failed, canceled).
 func (h *ReimageHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	req, err := h.DB.GetReimageRequest(r.Context(), id)
@@ -202,22 +202,51 @@ func (h *ReimageHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Status != api.ReimageStatusPending {
+	// Only terminal statuses cannot be canceled.
+	switch req.Status {
+	case api.ReimageStatusComplete, api.ReimageStatusFailed, api.ReimageStatusCanceled:
 		writeJSON(w, http.StatusConflict, api.ErrorResponse{
-			Error: fmt.Sprintf("cannot cancel reimage in status %q — only pending requests can be canceled", req.Status),
+			Error: fmt.Sprintf("cannot cancel reimage in terminal status %q", req.Status),
 			Code:  "not_cancelable",
 		})
 		return
 	}
 
-	if err := h.DB.UpdateReimageRequestStatus(r.Context(), id, api.ReimageStatusCanceled, "canceled by operator"); err != nil {
+	msg := "canceled by operator"
+	if req.Status == api.ReimageStatusInProgress || req.Status == api.ReimageStatusTriggered {
+		msg = fmt.Sprintf("canceled by operator (was in %s state)", req.Status)
+	}
+
+	if err := h.DB.UpdateReimageRequestStatus(r.Context(), id, api.ReimageStatusCanceled, msg); err != nil {
 		log.Error().Err(err).Str("req_id", id).Msg("reimage cancel")
 		writeError(w, err)
 		return
 	}
 
-	log.Info().Str("req_id", id).Str("node_id", req.NodeID).Msg("reimage request canceled")
+	// Also clear the node's reimage_pending flag so future PXE boots route to disk.
+	// Non-fatal — log on error but still report success.
+	if err := h.DB.SetReimagePending(r.Context(), req.NodeID, false); err != nil {
+		log.Warn().Err(err).Str("node_id", req.NodeID).Msg("reimage cancel: clear reimage_pending failed")
+	}
+
+	log.Info().Str("req_id", id).Str("node_id", req.NodeID).Str("prev_status", string(req.Status)).
+		Msg("reimage request canceled")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// CancelAllActive handles POST /api/v1/reimage/cancel-all-active.
+// Cancels every reimage request in a non-terminal status (pending, running, triggered).
+// Useful when nodes are powered off mid-deploy and the DB state is stuck,
+// blocking other operations like initramfs rebuild.
+func (h *ReimageHandler) CancelAllActive(w http.ResponseWriter, r *http.Request) {
+	count, err := h.DB.CancelAllActiveReimages(r.Context(), "bulk canceled by operator")
+	if err != nil {
+		log.Error().Err(err).Msg("reimage cancel-all-active")
+		writeError(w, err)
+		return
+	}
+	log.Info().Int("count", count).Msg("reimage requests bulk canceled")
+	writeJSON(w, http.StatusOK, map[string]int{"canceled": count})
 }
 
 // ─── POST /api/v1/reimage/{id}/retry ─────────────────────────────────────────

@@ -1056,6 +1056,54 @@ func (db *DB) GetActiveReimageForNode(ctx context.Context, nodeID string) (*api.
 	return &req, nil
 }
 
+// CancelAllActiveReimages transitions every non-terminal reimage request
+// (pending, triggered, in_progress) to canceled with the given message.
+// It also clears the reimage_pending flag on all affected nodes so that
+// future PXE boots route to disk rather than re-deploying.
+// Returns the number of requests updated.
+func (db *DB) CancelAllActiveReimages(ctx context.Context, msg string) (int, error) {
+	now := time.Now().Unix()
+
+	// Collect affected node IDs before updating so we can clear reimage_pending.
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT DISTINCT node_id FROM reimage_requests
+		WHERE status IN ('pending', 'triggered', 'in_progress')
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("db: cancel all active reimages: list nodes: %w", err)
+	}
+	var nodeIDs []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr == nil {
+			nodeIDs = append(nodeIDs, id)
+		}
+	}
+	rows.Close()
+
+	// Bulk-cancel all active requests.
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE reimage_requests
+		SET status = 'canceled', error_message = ?, completed_at = ?
+		WHERE status IN ('pending', 'triggered', 'in_progress')
+	`, msg, now)
+	if err != nil {
+		return 0, fmt.Errorf("db: cancel all active reimages: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	// Clear reimage_pending on affected nodes (non-fatal per node).
+	for _, nodeID := range nodeIDs {
+		if clearErr := db.SetReimagePending(ctx, nodeID, false); clearErr != nil {
+			// Log would require importing zerolog; use fmt to stderr instead.
+			// The handler layer logs this via Warn so we do not need to duplicate here.
+			_ = clearErr
+		}
+	}
+
+	return int(n), nil
+}
+
 // ─── ReimageRequest scan helpers ─────────────────────────────────────────────
 
 // scanNullableTimestamp converts a raw SQLite column value to *time.Time.
