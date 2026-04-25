@@ -336,9 +336,12 @@ func buildStandaloneGrubEFI(rootMnt, destPath string) error {
 
 	// Embedded grub.cfg — searches local disks for the OS-installed grub.cfg
 	// and loads it via configfile. No HTTP/network modules needed because the
-	// search logic is built into the binary.
+	// search logic is built into the binary. No hardcoded partition fallbacks:
+	// with XFS and ext4 compiled in, search --file scans all GPT partitions and
+	// finds the right one regardless of layout.
 	embeddedCfg := `# Embedded by clustr at image build time.
 # Searches local disks for the OS-installed grub.cfg and loads it.
+# XFS, ext4, and fat modules are compiled in — search scans all partitions.
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then
     configfile ($root)/grub2/grub.cfg
@@ -349,19 +352,10 @@ if [ -f ($root)/EFI/rocky/grub.cfg ]; then
     configfile ($root)/EFI/rocky/grub.cfg
 fi
 
-# Last resort: try common GPT layouts.
-set root=(hd0,gpt2)
-if [ -f /grub2/grub.cfg ]; then
-    configfile /grub2/grub.cfg
-fi
-
-set root=(hd0,gpt3)
-if [ -f /grub2/grub.cfg ]; then
-    configfile /grub2/grub.cfg
-fi
-
-echo "clustr: grub.cfg not found on any local partition"
-echo "Dropping to GRUB shell for manual recovery."
+echo "FATAL: clustr could not locate grub.cfg on any local partition"
+echo "Expected /grub2/grub.cfg or /EFI/rocky/grub.cfg on a GPT partition."
+echo "Check that the disk image deployed correctly and grub2-install ran."
+sleep 30
 `
 
 	cfgFile, err := os.CreateTemp("", "clustr-grub-embedded-*.cfg")

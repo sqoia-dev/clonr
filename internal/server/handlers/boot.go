@@ -439,17 +439,18 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 // that config via configfile. This works regardless of the disk layout because
 // search scans all partitions rather than relying on a hardcoded device path.
 //
-// Module availability: grub.efi is built at image-creation time by
-// grub2-mkimage with all required modules (part_gpt, search, xfs, ext2, fat)
-// compiled in and a disk-search config embedded. Alternatively, grub2-install
-// --target=x86_64-efi during deploy finalization produces a binary with the
-// same properties (modules compiled in). In both cases insmod is a no-op when
-// the module is already present but harmless otherwise.
+// Module availability: the server-side grub.efi is the distribution RPM binary
+// (grubx64.efi from the image's /boot/efi/EFI/<distro>/ — saved before
+// grub2-install runs during deploy finalization). This binary is the full
+// RPM-packaged build (~3.8 MB) with all filesystem modules compiled in (XFS,
+// ext4, fat, part_gpt, search, etc.). The grub2-install --removable stripped
+// output (~912 KB) lacks XFS and cannot search 4-partition XFS layouts.
+// No insmod is needed; modules cannot be loaded over HTTP anyway.
 func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
 	const cfg = `# grub.cfg stub served by clustr — redirects to local disk config.
-# No insmod needed: grub.efi is built by grub2-mkimage at image-creation time
-# (or replaced by grub2-install during deploy finalization) with all required
-# modules compiled in. Modules can't be loaded over HTTP so insmod would fail.
+# No insmod needed: grub.efi is the distribution RPM binary (full module set
+# including XFS, ext4, fat compiled in). Modules cannot be loaded over HTTP
+# so insmod is a no-op here.
 
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then
@@ -461,14 +462,10 @@ if [ -f ($root)/EFI/rocky/grub.cfg ]; then
     configfile ($root)/EFI/rocky/grub.cfg
 fi
 
-# Last resort: try each disk manually
-set root=(hd0,gpt2)
-if [ -f /grub2/grub.cfg ]; then
-    configfile /grub2/grub.cfg
-fi
-
-echo "clustr: grub.cfg not found on any local partition"
-echo "Dropping to GRUB shell for manual recovery."
+echo "FATAL: clustr could not locate grub.cfg on any local partition"
+echo "Expected /grub2/grub.cfg or /EFI/rocky/grub.cfg on a GPT partition."
+echo "Check that the disk image deployed correctly and grub2-install ran."
+sleep 30
 `
 	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte(cfg))

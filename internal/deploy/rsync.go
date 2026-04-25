@@ -874,6 +874,22 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		log.Info().Str("path", grubx64Path).
 			Msg("finalize: grubx64.efi present on ESP — proceeding with grub2-install")
 
+		// Save the distribution grubx64.efi (the full RPM-packaged binary with all
+		// filesystem modules, ~3.8 MB) BEFORE grub2-install runs. grub2-install
+		// --removable overwrites EFI/rocky/grubx64.efi with its own stripped output
+		// (~912 KB, missing XFS and ext4 modules). The distro binary is what the
+		// server must serve for UEFI chain-boot so that GRUB can search all partition
+		// types (XFS /boot, XFS /, ext4, etc.) without falling to a rescue prompt.
+		var distroGrubEFI []byte
+		if data, readErr := os.ReadFile(grubx64Path); readErr == nil {
+			distroGrubEFI = data
+			log.Info().Str("path", grubx64Path).Int("size", len(data)).
+				Msg("finalize: saved distro grubx64.efi before grub2-install (will use for server chain-boot)")
+		} else {
+			log.Warn().Err(readErr).Str("path", grubx64Path).
+				Msg("finalize: could not read distro grubx64.efi before grub2-install — server binary will use post-install copy")
+		}
+
 		// Step 3: run grub2-install --target=x86_64-efi inside the deployed chroot.
 		// Running inside the chroot is essential: grub2-install reads GRUB modules
 		// from /usr/lib/grub/x86_64-efi/ inside the chroot (the deployed OS's own
@@ -910,20 +926,43 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 		log.Info().Str("path", grubx64Path).Msg("  ✓ grubx64.efi verified post-install")
 
-		// Copy the grub2-install-built EFI binary (with compiled-in modules) back
-		// to the image directory so the server serves it for future UEFI chain-boots.
+		// Copy the distribution grubx64.efi (saved before grub2-install ran) to the
+		// image directory so the server serves it for future UEFI chain-boots.
+		//
+		// We prefer the pre-install distro binary (~3.8 MB, RPM-packaged) over the
+		// post-install grub2-install output (~912 KB, stripped --removable build)
+		// because the distro binary includes all filesystem modules (XFS, ext4, fat)
+		// compiled in. The stripped binary lacks these modules, so GRUB cannot search
+		// XFS partitions and falls to a bare rescue prompt on the 4-partition node
+		// layout (ESP + /boot XFS + swap + / XFS). See fix: use distro grubx64.efi.
 		reportStep("Updating server boot binary")
 		log.Info().Msg("  → Updating server-side grub.efi for chain-boot...")
 		if d.ImageDir != "" && d.ImageID != "" {
 			serverGrubPath := filepath.Join(d.ImageDir, d.ImageID, "grub.efi")
-			src, err := os.ReadFile(grubx64Path)
-			if err == nil {
+			// Prefer distro binary (saved pre-grub2-install). Fall back to post-install
+			// copy only if the pre-install read failed (should not happen in practice).
+			var src []byte
+			var srcDesc string
+			if len(distroGrubEFI) > 0 {
+				src = distroGrubEFI
+				srcDesc = "distro RPM binary (pre-grub2-install)"
+			} else {
+				var readErr error
+				src, readErr = os.ReadFile(grubx64Path)
+				if readErr != nil {
+					log.Warn().Err(readErr).Str("path", grubx64Path).
+						Msg("finalize: could not read post-install grubx64.efi — server grub.efi not updated (non-fatal)")
+					src = nil
+				}
+				srcDesc = "post-install grub2-install binary (fallback)"
+			}
+			if src != nil {
 				if writeErr := os.WriteFile(serverGrubPath, src, 0o644); writeErr != nil {
 					log.Warn().Err(writeErr).Str("dst", serverGrubPath).
 						Msg("finalize: could not update server grub.efi (non-fatal)")
 				} else {
-					log.Info().Str("dst", serverGrubPath).
-						Msg("finalize: updated server grub.efi with grub2-install-built binary")
+					log.Info().Str("dst", serverGrubPath).Str("source", srcDesc).Int("size", len(src)).
+						Msg("finalize: updated server grub.efi")
 				}
 			}
 		}
