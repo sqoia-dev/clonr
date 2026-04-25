@@ -193,6 +193,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create image dir %s: %w", cfg.ImageDir, err)
 	}
 
+	// Ensure TMPDIR exists (set by systemd unit; Go's os.MkdirTemp uses it).
+	if td := os.Getenv("TMPDIR"); td != "" {
+		if err := os.MkdirAll(td, 0o755); err != nil {
+			return fmt.Errorf("failed to create tmpdir %s: %w", td, err)
+		}
+	}
+
 	// Open database (applies migrations on first run).
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
