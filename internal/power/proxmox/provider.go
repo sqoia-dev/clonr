@@ -153,12 +153,26 @@ func (p *Provider) PowerOff(ctx context.Context) error {
 	return nil
 }
 
-// PowerCycle resets the VM (hard reset without power cycle).
+// PowerCycle hard-cycles the VM. If the VM is stopped it starts it; if it is
+// running it issues a reset. Proxmox returns HTTP 500 when /status/reset is
+// called on a stopped VM, so we check the current status first.
 func (p *Provider) PowerCycle(ctx context.Context) error {
-	return p.Reset(ctx)
+	status, err := p.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("proxmox: power cycle: get status: %w", err)
+	}
+	switch status {
+	case power.PowerOff:
+		return p.PowerOn(ctx)
+	case power.PowerOn:
+		return p.Reset(ctx)
+	default:
+		return fmt.Errorf("proxmox: power cycle: unexpected vm status %q", status)
+	}
 }
 
-// Reset issues a hard reset to the VM.
+// Reset issues a hard reset to the VM. The VM must already be running;
+// callers that need to handle stopped VMs should use PowerCycle instead.
 func (p *Provider) Reset(ctx context.Context) error {
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/status/reset", p.node, p.vmid)
 	if err := p.post(ctx, path, nil, nil); err != nil {
