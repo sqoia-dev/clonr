@@ -63,14 +63,48 @@ func FixEFIBoot(ctx context.Context, disk string, espPartNum int, label, loader 
 	return setBootEntry(ctx, newNum)
 }
 
-// removeStaleEntries deletes existing efibootmgr entries matching label.
+// removeStaleEntries deletes existing efibootmgr entries that match label
+// exactly or whose labels contain known OS-like substrings. Firmware and
+// network entries (PXE, IPv4, IPv6, IPMI, BMC, Network, Shell, HTTP) are
+// always preserved so the node can still PXE-boot after the next reimage.
 func removeStaleEntries(ctx context.Context, label string) error {
 	entries, err := listBootEntries(ctx)
 	if err != nil {
 		return err
 	}
+
+	// OS-like labels to remove (case-insensitive substring match).
+	osLabels := []string{"rocky", "linux", "red hat", "centos", "fedora", "uefi os"}
+	// Labels to preserve (firmware/network entries).
+	keepLabels := []string{"pxe", "ipv4", "ipv6", "ipmi", "bmc", "network", "shell", "http"}
+
 	for _, e := range entries {
-		if strings.EqualFold(e.Label, label) {
+		upper := strings.ToUpper(e.Label)
+
+		// Always preserve firmware/network entries.
+		preserve := false
+		for _, k := range keepLabels {
+			if strings.Contains(upper, strings.ToUpper(k)) {
+				preserve = true
+				break
+			}
+		}
+		if preserve {
+			continue
+		}
+
+		// Remove if exact label match OR matches any OS-like label.
+		shouldRemove := strings.EqualFold(e.Label, label)
+		if !shouldRemove {
+			for _, os := range osLabels {
+				if strings.Contains(upper, strings.ToUpper(os)) {
+					shouldRemove = true
+					break
+				}
+			}
+		}
+
+		if shouldRemove {
 			cmd := exec.CommandContext(ctx, "efibootmgr", "--delete-bootnum", "--bootnum", e.BootNum)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("efiboot: remove %s: %w\noutput: %s", e.BootNum, err, string(out))

@@ -1091,6 +1091,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// Content-only images carry an empty /etc/machine-id placeholder.
 	// Generate a 128-bit random hex string and write it now so that BLS entry
 	// filenames (which embed the machine-id) are deterministic within this deploy.
+	log.Info().Msg("  → Generating machine ID...")
 	machineID, err := generateMachineID()
 	if err != nil {
 		return fmt.Errorf("finalize/boot: generate machine-id: %w", err)
@@ -1110,6 +1111,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// /etc/fstab from all fstab.d files in lexicographic order.
 	// Paths matching /etc/fstab.d/9*-*.fstab are owned by the image overlay and
 	// are never overwritten here.
+	log.Info().Msg("  → Writing fstab...")
 	log.Info().Msg("finalize/boot: generating /etc/fstab.d/00-clonr-os.fstab")
 	if err := writeFstabD(ctx, mountRoot, layout, partDevs); err != nil {
 		return fmt.Errorf("finalize/boot: fstab generation: %w", err)
@@ -1117,6 +1119,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	log.Info().Msg("finalize/boot: /etc/fstab assembled from fstab.d")
 
 	// Get the root UUID now — needed for BLS entries and grub.cfg.
+	log.Info().Msg("  → Resolving partition UUIDs...")
 	var rootUUID, bootUUID string
 	for i, p := range layout.Partitions {
 		if i >= len(partDevs) {
@@ -1151,6 +1154,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// Content-only images have an empty /boot/, so BLS generation and grub.cfg
 	// both fail with "no kernel found". Copy any missing kernels into /boot now
 	// so that all subsequent steps (BLS, dracut, grub.cfg) can find them.
+	log.Info().Msg("  → Copying kernel to /boot...")
 	modulesDir := filepath.Join(mountRoot, "usr", "lib", "modules")
 	if modEntries, modErr := os.ReadDir(modulesDir); modErr == nil {
 		for _, e := range modEntries {
@@ -1269,6 +1273,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// a PXE initramfs environment with different hardware than the target node.
 	// --force: overwrite any existing initramfs images without prompting.
 	// --regenerate-all: rebuild for every installed kernel version.
+	log.Info().Msg("  → Rebuilding initramfs with dracut...")
 	log.Info().Msg("finalize/boot: rebuilding initramfs via dracut --no-hostonly --regenerate-all")
 	dracutCmd := exec.CommandContext(ctx, "chroot", mountRoot,
 		"dracut", "--force", "--no-hostonly", "--regenerate-all")
@@ -1306,6 +1311,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// fail on BIOS RAID (diskfilter writes are not supported) and injects
 	// unnecessary multi-boot / rescue complexity. We generate a minimal config
 	// directly from the discovered kernels and target UUIDs.
+	log.Info().Msg("  → Writing grub.cfg...")
 	log.Info().Msg("finalize/boot: writing minimal hand-crafted grub.cfg")
 	if err := writeHandcraftedGrubCfg(mountRoot, rootUUID, bootUUID, layout); err != nil {
 		// Non-fatal: the node can still attempt to boot via BLS entries.
@@ -1317,6 +1323,7 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 	// ── 9. SSH host key scrub ────────────────────────────────────────────────
 	// Remove host keys baked into the image so sshd regenerates unique keys
 	// on first boot via the ssh-keygen firstboot unit.
+	log.Info().Msg("  → Scrubbing SSH host keys...")
 	hostKeys, _ := filepath.Glob(filepath.Join(mountRoot, "etc", "ssh", "ssh_host_*"))
 	for _, k := range hostKeys {
 		if err := os.Remove(k); err != nil {
