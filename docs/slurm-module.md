@@ -114,11 +114,18 @@ curl -s http://10.99.0.1:8080/api/v1/images/<image-id>/metadata \
 ### API call to enable
 
 ```bash
-curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
+curl -s -X POST http://10.99.0.1:8080/api/v1/modules/slurm/enable \
   -H "Authorization: Bearer <your-api-key>" \
-  -H "Content-Type: application/json" | python3 -m json.tool
+  -H "Content-Type: application/json" \
+  -d '{"cluster_name":"my-hpc","slurm_repo_url":"https://repos.openhpc.community/OpenHPC/3/EL_9"}' \
+  | python3 -m json.tool
 # Expected: { "status": "ready" }
 ```
+
+The `cluster_name` is required and is used as the `ClusterName` directive in
+`slurm.conf`. The `slurm_repo_url` points to the DNF/YUM repository from which
+Slurm packages are installed automatically at node deploy time — see §2 for
+the full auto-install flow.
 
 ### What happens automatically on enable
 
@@ -135,10 +142,21 @@ curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
 ### Verify the module is enabled
 
 ```bash
-curl -s http://10.99.0.1:8080/api/v1/slurm/status \
+curl -s http://10.99.0.1:8080/api/v1/modules/slurm/status \
   -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
-# Expected: { "enabled": true, "munge_key_present": true, ... }
+# Expected:
+# {
+#   "enabled": true,
+#   "munge_key_present": true,
+#   "cluster_name": "my-hpc",
+#   "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9"
+# }
 ```
+
+The `munge_key_present` field is `true` once the key has been generated (on
+first enable). It becomes `false` only if the `slurm_secrets` table is
+manually cleared — under normal operation it stays `true` permanently after
+first enable.
 
 ---
 
@@ -458,9 +476,9 @@ All Slurm API routes require an admin-scoped Bearer token.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/slurm/status` | Returns module enabled state, munge key presence, and config summary |
-| `POST` | `/api/v1/slurm/enable` | Enable the module. Generates munge key if absent. Returns `{"status":"ready"}`. |
-| `POST` | `/api/v1/slurm/disable` | Disable the module. Stops munge key injection and Slurm config writes during finalize. Does not delete existing keys or configs. |
+| `GET` | `/api/v1/modules/slurm/status` | Returns module enabled state, munge key presence, `cluster_name`, `slurm_repo_url`, and config summary |
+| `POST` | `/api/v1/modules/slurm/enable` | Enable the module. Body: `{"cluster_name":"…","slurm_repo_url":"…"}`. Generates munge key if absent. Returns `{"status":"ready"}`. |
+| `POST` | `/api/v1/modules/slurm/disable` | Disable the module. Stops munge key injection, Slurm config writes, and auto-install at finalize. Does not delete existing keys or configs. |
 
 ### Config management
 

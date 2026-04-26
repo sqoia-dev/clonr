@@ -2,6 +2,31 @@
 
 ---
 
+## Docs — Slurm turnkey path (2026-04-25)
+
+### Documentation
+
+- **[NEW-GAP-1] `docs/slurm-module.md` §3 — enable curl example corrected**
+  Route fixed from `/api/v1/slurm/enable` to `/api/v1/modules/slurm/enable`.
+  Request body added: `cluster_name` (required, sets `ClusterName` in
+  `slurm.conf`) and `slurm_repo_url` (repo used for auto-install at deploy
+  time). Inline explanation added for both fields. Status verify example
+  updated to the correct `/modules/slurm/status` route with a full expected
+  response shape including `munge_key_present`, `cluster_name`, and
+  `slurm_repo_url`. `munge_key_present` field semantics documented (true
+  after first enable, stays true permanently under normal operation).
+  §9 API reference table routes corrected to `/modules/slurm/*` for all
+  three module-status entries; descriptions updated to reflect required
+  request body and new response fields.
+
+- **[NEW-GAP-2 docs] `docs/slurm-module.md` §3 — `munge_key_present` field documented**
+  The `GET /api/v1/modules/slurm/status` expected response now explicitly
+  shows `munge_key_present: true` and explains its lifecycle. Closes the
+  docs side of NEW-GAP-2 (Dinesh's code side: add `munge_key_present` field
+  to the status response struct).
+
+---
+
 ## Gap-fill Sprint — Slurm + UX hardening (2026-04-25)
 
 Ten code-side findings from the end-to-end new-user walkthrough (Task #62)
