@@ -106,7 +106,7 @@ done
 # ---------------------------------------------------------------------------
 log "Copying backup to ${DB_PATH}"
 cp -a "${BACKUP_FILE}" "${DB_PATH}"
-chmod 644 "${DB_PATH}"
+chmod 600 "${DB_PATH}"
 
 # Final sanity check on the restored file
 sqlite3 "${DB_PATH}" '.tables' >/dev/null || {

@@ -16,8 +16,8 @@ ExecStart=/usr/local/bin/clustr-serverd --pxe
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-# Bind to provisioning interface only in production: CLUSTR_LISTEN_ADDR=10.99.0.1:8080
-Environment=CLUSTR_LISTEN_ADDR=0.0.0.0:8080
+# Bind to provisioning interface only — never expose to host LAN or WAN.
+Environment=CLUSTR_LISTEN_ADDR=10.99.0.1:8080
 Environment=CLUSTR_IMAGE_DIR=/var/lib/clustr/images
 Environment=CLUSTR_DB_PATH=/var/lib/clustr/db/clustr.db
 Environment=CLUSTR_BOOT_DIR=/var/lib/clustr/boot
