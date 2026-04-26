@@ -60,6 +60,10 @@ type Manager struct {
 	db  *db.DB
 	hub ClientdHubIface
 
+	// Audit records state-changing events. Optional — nil disables auditing.
+	// GAP-20: wired from server.go after construction.
+	Audit *db.AuditService
+
 	mu  sync.RWMutex
 	cfg *db.SlurmModuleConfigRow // in-memory cache, loaded from DB on New()
 

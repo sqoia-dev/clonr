@@ -35,6 +35,11 @@ type APIKeysHandler struct {
 	// GetActorLabel returns the label of the key/session making this request.
 	// Used to populate created_by on newly minted keys.
 	GetActorLabel func(r *http.Request) string
+
+	// Audit records state-changing events. GAP-20: wired into create/revoke/rotate.
+	Audit *db.AuditService
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
 }
 
 // apiKeyResponse is the wire format for a key in list/get responses.
@@ -151,6 +156,16 @@ func (h *APIKeysHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		s := expiresAt.UTC().Format(time.RFC3339)
 		resp.APIKey.ExpiresAt = &s
 	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionAPIKeyCreate, "api_key", id,
+			r.RemoteAddr, nil, map[string]string{"scope": string(scope), "label": label})
+	}
+
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -201,6 +216,15 @@ func (h *APIKeysHandler) HandleRevoke(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, api.ErrorResponse{Error: "failed to revoke key", Code: "internal_error"})
 		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionAPIKeyRevoke, "api_key", id, //#nosec G101 -- audit action name, not a credential
+			r.RemoteAddr, map[string]string{"label": rec.Label, "scope": string(rec.Scope)}, nil)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -276,6 +300,16 @@ func (h *APIKeysHandler) HandleRotate(w http.ResponseWriter, r *http.Request) {
 		s := old.ExpiresAt.UTC().Format(time.RFC3339)
 		resp.APIKey.ExpiresAt = &s
 	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionAPIKeyRotate, "api_key", newID, //#nosec G101 -- audit action name, not a credential
+			r.RemoteAddr, map[string]string{"old_key_id": id, "label": old.Label}, map[string]string{"new_key_id": newID})
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

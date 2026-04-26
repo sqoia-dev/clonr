@@ -142,6 +142,8 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	hub := NewClientdHub()
 
 	slurmMgr := slurmmodule.New(database, hub)
+	// GAP-20: wire audit service into slurm manager for config change recording.
+	slurmMgr.Audit = db.NewAuditService(database)
 
 	s := &Server{
 		cfg:                 cfg,
@@ -620,6 +622,9 @@ func (s *Server) buildRouter() chi.Router {
 	// Wire audit + actor info into handlers that need it.
 	usersH.Audit = s.audit
 	usersH.GetActorInfo = getActorInfo
+	// GAP-20: wire audit into API key handler (create/revoke/rotate).
+	apiKeysH.Audit = s.audit
+	apiKeysH.GetActorInfo = getActorInfo
 
 	images := &handlers.ImagesHandler{
 		DB:                s.db,

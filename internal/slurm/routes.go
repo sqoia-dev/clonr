@@ -126,6 +126,13 @@ func (m *Manager) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GAP-20: audit slurm module enable.
+	if m.Audit != nil {
+		actor := keyLabelFromContext(r)
+		m.Audit.Record(r.Context(), "", actor, db.AuditActionSlurmConfigChange, "slurm_module", "enable",
+			r.RemoteAddr, nil, map[string]string{"cluster_name": req.ClusterName})
+	}
+
 	jsonResponse(w, map[string]string{"status": "ready"}, http.StatusOK)
 }
 
@@ -210,6 +217,12 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Str("filename", filename).Msg("slurm: save config version failed")
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
 		return
+	}
+
+	// GAP-20: audit slurm config file save.
+	if m.Audit != nil {
+		m.Audit.Record(r.Context(), "", authoredBy, db.AuditActionSlurmConfigChange, "slurm_config", filename,
+			r.RemoteAddr, nil, map[string]interface{}{"filename": filename, "version": ver, "message": body.Message})
 	}
 
 	jsonResponse(w, map[string]interface{}{"filename": filename, "version": ver}, http.StatusOK)
