@@ -100,6 +100,18 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+
+		// GAP-15: Pre-check 3 — node must have at least one SSH key configured.
+		// Reimaging a node with no SSH keys produces an inaccessible node: the
+		// deployed OS has no authorized_keys so no one can log in. The operator
+		// should set ssh_keys on the node before triggering a reimage.
+		if len(node.SSHKeys) == 0 {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+				Error: "node has no SSH keys configured — reimaging will produce an inaccessible node. Set ssh_keys first or pass force=true to override",
+				Code:  "no_ssh_keys",
+			})
+			return
+		}
 	}
 
 	// Build and persist the request record.
@@ -356,6 +368,32 @@ func (h *ReimageHandler) Retry(w http.ResponseWriter, r *http.Request) {
 		final = newReq
 	}
 	writeJSON(w, http.StatusOK, final)
+}
+
+// ─── GET /api/v1/nodes/{id}/reimage/active ───────────────────────────────────
+
+// GetActiveForNode handles GET /api/v1/nodes/{id}/reimage/active (GAP-11).
+// Returns the current active (non-terminal) reimage request for the node, or
+// {"status":"no_active_reimage"} when none exists. Never returns an empty body.
+func (h *ReimageHandler) GetActiveForNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	if _, err := h.DB.GetNodeConfig(r.Context(), nodeID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage get-active: lookup")
+		writeError(w, err)
+		return
+	}
+	if active == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "no_active_reimage"})
+		return
+	}
+	writeJSON(w, http.StatusOK, active)
 }
 
 // ─── DELETE /api/v1/nodes/{id}/reimage/active ────────────────────────────────

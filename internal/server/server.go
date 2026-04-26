@@ -985,6 +985,8 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/reimage", reimageH.Create)
 			// S4-10: Cancel in-flight reimage by node ID (not reimage UUID).
 			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}/reimage/active", reimageH.CancelActiveForNode)
+			// GAP-11: GET active reimage — returns {} when none exists instead of empty body.
+			r.Get("/nodes/{id}/reimage/active", reimageH.GetActiveForNode)
 			r.Get("/nodes/{id}/reimage", reimageH.ListForNode)
 			r.Get("/reimage/{id}", reimageH.Get)
 			r.Delete("/reimage/{id}", reimageH.Cancel)
