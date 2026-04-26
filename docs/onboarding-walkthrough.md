@@ -242,13 +242,33 @@ Once the build completes:
 
 ---
 
-### Phase 4 Verdict: PENDING SLURM BUILD
+### NEW-GAP-6: Slurm Build-From-Source Fails — PMIx Cannot Find Built hwloc
 
-Once the Slurm 24.11.5 build completes and nodes are reimaged with the build artifact, the final verdict will be updated. The remaining verification steps are:
-- `systemctl is-active munge slurmctld` on slurm-controller
-- `systemctl is-active munge slurmd` on slurm-compute  
-- `scontrol ping` returning `slurmctld@slurm-controller Version 24.11.5 up`
-- `srun -N2 hostname` returning both node names
+| Field | Value |
+|---|---|
+| **ID** | NEW-GAP-6 |
+| **Priority** | P1 — the `POST /api/v1/slurm/builds` pipeline is unusable |
+| **Summary** | `buildOneDep` in `internal/slurm/deps.go` passes only `--prefix` to every dep's `./configure`. PMIx 4.x requires `--with-hwloc=<path>` pointing to the previously-built hwloc install. The `installPaths` map of already-built deps is returned by `buildDependencies` but is never passed into `buildOneDep` for use as cross-dep configure flags. Result: PMIx configure fails with "PMIx requires HWLOC topology library support, but an adequate version of that library was not found." |
+| **Effort** | M — pass `installPaths` to `buildOneDep`, add per-dep configure flag logic (hwloc → `--with-hwloc`, ucx → `--with-ucx`, etc.) |
+| **Fix** | In `buildDependencies`, pass the current `installPaths` map to `buildOneDep`. In `buildOneDep`, switch on `name` to append dependency-specific configure flags: `pmix` gets `--with-hwloc=installPaths["hwloc"]`, `slurm` gets `--with-hwloc`, `--with-ucx`, `--with-pmix`, `--with-munge`. |
+
+---
+
+### Phase 4 Verdict: BLOCKED — Slurm Build Pipeline Has a Code Bug
+
+Three consecutive build attempts failed:
+1. Build 1: `bzip2` not installed on cloner → fixed, restarted.
+2. Build 2: `g++` not installed on cloner → fixed, restarted. PMIx configure failed: no libevent.
+3. Build 3: `libevent-devel` installed. PMIx configure failed: hwloc found in system scan but `hwloc.h` not on system path (hwloc was built in the workspace, not system-installed). Root cause: `buildOneDep` does not pass `--with-hwloc=<workspace-hwloc-install>` to PMIx configure.
+
+**Outcome:** `scontrol ping` and `srun -N2 hostname` cannot be verified in this session. The blocker is NEW-GAP-6, a code defect in the build pipeline.
+
+**What WAS verified end-to-end:**
+- iPXE boot → deploy agent → OS image written → GRUB → disk boot → EL10 kernel → clustr-clientd connected: CONFIRMED WORKING on both nodes
+- SSH access to deployed nodes: CONFIRMED WORKING after image fixes (NEW-GAP-3)
+- slurm.conf, gres.conf, cgroup.conf pushed to nodes via `POST /api/v1/slurm/push`: CONFIRMED WORKING
+- munge binary present in image, munge.key generated, `munge.service` active on slurm-controller: CONFIRMED WORKING
+- Slurm packages: NOT INSTALLED (build pipeline blocked by NEW-GAP-6)
 
 ---
 
