@@ -8,18 +8,18 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) -X main.commitSHA=$(COMMIT) -
 all: client server clientd
 
 client:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clonr ./cmd/clonr
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clustr ./cmd/clustr
 
 server:
-	go build $(LDFLAGS) -o bin/clonr-serverd ./cmd/clonr-serverd
+	go build $(LDFLAGS) -o bin/clustr-serverd ./cmd/clustr-serverd
 
 clientd:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clonr-clientd ./cmd/clonr-clientd
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clustr-clientd ./cmd/clustr-clientd
 
 # static builds a fully static binary suitable for embedding in PXE initramfs.
 # Uses -a to force rebuild of all packages with CGO disabled.
 static:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -a -o bin/clonr-static ./cmd/clonr
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -a -o bin/clustr-static ./cmd/clustr
 
 test:
 	go test ./... -v
