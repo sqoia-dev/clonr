@@ -2,6 +2,73 @@
 
 ---
 
+## Turnkey verification Round 4 — kpartx extraction fix + DeviceAllow dm fix (2026-04-26)
+
+### Problem 1: losetup --partscan partition devices unOpenable from Go subprocess
+
+On Rocky Linux 9 kernel `5.14.0-611.47.1.el9_7.x86_64` with an XFS data volume mounted,
+`losetup --partscan` creates `/dev/loopNpM` device nodes in `/dev` but they cannot be opened
+from Go child processes spawned by `clustr-serverd`. The kernel creates the nodes and
+`dmesg` shows `loop0: p1 p2 p3`, but any attempt to `open(2)` them from a subprocess of the
+Go server returns `EPERM` / "Can't open blockdev".
+
+Root cause: the combination of the XFS volume and the specific kernel's loop partition
+device handling creates a situation where the partition devices exist in `/dev` but are not
+accessible from within Go subprocess namespaces.
+
+### Fix 1: switch from losetup --partscan to kpartx
+
+`extract.go` `ExtractRootfs()` now:
+1. Attaches the raw disk with `losetup --find --show` (no `--partscan`)
+2. Creates partition device-mapper aliases via `kpartx -av loopDev`
+   → produces `/dev/mapper/loop0p1`, `/dev/mapper/loop0p2`, etc.
+3. Uses `/dev/mapper/loopNpM` paths for all subsequent mount operations
+4. Cleans up with `kpartx -d loopDev` before `losetup -d loopDev` in defer
+
+Device-mapper aliases work reliably regardless of kernel loop device configuration.
+Committed as `f6b200d`.
+
+### Problem 2: /dev/mapper/control not in DeviceAllow
+
+`clustr-serverd.service` uses `DevicePolicy=auto` which enforces a cgroup BPF device filter.
+The `DeviceAllow` list included loop devices and `/dev/kvm` but not device-mapper. When the
+extract subprocess called `kpartx`, libdevmapper's first action is to open `/dev/mapper/control`
+(char device, major 10, minor 236). The cgroup device filter denied the `open(2)` with EPERM:
+`/dev/mapper/control: open failed: Operation not permitted`.
+
+### Fix 2: add /dev/mapper/control and block-253 to DeviceAllow
+
+Added two new `DeviceAllow` entries to `deploy/systemd/clustr-serverd.service`:
+- `DeviceAllow=/dev/mapper/control rw` — allows libdevmapper to open the control node
+- `DeviceAllow=block-253 rwm` — allows read/write/mknod on device-mapper block devices
+  (major 253), which are the `/dev/mapper/loopNpM` partition aliases created by kpartx
+
+Updated the comment block explaining why both loop and device-mapper device allow entries
+are required for the extraction pipeline.
+
+### Round 4 verification result
+
+After both fixes:
+- Rocky Linux 9.5, BIOS firmware, OpenHPC EL9 repo
+- Image `bc6d3923` built to `ready` status in ~4 minutes (ISO cached)
+- Image size: 1.7 GiB (vs. 1.8 GiB for Rocky 10 — reasonable for a minimal install)
+- Firmware: `bios`, disk layout: biosboot(1M) + /boot(1G) + /(root, XFS)
+- Build extraction succeeded: no "Can't open blockdev", no "Operation not permitted"
+
+Node reimage and `srun -N2 hostname` verification: in progress (continuing).
+
+### Gaps found
+
+- **NEW-GAP-13** (P2): `deploy/systemd/clustr-serverd.service` in the repo lacked
+  `DeviceAllow` entries for device-mapper. Any fresh install of clustr on a Rocky Linux 9
+  host would hit this bug on the first BIOS image build. Fixed in this commit.
+
+- **NEW-GAP-14** (P2): `extract.go` used `losetup --partscan` which fails on Rocky Linux 9
+  kernels with XFS data volumes when called from a Go subprocess. Fixed by switching to kpartx
+  in `f6b200d`.
+
+---
+
 ## Management LAN access via Caddy bridge — tls-provisioning.md + install.md (2026-04-26)
 
 ### Problem

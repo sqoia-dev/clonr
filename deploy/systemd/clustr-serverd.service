@@ -219,22 +219,35 @@ MountFlags=
 # Device access
 # ---------------------------------------------------------------------------
 # ISO build pipeline uses qemu-kvm which requires /dev/kvm.
-# Rootfs extraction after install uses losetup which requires /dev/loop* block
-# devices AND /dev/loop-control. Important distinction:
-#   block-loop       — covers major 7 block devices (/dev/loop0, /dev/loop1p1,
-#                      etc.). Allows read/write/mknod on all loop block nodes.
-#   /dev/loop-control — character device (major 10, minor 237) used by
-#                       losetup -f to find and allocate a free loop device.
-#                       NOT covered by "block-loop". Without this entry,
-#                       losetup fails with "cannot find an unused loop device"
-#                       because the cgroup device controller denies open(2) on
-#                       the control node even for root + CAP_SYS_ADMIN.
-# Both entries are required for the full losetup → mount → extract workflow.
+# Rootfs extraction after install uses losetup + kpartx which requires:
+#   block-loop           — major 7 block devices (/dev/loop0, /dev/loop1, etc.).
+#                          Required for losetup --find --show to attach a raw disk.
+#   /dev/loop-control    — character device (major 10, minor 237) used by
+#                          losetup --find to allocate a free loop device.
+#                          NOT covered by "block-loop". Without this entry,
+#                          losetup fails with "cannot find an unused loop device"
+#                          because the cgroup device controller denies open(2) on
+#                          the control node even for root + CAP_SYS_ADMIN.
+#   /dev/mapper/control  — character device (major 10, minor 236) used by
+#                          kpartx (via libdevmapper) to create device-mapper
+#                          partition aliases (/dev/mapper/loopNpM). kpartx is
+#                          used instead of losetup --partscan because on Rocky
+#                          Linux 9 kernels, loop partition devices created by
+#                          --partscan cannot be opened ("Can't open blockdev")
+#                          from Go child processes. kpartx device-mapper aliases
+#                          work reliably regardless of kernel loop configuration.
+#   block-253            — device-mapper block devices (major 253): the
+#                          /dev/mapper/loopNpM devices created by kpartx. These
+#                          are the actual partition devices mounted during extraction.
+# All four entries are required for the full losetup → kpartx → mount → rsync
+# extraction workflow.
 DevicePolicy=auto
 DeviceAllow=/dev/kvm rwm
 DeviceAllow=/dev/net/tun rwm
 DeviceAllow=block-loop rwm
 DeviceAllow=/dev/loop-control rw
+DeviceAllow=/dev/mapper/control rw
+DeviceAllow=block-253 rwm
 
 [Install]
 WantedBy=multi-user.target
