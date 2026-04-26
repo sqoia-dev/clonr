@@ -2,6 +2,47 @@
 
 ---
 
+## Management LAN access via Caddy bridge — tls-provisioning.md + install.md (2026-04-26)
+
+### Problem
+
+After the SEC-P0-2 fix bound `clustr-serverd` to `10.99.0.1:8080` (provisioning interface only),
+the operator web UI became unreachable from the management LAN (`192.168.1.151`). The security
+posture was correct but the management access path was broken.
+
+### Solution: Caddy reverse-proxy bridge (Option B)
+
+Installed Caddy 2.11.2 on the provisioning host. Caddy listens on `192.168.1.151:80` (management
+interface, bound via `bind` directive) and reverse-proxies to `10.99.0.1:8080`. Because both IPs
+belong to the same host, Caddy reaches `clustr-serverd` as an interface-local connection with no
+firewall involvement. `clustr-serverd` was not restarted and `CLUSTR_LISTEN_ADDR` was not changed.
+
+Operational impact: none. clientd nodes continue reaching `10.99.0.1:8080` directly. No deploy
+traffic flows through Caddy.
+
+Firewall change: opened `http/tcp` on the `external` zone (eth0 / management LAN); removed the
+previously open `8080/tcp` on the external zone (it was harmless but misleading).
+
+### Doc updates
+
+- `docs/tls-provisioning.md` — new §3 "Management interface access (dual-NIC setup)" with the
+  exact Caddyfile, installation steps, firewall rules, and verification commands. §3–§5 (old)
+  renumbered to §4–§6. Added dual-NIC Caddyfile variant to §2.2.
+
+- `docs/install.md` — firewall section now includes a "Dual-NIC operators" note pointing to
+  `tls-provisioning.md §3` and explicitly warning against rebinding to `0.0.0.0`.
+
+### Live state on cloner (192.168.1.151)
+
+- Caddy 2.11.2 installed, `systemctl enable --now caddy` — active and enabled
+- Listening: `192.168.1.151:80` (management) + `127.0.0.1:2019` (admin API, localhost-only)
+- `http://192.168.1.151/api/v1/healthz/ready` returns HTTP 200 with all checks green
+- `http://192.168.1.151/` returns clustr web UI (HTTP 405 on HEAD is expected — GET works)
+- `http://10.99.0.1:8080/api/v1/healthz/ready` still returns HTTP 200 (direct path intact)
+- clustr-serverd PID 1593353, no restart, continuous since 09:50:57
+
+---
+
 ## Turnkey verification Round 3 — slurm-module.md API corrections + README Quick Start (2026-04-26)
 
 ### Slurm API path and body format corrections

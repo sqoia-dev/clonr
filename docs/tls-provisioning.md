@@ -8,9 +8,10 @@ This document covers TLS termination for the clustr API and web UI.
 
 1. [When TLS is required](#1-when-tls-is-required)
 2. [Recommended: Caddy as TLS terminator](#2-recommended-caddy-as-tls-terminator)
-3. [Configure initramfs for HTTPS](#3-configure-initramfs-for-https)
-4. [Air-gapped and physically-isolated environments](#4-air-gapped-and-physically-isolated-environments)
-5. [Alternatives to Caddy](#5-alternatives-to-caddy)
+3. [Management interface access (dual-NIC setup)](#3-management-interface-access-dual-nic-setup)
+4. [Configure initramfs for HTTPS](#4-configure-initramfs-for-https)
+5. [Air-gapped and physically-isolated environments](#5-air-gapped-and-physically-isolated-environments)
+6. [Alternatives to Caddy](#6-alternatives-to-caddy)
 
 ---
 
@@ -57,7 +58,9 @@ systemctl enable --now caddy
 
 ### 2.2 Caddyfile
 
-Create `/etc/caddy/Caddyfile`. Replace `clustr.hpc.example.com` with your actual hostname:
+Create `/etc/caddy/Caddyfile`. Two variants are provided below: the HTTPS variant (recommended when you have a publicly-resolvable hostname or an internal CA) and the HTTP-only variant used when Caddy bridges only the management LAN. See [§3](#3-management-interface-access-dual-nic-setup) for the dual-NIC case.
+
+**HTTPS variant** — replace `clustr.hpc.example.com` with your actual hostname:
 
 ```caddyfile
 # clustr provisioning server — TLS termination
@@ -169,11 +172,142 @@ clustr.hpc.example.com {
 
 ---
 
-## 3. Configure initramfs for HTTPS
+## 3. Management interface access (dual-NIC setup)
+
+Most production clustr installations use two network interfaces:
+
+| Interface | Role | IP example |
+|---|---|---|
+| `eth0` | Management / admin LAN | `192.168.1.151` |
+| `eth1` | Provisioning (PXE/DHCP/TFTP) | `10.99.0.1` |
+
+`clustr-serverd` binds `CLUSTR_LISTEN_ADDR` to the **provisioning interface only** (`10.99.0.1:8080`). This is the correct security posture — it prevents the DHCP server from answering on the management LAN. However, it also means the web UI is unreachable from an operator workstation on the management network.
+
+The solution is Caddy running on the same host, listening on the management interface and reverse-proxying to the provisioning IP. Caddy can reach `10.99.0.1:8080` as an interface-local connection because both IPs belong to the same host. The clustr-serverd process does not need to be restarted or rebind.
+
+### 3.1 Caddyfile for the management bridge
+
+This Caddyfile listens on port 80 of the management IP only (`bind 192.168.1.151`). Adapt the IP to match your management interface address.
+
+```caddyfile
+# clustr management interface bridge
+# Binds on the management interface and reverse-proxies to clustr-serverd
+# which is bound to the provisioning interface (10.99.0.1:8080).
+# This preserves SEC-P0-2: DHCP/TFTP/API remain on the provisioning interface only;
+# Caddy is the sole entry point from the management LAN.
+#
+# clientd nodes continue reaching 10.99.0.1:8080 directly — unchanged.
+
+:80 {
+    bind 192.168.1.151    # management interface IP; only this interface answers
+
+    reverse_proxy 10.99.0.1:8080 {
+        # Increase timeout for SSE log-streaming and WebSocket (clientd ws).
+        transport http {
+            read_timeout  3600s
+            write_timeout 3600s
+        }
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/clustr-access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+        format json
+    }
+}
+```
+
+### 3.2 Installation steps (Rocky Linux 9)
+
+```bash
+# Install Caddy from the official COPR
+dnf install -y 'dnf-command(copr)'
+dnf copr enable -y @caddy/caddy
+dnf install -y caddy
+
+# Create log directory with correct ownership
+mkdir -p /var/log/caddy
+chown -R caddy:caddy /var/log/caddy
+chmod 750 /var/log/caddy
+
+# Write the Caddyfile (use the template from §3.1 above)
+# /etc/caddy/Caddyfile
+
+# Validate and start
+caddy validate --config /etc/caddy/Caddyfile
+systemctl enable --now caddy
+```
+
+### 3.3 Firewall rules
+
+```bash
+# Rocky Linux 9 / firewalld
+# Open port 80 on the management zone (the zone that covers eth0)
+firewall-cmd --permanent --zone=external --add-service=http
+firewall-cmd --reload
+
+# Do NOT open port 80 or 8080 on the internal/provisioning zone — clientd goes direct to :8080
+# Remove any previously added 8080 rule from the external/management zone if present
+firewall-cmd --permanent --zone=external --remove-port=8080/tcp 2>/dev/null || true
+firewall-cmd --reload
+```
+
+Port 8080 should remain accessible on the provisioning zone (`internal`) for clientd and PXE traffic. It does not need to be open on the management zone (`external`) — Caddy handles that.
+
+### 3.4 Verify
+
+```bash
+# From the management LAN (operator workstation or the provisioning host itself)
+curl -s http://192.168.1.151/api/v1/healthz/ready
+# Expected: {"status":"ready","checks":{"db":"ok","boot_dir":"ok","initramfs":"ok"}}
+
+# Verify clustr-serverd direct access still works (from the provisioning host)
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready
+# Expected: same response
+
+# Confirm Caddy is adding its Via header (proving the proxy is in the path)
+curl -I http://192.168.1.151/ | grep Via
+# Expected: Via: 1.1 Caddy
+```
+
+### 3.5 Adding TLS (optional but recommended)
+
+If you have a DNS hostname that resolves to `192.168.1.151` from the management LAN and outbound HTTPS to Let's Encrypt, replace the `:80` + `bind` block with a named hostname block:
+
+```caddyfile
+clustr.mgmt.example.com {
+    reverse_proxy 10.99.0.1:8080 {
+        transport http {
+            read_timeout  3600s
+            write_timeout 3600s
+        }
+    }
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+}
+```
+
+For lab environments with no public DNS, use Caddy's internal CA (`tls internal`), or see §2.6 for manual certificate options.
+
+---
+
+## 4. Configure initramfs for HTTPS
 
 When TLS is enabled, nodes booting via PXE must communicate with the clustr server over HTTPS — not HTTP. The `clustr` binary baked into the initramfs reads `CLUSTR_SERVER` from the kernel command line or environment at boot time.
 
-### 3.1 Set CLUSTR_SERVER in the iPXE boot script
+### 4.1 Set CLUSTR_SERVER in the iPXE boot script
 
 The iPXE script served by clustr passes kernel cmdline parameters to the initramfs. Edit or ensure your boot script includes the HTTPS URL:
 
@@ -190,7 +324,7 @@ boot
 
 `CLUSTR_SERVER` tells the `clustr deploy` process where to register and upload logs. If using an internal CA (Option B above), also pass `CLUSTR_TLS_CA_CERT` pointing to the CA PEM or set `CLUSTR_INSECURE=true` (only acceptable if the provisioning network is fully isolated and no credentials flow over the wire).
 
-### 3.2 Inject the CA certificate into the initramfs (internal CA only)
+### 4.2 Inject the CA certificate into the initramfs (internal CA only)
 
 If the clustr server uses a certificate signed by a private CA, the initramfs must trust that CA. Add the CA PEM to `CLUSTR_BOOT_DIR/` and reference it:
 
@@ -205,7 +339,7 @@ cp /path/to/internal-ca.crt /var/lib/clustr/boot/internal-ca.crt
 
 Alternatively, rebuild the initramfs with the CA certificate pre-baked using a custom `scripts/build-initramfs.sh` hook that installs the cert into the initramfs root CA store.
 
-### 3.3 Verify
+### 4.3 Verify
 
 From a node that has booted into the initramfs, verify that the server is reachable over HTTPS:
 
@@ -216,7 +350,7 @@ wget -qO- https://clustr.hpc.example.com/api/v1/health
 
 ---
 
-## 4. Air-gapped and physically-isolated environments
+## 5. Air-gapped and physically-isolated environments
 
 Unencrypted HTTP on a **physically-isolated provisioning network** is acceptable under these conditions:
 
@@ -231,7 +365,7 @@ In this configuration, data-at-rest encryption (AES-256-GCM via `CLUSTR_SECRET_K
 
 ---
 
-## 5. Alternatives to Caddy
+## 6. Alternatives to Caddy
 
 ### nginx
 
