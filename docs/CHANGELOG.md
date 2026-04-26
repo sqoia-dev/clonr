@@ -64,6 +64,80 @@ and will be removed in **v1.1**. All endpoints returning `NodeConfig` now emit a
 
 ---
 
+## Gap-Fill Sprint — Turnkey Readiness (2026-04-26)
+
+### Documentation
+
+- **[GAP-9] `docs/install.md` §7 Step 5 — boot order corrected**
+  Changed boot order guidance from `net0;scsi0` (PXE-first) to `scsi0;net0`
+  (disk-first, net as fallback). Added explanation: persistent default is
+  disk-first; clustr temporarily flips to PXE-first via Proxmox API /
+  `SetNextBoot` for each reimage trigger, then flips back after verify-boot.
+
+- **[GAP-16] New `docs/slurm-module.md`** — complete Slurm module operator guide
+  Covers: prerequisites (Slurm must be in the image before deploy), enabling
+  the module, controller vs worker role assignment, munge key generation and
+  distribution, `slurm.conf` rendering from node inventory, `srun hostname`
+  smoke test, day-2 ops (add node, remove node, upgrade Slurm), full API
+  reference, and troubleshooting table. Linked from `README.md` and
+  `docs/install.md` See Also section.
+
+- **[GAP-2] `docs/install.md` §3.6 and §7 Step 1 — healthz auth documented**
+  Both healthz/ready examples now include the `Authorization: Bearer` header
+  and a note that the endpoint requires authentication. This reflects the
+  current server behaviour while Dinesh's code fix (make healthz unauthenticated)
+  is in progress. Docs will be updated once that fix lands.
+
+- **[GAP-1] `docs/install.md` §5 — `CLUSTR_SECRET_MASTER_KEY_PATH` documented**
+  Added entry to the Security env var table explaining this optional path-based
+  key override and its fallback behaviour.
+
+- **[GAP-3] `docs/install.md` §4.4 and `README.md` Quick Start Step 2 — bare-metal env var note**
+  Added explicit note that `clustr.env` is a Docker Compose convention; bare-
+  metal operators must set env vars in the systemd unit's `Environment=` lines.
+
+- **[GAP-4] `docs/install.md` §6 — bootstrap key recovery callout**
+  Added prominent "Recovery: if you missed the bootstrap API key" block with
+  the exact `clustr-serverd apikey create` command for both bare-metal and
+  Docker Compose paths.
+
+- **[GAP-5] `docs/install.md` §3.2 and §5 — `CLUSTR_SESSION_SECRET` warnings**
+  Added WARNING comment to the secrets.env generation snippet and strengthened
+  the env var table entry to explicitly state that omitting this causes every
+  web UI session to be invalidated on every server restart.
+
+- **[GAP-6] `docs/install.md` §7 Step 2 — image creation path reordered**
+  `factory/pull` (cloud image URL) is now the primary recommended first-image
+  path — no extra host packages, works out of the box. ISO build moved to
+  "Alternative path" with an explicit prerequisite list (`qemu-kvm`, `qemu-img`,
+  `genisoimage`, `xorriso`).
+
+- **[GAP-8] `docs/install.md` — new §8 "Registering Nodes"**
+  New section covering: MAC address discovery methods (Proxmox, DHCP log, BIOS),
+  `POST /api/v1/nodes` API call, `ssh_keys` importance warning, Proxmox power
+  provider config, IPMI power provider config, and manual power-cycle workflow
+  for nodes without BMC.
+
+- **[GAP-12] `docs/install.md` — new §9 "Reimaging Multiple Nodes"**
+  New section covering: bulk reimage via web UI checkbox + floating action bar,
+  group reimage via `POST /api/v1/node-groups/{id}/reimage`, use case for
+  redeploying an entire cluster.
+
+- **[GAP-10] `docs/install.md` §7 troubleshooting — `autoexec.ipxe` row**
+  Added row explaining that `autoexec.ipxe not found` in TFTP logs is normal
+  UEFI iPXE probe behaviour, not an error.
+
+- **[GAP-13] `docs/install.md` §7 troubleshooting — initramfs warning row**
+  Added row explaining that `initramfs not found` during finalize is expected
+  on ISO-built images; dracut rebuilds it automatically.
+
+- **[systemctl degraded] `docs/install.md` §7 troubleshooting — degraded row**
+  Added row: `systemctl is-system-running` shows `degraded` after first boot
+  → caused by `slurmd.service` enabled but slurm not installed → fix by
+  pre-installing slurm in image or disabling the Slurm module.
+
+---
+
 ## Sprint 6 — Release Readiness (2026-07-06 → 2026-07-19)
 
 ### CI / Build Gates

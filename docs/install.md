@@ -143,6 +143,8 @@ chmod 700 /etc/clustr
 
 # Session secret — HMAC key for browser session tokens. Rotate this to invalidate
 # all active browser sessions (e.g. on suspected compromise).
+# WARNING: if you skip this, a new random key is generated on every server start
+# and every web UI session is invalidated on each restart. Always set this.
 openssl rand -hex 64 | sed 's/^/CLUSTR_SESSION_SECRET=/' > /etc/clustr/secrets.env
 chmod 400 /etc/clustr/secrets.env
 
@@ -224,8 +226,12 @@ docker compose logs -f clustr
 ### 3.6 Verify the server is running
 
 ```bash
-curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
+# Replace <your-api-key> with the bootstrap key from §6, or any valid admin key.
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready \
+  -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
 # Expected: { "status": "ok", "checks": { "db": "ok", "boot_dir": "ok", "initramfs": ... } }
+# A 503 response means one or more checks failed — the "checks" map identifies which.
+# Note: /api/v1/healthz/ready requires a valid Bearer token.
 ```
 
 ---
@@ -288,6 +294,8 @@ systemctl daemon-reload
 systemctl enable --now clustr-serverd
 ```
 
+**Bare-metal env var note:** For the bare-metal path, non-secret configuration variables (`CLUSTR_LISTEN_ADDR`, `CLUSTR_PXE_INTERFACE`, etc.) go in `Environment=` lines directly inside the systemd unit file — **not** in `/etc/clustr/clustr.env`. The unit's `EnvironmentFile=` stanza only reads `/etc/clustr/secrets.env` (for `CLUSTR_SECRET_KEY` and `CLUSTR_SESSION_SECRET`). The `clustr.env` file referenced in the Docker Compose Quick Start is a Docker Compose convention; it has no effect on a bare-metal systemd install. If you create `/etc/clustr/clustr.env` on a bare-metal install and set variables there, the server will ignore them unless you also add `EnvironmentFile=/etc/clustr/clustr.env` to the unit.
+
 ### 4.5 Capture bootstrap output
 
 On first start, the server creates the default admin account and prints a one-time API key. See [§6 — Bootstrap Admin Account](#6-bootstrap-admin-account).
@@ -340,7 +348,8 @@ All variables are read from the process environment. With Docker Compose, set th
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `CLUSTR_SECRET_KEY` | — | **Yes** | 32-byte hex key used to encrypt BMC and LDAP credentials at rest (AES-256-GCM). Generate with `openssl rand -hex 32`. Server refuses to start if unset outside dev mode. |
-| `CLUSTR_SESSION_SECRET` | *(ephemeral)* | Recommended | HMAC key for browser session tokens. If unset, a random key is generated at startup and all sessions are invalidated on every restart. |
+| `CLUSTR_SECRET_MASTER_KEY_PATH` | *(unset)* | No | Path to a file containing the master key. When set, the server reads the key from this file instead of `CLUSTR_SECRET_KEY`. If the file does not exist the server falls back to `CLUSTR_SECRET_KEY`. The bare-metal systemd unit template references this variable; omitting the file is safe if `CLUSTR_SECRET_KEY` is set in `secrets.env`. |
+| `CLUSTR_SESSION_SECRET` | *(ephemeral)* | **Strongly recommended** | HMAC key for browser session tokens. **If unset, a random key is generated at each startup — every web UI session is invalidated on every server restart.** Generate with `openssl rand -hex 64`. |
 | `CLUSTR_SESSION_SECURE` | `0` | No | Set to `1` to mark session cookies as `Secure` (requires TLS). Should be `1` in any deployment with a TLS reverse proxy. |
 | `CLUSTR_AUTH_DEV_MODE` | `0` | No | Set to `1` to disable authentication entirely. Only valid on loopback (`127.0.0.1`). Server refuses to start with this flag on a non-loopback address. **Never use in production.** |
 
@@ -442,6 +451,20 @@ WARN  Bootstrap admin API key generated. Copy this now — it will not be shown 
 journalctl -u clustr-serverd --no-pager | grep -A2 "Bootstrap admin"
 ```
 
+### Recovery: if you missed the bootstrap API key
+
+The bootstrap key is printed **once** at first startup and never shown again — it is stored as a hash in the DB. If you missed it, create a replacement admin key:
+
+```bash
+# bare-metal (run as root on the server host)
+clustr-serverd apikey create --scope admin --description "replacement-admin"
+
+# Docker Compose
+docker exec -it clustr clustr-serverd apikey create --scope admin --description "replacement-admin"
+```
+
+The new key is printed to stdout. Copy it immediately — it is also shown only once.
+
 ### Changing the default password
 
 Log in to the web UI at `http://<server-ip>:8080` with `clustr` / `clustr`. You will be redirected to the password-change screen immediately.
@@ -464,20 +487,16 @@ This procedure verifies a working end-to-end deployment: image created, node reg
 ### Step 1: Verify the server is healthy
 
 ```bash
-curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
+# Replace <your-api-key> with the bootstrap key printed at first startup (see §6).
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready \
+  -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
 # All checks must be "ok" or "warn" — a single "fail" means the server cannot serve PXE.
+# Note: this endpoint requires authentication. A 401 response means the key is wrong or missing.
 ```
 
 ### Step 2: Build a test image
 
-Log into the web UI. Navigate to **Images > Build from ISO**.
-
-1. Provide the URL of a Rocky Linux 9 or Ubuntu 22.04 minimal ISO (or upload a local file).
-2. Leave all defaults. Click **Build**.
-3. The build takes 8–15 minutes depending on network speed and whether KVM is available.
-4. When status is `ready`, note the image ID.
-
-Alternatively, pull a pre-built cloud image:
+**Recommended first path — pull a pre-built cloud image (no extra dependencies):**
 
 ```bash
 curl -s -X POST http://10.99.0.1:8080/api/v1/factory/pull \
@@ -491,6 +510,30 @@ curl -s -X POST http://10.99.0.1:8080/api/v1/factory/pull \
     "format": "qcow2"
   }'
 ```
+
+The server pulls and converts the image in the background. Poll `GET /api/v1/images` until `status` is `ready` (usually 2–5 minutes on a fast link). This path works out of the box on both Docker Compose and bare-metal installs with no additional host packages.
+
+**Alternative path — Build from ISO (requires additional host packages):**
+
+ISO builds require KVM acceleration and host-side build tooling. Before using this path, verify the following are installed on the server host (or available inside the Docker container):
+
+```bash
+# Rocky Linux / RHEL
+dnf install -y qemu-kvm qemu-img genisoimage xorriso
+
+# Ubuntu / Debian
+apt install -y qemu-kvm qemu-utils genisoimage xorriso
+
+# Verify KVM is accessible
+ls /dev/kvm || echo "WARN: no KVM — ISO builds will be very slow"
+```
+
+Then in the web UI navigate to **Images > Build from ISO**:
+
+1. Provide the URL of a Rocky Linux 9 or Ubuntu 22.04 minimal ISO (or upload a local file).
+2. Leave all defaults. Click **Build**.
+3. The build takes 8–15 minutes depending on network speed and whether KVM is available.
+4. When status is `ready`, note the image ID.
 
 ### Step 3: Register a test node
 
@@ -530,7 +573,7 @@ curl -s -X POST http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/reimage \
 
 ### Step 5: PXE boot the node
 
-Power on the test node. Ensure it is configured to PXE boot from the provisioning network (net boot first in BIOS/UEFI boot order). The node will:
+Power on the test node. Ensure the BIOS/UEFI boot order is set to **disk first, then network** (`scsi0;net0` in Proxmox terms, or equivalent on bare metal). Persistent default is disk-first; clustr's reimage trigger temporarily flips this to PXE-first via the Proxmox API (or IPMI `SetNextBoot`) for the deploy run, then flips back after the node posts its verify-boot. On a blank disk the firmware falls through to the network fallback automatically. The node will:
 
 1. Get a DHCP offer from clustr.
 2. Download the iPXE binary via TFTP.
@@ -571,6 +614,133 @@ If the node is reachable and running the expected OS, the smoke test passes.
 | Reimage stuck at `in_progress` | Node can't reach the server HTTP port | Check firewall rules; verify `CLUSTR_SERVER` or `CLUSTR_PXE_SERVER_IP` is reachable from the node subnet |
 | `verified_booted` never reached | `clustr-clientd` not injected into rootfs | Check `CLUSTR_CLIENTD_BIN_PATH`; ensure the image was built with the client binary available |
 | `/api/v1/healthz/ready` returns `503` on `initramfs` | No initramfs built yet | Normal on a fresh install before the first image build completes |
+| TFTP log shows `autoexec.ipxe not found` | Normal iPXE probe behaviour | UEFI iPXE tries `autoexec.ipxe` over TFTP before falling back to the HTTP chain. This file does not exist in clustr and is not required — iPXE proceeds to `/api/v1/boot/script` automatically. No action needed. |
+| Deploy log shows `initramfs not found — BLS entry will reference it anyway` | Normal for images built from minimal ISOs | The base image tar does not include a pre-built initramfs. dracut rebuilds it automatically during the first deploy's finalize phase (adds ~30 seconds). This is expected and correct. It is only a problem if the warning persists after a complete deploy cycle. |
+| `systemctl is-system-running` shows `degraded` after first boot | `slurmd.service` enabled but slurm not installed in image | The Slurm module attempts to enable `slurmd.service` during finalize. If slurm is not installed in the base image, systemd marks the unit failed and the system shows as degraded. To avoid this: either pre-install slurm in your image before deploying (see [docs/slurm-module.md](slurm-module.md)), or disable the Slurm module (`POST /api/v1/slurm/disable`) before reimaging nodes that do not have slurm installed. |
+
+---
+
+## 8. Registering Nodes
+
+### Discovering the node's MAC address
+
+Each node is identified by the MAC address of its provisioning NIC. To find it:
+
+- **Proxmox:** the MAC is shown in the VM hardware config (Network Device field). Example: `BC:24:11:DA:58:6A`.
+- **Bare metal:** boot the node and check the DHCP lease log on the clustr host (`journalctl -u clustr-serverd | grep "DHCP DISCOVER"`), or read it from the node's BIOS/UEFI network settings, or `ip link show` from the OS.
+- **IPMI:** `ipmitool lan print 1` shows the BMC MAC, but you want the host NIC MAC — check the host OS or inspect DHCP leases.
+
+### Registering a node via the API
+
+```bash
+curl -s -X POST http://10.99.0.1:8080/api/v1/nodes \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hostname": "compute-001",
+    "primary_mac": "aa:bb:cc:dd:ee:ff",
+    "base_image_id": "<image-id>",
+    "interfaces": [
+      {
+        "mac_address": "aa:bb:cc:dd:ee:ff",
+        "name": "eth0",
+        "ip_address": "10.99.0.50/24",
+        "gateway": "10.99.0.1",
+        "dns": ["10.99.0.1"]
+      }
+    ],
+    "ssh_keys": ["ssh-ed25519 AAAA... operator@bastion"]
+  }' | python3 -m json.tool
+```
+
+**Important:** always populate `ssh_keys`. If `ssh_keys` is empty, the deployed node will have no authorized keys in `/root/.ssh/authorized_keys` and SSH access will be completely unavailable after deployment.
+
+### Configuring power providers
+
+Power providers allow clustr to automatically power-cycle nodes when a reimage is triggered, without requiring the operator to manually press the power button.
+
+**Proxmox (recommended for lab/dev):**
+
+Add a `power_provider` block to the node config:
+
+```json
+"power_provider": {
+  "type": "proxmox",
+  "proxmox": {
+    "host": "https://192.168.1.223:8006",
+    "token_id": "root@pam!clustr",
+    "token_secret": "<proxmox-api-token>",
+    "node": "pve",
+    "vmid": "201",
+    "insecure": false,
+    "tls_ca_cert_path": ""
+  }
+}
+```
+
+**IPMI (for bare-metal nodes with BMC):**
+
+```json
+"power_provider": {
+  "type": "ipmi",
+  "ipmi": {
+    "host": "10.0.0.101",
+    "username": "admin",
+    "password": "changeme"
+  }
+}
+```
+
+### Manual power-cycle workflow (no BMC)
+
+If your nodes do not have an IPMI BMC and are not managed by Proxmox, clustr cannot automatically power-cycle them. The workflow in this case is:
+
+1. Register the node and trigger a reimage via `POST /api/v1/nodes/{id}/reimage`.
+2. Manually power-cycle the node (physical power button or hypervisor console).
+3. The node PXE boots, clustr serves the deploy script, and the reimage proceeds automatically.
+
+The reimage trigger sets the node's `reimage_pending` flag in the DB. clustr's iPXE routing decision checks this flag when the node boots — no timing coordination is required between the trigger and the power cycle.
+
+---
+
+## 9. Reimaging Multiple Nodes
+
+### Bulk reimage via the web UI
+
+From the **Nodes** page, check the boxes next to the nodes you want to reimage. A floating action bar appears at the bottom of the page. Click **Reimage Selected**.
+
+In the confirmation modal:
+
+- Choose a target image (or leave blank to use each node's currently assigned image).
+- Optionally enable **Dry run** to simulate the operation without sending reimage requests.
+- Click **Reimage N nodes**.
+
+Reimage requests are submitted individually. Progress for each node is visible in the **Nodes** list and the **Deployments** page (`#/deploys`).
+
+### Bulk reimage via the group API
+
+If your nodes are organized into a NodeGroup, you can reimage the entire group with one API call:
+
+```bash
+GROUP_ID="<node-group-id>"
+
+curl -s -X POST http://10.99.0.1:8080/api/v1/node-groups/${GROUP_ID}/reimage \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_id": "<image-id>",
+    "dry_run": false
+  }' | python3 -m json.tool
+```
+
+This creates a `group_reimage_job` that fans out individual reimage requests with bounded concurrency (default: 5 concurrent reimages, configurable via `CLUSTR_REIMAGE_MAX_CONCURRENT`). The job status is visible in the web UI Deployments page.
+
+**Use case: redeploying an entire cluster**
+
+1. Build or update your base image.
+2. Create a NodeGroup containing all compute nodes.
+3. Post the group reimage request with the new image ID.
+4. Monitor the Deployments page — nodes complete in batches as power cycles and deploys proceed.
 
 ---
 
@@ -579,4 +749,5 @@ If the node is reachable and running the expected OS, the smoke test passes.
 - [docs/rbac.md](rbac.md) — Role model, group-scoped operators, user management
 - [docs/upgrade.md](upgrade.md) — Upgrade procedure, migration notes, rollback
 - [docs/tls-provisioning.md](tls-provisioning.md) — TLS setup with Caddy, initramfs HTTPS configuration
+- [docs/slurm-module.md](slurm-module.md) — Slurm module operator guide: enable, configure, first job
 - [README.md](../README.md) — Quick Start and architecture overview

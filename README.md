@@ -28,7 +28,7 @@ echo "CLUSTR_SESSION_SECRET=$(openssl rand -hex 64)" >> /etc/clustr/secrets.env
 chmod 400 /etc/clustr/secrets.env
 ```
 
-### 2. Create clustr.env
+### 2. Create clustr.env (Docker Compose only)
 
 ```bash
 # Download the example and edit for your provisioning interface:
@@ -38,6 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker
 # to match your provisioning network interface.
 chmod 600 /etc/clustr/clustr.env
 ```
+
+**Bare-metal installs (Path B):** do not use `clustr.env`. Configuration variables go in `Environment=` lines inside the systemd unit file. See [docs/install.md §4.4](docs/install.md#44-install-systemd-unit) for details.
 
 ### 3. Start the server
 
