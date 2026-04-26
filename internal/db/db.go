@@ -1137,15 +1137,21 @@ func (db *DB) CreateReimageRequest(ctx context.Context, req api.ReimageRequest) 
 	if req.ScheduledAt != nil {
 		scheduledAtVal = req.ScheduledAt.Unix()
 	}
+	injectVarsJSON := "{}"
+	if req.InjectVars != nil {
+		if b, jerr := json.Marshal(req.InjectVars); jerr == nil {
+			injectVarsJSON = string(b)
+		}
+	}
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO reimage_requests
 			(id, node_id, image_id, status, scheduled_at, error_message,
-			 requested_by, dry_run, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 requested_by, dry_run, inject_vars, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		req.ID, req.NodeID, req.ImageID, string(req.Status),
 		scheduledAtVal, req.ErrorMessage,
-		req.RequestedBy, boolToInt(req.DryRun), req.CreatedAt.Unix(),
+		req.RequestedBy, boolToInt(req.DryRun), injectVarsJSON, req.CreatedAt.Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("db: create reimage request: %w", err)
@@ -1318,6 +1324,46 @@ func (db *DB) CancelAllActiveReimages(ctx context.Context, msg string) (int, err
 	}
 
 	return int(n), nil
+}
+
+// GetInjectVarsForActiveReimage returns the inject_vars JSON for the most recent
+// non-terminal reimage request for nodeID, or an empty map if none exists.
+// Used by RegisterNode (S4-11) to merge per-deployment vars into the NodeConfig
+// returned to the deploy agent.
+func (db *DB) GetInjectVarsForActiveReimage(ctx context.Context, nodeID string) (map[string]string, error) {
+	var injectVarsJSON string
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT inject_vars FROM reimage_requests
+		WHERE node_id = ?
+		  AND status NOT IN ('complete', 'failed', 'canceled')
+		ORDER BY created_at DESC LIMIT 1
+	`, nodeID).Scan(&injectVarsJSON)
+	if err == sql.ErrNoRows || injectVarsJSON == "" || injectVarsJSON == "{}" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db: get inject_vars for active reimage: %w", err)
+	}
+	var m map[string]string
+	if jerr := json.Unmarshal([]byte(injectVarsJSON), &m); jerr != nil {
+		return nil, nil // treat bad JSON as empty
+	}
+	return m, nil
+}
+
+// CountActiveReimages returns the number of reimage_requests rows that are in a
+// non-terminal state (pending, triggered, in_progress). Used by the Prometheus
+// metrics collector to populate clustr_active_deploys.
+func (db *DB) CountActiveReimages(ctx context.Context) (int64, error) {
+	var n int64
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM reimage_requests
+		WHERE status IN ('pending', 'triggered', 'in_progress')
+	`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("db: count active reimages: %w", err)
+	}
+	return n, nil
 }
 
 // ─── ReimageRequest scan helpers ─────────────────────────────────────────────
@@ -2791,4 +2837,224 @@ func requireOneRow(res sql.Result, table, id string) error {
 		return api.ErrNotFound
 	}
 	return nil
+}
+
+// ─── Webhook operations (S4-2) ───────────────────────────────────────────────
+
+// WebhookSubscription is a row in webhook_subscriptions.
+type WebhookSubscription struct {
+	ID        string
+	URL       string
+	Events    []string // decoded from JSON
+	Secret    string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// WebhookDelivery is a row in webhook_deliveries.
+type WebhookDelivery struct {
+	ID          string
+	WebhookID   string
+	Event       string
+	PayloadJSON string
+	Status      string // "success" | "failed"
+	HTTPStatus  int
+	Attempt     int
+	ErrorMsg    string
+	DeliveredAt time.Time
+}
+
+// CreateWebhookSubscription inserts a new webhook subscription.
+func (db *DB) CreateWebhookSubscription(ctx context.Context, sub WebhookSubscription) error {
+	eventsJSON, err := json.Marshal(sub.Events)
+	if err != nil {
+		return fmt.Errorf("db: marshal webhook events: %w", err)
+	}
+	now := time.Now().Unix()
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO webhook_subscriptions (id, url, events, secret, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, sub.ID, sub.URL, string(eventsJSON), sub.Secret, boolToInt(sub.Enabled), now, now)
+	if err != nil {
+		return fmt.Errorf("db: create webhook subscription: %w", err)
+	}
+	return nil
+}
+
+// GetWebhookSubscription returns a single subscription by ID.
+func (db *DB) GetWebhookSubscription(ctx context.Context, id string) (WebhookSubscription, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, url, events, secret, enabled, created_at, updated_at
+		FROM webhook_subscriptions WHERE id = ?
+	`, id)
+	return scanWebhookSubscription(row)
+}
+
+// ListWebhookSubscriptions returns all enabled subscriptions that include event
+// in their events array. If event is empty, all enabled subscriptions are returned.
+func (db *DB) ListWebhookSubscriptions(ctx context.Context, event string) ([]WebhookSubscription, error) {
+	var rows *sql.Rows
+	var err error
+	if event == "" {
+		rows, err = db.sql.QueryContext(ctx, `
+			SELECT id, url, events, secret, enabled, created_at, updated_at
+			FROM webhook_subscriptions WHERE enabled = 1 ORDER BY created_at ASC
+		`)
+	} else {
+		// SQLite json_each to check if event is in the events array.
+		rows, err = db.sql.QueryContext(ctx, `
+			SELECT DISTINCT ws.id, ws.url, ws.events, ws.secret, ws.enabled, ws.created_at, ws.updated_at
+			FROM webhook_subscriptions ws, json_each(ws.events) je
+			WHERE ws.enabled = 1 AND je.value = ?
+			ORDER BY ws.created_at ASC
+		`, event)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db: list webhook subscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var subs []WebhookSubscription
+	for rows.Next() {
+		sub, err := scanWebhookSubscription(rows)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, sub)
+	}
+	return subs, rows.Err()
+}
+
+// UpdateWebhookSubscription replaces the URL, events, secret, and enabled flag.
+func (db *DB) UpdateWebhookSubscription(ctx context.Context, sub WebhookSubscription) error {
+	eventsJSON, err := json.Marshal(sub.Events)
+	if err != nil {
+		return fmt.Errorf("db: marshal webhook events: %w", err)
+	}
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE webhook_subscriptions
+		SET url = ?, events = ?, secret = ?, enabled = ?, updated_at = ?
+		WHERE id = ?
+	`, sub.URL, string(eventsJSON), sub.Secret, boolToInt(sub.Enabled), now, sub.ID)
+	if err != nil {
+		return fmt.Errorf("db: update webhook subscription: %w", err)
+	}
+	return requireOneRow(res, "webhook_subscriptions", sub.ID)
+}
+
+// DeleteWebhookSubscription deletes a subscription and cascades to deliveries.
+func (db *DB) DeleteWebhookSubscription(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM webhook_subscriptions WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("db: delete webhook subscription: %w", err)
+	}
+	return requireOneRow(res, "webhook_subscriptions", id)
+}
+
+// RecordWebhookDelivery inserts a delivery attempt record.
+func (db *DB) RecordWebhookDelivery(ctx context.Context, d WebhookDelivery) error {
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO webhook_deliveries
+			(id, webhook_id, event, payload_json, status, http_status, attempt, error_msg, delivered_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, d.ID, d.WebhookID, d.Event, d.PayloadJSON, d.Status, d.HTTPStatus,
+		d.Attempt, d.ErrorMsg, d.DeliveredAt.Unix())
+	if err != nil {
+		return fmt.Errorf("db: record webhook delivery: %w", err)
+	}
+	return nil
+}
+
+// ListWebhookDeliveries returns the most recent 200 delivery records for a
+// subscription, newest-first.
+func (db *DB) ListWebhookDeliveries(ctx context.Context, webhookID string) ([]WebhookDelivery, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, webhook_id, event, payload_json, status, http_status, attempt, error_msg, delivered_at
+		FROM webhook_deliveries
+		WHERE webhook_id = ?
+		ORDER BY delivered_at DESC LIMIT 200
+	`, webhookID)
+	if err != nil {
+		return nil, fmt.Errorf("db: list webhook deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	var deliveries []WebhookDelivery
+	for rows.Next() {
+		var d WebhookDelivery
+		var ts int64
+		if err := rows.Scan(&d.ID, &d.WebhookID, &d.Event, &d.PayloadJSON, &d.Status, &d.HTTPStatus, &d.Attempt, &d.ErrorMsg, &ts); err != nil {
+			return nil, fmt.Errorf("db: scan webhook delivery: %w", err)
+		}
+		d.DeliveredAt = time.Unix(ts, 0).UTC()
+		deliveries = append(deliveries, d)
+	}
+	return deliveries, rows.Err()
+}
+
+// scanWebhookSubscription scans a single webhook_subscriptions row.
+type webhookScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWebhookSubscription(row webhookScanner) (WebhookSubscription, error) {
+	var sub WebhookSubscription
+	var eventsJSON string
+	var enabledInt int
+	var createdAt, updatedAt int64
+
+	if err := row.Scan(&sub.ID, &sub.URL, &eventsJSON, &sub.Secret, &enabledInt, &createdAt, &updatedAt); err != nil {
+		return WebhookSubscription{}, fmt.Errorf("db: scan webhook subscription: %w", err)
+	}
+	sub.Enabled = enabledInt != 0
+	sub.CreatedAt = time.Unix(createdAt, 0).UTC()
+	sub.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+
+	if err := json.Unmarshal([]byte(eventsJSON), &sub.Events); err != nil {
+		sub.Events = nil // treat bad JSON as empty
+	}
+	return sub, nil
+}
+
+// boolToInt converts a bool to 0/1 for SQLite storage.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// ListRunningGroupReimageJobs returns all group_reimage_jobs with status='running'.
+// Used by the startup hook (S4-4) to resume jobs orphaned by a prior process crash.
+func (db *DB) ListRunningGroupReimageJobs(ctx context.Context) ([]GroupReimageJob, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, group_id, image_id, concurrency, pause_on_failure_pct, status,
+		       total_nodes, triggered_nodes, succeeded_nodes, failed_nodes,
+		       created_at, updated_at
+		FROM group_reimage_jobs WHERE status = 'running'
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list running group reimage jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []GroupReimageJob
+	for rows.Next() {
+		var j GroupReimageJob
+		var createdAt, updatedAt int64
+		if err := rows.Scan(
+			&j.ID, &j.GroupID, &j.ImageID, &j.Concurrency, &j.PauseOnFailurePct, &j.Status,
+			&j.TotalNodes, &j.TriggeredNodes, &j.SucceededNodes, &j.FailedNodes,
+			&createdAt, &updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("db: scan group reimage job: %w", err)
+		}
+		j.CreatedAt = time.Unix(createdAt, 0).UTC()
+		j.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
 }
