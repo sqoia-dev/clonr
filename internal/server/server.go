@@ -150,8 +150,12 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	}
 	s.router = s.buildRouter()
 	s.http = &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: s.router,
+		Addr:              cfg.ListenAddr,
+		Handler:           s.router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      300 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return s
 }
@@ -385,9 +389,12 @@ func (s *Server) buildRouter() chi.Router {
 	usersH := s.buildUsersHandler()
 
 	health := &handlers.HealthHandler{
-		Version:   s.buildInfo.Version,
-		CommitSHA: s.buildInfo.CommitSHA,
-		BuildTime: s.buildInfo.BuildTime,
+		Version:       s.buildInfo.Version,
+		CommitSHA:     s.buildInfo.CommitSHA,
+		BuildTime:     s.buildInfo.BuildTime,
+		DB:            s.db,
+		BootDir:       s.cfg.PXE.BootDir,
+		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clustr.img",
 	}
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
 	nodes := &handlers.NodesHandler{
@@ -461,7 +468,13 @@ func (s *Server) buildRouter() chi.Router {
 	progress := &handlers.ProgressHandler{Store: s.progress}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
 	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}
-	reimageH := &handlers.ReimageHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
+	reimageH := &handlers.ReimageHandler{
+		DB:           s.db,
+		Orchestrator: s.reimageOrchestrator,
+		GetActorLabel: func(r *http.Request) string {
+			return actorLabel(r.Context())
+		},
+	}
 	boot := &handlers.BootHandler{
 		BootDir:   s.cfg.PXE.BootDir,
 		TFTPDir:   s.cfg.PXE.TFTPDir,
@@ -507,6 +520,13 @@ func (s *Server) buildRouter() chi.Router {
 		// Node-scope callbacks — accept both node and admin keys, or no key (legacy PXE nodes).
 		r.Post("/nodes/register", nodes.RegisterNode)
 		r.Post("/logs", logs.IngestLogs)
+		// POST /deploy/progress is intentionally outside the admin-only group.
+		// The deploy agent running in initramfs calls this endpoint using its
+		// node-scoped API key (minted at PXE-serve time). Placing it inside
+		// the admin group would require admin-scoped keys in the initramfs,
+		// which violates the least-privilege design (node keys can only interact
+		// with their own node's resources). GET paths for progress are inside the
+		// admin group below — only operators read the aggregated progress stream.
 		r.Post("/deploy/progress", progress.IngestProgress)
 
 		// Deploy lifecycle callbacks — require node-scope auth where the key's bound
@@ -571,8 +591,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
 			r.With(requireRole("admin")).Delete("/admin/users/{id}", usersH.HandleDelete)
 
-			// Health
+			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
+			// Readiness probe: pings DB, checks boot dir, checks initramfs present.
+			// Returns 200 with JSON if healthy, 503 with reason map if not.
+			r.Get("/healthz/ready", health.ServeReady)
 
 			// Images — mutating operations are admin-only.
 			// GET /images/{id} and GET /images/{id}/blob are registered above with

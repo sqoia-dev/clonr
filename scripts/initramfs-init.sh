@@ -286,12 +286,18 @@ fi
 #   - deploy agent runs inside a screen session named "clustr-deploy"
 #   - operator can: ssh root@<node-ip>  then  screen -r clustr-deploy
 ENABLE_SSH=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.ssh=' | cut -d= -f2 | tr -d '[:space:]' | head -1)
-SSH_PASS=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.ssh.pass=' | cut -d= -f2- | tr -d '[:space:]' | head -1)
-SSH_PASS="${SSH_PASS:-clustrdev}"
+# Generate a random per-boot 8-char hex password. Do NOT log the password value.
+# Any clustr.ssh.pass= on the cmdline is intentionally ignored to prevent passwords
+# appearing in kernel cmdline logs (dmesg, serial console, PXE server logs).
+SSH_PASS=$(dd if=/dev/urandom bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
+if [ -z "$SSH_PASS" ]; then
+    # Fallback if od/dd unavailable: derive from /proc/uptime nanoseconds
+    SSH_PASS=$(cat /proc/uptime 2>/dev/null | tr -d '.' | cut -c1-8)
+fi
 
 if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
     log "--- SSH debug access enabled ---"
-    log "  password : $SSH_PASS"
+    # Password intentionally not logged — retrieve from node console/serial only.
 
     # Generate an ephemeral ed25519 host key.
     mkdir -p /etc/dropbear
@@ -324,7 +330,8 @@ if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
     DROPBEAR_PID=$!
     log "  dropbear PID=$DROPBEAR_PID started on :22"
     NODE_IP=$(ip addr show 2>/dev/null | grep 'inet ' | grep -v '127\.' | head -1 | awk '{print $2}' | cut -d/ -f1)
-    log "  SSH : ssh root@${NODE_IP:-<node-ip>}  (password: $SSH_PASS)"
+    log "  SSH enabled on port 22 : ssh root@${NODE_IP:-<node-ip>}"
+    log "  (password available via serial/IPMI console only — not logged)"
     log "  Then: screen -r clustr-deploy"
     log "--- end SSH info ---"
 fi
@@ -367,7 +374,8 @@ if [ "$CLUSTR_EXIT" -eq 0 ]; then
 else
     log "deployment failed (exit $CLUSTR_EXIT) — sleeping to allow log collection"
     if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
-        log "SSH still active — connect to inspect: ssh root@<node-ip>  (password: $SSH_PASS)"
+        log "SSH still active — connect to inspect: ssh root@<node-ip>"
+        log "(password visible on serial/IPMI console only)"
         log "Attach to deploy session: screen -r clustr-deploy"
     else
         log "(pull log: nc <node-ip> 9999)"

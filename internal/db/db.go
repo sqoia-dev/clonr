@@ -82,6 +82,11 @@ func (db *DB) Close() error {
 	return db.sql.Close()
 }
 
+// Ping verifies the database connection is alive by executing a lightweight query.
+func (db *DB) Ping(ctx context.Context) error {
+	return db.sql.PingContext(ctx)
+}
+
 // lastUsedFlusher runs in a background goroutine and flushes the lastUsedBatch
 // map every 30 seconds via a single transaction.
 func (db *DB) lastUsedFlusher() {

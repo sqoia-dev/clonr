@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -188,10 +189,24 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	log.Info().Str("version", version).Str("addr", cfg.ListenAddr).Msg("clustr-serverd starting")
 
-	// Ensure image directory exists.
-	if err := os.MkdirAll(cfg.ImageDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create image dir %s: %w", cfg.ImageDir, err)
+	// Ensure all required runtime directories exist on first run.
+	// This prevents panics and confusing errors when the server is installed fresh.
+	requiredDirs := []string{
+		filepath.Dir(cfg.DBPath), // parent dir for the SQLite database file
+		cfg.ImageDir,
+		cfg.PXE.BootDir,
+		cfg.PXE.TFTPDir,
+		cfg.LogArchiveDir,
 	}
+	for _, d := range requiredDirs {
+		if d == "" {
+			continue
+		}
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("failed to create required dir %s: %w", d, err)
+		}
+	}
+	log.Info().Msg("required runtime directories ensured")
 
 	// Ensure TMPDIR exists (set by systemd unit; Go's os.MkdirTemp uses it).
 	if td := os.Getenv("TMPDIR"); td != "" {
@@ -202,6 +217,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Open database (applies migrations on first run).
 	database, err := db.Open(cfg.DBPath)
+
 	if err != nil {
 		return fmt.Errorf("failed to open database %s: %w", cfg.DBPath, err)
 	}

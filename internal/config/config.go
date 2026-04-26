@@ -39,6 +39,10 @@ type ServerConfig struct {
 	// LDAPPKIDir is where the CA key and certificate are stored.
 	// Default: /etc/clustr/pki
 	LDAPPKIDir    string `json:"ldap_pki_dir"`    // CLUSTR_LDAP_PKI_DIR
+
+	// LogArchiveDir is where log purge summary events are written (future cold archive).
+	// Default: /var/lib/clustr/log-archive
+	LogArchiveDir string `json:"log_archive_dir"` // CLUSTR_LOG_ARCHIVE_DIR
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -96,6 +100,7 @@ func LoadServerConfig() ServerConfig {
 		LDAPDataDir:   envOrDefault("CLUSTR_LDAP_DATA_DIR", "/var/lib/clustr/ldap"),
 		LDAPConfigDir: envOrDefault("CLUSTR_LDAP_CONFIG_DIR", "/etc/clustr/ldap"),
 		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
+		LogArchiveDir: envOrDefault("CLUSTR_LOG_ARCHIVE_DIR", "/var/lib/clustr/log-archive"),
 	}
 }
 

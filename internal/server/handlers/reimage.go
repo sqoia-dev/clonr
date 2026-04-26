@@ -27,8 +27,11 @@ import (
 
 // ReimageHandler handles all /api/v1/nodes/{id}/reimage and /api/v1/reimage routes.
 type ReimageHandler struct {
-	DB           *db.DB
-	Orchestrator *reimage.Orchestrator
+	DB             *db.DB
+	Orchestrator   *reimage.Orchestrator
+	// GetActorLabel returns a human-readable label for the authenticated caller
+	// (e.g. "user:<id>" or "key:<label>"). Used for RequestedBy audit attribution.
+	GetActorLabel  func(r *http.Request) string
 }
 
 // ─── POST /api/v1/nodes/{id}/reimage ─────────────────────────────────────────
@@ -96,17 +99,23 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build and persist the request record.
+	actor := "api"
+	if h.GetActorLabel != nil {
+		if label := h.GetActorLabel(r); label != "" {
+			actor = label
+		}
+	}
 	status := api.ReimageStatusPending
 	req := api.ReimageRequest{
-		ID:          uuid.New().String(),
-		NodeID:      nodeID,
-		ImageID:     imageID,
-		Status:      status,
-		ScheduledAt: body.ScheduledAt,
+		ID:           uuid.New().String(),
+		NodeID:       nodeID,
+		ImageID:      imageID,
+		Status:       status,
+		ScheduledAt:  body.ScheduledAt,
 		ErrorMessage: "",
-		RequestedBy: "api",
-		DryRun:      body.DryRun,
-		CreatedAt:   time.Now().UTC(),
+		RequestedBy:  actor,
+		DryRun:       body.DryRun,
+		CreatedAt:    time.Now().UTC(),
 	}
 
 	if err := h.DB.CreateReimageRequest(r.Context(), req); err != nil {
@@ -286,13 +295,19 @@ func (h *ReimageHandler) Retry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new request cloned from the original.
+	retryActor := "api-retry"
+	if h.GetActorLabel != nil {
+		if label := h.GetActorLabel(r); label != "" {
+			retryActor = label + " (retry)"
+		}
+	}
 	newReq := api.ReimageRequest{
 		ID:          uuid.New().String(),
 		NodeID:      orig.NodeID,
 		ImageID:     orig.ImageID,
 		Status:      api.ReimageStatusPending,
 		DryRun:      orig.DryRun,
-		RequestedBy: "api-retry",
+		RequestedBy: retryActor,
 		CreatedAt:   time.Now().UTC(),
 	}
 	if err := h.DB.CreateReimageRequest(r.Context(), newReq); err != nil {
