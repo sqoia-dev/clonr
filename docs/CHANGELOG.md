@@ -2,6 +2,55 @@
 
 ---
 
+## Turnkey gap-fill round 3 — rocky10 image SSH fix + Slurm EL-version docs (2026-04-26)
+
+### NEW-GAP-3 (image) — rocky10 image: add PermitRootLogin yes to sshd drop-in
+
+- Root cause verified: the rocky10 base image (UUID `9a9af513`) had `PermitRootLogin`
+  commented out in all sshd_config layers, relying solely on the deploy-time injected
+  `70-permit-root.conf` drop-in. The image-level default is now explicit so any deploy
+  path that skips the drop-in injection step still permits root SSH key auth.
+- Applied Path B fix directly to the live rootfs at
+  `/var/lib/clustr/images/9a9af513-5d98-4514-918a-c446df122dcf/rootfs`:
+  - Added `etc/ssh/sshd_config.d/60-clustr-lab.conf` with `PermitRootLogin yes`
+    and `PasswordAuthentication no` (key auth only; password auth removed from image
+    default — deploy injects `PasswordAuthentication yes` separately if needed for lab).
+  - Removed stale `etc/ssh/sshd_config.d/60-clonr-password-auth.conf` (old name,
+    only had `PasswordAuthentication yes`, no `PermitRootLogin`).
+- Re-tarred rootfs deterministically using the identical `tar` flags as
+  `Factory.bakeDeterministicTar` (sort=name, mtime=@0, same exclusion list).
+- Updated `tar-sha256` sidecar: `ee1a42f8a4b7153cbc85a313ce15b0f3f02ad4b2c338e70a045c52c89c1a3aba`
+- Recomputed `checksumDir` (Go-equivalent Python walk): `7bc6f92af1be24551b3d534dc3efaf9ea3dc53b7c3a81fba5d6ea9b7e61563f8`
+- Updated `base_images` DB row: `checksum` and `size_bytes` columns updated.
+- Updated `metadata.json` sidecar with new checksums and `patch_note`.
+- Additional diagnosis: confirmed PAM stack on deployed nodes is already correct —
+  finalize code strips `pam_sss.so` from `password-auth` even when LDAP module is
+  enabled (GAP-14 fix), so account-phase PAM rejection from the walkthrough was a
+  pre-GAP-14 deploy artifact. The authselect profile in the image is `local` (not
+  ldap), shadow exists with a valid root hash, nsswitch resolves `passwd: files systemd`.
+  The deploy code's `70-permit-root.conf` injection is the primary PermitRootLogin
+  mechanism; this image-level fix is belt-and-suspenders.
+
+### NEW-GAP-4 (docs) — slurm-module.md: EL version guidance for slurm_repo_url
+
+- Added §2.1 "Choosing `slurm_repo_url`" to §2 (Image prerequisites):
+  - OpenHPC URL table: EL9 (`OpenHPC/3/EL_9`) vs EL10 (check upstream availability).
+  - SchedMD URL pattern for direct downloads.
+  - Source comparison table (OpenHPC vs SchedMD vs EPEL vs gold image) with
+    when-to-use guidance.
+  - Critical: URL must match image EL major version. Mismatch causes silent `dnf`
+    failure (no matching packages, no error from dnf, Slurm absent after deploy).
+  - Reachability test: `curl -I <slurm_repo_url>` from the clustr-serverd host.
+  - Coordination note: once server-side EL version validation lands (Dinesh's
+    NEW-GAP-4 code fix), the section will update to reflect that clustr enforces
+    the match at module-enable time.
+- Added troubleshooting row "Slurm not installed on deployed node" to §10:
+  - Points to §2.1 for URL selection.
+  - Distinguishes EL-mismatch silent failure from unreachable-repo WARN failure.
+  - Notes that `slurm.install.failed` audit event will appear after Dinesh's fix lands.
+
+---
+
 ## Turnkey gap-fill round 2 — Slurm auto-install (2026-04-25)
 
 ### NEW-GAP-2 (code) — `munge_key_present` in Slurm status

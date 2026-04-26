@@ -69,15 +69,77 @@ the deploy logs and re-image once the repo is reachable.
 
 **Providing the repo URL:**
 
-Pass `slurm_repo_url` when enabling the module (see §3). The OpenHPC
-community repository for EL9 is the recommended starting point:
+Pass `slurm_repo_url` when enabling the module (see §3). See
+[§2.1 — Choosing `slurm_repo_url`](#21--choosing-slurm_repo_url) for the
+correct URL per base image EL version.
+
+### 2.1 — Choosing `slurm_repo_url`
+
+The repository URL must match the Enterprise Linux (EL) major version of your
+base image. A mismatch causes `dnf` to silently skip the install (no packages
+match), leaving the node without Slurm after deploy. Until server-side
+validation lands (see note below), this is a manual operator responsibility.
+
+#### OpenHPC community repositories (recommended)
+
+| Base image | EL version | `slurm_repo_url` |
+|---|---|---|
+| Rocky Linux 9, AlmaLinux 9, RHEL 9 | EL9 | `https://repos.openhpc.community/OpenHPC/3/EL_9` |
+| Rocky Linux 10, AlmaLinux 10, RHEL 10 | EL10 | Check [OpenHPC releases](https://github.com/openhpc/ohpc/releases) — EL10 support tracks upstream availability |
+
+For EL9, the OpenHPC 3.x repository is production-ready. Use the RPM release
+URL to add the repo:
+
+```
+https://github.com/openhpc/ohpc/releases/download/v3.0.GA/ohpc-release-3-1.el9.x86_64.rpm
+```
+
+Or set `slurm_repo_url` to the flat repository base URL (the URL clustr adds
+as a `.repo` file, not the release RPM):
 
 ```
 https://repos.openhpc.community/OpenHPC/3/EL_9
 ```
 
-For EL10 or Ubuntu, substitute the appropriate repo URL from your distro's
-Slurm package provider.
+For EL10, check [https://repos.openhpc.community/](https://repos.openhpc.community/)
+for availability. If EL10 packages are not yet published by OpenHPC, use the
+SchedMD or distro-native path below.
+
+#### SchedMD / distro-native Slurm
+
+SchedMD publishes RPMs for RHEL-family distributions at:
+
+```
+https://download.schedmd.com/slurm/
+```
+
+Browse to the correct subdirectory for your Slurm version and EL variant. The
+SchedMD path is useful when you need a specific Slurm version or when OpenHPC
+does not yet ship packages for your EL version.
+
+#### When to use each source
+
+| Source | Use when |
+|---|---|
+| OpenHPC | Default. Includes munge, PMIx, HWLOC, and Slurm in one cohesive repo. Easiest path for most HPC clusters. |
+| SchedMD | You need a specific Slurm version, or your EL version isn't in OpenHPC yet. |
+| Distro EPEL | Not recommended for Slurm — EPEL Slurm packages lag behind upstream and lack HPC-specific build options. |
+| Pre-baked gold image | Air-gapped clusters or production environments where deploy speed matters (see Advanced path below). |
+
+**Critical:** Verify the URL is reachable from the provisioning network before
+enabling the module. Test with:
+
+```bash
+curl -I <slurm_repo_url>
+# Expected: HTTP 200 or 301. A 404 or connection failure means the URL is wrong or unreachable.
+```
+
+**Coordination note:** A future server-side change will validate that the EL
+version embedded in `slurm_repo_url` matches the base image's `distro_version`
+at module-enable time and reject mismatched URLs with HTTP 400. Until that
+lands, EL version matching is the operator's responsibility. Once server-side
+validation is live, this section will be updated to reflect that clustr
+enforces the match automatically.
 
 ### Advanced path — pre-install Slurm in the image (gold image)
 
@@ -548,6 +610,7 @@ All Slurm API routes require an admin-scoped Bearer token.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| Slurm not installed on deployed node (binaries absent, `slurmd`/`slurmctld` missing) | EL version mismatch between `slurm_repo_url` and the base image — `dnf` silently found no matching packages | Verify `slurm_repo_url` matches the image's EL major version (see §2.1). Use `curl -I <slurm_repo_url>` from the server to confirm reachability. Correct the URL, re-enable the module with the right URL, and reimage. After server-side EL validation lands (see §2.1 coordination note), the module-enable call will reject mismatched URLs at configuration time. |
 | Slurm module enabled but `slurmd` not installed after reimage | `slurm_repo_url` was unreachable at finalize time (non-fatal WARN — deploy continued, Slurm skipped) | Check deploy logs for the WARN line. Verify the URL is accessible: `curl -I <slurm_repo_url>` from the clustr-serverd host. Fix network/firewall/DNS, then reimage. |
 | `slurmd.service` degraded after reimage (advanced/gold-image path) | Slurm binaries missing from the pre-built image | Either switch to the recommended auto-install path (set `slurm_repo_url`, reimage), or re-bake the gold image with Slurm installed. See §2. |
 | `munge -n \| unmunge` fails with `STATUS: Socket communication error` | munge service not running | `systemctl start munge`. If it fails to start, check `journalctl -u munge` for the reason. |
