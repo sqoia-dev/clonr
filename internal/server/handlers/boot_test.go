@@ -281,7 +281,7 @@ func TestServeIPXEScript_DeployedVerified_DiskBoots(t *testing.T) {
 	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
 		t.Fatalf("RecordDeploySucceeded: %v", err)
 	}
-	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+	if _, err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
 		t.Fatalf("RecordVerifyBooted: %v", err)
 	}
 
@@ -442,7 +442,7 @@ func makeDeployedNodeWithImage(t *testing.T, d *db.DB, mac, hostname, imageID st
 	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
 		t.Fatalf("makeDeployedNodeWithImage RecordDeploySucceeded: %v", err)
 	}
-	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+	if _, err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
 		t.Fatalf("makeDeployedNodeWithImage RecordVerifyBooted: %v", err)
 	}
 	got, err := d.GetNodeConfigByMAC(t.Context(), mac)
@@ -494,7 +494,7 @@ func TestServeIPXEScript_NoImageID_DefaultsToUEFI(t *testing.T) {
 	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
 		t.Fatalf("RecordDeploySucceeded: %v", err)
 	}
-	if err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+	if _, err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
 		t.Fatalf("RecordVerifyBooted: %v", err)
 	}
 

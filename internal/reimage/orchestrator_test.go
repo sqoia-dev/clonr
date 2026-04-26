@@ -108,7 +108,7 @@ func TestFlipToDiskFirst_OnDeployedVerified(t *testing.T) {
 	flip := buildFlipFunc(prov, d)
 
 	// Simulate verify-boot phone-home: record the verified state, then flip.
-	if err := d.RecordVerifyBooted(ctx, node.ID); err != nil {
+	if _, err := d.RecordVerifyBooted(ctx, node.ID); err != nil {
 		t.Fatalf("RecordVerifyBooted: %v", err)
 	}
 	if err := flip(ctx, node.ID); err != nil {

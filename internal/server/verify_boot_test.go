@@ -220,7 +220,7 @@ func TestVerifyBoot_Heartbeat_UpdatesLastSeenAtOnly(t *testing.T) {
 	}
 
 	// First call.
-	if err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
+	if _, err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
 		t.Fatalf("first RecordVerifyBooted: %v", err)
 	}
 	n1, err := database.GetNodeConfig(ctx, nodeCfg.ID)
@@ -236,7 +236,7 @@ func TestVerifyBoot_Heartbeat_UpdatesLastSeenAtOnly(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Second call (heartbeat on reboot or retry).
-	if err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
+	if _, err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
 		t.Fatalf("second RecordVerifyBooted: %v", err)
 	}
 	n2, err := database.GetNodeConfig(ctx, nodeCfg.ID)
@@ -388,7 +388,7 @@ func TestMigration022_DualWrite_BackCompat(t *testing.T) {
 	}
 
 	// Step 3: Phone home — transition to deployed_verified.
-	if err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
+	if _, err := database.RecordVerifyBooted(ctx, nodeCfg.ID); err != nil {
 		t.Fatalf("RecordVerifyBooted: %v", err)
 	}
 	final, err := database.GetNodeConfig(ctx, nodeCfg.ID)
