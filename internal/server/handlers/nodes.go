@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,46 @@ import (
 	"github.com/sqoia-dev/clustr/internal/webhook"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
+
+// sortNodeConfigs sorts a slice of NodeConfigs by the given column name.
+// Valid columns: hostname, status, last_deploy, group. Unrecognised columns are no-ops.
+func sortNodeConfigs(nodes []api.NodeConfig, col string, desc bool) {
+	less := func(i, j int) bool {
+		a, b := nodes[i], nodes[j]
+		var cmp int
+		switch col {
+		case "hostname":
+			cmp = strings.Compare(strings.ToLower(a.Hostname), strings.ToLower(b.Hostname))
+		case "status":
+			cmp = strings.Compare(string(a.State()), string(b.State()))
+		case "last_deploy":
+			ta := a.LastDeploySucceededAt
+			tb := b.LastDeploySucceededAt
+			if ta == nil && tb == nil {
+				cmp = 0
+			} else if ta == nil {
+				cmp = -1
+			} else if tb == nil {
+				cmp = 1
+			} else if ta.Before(*tb) {
+				cmp = -1
+			} else if ta.After(*tb) {
+				cmp = 1
+			} else {
+				cmp = 0
+			}
+		case "group":
+			cmp = strings.Compare(strings.ToLower(a.GroupID), strings.ToLower(b.GroupID))
+		default:
+			cmp = 0
+		}
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	}
+	sort.SliceStable(nodes, less)
+}
 
 // extractIP returns just the IP from a CIDR string like "10.0.1.50/24".
 // Returns the input unchanged if no slash is present.
@@ -130,9 +171,12 @@ func sanitizeNodeConfigs(cfgs []api.NodeConfig) []api.NodeConfig {
 // ListNodes handles GET /api/v1/nodes
 // Accepts optional ?page= and ?per_page= (default 50) for pagination.
 // When pagination params are absent the full list is returned (backward compatible).
+// S5-3: accepts ?sort=hostname|status|last_deploy|group and ?dir=asc|desc.
 func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	baseImageID := r.URL.Query().Get("base_image_id")
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	sortCol := r.URL.Query().Get("sort")
+	sortDir := r.URL.Query().Get("dir")
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
 	nodes, err := h.DB.SearchNodeConfigs(r.Context(), baseImageID, search)
@@ -145,6 +189,12 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 		nodes = []api.NodeConfig{}
 	}
 	nodes = sanitizeNodeConfigs(nodes)
+
+	// S5-3: server-side sort by requested column.
+	if sortCol != "" {
+		desc := strings.ToLower(sortDir) == "desc"
+		sortNodeConfigs(nodes, sortCol, desc)
+	}
 
 	total := len(nodes)
 	resp := api.ListNodesResponse{Total: total}
@@ -380,11 +430,18 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.Audit != nil {
-		aID, aLabel := "", ""
-		if h.GetActorInfo != nil {
-			aID, aLabel = h.GetActorInfo(r)
+	// S5-12: Record field-level config change history.
+	aID, aLabel := "", ""
+	if h.GetActorInfo != nil {
+		aID, aLabel = h.GetActorInfo(r)
+	}
+	if changes, diffErr := db.DiffNodeConfigFields(sanitizeNodeConfig(existing), sanitizeNodeConfig(cfg)); diffErr == nil {
+		if recErr := h.DB.RecordNodeConfigChanges(r.Context(), id, aLabel, changes); recErr != nil {
+			log.Warn().Err(recErr).Str("node_id", id).Msg("update node: record config history failed (non-fatal)")
 		}
+	}
+
+	if h.Audit != nil {
 		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeUpdate, "node", id,
 			r.RemoteAddr, sanitizeNodeConfig(existing), sanitizeNodeConfig(cfg))
 	}
