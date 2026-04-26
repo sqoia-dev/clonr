@@ -447,6 +447,82 @@ function fmtETA(secs) {
 
 const Pages = {
 
+    // ── Shared modal utilities ─────────────────────────────────────────────
+
+    // showConfirmModal shows a modal-based confirmation dialog (S2-14).
+    // Replaces native confirm()/alert() for testability and consistent UX.
+    //
+    // opts:
+    //   title        {string}   Modal heading (default: "Confirm")
+    //   message      {string}   Body text (may contain HTML — caller must escape user data)
+    //   confirmText  {string}   Confirm button label (default: "Confirm")
+    //   cancelText   {string}   Cancel button label (default: "Cancel"). Omit for alert-only.
+    //   danger       {boolean}  Style confirm button as btn-danger
+    //   onConfirm    {function} Called when confirmed
+    //   onCancel     {function} Optional; called on cancel/close
+    showConfirmModal(opts = {}) {
+        const id = 'confirm-modal-' + Date.now();
+        const title = opts.title || 'Confirm';
+        const message = opts.message || '';
+        const confirmText = opts.confirmText || 'Confirm';
+        const cancelText = opts.cancelText !== undefined ? opts.cancelText : 'Cancel';
+        const btnClass = opts.danger ? 'btn btn-danger' : 'btn btn-primary';
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.id = id;
+
+        const cancelBtn = cancelText
+            ? `<button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()${opts.onCancel ? ';Pages._confirmModalCancel_' + id + '()' : ''}">${escHtml(cancelText)}</button>`
+            : '';
+
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:440px" aria-labelledby="${id}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${id}-title">${escHtml(title)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                </div>
+                <div class="modal-body">
+                    <div style="color:var(--text-secondary);font-size:14px;line-height:1.5;margin-bottom:16px">${message}</div>
+                    <div style="display:flex;gap:8px;justify-content:flex-end">
+                        ${cancelBtn}
+                        <button class="${btnClass}" id="${id}-confirm-btn">${escHtml(confirmText)}</button>
+                    </div>
+                </div>
+            </div>`;
+
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) {
+                overlay.remove();
+                if (opts.onCancel) opts.onCancel();
+            }
+        });
+
+        document.getElementById(`${id}-confirm-btn`).addEventListener('click', () => {
+            overlay.remove();
+            if (opts.onConfirm) opts.onConfirm();
+        });
+
+        trapModalFocus(overlay, () => {
+            overlay.remove();
+            if (opts.onCancel) opts.onCancel();
+        });
+    },
+
+    // showAlertModal shows a simple non-blocking informational modal (S2-14).
+    showAlertModal(title, message, buttonText = 'OK') {
+        Pages.showConfirmModal({
+            title,
+            message,
+            confirmText: buttonText,
+            cancelText: '',
+            danger: false,
+        });
+    },
+
     // ── Dashboard ──────────────────────────────────────────────────────────
 
     // _dashDeployMap persists the deployment map across refresh cycles so the
@@ -457,10 +533,11 @@ const Pages = {
         App.render(loading('Loading dashboard…'));
 
         try {
-            const [imagesResp, nodesResp, progressEntries] = await Promise.all([
+            const [imagesResp, nodesResp, progressEntries, initramfsInfo] = await Promise.all([
                 API.images.list(),
                 API.nodes.list(),
                 API.progress.list().catch(() => []),
+                API.system.initramfs().catch(() => null),
             ]);
 
             const images = imagesResp.images || [];
@@ -483,6 +560,33 @@ const Pages = {
 
             const recentActivity = this._buildRecentActivity(images, nodes);
 
+            // S2-11: Stale initramfs indicator.
+            // Show a warning when the newest ready image was created after the current
+            // initramfs was built — meaning the initramfs may not include the latest
+            // kernel or scripts from that image.
+            const staleInitramfsWarning = (() => {
+                if (!initramfsInfo || !initramfsInfo.build_time) return '';
+                const readyImages = images.filter(i => i.status === 'ready');
+                if (readyImages.length === 0) return '';
+                const newestImageTs = Math.max(...readyImages.map(i => {
+                    const t = i.created_at;
+                    return typeof t === 'number' ? t : (t ? new Date(t).getTime() / 1000 : 0);
+                }));
+                const initramfsTs = typeof initramfsInfo.build_time === 'number'
+                    ? initramfsInfo.build_time
+                    : new Date(initramfsInfo.build_time).getTime() / 1000;
+                if (newestImageTs > initramfsTs) {
+                    return `<div class="alert alert-warning" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <span>
+                            <strong>Initramfs may be stale.</strong>
+                            A newer image was created after the current initramfs was built. Nodes booting via PXE will use the old initramfs until it is rebuilt.
+                        </span>
+                        <a href="#/images" class="btn btn-secondary btn-sm" style="white-space:nowrap">Go to Images</a>
+                    </div>`;
+                }
+                return '';
+            })();
+
             App.render(`
                 <div class="page-header">
                     <div>
@@ -490,6 +594,8 @@ const Pages = {
                         <div class="page-subtitle">System overview and active deployments</div>
                     </div>
                 </div>
+
+                ${staleInitramfsWarning}
 
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -898,22 +1004,39 @@ const Pages = {
 
     // ── Images ─────────────────────────────────────────────────────────────
 
-    async images() {
+    async images(filterTag = '') {
         App.render(loading('Loading images…'));
         try {
             const [resp, initramfsInfo] = await Promise.all([
-                API.images.list(),
+                // Always load all images for tag collection; server-side ?tag= used when filtering.
+                filterTag ? API.images.list('', filterTag) : API.images.list(),
                 API.system.initramfs().catch(() => null),
             ]);
             const images = resp.images || [];
+
+            // Collect all unique tags across all images for the filter dropdown.
+            // When filtered we still want full tag list so re-load all in background.
+            // For simplicity, tags are collected from the currently displayed set — good
+            // enough since the dropdown is informational; all filtering is server-side.
+            const allTagsSet = new Set();
+            images.forEach(img => (img.tags || []).forEach(t => allTagsSet.add(t)));
+            const allTags = Array.from(allTagsSet).sort();
+            const tagFilterHtml = allTags.length > 0 || filterTag ? `
+                <select id="img-tag-filter" onchange="Pages.images(this.value)"
+                    style="padding:6px 10px;font-size:13px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
+                    <option value="">All tags</option>
+                    ${allTags.map(t => `<option value="${escHtml(t)}" ${t === filterTag ? 'selected' : ''}>${escHtml(t)}</option>`).join('')}
+                    ${filterTag && !allTags.includes(filterTag) ? `<option value="${escHtml(filterTag)}" selected>${escHtml(filterTag)}</option>` : ''}
+                </select>` : '';
 
             App.render(`
                 <div class="page-header">
                     <div>
                         <h1 class="page-title">Images</h1>
-                        <div class="page-subtitle">${images.length} image${images.length !== 1 ? 's' : ''} total</div>
+                        <div class="page-subtitle">${images.length} image${images.length !== 1 ? 's' : ''} total${filterTag ? ` (filtered by tag: <strong>${escHtml(filterTag)}</strong>)` : ''}</div>
                     </div>
-                    <div class="flex gap-8">
+                    <div class="flex gap-8" style="align-items:center">
+                        ${tagFilterHtml}
                         <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
                         <button class="btn btn-secondary" onclick="Pages.showBuildFromISOModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -940,16 +1063,18 @@ const Pages = {
 
                 ${images.length === 0
                     ? `<div class="card"><div class="card-body">${emptyState(
-                        'No images yet',
-                        'Pull your first image to get started.',
-                        `<button class="btn btn-primary" onclick="Pages.showPullModal()">Pull Image</button>`
+                        filterTag ? `No images with tag "${filterTag}"` : 'No images yet',
+                        filterTag ? 'Try a different tag filter or clear the filter.' : 'Pull your first image to get started.',
+                        filterTag
+                            ? `<button class="btn btn-secondary" onclick="Pages.images()">Clear Filter</button>`
+                            : `<button class="btn btn-primary" onclick="Pages.showPullModal()">Pull Image</button>`
                     )}</div></div>`
                     : `<div class="image-grid">${images.map(img => this._imageCard(img)).join('')}</div>`
                 }
             `);
 
             const hasBuilding = images.some(i => i.status === 'building' || i.status === 'interrupted');
-            App.setAutoRefresh(() => Pages.images(), hasBuilding ? 5000 : 30000);
+            App.setAutoRefresh(() => Pages.images(filterTag), hasBuilding ? 5000 : 30000);
 
         } catch (e) {
             App.render(alertBox(`Failed to load images: ${e.message}`));
@@ -1127,23 +1252,27 @@ const Pages = {
     // ── Delete a single initramfs history entry ────────────────────────────
 
     async deleteInitramfsHistory(id) {
-        if (!confirm('Delete this history entry?')) return;
-        try {
-            await API.system.deleteInitramfsHistory(id);
-            // Remove the row from the DOM immediately without a full page reload.
-            const rows = document.querySelectorAll('#initramfs-history-table tbody tr');
-            rows.forEach(row => {
-                // The delete button's onclick contains the ID; find the row by checking its button.
-                const btn = row.querySelector('button');
-                if (btn && btn.getAttribute('onclick') && btn.getAttribute('onclick').includes(id)) {
-                    row.remove();
+        Pages.showConfirmModal({
+            title: 'Delete History Entry',
+            message: 'Remove this initramfs history entry? This cannot be undone.',
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.system.deleteInitramfsHistory(id);
+                    const rows = document.querySelectorAll('#initramfs-history-table tbody tr');
+                    rows.forEach(row => {
+                        const btn = row.querySelector('button');
+                        if (btn && btn.getAttribute('onclick') && btn.getAttribute('onclick').includes(id)) {
+                            row.remove();
+                        }
+                    });
+                    Pages.images();
+                } catch (e) {
+                    Pages.showAlertModal('Delete Failed', escHtml(e.message));
                 }
-            });
-            // Refresh the system card to pick up the updated table.
-            Pages.images();
-        } catch (e) {
-            alert('Failed to delete: ' + e.message);
-        }
+            },
+        });
     },
 
     // ── Image card with resume button ──────────────────────────────────────
@@ -1637,13 +1766,20 @@ const Pages = {
     },
 
     async archiveImage(id, name) {
-        if (!confirm(`Archive image "${name}"? This cannot be undone.`)) return;
-        try {
-            await API.images.archive(id);
-            Pages.images();
-        } catch (e) {
-            alert(`Archive failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Archive Image',
+            message: `Archive image <strong>${escHtml(name)}</strong>? This cannot be undone.`,
+            confirmText: 'Archive',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.images.archive(id);
+                    Pages.images();
+                } catch (e) {
+                    Pages.showAlertModal('Archive Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // showDeleteImageModal — opens a confirmation modal for real image deletion.
@@ -1878,8 +2014,11 @@ const Pages = {
     async imageDetail(id) {
         App.render(loading('Loading image…'));
         try {
-            const img = await API.images.get(id);
-            const tagsHtml = (img.tags || []).map(t => `<span class="badge badge-neutral">${escHtml(t)}</span>`).join(' ') || '—';
+            // Fetch image and metadata in parallel; metadata may not exist (404 is fine).
+            const [img, meta] = await Promise.all([
+                API.images.get(id),
+                API.images.metadata(id).catch(() => null),
+            ]);
 
             App.render(`
                 <div class="breadcrumb">
@@ -1928,11 +2067,31 @@ const Pages = {
                                 ? `<a href="${escHtml(img.source_url)}" target="_blank" rel="noreferrer">${escHtml(img.source_url)}</a>`
                                 : '—'}</div>
                         </div>
-                        <div class="kv-item"><div class="kv-key">Tags</div><div class="kv-value">${tagsHtml}</div></div>
+                        <div class="kv-item" style="grid-column:1/-1">
+                            <div class="kv-key">Tags</div>
+                            <div class="kv-value" id="img-tags-display">
+                                ${Pages._renderImageTagEditor(img.id, img.tags || [])}
+                            </div>
+                        </div>
                         <div class="kv-item"><div class="kv-key">Notes</div><div class="kv-value">${escHtml(img.notes || '—')}</div></div>
                         <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(img.created_at)}</div></div>
                         <div class="kv-item"><div class="kv-key">Finalized</div><div class="kv-value">${fmtDate(img.finalized_at)}</div></div>
                     </div>`)}
+
+                ${meta && !meta.error ? cardWrap('Build Metadata', `
+                    <div class="kv-grid">
+                        ${meta.kernel_version ? `<div class="kv-item"><div class="kv-key">Kernel</div><div class="kv-value"><code>${escHtml(meta.kernel_version)}</code></div></div>` : ''}
+                        ${meta.cuda_version ? `<div class="kv-item"><div class="kv-key">CUDA</div><div class="kv-value"><code>${escHtml(meta.cuda_version)}</code></div></div>` : ''}
+                        ${meta.build_method ? `<div class="kv-item"><div class="kv-key">Build Method</div><div class="kv-value">${escHtml(meta.build_method)}</div></div>` : ''}
+                        ${meta.build_timestamp ? `<div class="kv-item"><div class="kv-key">Build Timestamp</div><div class="kv-value">${escHtml(meta.build_timestamp)}</div></div>` : ''}
+                        ${meta.distro ? `<div class="kv-item"><div class="kv-key">Distro</div><div class="kv-value">${escHtml(meta.distro)}</div></div>` : ''}
+                        ${meta.firmware ? `<div class="kv-item"><div class="kv-key">Firmware (detected)</div><div class="kv-value">${escHtml(meta.firmware)}</div></div>` : ''}
+                        ${(meta.installed_packages_summary && meta.installed_packages_summary.length > 0) ? `
+                        <div class="kv-item" style="grid-column:1/-1">
+                            <div class="kv-key">Installed Packages (summary)</div>
+                            <div class="kv-value" style="font-size:12px">${meta.installed_packages_summary.slice(0, 20).map(p => escHtml(p)).join(', ')}${meta.installed_packages_summary.length > 20 ? ` <span class="text-dim">+${meta.installed_packages_summary.length - 20} more</span>` : ''}</div>
+                        </div>` : ''}
+                    </div>`) : ''}
 
                 ${img.disk_layout ? cardWrap('Disk Layout', `
                     ${this._renderDiskLayout(img.disk_layout)}
@@ -1960,6 +2119,69 @@ const Pages = {
             }
         } catch (e) {
             App.render(alertBox(`Failed to load image: ${e.message}`));
+        }
+    },
+
+    // _renderImageTagEditor renders the interactive tag editor for the image detail page (S2-3).
+    // Tags are displayed as removable chips with an inline add-tag input.
+    _renderImageTagEditor(imageId, tags) {
+        const chips = tags.map(t => `
+            <span class="badge badge-neutral" style="display:inline-flex;align-items:center;gap:4px">
+                ${escHtml(t)}
+                <button type="button" class="tag-remove-btn" title="Remove tag"
+                    onclick="Pages._removeImageTag('${escHtml(imageId)}', '${escHtml(t)}')"
+                    style="background:none;border:none;cursor:pointer;padding:0;line-height:1;color:inherit;opacity:0.7;font-size:12px">&times;</button>
+            </span>`).join(' ');
+        return `
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" id="img-tag-chips">
+                ${chips || '<span class="text-dim" style="font-size:12px">No tags</span>'}
+            </div>
+            <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+                <input type="text" id="img-tag-input" placeholder="Add tag…"
+                    style="width:160px;padding:4px 8px;font-size:13px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)"
+                    onkeydown="if(event.key==='Enter'){event.preventDefault();Pages._addImageTag('${escHtml(imageId)}');}">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._addImageTag('${escHtml(imageId)}')">Add</button>
+                <span id="img-tag-error" style="color:var(--color-danger);font-size:12px"></span>
+            </div>`;
+    },
+
+    // _addImageTag adds a tag to the image and refreshes the tag display (S2-3).
+    async _addImageTag(imageId) {
+        const input = document.getElementById('img-tag-input');
+        const errEl = document.getElementById('img-tag-error');
+        if (!input) return;
+        const newTag = input.value.trim();
+        if (!newTag) return;
+
+        // Gather current tags from existing chips.
+        const chips = document.querySelectorAll('#img-tag-chips .badge');
+        const current = Array.from(chips).map(c => c.textContent.trim().replace(/×$/, '').trim()).filter(Boolean);
+        if (current.includes(newTag)) {
+            if (errEl) errEl.textContent = 'Tag already exists';
+            return;
+        }
+        const updated = [...current, newTag];
+        try {
+            const img = await API.images.updateTags(imageId, updated);
+            const container = document.getElementById('img-tags-display');
+            if (container) container.innerHTML = Pages._renderImageTagEditor(imageId, img.tags || []);
+            if (errEl) errEl.textContent = '';
+        } catch (e) {
+            if (errEl) errEl.textContent = `Failed: ${e.message}`;
+        }
+    },
+
+    // _removeImageTag removes a tag from the image and refreshes the tag display (S2-3).
+    async _removeImageTag(imageId, tagToRemove) {
+        const chips = document.querySelectorAll('#img-tag-chips .badge');
+        const current = Array.from(chips).map(c => c.textContent.trim().replace(/×$/, '').trim()).filter(Boolean);
+        const updated = current.filter(t => t !== tagToRemove);
+        try {
+            const img = await API.images.updateTags(imageId, updated);
+            const container = document.getElementById('img-tags-display');
+            if (container) container.innerHTML = Pages._renderImageTagEditor(imageId, img.tags || []);
+        } catch (e) {
+            console.error('remove image tag:', e);
         }
     },
 
@@ -2020,7 +2242,7 @@ const Pages = {
         try {
             sess = await API.images.openShellSession(imageId);
         } catch (e) {
-            alert(`Failed to open shell session: ${e.message}`);
+            Pages.showAlertModal('Shell Session Failed', escHtml(e.message));
             return;
         }
 
@@ -2327,7 +2549,7 @@ const Pages = {
             const sectionsHtml = filteredNodes.length
                 ? Pages._nodesRoleSections(filteredNodes, imgMap, images, groupMap)
                 : `<div class="card">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
-                    groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>Add Node</button>`)}</div>`;
+                    groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>Add Node</button>`)}</div>`;
 
             App.render(`
                 <div class="page-header">
@@ -2336,7 +2558,7 @@ const Pages = {
                         <div class="page-subtitle" id="nodes-subtitle">${filteredNodes.length}${groupFilter ? ' (filtered)' : ''} of ${nodes.length} node${nodes.length !== 1 ? 's' : ''}</div>
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))})'>
+                        <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                             </svg>
@@ -2522,9 +2744,10 @@ const Pages = {
         }
     },
 
-    showNodeModal(nodeJson, imagesJson) {
-        const node   = nodeJson   ? JSON.parse(nodeJson)   : null;
-        const images = imagesJson ? JSON.parse(imagesJson) : [];
+    showNodeModal(nodeJson, imagesJson, nodeGroupsJson) {
+        const node       = nodeJson       ? JSON.parse(nodeJson)       : null;
+        const images     = imagesJson     ? JSON.parse(imagesJson)     : [];
+        const nodeGroups = nodeGroupsJson ? JSON.parse(nodeGroupsJson) : [];
         const isEdit = !!node;
 
         const overlay = document.createElement('div');
@@ -2536,6 +2759,11 @@ const Pages = {
         const imgOptions = images
             .filter(i => i.status === 'ready')
             .map(i => `<option value="${escHtml(i.id)}" ${node && node.base_image_id === i.id ? 'selected' : ''}>${escHtml(i.name)}${i.version ? ' (' + i.version + ')' : ''}</option>`)
+            .join('');
+
+        // S2-6: Node Group dropdown — populated from nodeGroups list.
+        const groupOptions = nodeGroups
+            .map(g => `<option value="${escHtml(g.id)}" ${node && node.group_id === g.id ? 'selected' : ''}>${escHtml(g.name)}</option>`)
             .join('');
 
         overlay.innerHTML = `
@@ -2582,9 +2810,21 @@ const Pages = {
                                 </select>
                                 <div id="role-mismatch-warning" class="alert alert-warning" style="display:none;margin-top:8px;font-size:12px"></div>
                             </div>
-                            <div class="form-group" style="grid-column:1/-1">
-                                <label>Groups (comma-separated)</label>
-                                <input type="text" name="groups" value="${isEdit ? escHtml((node.groups || []).join(', ')) : ''}" placeholder="compute, gpu, infiniband">
+                            <div class="form-group">
+                                <!-- S2-7: Tags = freeform, was "Groups"; S2-6: Node Group dropdown -->
+                                <label>Tags <span style="font-size:11px;color:var(--text-secondary)">(comma-separated)</span>
+                                    <span style="font-size:11px;color:var(--text-secondary);display:block;font-weight:400">Unstructured labels used for filtering and Slurm role assignment.</span>
+                                </label>
+                                <input type="text" name="tags" value="${isEdit ? escHtml((node.tags || node.groups || []).join(', ')) : ''}" placeholder="compute, gpu, infiniband">
+                            </div>
+                            <div class="form-group">
+                                <label>Node Group
+                                    <span style="font-size:11px;color:var(--text-secondary);display:block;font-weight:400">Primary operational group — controls disk layout inheritance, network profile, and group reimages.</span>
+                                </label>
+                                <select name="group_id">
+                                    <option value="">None</option>
+                                    ${groupOptions || '<option disabled>No groups defined</option>'}
+                                </select>
                             </div>
                             <div class="form-group" style="grid-column:1/-1">
                                 <label>Kernel Args</label>
@@ -2889,8 +3129,9 @@ const Pages = {
         btn.textContent = 'Saving…';
         res.innerHTML = '';
 
-        const groups  = data.get('groups').split(',').map(g => g.trim()).filter(Boolean);
+        const tags    = data.get('tags').split(',').map(g => g.trim()).filter(Boolean);
         const sshKeys = data.get('ssh_keys').split('\n').map(k => k.trim()).filter(Boolean);
+        const groupId = data.get('group_id') || null;
 
         // Build power_provider from form fields.
         const ppType = data.get('power_provider_type') || '';
@@ -2916,7 +3157,9 @@ const Pages = {
             fqdn:           data.get('fqdn'),
             primary_mac:    data.get('primary_mac'),
             base_image_id:  data.get('base_image_id'),
-            groups,
+            tags,
+            groups:         tags, // backward-compat alias
+            group_id:       groupId,
             ssh_keys:       sshKeys,
             kernel_args:    data.get('kernel_args'),
             interfaces:     [],
@@ -2941,13 +3184,20 @@ const Pages = {
     },
 
     async deleteNode(id, name) {
-        if (!confirm(`Delete node "${name}"? This cannot be undone.`)) return;
-        try {
-            await API.nodes.del(id);
-            Pages.nodes();
-        } catch (e) {
-            alert(`Delete failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Delete Node',
+            message: `Delete node <strong>${escHtml(name)}</strong>? This cannot be undone.`,
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.nodes.del(id);
+                    Pages.nodes();
+                } catch (e) {
+                    Pages.showAlertModal('Delete Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // _togglePowerDropdown opens/closes the per-row power dropdown on the nodes list.
@@ -3019,20 +3269,27 @@ const Pages = {
     // _listConfirmPowerAction shows a confirmation dialog before executing a destructive
     // power action from the nodes list (off, reset, cycle).
     async _listConfirmPowerAction(nodeId, action, title, description) {
-        if (!confirm(`${title}\n\n${description}\n\nNode: ${nodeId}\n\nAre you sure?`)) return;
-        const actionFns = {
-            off:   () => API.nodes.power.off(nodeId),
-            reset: () => API.nodes.power.reset(nodeId),
-            cycle: () => API.nodes.power.cycle(nodeId),
-        };
-        const fn = actionFns[action];
-        if (!fn) return;
-        try {
-            await fn();
-            App.toast(`${title} sent to ${nodeId}`, 'success');
-        } catch (e) {
-            App.toast(`${title} failed: ${e.message}`, 'error');
-        }
+        Pages.showConfirmModal({
+            title,
+            message: `${escHtml(description)}<br><br><span class="text-dim">Node: ${escHtml(nodeId)}</span>`,
+            confirmText: title,
+            danger: true,
+            onConfirm: async () => {
+                const actionFns = {
+                    off:   () => API.nodes.power.off(nodeId),
+                    reset: () => API.nodes.power.reset(nodeId),
+                    cycle: () => API.nodes.power.cycle(nodeId),
+                };
+                const fn = actionFns[action];
+                if (!fn) return;
+                try {
+                    await fn();
+                    App.toast(`${title} sent to ${nodeId}`, 'success');
+                } catch (e) {
+                    App.toast(`${title} failed: ${e.message}`, 'error');
+                }
+            },
+        });
     },
 
     // _regenerateHostname picks a new random 4-hex suffix and fills the hostname field.
@@ -3223,8 +3480,8 @@ const Pages = {
                                     </select>
                                 </div>
                                 <div class="form-group" style="grid-column:1/-1">
-                                    <label>Groups / Tags <span style="font-size:11px;color:var(--text-secondary)">(comma-separated)</span></label>
-                                    <input type="text" id="ov-groups" value="${escHtml((node.groups || []).join(', '))}"
+                                    <label>Tags <span class="tooltip-icon" title="Unstructured labels used for filtering and Slurm role assignment." style="cursor:help;font-size:11px;color:var(--text-secondary)">(?)</span> <span style="font-size:11px;color:var(--text-secondary)">(comma-separated)</span></label>
+                                    <input type="text" id="ov-tags" value="${escHtml((node.tags || node.groups || []).join(', '))}"
                                         placeholder="compute, gpu, infiniband"
                                         oninput="Pages._tabMarkDirty('overview')">
                                 </div>
@@ -3821,7 +4078,7 @@ const Pages = {
                     fqdn:          node.fqdn || '',
                     base_image_id: node.base_image_id || '',
                     group_id:      node.group_id || '',
-                    groups:        (node.groups || []).join(', '),
+                    tags:          (node.tags || node.groups || []).join(', '),
                 },
             };
             Pages._nodeEditorState['bmc'] = {
@@ -3925,9 +4182,14 @@ const Pages = {
             Router.navigate('/nodes');
             return;
         }
-        if (confirm(`You have unsaved changes on the ${dirtyTabs.join(', ')} tab(s). Leave without saving?`)) {
-            Router.navigate('/nodes');
-        }
+        Pages.showConfirmModal({
+            title: 'Unsaved Changes',
+            message: `You have unsaved changes on the <strong>${escHtml(dirtyTabs.join(', '))}</strong> tab(s). Leave without saving?`,
+            confirmText: 'Leave',
+            cancelText: 'Stay',
+            danger: false,
+            onConfirm: () => Router.navigate('/nodes'),
+        });
     },
 
     // _switchNodeTab handles tab switching with unsaved-changes protection.
@@ -4057,12 +4319,12 @@ const Pages = {
             const f   = document.getElementById('ov-fqdn');
             const img = document.getElementById('ov-base-image');
             const grp = document.getElementById('ov-group-id');
-            const gs  = document.getElementById('ov-groups');
+            const gs  = document.getElementById('ov-tags');
             if (h)   h.value   = orig.hostname;
             if (f)   f.value   = orig.fqdn;
             if (img) img.value = orig.base_image_id;
             if (grp) grp.value = orig.group_id;
-            if (gs)  gs.value  = orig.groups;
+            if (gs)  gs.value  = orig.tags;
         } else if (tabKey === 'bmc') {
             const pt = document.getElementById('pp-type');
             if (pt) { pt.value = orig.pp_type; Pages._onPowerProviderInlineTypeChange(orig.pp_type); }
@@ -4141,7 +4403,7 @@ const Pages = {
         const fqdn        = (document.getElementById('ov-fqdn')?.value || '').trim();
         const baseImageId = document.getElementById('ov-base-image')?.value || '';
         const groupId     = document.getElementById('ov-group-id')?.value || '';
-        const groupsRaw   = (document.getElementById('ov-groups')?.value || '');
+        const tagsRaw     = (document.getElementById('ov-tags')?.value || '');
 
         // Validate hostname.
         if (hostname && !/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(hostname)) {
@@ -4150,7 +4412,7 @@ const Pages = {
             return;
         }
 
-        const groups = groupsRaw.split(',').map(g => g.trim()).filter(Boolean);
+        const tags = tagsRaw.split(',').map(g => g.trim()).filter(Boolean);
 
         try {
             // Fetch current node to get all fields we're not changing (the API requires full body).
@@ -4161,7 +4423,8 @@ const Pages = {
                 primary_mac:     existing.primary_mac,
                 base_image_id:   baseImageId,
                 group_id:        groupId,
-                groups,
+                tags,
+                groups:          tags, // backward-compat alias
                 ssh_keys:        existing.ssh_keys || [],
                 kernel_args:     existing.kernel_args || '',
                 custom_vars:     existing.custom_vars || {},
@@ -4174,7 +4437,7 @@ const Pages = {
 
             // Update original state so subsequent reverts work correctly.
             Pages._nodeEditorState['overview'].original = {
-                hostname, fqdn, base_image_id: baseImageId, group_id: groupId, groups: groupsRaw,
+                hostname, fqdn, base_image_id: baseImageId, group_id: groupId, tags: tagsRaw,
             };
             Pages._tabMarkClean('overview');
 
@@ -4502,7 +4765,7 @@ const Pages = {
         const builtFor = img.built_for_roles || [];
         if (!builtFor.length) { warnEl.style.display = 'none'; return; }
         const roleKeywords = ['compute', 'gpu-compute', 'gpu', 'storage', 'head-node', 'management', 'minimal'];
-        const nodeRoles = (node.groups || []).filter(g => roleKeywords.some(k => g.toLowerCase().includes(k)));
+        const nodeRoles = (node.tags || node.groups || []).filter(g => roleKeywords.some(k => g.toLowerCase().includes(k)));
         const mismatched = nodeRoles.filter(g => !builtFor.some(r => g.toLowerCase().includes(r) || r.toLowerCase().includes(g)));
         if (mismatched.length) {
             warnEl.innerHTML = `Role mismatch: node has <strong>${escHtml(mismatched.join(', '))}</strong> but image built for <strong>${escHtml(builtFor.join(', '))}</strong>`;
@@ -4515,53 +4778,77 @@ const Pages = {
     // ── Node Actions dropdown ─────────────────────────────────────────────────
 
     async _nodeActionsRediscover(nodeId) {
-        if (!confirm('Mark node for hardware re-discovery?\n\nThe node will need to PXE boot to re-register its hardware profile.\nThis does NOT wipe the disk.')) return;
-        try {
-            // Trigger a reimage so the node PXE-boots and re-registers its hardware profile.
-            await API.request('POST', `/nodes/${nodeId}/reimage`, {});
-            alert('Reimage requested. PXE-boot the node to re-discover hardware. After registration, cancel or skip deployment if you only want hardware discovery.');
-        } catch (e) {
-            alert(`Re-discover failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Hardware Re-discovery',
+            message: 'Mark node for hardware re-discovery?<br><br>The node will need to PXE boot to re-register its hardware profile. This does <strong>not</strong> wipe the disk.',
+            confirmText: 'Re-discover',
+            onConfirm: async () => {
+                try {
+                    await API.request('POST', `/nodes/${nodeId}/reimage`, {});
+                    Pages.showAlertModal('Reimage Requested', 'PXE-boot the node to re-discover hardware. After registration, cancel or skip deployment if you only want hardware discovery.');
+                } catch (e) {
+                    Pages.showAlertModal('Re-discover Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     async _nodeActionsTriggerReimage(nodeId, displayName) {
-        if (!confirm(`Trigger reimage of "${displayName}"?\n\nThe node will re-deploy on next PXE boot.`)) return;
-        try {
-            await API.request('POST', `/nodes/${nodeId}/reimage`, {});
-            alert('Reimage requested. The node will re-deploy on next PXE boot.');
-            // Reload the page to show updated reimage_pending state.
-            Pages.nodeDetail(nodeId);
-        } catch (e) {
-            alert(`Trigger reimage failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Trigger Reimage',
+            message: `Trigger reimage of <strong>${escHtml(displayName)}</strong>?<br><br>The node will re-deploy on next PXE boot.`,
+            confirmText: 'Trigger Reimage',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.request('POST', `/nodes/${nodeId}/reimage`, {});
+                    Pages.nodeDetail(nodeId);
+                } catch (e) {
+                    Pages.showAlertModal('Trigger Reimage Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // ── Cancel a single reimage request ──────────────────────────────────────
 
     async _cancelReimage(reimageId, nodeId) {
-        if (!confirm('Cancel this reimage request?\n\nThe node\'s reimage_pending flag will be cleared so PXE boots route to disk.')) return;
-        try {
-            await API.reimages.cancel(reimageId);
-            App.toast('Reimage request canceled', 'success');
-            Pages.nodeDetail(nodeId);
-        } catch (e) {
-            alert(`Cancel failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Cancel Reimage',
+            message: "Cancel this reimage request?<br><br>The node's <code>reimage_pending</code> flag will be cleared so PXE boots route to disk.",
+            confirmText: 'Cancel Reimage',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.reimages.cancel(reimageId);
+                    App.toast('Reimage request canceled', 'success');
+                    Pages.nodeDetail(nodeId);
+                } catch (e) {
+                    Pages.showAlertModal('Cancel Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // ── Cancel all non-terminal reimage requests ──────────────────────────────
 
     async cancelAllActiveDeploys() {
-        if (!confirm('Cancel ALL active reimage requests (pending, triggered, in_progress)?\n\nThis will clear reimage_pending on all affected nodes.')) return;
-        try {
-            const result = await API.reimages.cancelAllActive();
-            const n = result && result.canceled != null ? result.canceled : '?';
-            App.toast(`${n} reimage request${n === 1 ? '' : 's'} canceled`, 'success');
-            Pages.images();
-        } catch (e) {
-            alert(`Cancel all failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Cancel All Active Deploys',
+            message: 'Cancel ALL active reimage requests (pending, triggered, in_progress)?<br><br>This will clear <code>reimage_pending</code> on all affected nodes.',
+            confirmText: 'Cancel All',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    const result = await API.reimages.cancelAllActive();
+                    const n = result && result.canceled != null ? result.canceled : '?';
+                    App.toast(`${n} reimage request${n === 1 ? '' : 's'} canceled`, 'success');
+                    Pages.images();
+                } catch (e) {
+                    Pages.showAlertModal('Cancel All Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     async loadNodeLogs(mac) {
@@ -4834,13 +5121,19 @@ const Pages = {
 
     // _pushToSingleNode initiates a push to a single node and shows toast feedback.
     async _pushToSingleNode(nodeId) {
-        if (!confirm('Push all Slurm configs to this node?')) return;
-        try {
-            const op = await API.slurm.push({ filenames: [], node_ids: [nodeId], apply_action: 'reconfigure' });
-            App.toast('Push started (op: ' + (op.id || '?').slice(0,8) + ')', 'info');
-        } catch (err) {
-            App.toast('Push failed: ' + err.message, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Push Slurm Configs',
+            message: `Push all Slurm configs to node <strong>${escHtml(nodeId)}</strong>?`,
+            confirmText: 'Push',
+            onConfirm: async () => {
+                try {
+                    const op = await API.slurm.push({ filenames: [], node_ids: [nodeId], apply_action: 'reconfigure' });
+                    App.toast('Push started (op: ' + (op.id || '?').slice(0,8) + ')', 'info');
+                } catch (err) {
+                    App.toast('Push failed: ' + err.message, 'error');
+                }
+            },
+        });
     },
 
     // _saveSlurmRole reads the checked role checkboxes and calls PUT /nodes/:id/slurm/role.
@@ -5291,25 +5584,38 @@ const Pages = {
 
     async _applyRecommendedLayout(nodeId, layoutJSON) {
         const layout = JSON.parse(layoutJSON);
-        if (!confirm('Apply the recommended disk layout as a node-level override? This will override the image/group default for this node only.')) return;
-        try {
-            await API.request('PUT', `/nodes/${nodeId}/layout-override`, { layout });
-            App.toast('Recommended layout applied as node override', 'success');
-            Pages._onDiskLayoutTabOpen(nodeId);
-        } catch (e) {
-            App.toast(`Failed to apply layout: ${e.message}`, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Apply Recommended Layout',
+            message: 'Apply the recommended disk layout as a node-level override?<br><br>This will override the image/group default for this node only.',
+            confirmText: 'Apply',
+            onConfirm: async () => {
+                try {
+                    await API.request('PUT', `/nodes/${nodeId}/layout-override`, { layout });
+                    App.toast('Recommended layout applied as node override', 'success');
+                    Pages._onDiskLayoutTabOpen(nodeId);
+                } catch (e) {
+                    App.toast(`Failed to apply layout: ${e.message}`, 'error');
+                }
+            },
+        });
     },
 
     async _clearLayoutOverride(nodeId) {
-        if (!confirm('Clear the node-level disk layout override? The group or image default will be used instead.')) return;
-        try {
-            await API.request('PUT', `/nodes/${nodeId}/layout-override`, { clear_layout_override: true });
-            App.toast('Node layout override cleared — using group or image default', 'success');
-            Pages._onDiskLayoutTabOpen(nodeId);
-        } catch (e) {
-            App.toast(`Failed to clear override: ${e.message}`, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Clear Layout Override',
+            message: 'Clear the node-level disk layout override?<br><br>The group or image default will be used instead.',
+            confirmText: 'Clear Override',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.request('PUT', `/nodes/${nodeId}/layout-override`, { clear_layout_override: true });
+                    App.toast('Node layout override cleared — using group or image default', 'success');
+                    Pages._onDiskLayoutTabOpen(nodeId);
+                } catch (e) {
+                    App.toast(`Failed to clear override: ${e.message}`, 'error');
+                }
+            },
+        });
     },
 
     _showLayoutOverrideEditor(nodeId, layoutJSON) {
@@ -5562,24 +5868,31 @@ const Pages = {
         }
     },
 
-    // _confirmPowerAction shows a modal dialog before executing a destructive action.
+    // _confirmPowerAction shows a modal dialog before executing a destructive power action.
     _confirmPowerAction(nodeId, action, title, description) {
-        if (!confirm(`${title}\n\n${description}\n\nAre you sure?`)) return;
-        const actionFns = {
-            off:   () => API.nodes.power.off(nodeId),
-            cycle: () => API.nodes.power.cycle(nodeId),
-            reset: () => API.nodes.power.reset(nodeId),
-            pxe:   () => API.nodes.power.pxeBoot(nodeId),
-        };
-        const fn = actionFns[action];
-        if (!fn) return;
-        const feedback = document.getElementById('power-action-feedback');
-        if (feedback) { feedback.textContent = `Sending ${action} command…`; feedback.style.display = ''; feedback.className = 'alert alert-info'; }
-        fn().then(() => {
-            if (feedback) { feedback.textContent = `${title} command sent.`; }
-            setTimeout(() => Pages._refreshPowerStatus(nodeId), 2000);
-        }).catch(e => {
-            if (feedback) { feedback.textContent = `Error: ${e.message}`; feedback.className = 'alert alert-error'; }
+        Pages.showConfirmModal({
+            title,
+            message: `${escHtml(description)}<br><br>Are you sure?`,
+            confirmText: title,
+            danger: true,
+            onConfirm: () => {
+                const actionFns = {
+                    off:   () => API.nodes.power.off(nodeId),
+                    cycle: () => API.nodes.power.cycle(nodeId),
+                    reset: () => API.nodes.power.reset(nodeId),
+                    pxe:   () => API.nodes.power.pxeBoot(nodeId),
+                };
+                const fn = actionFns[action];
+                if (!fn) return;
+                const feedback = document.getElementById('power-action-feedback');
+                if (feedback) { feedback.textContent = `Sending ${action} command…`; feedback.style.display = ''; feedback.className = 'alert alert-info'; }
+                fn().then(() => {
+                    if (feedback) { feedback.textContent = `${title} command sent.`; }
+                    setTimeout(() => Pages._refreshPowerStatus(nodeId), 2000);
+                }).catch(e => {
+                    if (feedback) { feedback.textContent = `Error: ${e.message}`; feedback.className = 'alert alert-error'; }
+                });
+            },
         });
     },
 
@@ -5745,13 +6058,20 @@ const Pages = {
     },
 
     async deleteNodeAndGoBack(id, name) {
-        if (!confirm(`Delete node "${name}"? This cannot be undone.`)) return;
-        try {
-            await API.nodes.del(id);
-            Router.navigate('/nodes');
-        } catch (e) {
-            alert(`Delete failed: ${e.message}`);
-        }
+        Pages.showConfirmModal({
+            title: 'Delete Node',
+            message: `Delete node <strong>${escHtml(name)}</strong>? This cannot be undone.`,
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.nodes.del(id);
+                    Router.navigate('/nodes');
+                } catch (e) {
+                    Pages.showAlertModal('Delete Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // ── Node Groups ───────────────────────────────────────────────────────────
@@ -6441,29 +6761,32 @@ const Pages = {
             usingNodes = ((resp && resp.nodes) || []).filter(n => n.group_id === id);
         } catch (_) {}
 
-        let confirmed = false;
-        if (usingNodes.length > 0) {
-            const names = usingNodes.map(n => n.hostname || n.primary_mac).join(', ');
-            confirmed = confirm(
-                `${usingNodes.length} node${usingNodes.length !== 1 ? 's are' : ' is'} using this group: ${names}.\n\n` +
-                `Deleting it will remove the group assignment from those nodes but keep them as standalone nodes.\n\nContinue?`
-            );
-        } else {
-            confirmed = confirm(`Delete group "${name}"? This cannot be undone.`);
-        }
-        if (!confirmed) return;
+        const message = usingNodes.length > 0
+            ? (() => {
+                const names = usingNodes.map(n => escHtml(n.hostname || n.primary_mac)).join(', ');
+                return `<strong>${usingNodes.length} node${usingNodes.length !== 1 ? 's are' : ' is'} using this group:</strong> ${names}.<br><br>Deleting it will remove the group assignment from those nodes but keep them as standalone nodes.`;
+            })()
+            : `Delete group <strong>${escHtml(name)}</strong>? This cannot be undone.`;
 
-        try {
-            await API.nodeGroups.del(id);
-            App.toast(`Group "${name}" deleted`, 'success');
-            Pages.nodeGroups();
-        } catch (e) {
-            if (e.message && e.message.includes('409')) {
-                alert(`Cannot delete group — it is still in use. Remove all node assignments first or contact the admin.`);
-            } else {
-                App.toast(`Delete failed: ${e.message}`, 'error');
-            }
-        }
+        Pages.showConfirmModal({
+            title: 'Delete Node Group',
+            message,
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.nodeGroups.del(id);
+                    App.toast(`Group "${name}" deleted`, 'success');
+                    Pages.nodeGroups();
+                } catch (e) {
+                    if (e.message && e.message.includes('409')) {
+                        Pages.showAlertModal('Cannot Delete Group', 'This group is still in use. Remove all node assignments first.');
+                    } else {
+                        App.toast(`Delete failed: ${e.message}`, 'error');
+                    }
+                }
+            },
+        });
     },
 
     // ── Build from ISO modal ─────────────────────────────────────────���─────
@@ -6592,14 +6915,21 @@ const Pages = {
     },
 
     async removeGroupMember(groupId, nodeId, nodeLabel) {
-        if (!confirm(`Remove ${nodeLabel} from this group?`)) return;
-        try {
-            await API.nodeGroups.removeMember(groupId, nodeId);
-            App.toast(`${nodeLabel} removed from group`, 'success');
-            Pages.nodeGroupDetail(groupId);
-        } catch (e) {
-            App.toast(`Failed to remove member: ${e.message}`, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Remove from Group',
+            message: `Remove <strong>${escHtml(nodeLabel)}</strong> from this group?`,
+            confirmText: 'Remove',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.nodeGroups.removeMember(groupId, nodeId);
+                    App.toast(`${nodeLabel} removed from group`, 'success');
+                    Pages.nodeGroupDetail(groupId);
+                } catch (e) {
+                    App.toast(`Failed to remove member: ${e.message}`, 'error');
+                }
+            },
+        });
     },
 
     async showAddMemberModal(groupId) {
@@ -7232,32 +7562,45 @@ const Pages = {
     _updateIsoBuildProgress() {},
 
     async _cancelIsoBuild(imageId) {
-        if (!confirm('Cancel this build? The in-progress VM will be stopped and the image will remain in error state.')) return;
-        try {
-            if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
-            clearInterval(Pages._isoBuildElapsedTimer);
-            await API.images.delete(imageId);
-            Router.navigate('/images');
-        } catch (e) {
-            alert('Cancel failed: ' + e.message);
-        }
+        Pages.showConfirmModal({
+            title: 'Cancel Build',
+            message: 'Cancel this build? The in-progress VM will be stopped and the image will remain in error state.',
+            confirmText: 'Cancel Build',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
+                    clearInterval(Pages._isoBuildElapsedTimer);
+                    await API.images.delete(imageId);
+                    Router.navigate('/images');
+                } catch (e) {
+                    Pages.showAlertModal('Cancel Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // _deleteAndRetryBuild deletes an interrupted image and reopens the Build from
     // ISO modal prefilled with the original source URL so the admin can retry
     // without having to retype anything.
     async _deleteAndRetryBuild(imageId, sourceUrl) {
-        if (!confirm('Delete this image and open the Build from ISO modal to retry?')) return;
-        try {
-            if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
-            clearInterval(Pages._isoBuildElapsedTimer);
-            await API.images.delete(imageId);
-            Router.navigate('/images');
-            // Brief delay so the images page renders before opening the modal.
-            setTimeout(() => Pages.showBuildFromISOModal(sourceUrl), 300);
-        } catch (e) {
-            alert('Delete failed: ' + e.message);
-        }
+        Pages.showConfirmModal({
+            title: 'Delete and Retry Build',
+            message: 'Delete this image and open the Build from ISO modal to retry?',
+            confirmText: 'Delete and Retry',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
+                    clearInterval(Pages._isoBuildElapsedTimer);
+                    await API.images.delete(imageId);
+                    Router.navigate('/images');
+                    setTimeout(() => Pages.showBuildFromISOModal(sourceUrl), 300);
+                } catch (e) {
+                    Pages.showAlertModal('Delete Failed', escHtml(e.message));
+                }
+            },
+        });
     },
 
     // ── Role mismatch warning ───────────────────────────────────────────��──
@@ -7281,7 +7624,7 @@ const Pages = {
         // A mismatch is when the node has a group that looks like a role ID
         // (compute, gpu-compute, storage, etc.) but it's not in the image's roles.
         const roleKeywords = ['compute', 'gpu-compute', 'gpu', 'storage', 'head-node', 'management', 'minimal'];
-        const nodeRoles = (node.groups || []).filter(g => roleKeywords.some(k => g.toLowerCase().includes(k)));
+        const nodeRoles = (node.tags || node.groups || []).filter(g => roleKeywords.some(k => g.toLowerCase().includes(k)));
         const mismatched = nodeRoles.filter(g => !builtFor.some(r => g.toLowerCase().includes(r) || r.toLowerCase().includes(g)));
 
         if (mismatched.length) {
@@ -7727,14 +8070,21 @@ const Pages = {
     },
 
     async _settingsDisableUser(id, username) {
-        if (!confirm(`Disable user "${username}"? They will not be able to log in.`)) return;
-        try {
-            await API.users.update(id, { disabled: true });
-            App.toast('User disabled', 'success');
-            Pages._settingsRender('users');
-        } catch (err) {
-            App.toast('Disable failed: ' + err.message, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Disable User',
+            message: `Disable user <strong>${escHtml(username)}</strong>? They will not be able to log in.`,
+            confirmText: 'Disable',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.users.update(id, { disabled: true });
+                    App.toast('User disabled', 'success');
+                    Pages._settingsRender('users');
+                } catch (err) {
+                    App.toast('Disable failed: ' + err.message, 'error');
+                }
+            },
+        });
     },
 
     _settingsCreateKeyModal() {
@@ -7802,24 +8152,38 @@ const Pages = {
     },
 
     async _settingsRotateKey(id) {
-        if (!confirm('Rotate this key? The old key will stop working immediately.')) return;
-        try {
-            const resp = await API.apiKeys.rotate(id);
-            Pages._settingsShowRawKey(resp.key, 'Key Rotated');
-        } catch (err) {
-            App.toast('Rotate failed: ' + err.message, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Rotate API Key',
+            message: 'Rotate this key? The old key will stop working immediately.',
+            confirmText: 'Rotate',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    const resp = await API.apiKeys.rotate(id);
+                    Pages._settingsShowRawKey(resp.key, 'Key Rotated');
+                } catch (err) {
+                    App.toast('Rotate failed: ' + err.message, 'error');
+                }
+            },
+        });
     },
 
     async _settingsRevokeKey(id, label) {
-        if (!confirm(`Revoke key "${label}"? This cannot be undone.`)) return;
-        try {
-            await API.apiKeys.revoke(id);
-            App.toast('Key revoked', 'success');
-            Pages._settingsRender('api-keys');
-        } catch (err) {
-            App.toast('Revoke failed: ' + err.message, 'error');
-        }
+        Pages.showConfirmModal({
+            title: 'Revoke API Key',
+            message: `Revoke key <strong>${escHtml(label)}</strong>? This cannot be undone.`,
+            confirmText: 'Revoke',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.apiKeys.revoke(id);
+                    App.toast('Key revoked', 'success');
+                    Pages._settingsRender('api-keys');
+                } catch (err) {
+                    App.toast('Revoke failed: ' + err.message, 'error');
+                }
+            },
+        });
     },
 
     _settingsShowRawKey(rawKey, title) {

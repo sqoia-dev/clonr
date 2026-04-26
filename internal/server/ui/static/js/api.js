@@ -104,7 +104,12 @@ const API = {
 
     // Convenience methods.
     images: {
-        list(status = '')           { return API.get('/images', status ? { status } : {}); },
+        list(status = '', tag = '') {
+            const params = {};
+            if (status) params.status = status;
+            if (tag)    params.tag = tag;
+            return API.get('/images', params);
+        },
         get(id)                     { return API.get(`/images/${id}`); },
         archive(id)                 { return API.del(`/images/${id}`); },
         // delete sends a real DELETE that removes blobs + DB record.
@@ -114,6 +119,8 @@ const API = {
             return API.del(path);
         },
         diskLayout(id)              { return API.get(`/images/${id}/disklayout`); },
+        metadata(id)                { return API.get(`/images/${id}/metadata`); },
+        updateTags(id, tags)        { return API.put(`/images/${id}/tags`, { tags }); },
         activeDeploys(id)           { return API.get(`/images/${id}/active-deploys`); },
         openShellSession(id)        { return API.post(`/images/${id}/shell-session`, {}); },
         closeShellSession(id, sid)  { return API.del(`/images/${id}/shell-session/${sid}`); },
