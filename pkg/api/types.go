@@ -913,10 +913,14 @@ type ListNodesResponse struct {
 
 // HealthResponse is returned by GET /api/v1/health.
 type HealthResponse struct {
-	Status    string `json:"status"`
-	Version   string `json:"version,omitempty"`
-	CommitSHA string `json:"commit,omitempty"`
-	BuildTime string `json:"build_time,omitempty"`
+	Status           string `json:"status"`
+	Version          string `json:"version,omitempty"`
+	CommitSHA        string `json:"commit,omitempty"`
+	BuildTime        string `json:"build_time,omitempty"`
+	// FlipBackFailures is the number of verify-boot flip-back failures since
+	// the process started. Non-zero indicates Proxmox boot-order reset failures.
+	// Only present when the server has tracking wired (S4-9).
+	FlipBackFailures *int64 `json:"flip_back_failures,omitempty"`
 }
 
 // ImageInUseResponse is returned with 409 Conflict when a DELETE /api/v1/images/:id
@@ -1210,6 +1214,10 @@ type ReimageRequest struct {
 	ExitCode     *int          `json:"exit_code,omitempty"`
 	ExitName     string        `json:"exit_name,omitempty"`
 	Phase        string        `json:"phase,omitempty"`
+	// InjectVars holds the per-deployment custom variable overrides (S4-11).
+	// Merged with the node's custom_vars at trigger time; not persisted.
+	// Delivered to the deploy agent via initramfs kernel cmdline.
+	InjectVars   map[string]string `json:"inject_vars,omitempty"`
 }
 
 // DeployFailedPayload is the JSON body for POST /api/v1/nodes/:id/deploy-failed.
@@ -1251,6 +1259,11 @@ type CreateReimageRequest struct {
 	DryRun      bool       `json:"dry_run,omitempty"`
 	// Force skips the image-ready and active-reimage pre-checks.
 	Force       bool       `json:"force,omitempty"`
+	// InjectVars, when non-nil, is merged with the node's custom_vars for THIS
+	// deployment only (not persisted to the database). Keys in InjectVars override
+	// the node's stored custom_vars. The merged set is delivered to the deploy
+	// agent via initramfs kernel cmdline. (S4-11)
+	InjectVars  map[string]string `json:"inject_vars,omitempty"`
 }
 
 // ListReimagesResponse wraps the reimage history list.

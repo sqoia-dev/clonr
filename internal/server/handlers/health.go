@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"sync/atomic"
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
@@ -15,23 +16,32 @@ type DBPinger interface {
 
 // HealthHandler returns a simple liveness check and a readiness check.
 type HealthHandler struct {
-	Version    string
-	CommitSHA  string
-	BuildTime  string
-	DB         DBPinger
-	BootDir    string
+	Version       string
+	CommitSHA     string
+	BuildTime     string
+	DB            DBPinger
+	BootDir       string
 	InitramfsPath string
+	// FlipBackFailures is a pointer to the server's atomic counter for
+	// verify-boot flip-back failures (S4-9). May be nil when not configured.
+	FlipBackFailures *int64
 }
 
 // ServeHTTP handles GET /api/v1/health — liveness probe.
 // Always returns 200 if the process is alive.
+// Includes flip_back_failures count from S4-9.
 func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, api.HealthResponse{
+	resp := api.HealthResponse{
 		Status:    "ok",
 		Version:   h.Version,
 		CommitSHA: h.CommitSHA,
 		BuildTime: h.BuildTime,
-	})
+	}
+	if h.FlipBackFailures != nil {
+		n := atomic.LoadInt64(h.FlipBackFailures)
+		resp.FlipBackFailures = &n
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ReadyResponse is returned by GET /api/v1/healthz/ready.
