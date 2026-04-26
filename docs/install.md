@@ -121,7 +121,7 @@ firewall-cmd --reload
 
 **Security note:** Do not expose port 8080 to the management LAN or the internet unless you are using a TLS-terminating reverse proxy (Caddy recommended). The provisioning API carries BMC credentials and image blobs. See [docs/tls-provisioning.md](tls-provisioning.md) for the Caddy setup.
 
-**Dual-NIC operators:** if `clustr-serverd` is bound to the provisioning interface only (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080`) and you need operator access from the management LAN, use Caddy on the same host to bridge the two networks — see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup). Do not rebind `CLUSTR_LISTEN_ADDR` to `0.0.0.0` — that re-exposes the DHCP server on the management interface.
+**Dual-NIC operators:** if `clustr-serverd` is bound to the provisioning interface only (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080`) and you need operator access from the management LAN, use Caddy on the same host to bridge the two networks — see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup). The recommended Caddyfile listens on both `:80` and `:8080` of the management interface so that operators with existing bookmarks or scripts on either port continue to work seamlessly. Do not rebind `CLUSTR_LISTEN_ADDR` to `0.0.0.0` — that re-exposes the DHCP server on the management interface.
 
 ---
 

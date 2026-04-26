@@ -187,19 +187,25 @@ The solution is Caddy running on the same host, listening on the management inte
 
 ### 3.1 Caddyfile for the management bridge
 
-This Caddyfile listens on port 80 of the management IP only (`bind 192.168.1.151`). Adapt the IP to match your management interface address.
+This Caddyfile listens on **both port 80 and port 8080** of the management IP (`bind 192.168.1.151`). Using a single site block with two addresses keeps the config DRY — one reverse_proxy stanza, one log block, no duplication. Adapt the IP to match your management interface address.
+
+Port 8080 is included so that operators with existing bookmarks or scripts pointing to `:8080` continue to work without reconfiguration. Both ports proxy identically to `clustr-serverd` on the provisioning interface.
 
 ```caddyfile
 # clustr management interface bridge
-# Binds on the management interface and reverse-proxies to clustr-serverd
-# which is bound to the provisioning interface (10.99.0.1:8080).
+# Binds on the management interface (both :80 and :8080) and reverse-proxies to
+# clustr-serverd which is bound to the provisioning interface (10.99.0.1:8080).
 # This preserves SEC-P0-2: DHCP/TFTP/API remain on the provisioning interface only;
 # Caddy is the sole entry point from the management LAN.
 #
-# clientd nodes continue reaching 10.99.0.1:8080 directly — unchanged.
+# :8080 is included so existing operator bookmarks/scripts on either port work
+# without reconfiguration. Both ports proxy identically.
+#
+# clientd nodes continue reaching 10.99.0.1:8080 directly — not through Caddy.
 
-:80 {
-    bind 192.168.1.151    # management interface IP; only this interface answers
+http://192.168.1.151, http://192.168.1.151:8080 {
+    # Bind only to the management interface — do not answer on the provisioning NIC.
+    bind 192.168.1.151
 
     reverse_proxy 10.99.0.1:8080 {
         # Increase timeout for SSE log-streaming and WebSocket (clientd ws).
@@ -250,32 +256,41 @@ systemctl enable --now caddy
 
 ```bash
 # Rocky Linux 9 / firewalld
-# Open port 80 on the management zone (the zone that covers eth0)
+# Open ports 80 and 8080 on the management zone (the zone that covers eth0).
+# Both ports are served by Caddy — 8080 lets operators with existing bookmarks
+# or scripts on that port continue to work without changes.
 firewall-cmd --permanent --zone=external --add-service=http
-firewall-cmd --reload
-
-# Do NOT open port 80 or 8080 on the internal/provisioning zone — clientd goes direct to :8080
-# Remove any previously added 8080 rule from the external/management zone if present
-firewall-cmd --permanent --zone=external --remove-port=8080/tcp 2>/dev/null || true
+firewall-cmd --permanent --zone=external --add-port=8080/tcp
 firewall-cmd --reload
 ```
 
-Port 8080 should remain accessible on the provisioning zone (`internal`) for clientd and PXE traffic. It does not need to be open on the management zone (`external`) — Caddy handles that.
+Port 8080 on the management zone (`external`) is answered by Caddy — not by `clustr-serverd`. The `clustr-serverd` process remains bound to `10.99.0.1:8080` (provisioning interface only). Caddy's `:8080` listener on `192.168.1.151` is a separate socket, verified by `ss -tlnp | grep 8080`. Do not open 8080 on the provisioning zone (`internal`) — clientd traffic reaches `clustr-serverd` on `10.99.0.1:8080` directly without going through Caddy.
 
 ### 3.4 Verify
 
 ```bash
-# From the management LAN (operator workstation or the provisioning host itself)
+# From the management LAN — port 80
 curl -s http://192.168.1.151/api/v1/healthz/ready
 # Expected: {"status":"ready","checks":{"db":"ok","boot_dir":"ok","initramfs":"ok"}}
 
-# Verify clustr-serverd direct access still works (from the provisioning host)
+# From the management LAN — port 8080 (existing bookmarks/scripts)
+curl -s http://192.168.1.151:8080/api/v1/healthz/ready
+# Expected: same response — Caddy proxies both ports identically
+
+# Verify clustr-serverd direct access still works from the provisioning host
 curl -s http://10.99.0.1:8080/api/v1/healthz/ready
 # Expected: same response
 
-# Confirm Caddy is adding its Via header (proving the proxy is in the path)
-curl -I http://192.168.1.151/ | grep Via
-# Expected: Via: 1.1 Caddy
+# Confirm Caddy is answering on both ports (Via header proves the proxy is in the path)
+curl -I http://192.168.1.151/ | grep Via          # Via: 1.1 Caddy
+curl -I http://192.168.1.151:8080/ | grep Via     # Via: 1.1 Caddy
+
+# Confirm socket ownership — Caddy must own :8080 on 192.168.1.151,
+# clustr-serverd must own :8080 on 10.99.0.1 (provisioning NIC only)
+ss -tlnp | grep 8080
+# Expected lines:
+#   LISTEN  192.168.1.151:8080  caddy
+#   LISTEN  10.99.0.1:8080      clustr-serverd
 ```
 
 ### 3.5 Adding TLS (optional but recommended)
