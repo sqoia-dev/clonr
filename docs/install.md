@@ -419,30 +419,52 @@ These are used by `clustr-backup.sh` and `clustr-backup-verify.sh`, not by `clus
 On the first start (when the users table is empty), `clustr-serverd` automatically creates two credentials:
 
 **Default UI account:**
-- Username: `clustr`
-- Password: `clustr`
-- Role: admin
-- `must_change_password = true` — you will be forced to change it on first login.
+
+| Field | Value |
+|---|---|
+| Username | `clustr` |
+| Password | `clustr` |
+| Role | admin |
+| First-login behavior | Password change is **required** — you will be redirected to a change screen immediately after login |
 
 **Bootstrap API key:**
 - An admin-scoped API key is generated and printed to stdout **once** at startup.
 - This is the only time the raw key is visible. Copy it immediately.
-- The key is stored as a SHA-256 hash in the DB. If lost, rotate it using `clustr-serverd apikey create --scope admin --description "replacement-admin"`.
+- The key is stored as a SHA-256 hash in the DB. If lost, rotate it using `clustr-serverd apikey create --scope admin`.
 
-### Capturing the bootstrap output
+> **IMPORTANT — read this before your first login:**
+> The password `clustr` is a known default. The server sets `must_change_password = true` on this account.
+> When you first log in, the UI will redirect you to a forced password-change screen before allowing access to any
+> other page. Your new password must be at least 8 characters and contain one uppercase letter, one lowercase
+> letter, and one digit (e.g. `Myclust3r!`). Until you complete this step, the rest of the UI is locked.
+
+### Step 1: Log in to the web UI
+
+Open `http://<server-ip>` (or `http://<server-ip>:8080` — both work if Caddy is configured per
+[docs/tls-provisioning.md](tls-provisioning.md)).
+
+Enter:
+- **Username:** `clustr`
+- **Password:** `clustr`
+
+You will be immediately redirected to a password-change screen. Set a strong password and continue.
+
+### Step 2: Create a personal admin account
+
+Once logged in, do not use the `clustr` account for day-to-day work:
+
+1. Navigate to **Settings > Users**.
+2. Click **Create user**, set a strong password, and assign role **Admin**.
+3. Log out and log back in with the new personal credentials.
+4. Disable or demote the `clustr` bootstrap account.
+
+### Capturing the bootstrap API key
 
 **Docker Compose:**
 
 ```bash
 # Watch startup, copy the key before the log scrolls
 docker compose logs -f clustr 2>&1 | head -60
-```
-
-Look for a line like:
-
-```
-WARN  Bootstrap admin API key generated. Copy this now — it will not be shown again.
-      key=ck_admin_...
 ```
 
 **systemd:**
@@ -453,7 +475,7 @@ journalctl -u clustr-serverd --no-pager | grep -A2 "Bootstrap admin"
 
 ### Recovery: if you missed the bootstrap API key
 
-The bootstrap key is printed **once** at first startup and never shown again — it is stored as a hash in the DB. If you missed it, create a replacement admin key:
+The bootstrap key is printed **once** at first startup and never shown again. If you missed it, create a replacement:
 
 ```bash
 # bare-metal (run as root on the server host)
@@ -465,18 +487,45 @@ docker exec -it clustr clustr-serverd apikey create --scope admin --description 
 
 The new key is printed to stdout. Copy it immediately — it is also shown only once.
 
-### Changing the default password
+### Recovery: if you forgot or lost the web UI password
 
-Log in to the web UI at `http://<server-ip>:8080` with `clustr` / `clustr`. You will be redirected to the password-change screen immediately.
+The web UI password is stored as a bcrypt hash in the SQLite DB. There is no plaintext recovery. To reset it,
+use the admin API key to call the reset-password endpoint:
 
-### Creating a second admin account
+**Step 1 — Find the user ID:**
 
-Once logged in:
+```bash
+sqlite3 /var/lib/clustr/db/clustr.db "SELECT id, username, role FROM users;"
+```
 
-1. Navigate to **Settings > Users**.
-2. Click **Create user**, set a strong password, and assign role **Admin**.
-3. Log out and log back in with the new credentials.
-4. Delete or demote the default `clustr` account.
+**Step 2 — Reset the password via the API:**
+
+```bash
+# Replace USER_ID with the UUID from step 1.
+# Replace YOUR_ADMIN_KEY with your admin API key.
+# Password must be 8+ chars, with at least one uppercase letter, lowercase letter, and digit.
+curl -s -X POST http://10.99.0.1:8080/api/v1/admin/users/USER_ID/reset-password \
+  -H "Authorization: Bearer YOUR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "Newpassword1"}'
+# Expected response: {"ok":true}
+```
+
+After the reset, `must_change_password` is set to true. Log in with the new password — you will be redirected to
+the forced change screen again to set a final password of your choice.
+
+**No admin API key either?** If you have lost both the webui password and the admin API key, generate a new API
+key directly on the server host:
+
+```bash
+# bare-metal
+clustr-serverd apikey create --scope admin --description "emergency-recovery"
+
+# Docker Compose
+docker exec -it clustr clustr-serverd apikey create --scope admin --description "emergency-recovery"
+```
+
+Then use that key with the password-reset curl command above.
 
 ---
 
