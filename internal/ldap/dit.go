@@ -82,6 +82,7 @@ func (c *ditClient) connect() (*goldap.Conn, error) {
 	}
 
 	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
 		ServerName: serverNameFromURI(c.serverURI),
 	}
@@ -703,6 +704,7 @@ func (c *ditClient) HealthBind() error {
 		return fmt.Errorf("ldap dit: health: failed to parse CA cert")
 	}
 	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
 		ServerName: serverNameFromURI(c.serverURI),
 	}

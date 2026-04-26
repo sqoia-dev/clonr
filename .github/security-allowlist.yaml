@@ -145,6 +145,19 @@
 
 - scanner: gosec
   id: G402
+  disposition: fixed
+  locations:
+    - internal/ldap/dit.go:84-87 (fixed: added MinVersion: tls.VersionTLS12)
+    - internal/ldap/dit.go:705-708 (fixed: added MinVersion: tls.VersionTLS12)
+  rationale: >
+    gosec v2.22.4 flags tls.Config structs without an explicit MinVersion even
+    though Go 1.18+ defaults to TLS 1.2.  Both tls.Config instances in
+    internal/ldap/dit.go were missing explicit MinVersion.  Fixed by adding
+    MinVersion: tls.VersionTLS12 to both structs — this makes the intent
+    explicit and eliminates the finding without suppression.
+
+- scanner: gosec
+  id: G402
   disposition: accepted
   tracked_as: S4-5
   locations:

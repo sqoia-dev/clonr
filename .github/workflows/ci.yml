@@ -173,42 +173,36 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Install trivy
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.63.0
-
-      # Scan the locally-built image.
-      #   --exit-code 1   — non-zero exit if findings at or above threshold
-      #   --severity HIGH,CRITICAL — threshold: HIGH and above fail the build
-      #   --ignore-unfixed — do not fail on vulns with no fix available (they
-      #                      cannot be resolved by clustr maintainers)
-      #   --vuln-type os,library — scan both OS packages and language deps
+      # Scan the locally-built image using the official trivy action.
+      #   exit-code: 1     — non-zero exit if findings at or above threshold
+      #   severity: HIGH,CRITICAL — threshold: HIGH and above fail the build
+      #   ignore-unfixed: true — do not fail on vulns with no available fix
+      #   vuln-type: os,library — scan both OS packages and language deps
       #
       # If a finding has a fix available and is HIGH/CRITICAL, the build fails.
       # Document any accepted findings in .github/security-allowlist.yaml.
       - name: Scan image with trivy
-        run: |
-          trivy image \
-            --exit-code 1 \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --vuln-type os,library \
-            --format table \
-            clustr-server:ci-scan
+        uses: aquasecurity/trivy-action@0.32.0
+        with:
+          image-ref: clustr-server:ci-scan
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: table
 
-      # Also emit SARIF for GitHub Security tab visibility.
+      # Emit SARIF for GitHub Security tab — separate step so it runs even if scan fails.
       - name: Trivy SARIF output
         if: always()
-        run: |
-          trivy image \
-            --exit-code 0 \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --vuln-type os,library \
-            --format sarif \
-            --output trivy-results.sarif \
-            clustr-server:ci-scan
+        uses: aquasecurity/trivy-action@0.32.0
+        with:
+          image-ref: clustr-server:ci-scan
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: sarif
+          output: trivy-results.sarif
 
       - name: Upload trivy SARIF
         if: always()
