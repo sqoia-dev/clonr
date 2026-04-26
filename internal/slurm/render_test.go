@@ -169,18 +169,22 @@ func TestOverrideOrDefault(t *testing.T) {
 
 // ─── MissingKey handling ──────────────────────────────────────────────────────
 
-func TestRenderConfig_MissingKey_UsesZeroValue(t *testing.T) {
-	// RenderConfig uses Option("missingkey=zero") — missing fields render as
-	// their zero value (empty string for string fields), not an error.
-	tmpl := `Cluster={{.ClusterName}} Extra={{.NoSuchField}}`
-	ctx := RenderContext{ClusterName: "test"}
+func TestRenderConfig_MapMissingKey_UsesZeroValue(t *testing.T) {
+	// RenderConfig uses Option("missingkey=zero") — this silences missing map
+	// key lookups (map[string]string), returning zero value for that type.
+	// Note: missing STRUCT fields still error; this only applies to maps.
+	tmpl := `Cluster={{.ClusterName}} Override={{index .Overrides "nonexistent-key"}}`
+	ctx := RenderContext{
+		ClusterName: "map-test",
+		Overrides:   map[string]string{"key": "val"},
+	}
 
 	out, err := RenderConfig(tmpl, ctx)
 	if err != nil {
-		t.Fatalf("RenderConfig missing key: %v", err)
+		t.Fatalf("RenderConfig missing map key: %v", err)
 	}
-	mustContain(t, out, "Cluster=test")
-	mustContain(t, out, "Extra=")
+	mustContain(t, out, "Cluster=map-test")
+	mustContain(t, out, "Override=")
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
