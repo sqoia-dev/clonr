@@ -41,6 +41,7 @@ interface {{ .Name }}
 {{ end }}
 ! ── Port-Channels (LAGs) ─────────────────────────────────────────────────────
 {{ range .LAGs -}}
+{{- $lag := . -}}
 interface Port-Channel{{ .ID }}
    description {{ .Description }}
    {{ if eq .Mode "lacp" -}}
@@ -51,7 +52,7 @@ interface Port-Channel{{ .ID }}
 
 {{ range .MemberPorts -}}
 interface {{ . }}
-   channel-group {{ $.ID }} mode {{ if eq $.Mode "lacp" }}active{{ else }}on{{ end }}
+   channel-group {{ $lag.ID }} mode {{ if eq $lag.Mode "lacp" }}active{{ else }}on{{ end }}
 {{ end -}}
 {{ end }}
 {{ if .EnablePFC -}}
