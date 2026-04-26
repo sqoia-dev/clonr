@@ -2513,7 +2513,61 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	log.Info().Str("repo_url", repoURL).Strs("packages", pkgs).
 		Msg("finalize slurm: auto-install: adding repo and installing packages in chroot")
 
-	// Step 1: Write a .repo file directly rather than calling dnf config-manager,
+	// Step 1: Bind-mount virtual filesystems required by dnf/rpm scriptlets.
+	// Without /proc, /sys, and /dev, rpm post-install scripts (ldconfig, systemctl
+	// preset, etc.) fail with "No such file or directory" or exit non-zero.
+	// The munge and slurm packages both run scriptlets that require these mounts.
+	// Same pattern used by installKernelInChroot.
+	type bindMount struct{ src, dst string }
+	binds := []bindMount{
+		{"/proc", filepath.Join(mountRoot, "proc")},
+		{"/sys", filepath.Join(mountRoot, "sys")},
+		{"/dev", filepath.Join(mountRoot, "dev")},
+		{"/dev/pts", filepath.Join(mountRoot, "dev", "pts")},
+	}
+	for _, b := range binds {
+		if err := os.MkdirAll(b.dst, 0o755); err != nil {
+			log.Warn().Err(err).Str("path", b.dst).
+				Msg("finalize slurm: auto-install: could not mkdir bind-mount dst (non-fatal)")
+		}
+		if out, err := exec.CommandContext(ctx, "mount", "--bind", b.src, b.dst).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("src", b.src).Str("dst", b.dst).Str("output", string(out)).
+				Msg("finalize slurm: auto-install: bind-mount failed (non-fatal, dnf scriptlets may fail)")
+		}
+	}
+	defer func() {
+		// Unmount bind-mounts in reverse order so /dev/pts is unmounted before /dev.
+		for i := len(binds) - 1; i >= 0; i-- {
+			_ = exec.Command("umount", "-l", binds[i].dst).Run()
+		}
+	}()
+
+	// Step 2: Copy the deploy environment's /etc/resolv.conf into the chroot so
+	// dnf can reach the OpenHPC repo on the public internet.
+	//
+	// In the PXE initramfs environment the node's /etc/resolv.conf points at
+	// the clustr server (10.99.0.1) which runs dnsmasq and forwards queries
+	// upstream. The chroot's own resolv.conf (from the captured base image) may
+	// be empty or point at a stale address, causing "Couldn't resolve host name"
+	// errors for the OpenHPC repo URL.
+	//
+	// The file is overwritten; the original is restored by the subsequent reboot
+	// — on first boot NetworkManager writes its own resolv.conf based on the NM
+	// connection profiles we inject in applyNodeConfig.
+	resolvSrc := "/etc/resolv.conf"
+	resolvDst := filepath.Join(mountRoot, "etc", "resolv.conf")
+	if data, err := os.ReadFile(resolvSrc); err == nil {
+		if err := os.WriteFile(resolvDst, data, 0o644); err != nil {
+			log.Warn().Err(err).Str("dst", resolvDst).
+				Msg("finalize slurm: auto-install: could not write resolv.conf into chroot (non-fatal, DNS may fail)")
+		} else {
+			log.Info().Msg("finalize slurm: auto-install: copied /etc/resolv.conf into chroot for dnf DNS resolution")
+		}
+	} else {
+		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not read host /etc/resolv.conf (non-fatal)")
+	}
+
+	// Step 3: Write a .repo file directly rather than calling dnf config-manager,
 	// because config-manager may not be installed in the chroot image.
 	repoContent := "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL + "\nenabled=1\ngpgcheck=0\n"
 	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
@@ -2528,7 +2582,7 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	log.Info().Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
 		Msg("finalize slurm: auto-install: repo file written")
 
-	// Step 2: Install packages inside chroot.
+	// Step 4: Install packages inside chroot.
 	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False"}, pkgs...)
 	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
 	if err != nil {

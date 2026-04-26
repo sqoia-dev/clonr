@@ -2,6 +2,47 @@
 
 ---
 
+## Turnkey verification Round 4 cont. — Slurm chroot DNS fix (2026-04-26)
+
+### Problem: installSlurmInChroot missing bind-mounts and resolv.conf injection
+
+`installSlurmInChroot` in `internal/deploy/finalize.go` ran `chroot <mountRoot> dnf install`
+without setting up the virtual filesystem bind-mounts (`/proc`, `/sys`, `/dev`, `/dev/pts`)
+required by dnf/rpm scriptlets, and without copying the deploy host's `/etc/resolv.conf` into
+the chroot before dnf ran.
+
+Root cause: `installKernelInChroot` (called earlier in the deploy for kernelless images) already
+had this setup, but `installSlurmInChroot` was a separate function added later and didn't replicate
+the same pattern. During the PXE initramfs deploy phase the chroot's own `/etc/resolv.conf` (from
+the captured base image) may be empty or point at a stale server, causing:
+
+```
+Curl error (6): Couldn't resolve host name for repos.openhpc.community
+finalize slurm: auto-install: dnf install failed (non-fatal) — check repo URL and image network access during deploy
+finalize slurm: skipping systemctl enable — binary not found in image (Slurm not installed)
+```
+
+Result: Slurm and munge were never installed. Both nodes booted with `systemctl_state=degraded`
+because munge/slurmctld/slurmd services were missing.
+
+### Fix: add pre-dnf setup to installSlurmInChroot
+
+Before the `chroot dnf install` call, `installSlurmInChroot` now:
+1. Bind-mounts `/proc`, `/sys`, `/dev`, `/dev/pts` into the chroot (same pattern as `installKernelInChroot`)
+2. Copies the deploy environment's `/etc/resolv.conf` into `<mountRoot>/etc/resolv.conf`
+3. Unmounts all bind-mounts via `umount -l` in a deferred cleanup
+
+DNS resolution now works because the initramfs's resolv.conf points at `10.99.0.1` (clustr
+server's eth1) which runs dnsmasq and forwards upstream.
+
+### Gaps found
+
+- **NEW-GAP-15** (P1): `installSlurmInChroot` lacked the bind-mount and resolv.conf setup that
+  `installKernelInChroot` had, causing dnf DNS resolution to fail on every first-time deploy
+  where a Slurm repo URL was configured. This is the primary blocker for the turnkey Slurm path.
+
+---
+
 ## Turnkey verification Round 4 — kpartx extraction fix + DeviceAllow dm fix (2026-04-26)
 
 ### Problem 1: losetup --partscan partition devices unOpenable from Go subprocess
