@@ -2050,9 +2050,17 @@ func (db *DB) UpdateNodeGroup(ctx context.Context, g api.NodeGroup) error {
 	return requireOneRow(res, "node_groups", g.ID)
 }
 
-// DeleteNodeGroup removes a NodeGroup. Membership rows are removed via
-// the FK cascade on node_group_memberships.
+// DeleteNodeGroup removes a NodeGroup. Membership rows are removed
+// explicitly before the node_groups delete (FK cascade is also wired but
+// explicit deletion is safer across SQLite driver versions).
+// S6-6: node_configs.group_id column dropped; only membership table needs cleanup.
 func (db *DB) DeleteNodeGroup(ctx context.Context, id string) error {
+	// Explicitly remove memberships first so the correlated subquery in
+	// nodeConfigCols immediately returns NULL for affected nodes.
+	if _, err := db.sql.ExecContext(ctx,
+		`DELETE FROM node_group_memberships WHERE group_id = ?`, id); err != nil {
+		return fmt.Errorf("db: delete node group memberships: %w", err)
+	}
 	res, err := db.sql.ExecContext(ctx, `DELETE FROM node_groups WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("db: delete node group: %w", err)
