@@ -426,6 +426,7 @@ batch*       up   infinite      1   idle slurm-compute
 | Symptom | Check | Fix |
 |---|---|---|
 | `slurmctld` not found after reimage | Slurm packages not installed | Verify `slurm_repo_url` is correct and reachable. Check that image is Rocky 9 (not Rocky 10 — OpenHPC EL10 does not exist yet). Reimage. |
+| `slurmctld` fails with "CLUSTER NAME MISMATCH" | Stale `clustername` file from prior image install | `rm -f /var/spool/slurmctld/clustername && systemctl restart slurmctld`. The clustr finalize phase will clean this automatically in a future release. |
 | `munge -n \| unmunge` fails | Key mismatch or munge not running | Reimage both nodes so they get the same munge key from clustr. |
 | `sinfo` shows `down` | `slurmd` not reaching controller | Check `SlurmctldHost` in `/etc/slurm/slurm.conf` matches the actual controller hostname. Open port 6817-6818/tcp on any firewall. |
 | `srun` hangs | Controller unreachable from worker | `ping slurm-controller` from the worker. Verify both nodes are on the same provisioning network. |

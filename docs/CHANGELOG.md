@@ -2,6 +2,28 @@
 
 ---
 
+## Docs: Round 5 turnkey verification — srun works (2026-04-26)
+
+Added "Final Turnkey Verification — Round 5" to `docs/onboarding-walkthrough.md`.
+
+Findings:
+- `srun hostname` confirmed working: output `slurm-compute`. First clean end-to-end run.
+- OpenHPC EL9 repo (`https://repos.openhpc.community/OpenHPC/3/EL_9`) confirmed live.
+  OpenHPC EL10 confirmed absent (HTTP 404). Rocky Linux 9 + EL9 repo is the only supported path.
+- Munge, slurmctld (after one-line fix), slurmd all healthy. munge self-test passed.
+- NEW-GAP-13 (P3): `dnf install failed` log fires even when packages already in image.
+- NEW-GAP-14 (P2): `slurmctld` fails with "CLUSTER NAME MISMATCH" on first boot if a
+  stale zero-byte `/var/spool/slurmctld/clustername` was baked into the base image by the
+  QEMU install process. Fix: `rm -f /var/spool/slurmctld/clustername && systemctl restart slurmctld`.
+  Permanent fix: finalize.go should wipe `StateSaveLocation` directory before chown.
+
+Updated README Quick Start troubleshooting table with NEW-GAP-14 symptom and workaround.
+
+Verdict: NEAR-TURNKEY. `srun hostname` works. One P2 gap (NEW-GAP-14) requires a 60-second
+manual fix until finalize.go is patched. Recommend: fix finalize.go, then ship v1.0.
+
+---
+
 ## Fix: sidebar cluster strip showing 0/0 nodes (2026-04-25)
 
 ### Bug
