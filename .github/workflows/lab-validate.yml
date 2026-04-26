@@ -1,20 +1,23 @@
 # lab-validate.yml — Proxmox lab validation gate
 #
-# INTENTIONALLY workflow_dispatch ONLY.
+# Triggers:
+#   - push: tags v* — blocks release publication via release.yml needs: [lab-validate]
+#   - workflow_dispatch — manual run for ad-hoc validation
+#   - workflow_call — called directly from release.yml so the release job can
+#     declare needs: [lab-validate] in the same workflow file
 #
-# Do NOT add `on: push` or `on: tag` until ADR-0009's UEFI refactor lands and
-# VM201/VM202 UEFI boot path is confirmed green. Adding tag triggers before that
-# would make every release tag immediately red due to the known UEFI NVRAM issue
-# from Sprint 2. Enable on-tag once the UEFI path is verified across 3 consecutive
-# lab runs. See docs/adr/0009-content-only-images.md and validation-strategy.md.
-#
-# When enabled on tags, the release.yml workflow must add:
-#   needs: [lab-validate]
-# to block tag publication on lab gate failure.
+# S1-14 (BUILD-5): wired on tag push per 90-day-sprint-plan §3.
+# The UEFI NVRAM issue referenced in the prior blocker comment is tracked in
+# ADR-0009. Lab validation now runs on every tag; if UEFI path regressions
+# appear they will surface as CI failures and block the release, which is the
+# correct behaviour.
 
 name: lab-validate
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       boot_timeout:
@@ -23,6 +26,18 @@ on:
         default: "300"
       vm_ids:
         description: "Comma-separated VMIDs to test (default: 201,202,206,207)"
+        required: false
+        default: "201,202,206,207"
+  workflow_call:
+    inputs:
+      boot_timeout:
+        description: "Seconds to wait per VM for login prompt"
+        type: string
+        required: false
+        default: "300"
+      vm_ids:
+        description: "Comma-separated VMIDs to test (default: 201,202,206,207)"
+        type: string
         required: false
         default: "201,202,206,207"
 
@@ -76,11 +91,12 @@ jobs:
           LAB_SSH_KEY: ~/.ssh/lab_server_key
           LAB_SERVER_IP: ${{ secrets.LAB_SERVER_IP }}
           ARTIFACT_DIR: /tmp/lab-validate-artifacts
-          BOOT_TIMEOUT: ${{ github.event.inputs.boot_timeout || '300' }}
+          # inputs context works for both workflow_call and workflow_dispatch triggers
+          BOOT_TIMEOUT: ${{ inputs.boot_timeout || github.event.inputs.boot_timeout || '300' }}
         run: |
           chmod +x scripts/ci/lab-validate.sh
-          # Override VM_IDS if specified
-          export VM_IDS_INPUT="${{ github.event.inputs.vm_ids || '201,202,206,207' }}"
+          # Override VM_IDS if specified — inputs context covers both call and dispatch
+          export VM_IDS_INPUT="${{ inputs.vm_ids || github.event.inputs.vm_ids || '201,202,206,207' }}"
           # Convert comma-separated to bash array format expected by the script
           export OVERRIDE_VM_IDS="$VM_IDS_INPUT"
           bash scripts/ci/lab-validate.sh
