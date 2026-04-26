@@ -2225,8 +2225,27 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 	}
 
 	// ── Enable services in chroot ─────────────────────────────────────────────
-	// Always enable munge — required by all Slurm daemons.
-	services := []string{"munge.service"}
+	// GAP-14: Only enable a service when its binary is present in the chroot.
+	// Without this guard, `systemctl enable slurmd` on an image that has no
+	// slurmd binary creates a broken symlink and puts the unit in a degraded
+	// state on first boot — which causes PAM to terminate SSH sessions after key
+	// acceptance, making every freshly deployed node unreachable via SSH.
+	//
+	// svcBinaryMap maps systemd unit → the binary (relative to chroot root)
+	// whose existence gates the enable call. If the binary is absent we log INFO
+	// and skip — the node boots cleanly without that service.
+	svcBinaryMap := map[string]string{
+		"munge.service":    "usr/sbin/munged",
+		"slurmd.service":   "usr/sbin/slurmd",
+		"slurmctld.service": "usr/sbin/slurmctld",
+		"slurmdbd.service": "usr/sbin/slurmdbd",
+	}
+
+	// Determine which services to enable based on node role.
+	services := []string{}
+	// munge: enable only if munged is present (required by all Slurm daemons,
+	// but skip gracefully on images that have no Slurm at all).
+	services = append(services, "munge.service")
 	if hasGres {
 		// Compute node.
 		services = append(services, "slurmd.service")
@@ -2237,6 +2256,16 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 	}
 
 	for _, svc := range services {
+		// Check binary existence in chroot before enabling the service.
+		// This prevents systemctl enable from creating dangling symlinks when
+		// slurm/munge are not installed in the image.
+		if binRel, known := svcBinaryMap[svc]; known {
+			if !fileExists(filepath.Join(mountRoot, binRel)) {
+				log.Info().Str("service", svc).Str("binary", binRel).
+					Msg("finalize slurm: skipping systemctl enable — binary not found in image (Slurm not installed)")
+				continue
+			}
+		}
 		if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "systemctl", "enable", svc).CombinedOutput(); err != nil {
 			log.Warn().Err(err).Str("service", svc).Str("output", string(out)).
 				Msgf("finalize slurm: systemctl enable %s (non-fatal) — service may not be installed", svc)
