@@ -2,6 +2,117 @@
 
 ---
 
+## v1.0.0 — Release Notes (target: 2026-07-25)
+
+### What is clustr?
+
+clustr is an open-source, self-hosted HPC node imaging and provisioning platform.
+It ships as a single Go binary (`clustr-serverd`) backed by SQLite, requires no cloud
+services, and targets bare-metal and Proxmox-managed clusters of any size.
+
+### 90-Day Arc: v0.x → v1.0
+
+clustr enters v1.0 as a production-ready, secure-by-default platform. Over the 90-day
+sprint window (Sprint 0 through Sprint 6) the following transformations were made:
+
+**Security hardened:** All P0 credential-at-rest gaps are closed — BMC passwords and
+LDAP bind credentials are AES-256-GCM encrypted (CLUSTR_SECRET_KEY required). The DB
+is chmod 600. The provisioning listener is bound to the provisioning interface, not
+0.0.0.0. SSH passwords in the PXE initramfs are now per-boot random (from /dev/urandom).
+gosec, trivy, and govulncheck run in CI on every push.
+
+**Multi-user RBAC:** Three-tier role model (admin / operator / readonly) with
+group-scoped operator access. Operators can manage their assigned NodeGroups without
+touching other groups. Full audit log on all state-changing actions.
+
+**Coherent image factory:** Five separate finalize paths collapsed into one
+`finalizeImageFromRootfs` helper. Image tags, metadata, and stale-initramfs warnings
+are surfaced in the UI.
+
+**Clean data model:** `groups[]` renamed to `tags[]` (unstructured node labels).
+`NodeGroup` is the sole structured grouping primitive. The `node_configs.group_id`
+denormalized column is replaced by `node_group_memberships.is_primary=1` as the
+authoritative source. The `last_deploy_succeeded_at` back-compat alias is removed;
+`deploy_completed_preboot_at` (ADR-0008) is now the sole canonical field.
+
+**Production observability:** Prometheus `/metrics` endpoint with 8 metrics, readiness
+endpoint (`/api/v1/healthz/ready`), outbound webhooks with HMAC signing, structured
+audit log, node config change history.
+
+**Operator tooling:** Docker Compose install package, Ansible bare-metal role,
+install/upgrade docs, backup integrity verification, rollback guard in autodeploy.
+
+**UI polish:** Per-persona UX improvements — bulk reimage, GPU inventory, power state
+column, server-side sort/search, scheduled reimage, getting-started wizard, first-deploy
+wizard, CI key preset, dry-run checkbox for group reimage.
+
+### API Deprecation Notice
+
+The `groups` field in `NodeConfig` JSON responses is deprecated. It mirrors `tags`
+and will be removed in **v1.1**. All endpoints returning `NodeConfig` now emit a
+`Sunset: Sat, 25 Oct 2026 00:00:00 GMT` header. Update clients to read `tags` instead.
+
+### Migration Notes
+
+- Migrations 001–049 run automatically at startup. All are backward-compatible.
+- `CLUSTR_SECRET_KEY` is now required in non-dev mode. Server refuses to start without
+  it. See `docs/install.md` for key generation instructions.
+- `node_configs.group_id` column dropped (migration 048). Group assignment now lives
+  exclusively in `node_group_memberships`. No action required — migration handles it.
+- `node_configs.last_deploy_succeeded_at` column dropped (migration 049). Use
+  `deploy_completed_preboot_at` for all deploy timestamp reads.
+
+---
+
+## Sprint 6 — Release Readiness (2026-07-06 → 2026-07-19)
+
+### Schema Cleanup
+
+- **[S6-6] Drop `node_configs.group_id` column** (migration 048)
+  The denormalized fast-path `group_id` column on `node_configs` is removed.
+  The authoritative source is now `node_group_memberships WHERE is_primary = 1`
+  (established in S2-5, migration 042). All DB reads and writes updated to use
+  the membership table exclusively. The `EffectiveLayout()` and
+  `EffectiveExtraMounts()` call chain continues to receive the primary group via
+  the JOIN. BUG-1 (GroupID cleared on PUT) fix remains intact — the handler now
+  routes group changes through `AssignNodeToGroup` → `SetPrimaryGroupMember`.
+
+- **[S6-8] Drop `node_configs.last_deploy_succeeded_at` column** (migration 049)
+  The back-compat dual-write column introduced during the ADR-0008 two-phase
+  deploy verification transition is removed. `deploy_completed_preboot_at` is
+  now the sole canonical "deploy complete" timestamp. `RecordDeploySucceeded`
+  no longer dual-writes. `State()` no longer falls back to `LastDeploySucceededAt`.
+  The `last_deploy` sort column in the nodes list now sorts by
+  `DeployCompletedPrebootAt`. The `TestMigration022_DualWrite_BackCompat` test
+  is replaced by `TestMigration022_DeploySucceeded_StateTransitions` which
+  tests the canonical ADR-0008 path without any legacy fallback.
+
+### API Deprecation (S6-7)
+
+- **[S6-7] `NodeConfig.groups` field Sunset header**
+  Per `decisions.md` D3: the `groups` JSON field stays in v1.0 responses but
+  is removed in v1.1. All node-returning endpoints (`GET/POST/PUT /api/v1/nodes`,
+  `GET /api/v1/nodes/:id`, `GET /api/v1/nodes/by-mac/:mac`,
+  `GET /api/v1/node-groups/:id`) now emit:
+  ```
+  Sunset: Sat, 25 Oct 2026 00:00:00 GMT
+  Deprecation: true; rel="deprecation"; field="groups"
+  ```
+  Clients should migrate to reading the `tags` field. The `groups` field will be
+  removed in v1.1 (estimated 2026-10-25, 90 days after v1.0).
+
+### Deploy Log Cleanup (S6-10)
+
+- **[S6-10] Remove debug ESP log blocks from `rsync.go`**
+  Two debug log blocks (lines 526–553 in the pre-patch file) that logged EFI
+  System Partition directory contents after extraction are removed. These were
+  added during UEFI boot debugging and are no longer needed now that UEFI boot
+  is confirmed stable. Production deploy logs are uncluttered. The blocks used
+  `Debug()` level but were verbose enough to obscure real deploy events in busy
+  clusters.
+
+---
+
 ## Sprint 5 — Persona Polish (2026-06-22 → 2026-07-06)
 
 ### Hardware Discovery

@@ -115,6 +115,7 @@ func (h *NodeGroupsHandler) GetNodeGroup(w http.ResponseWriter, r *http.Request)
 	if members == nil {
 		members = []api.NodeConfig{}
 	}
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated in NodeConfig, removed in v1.1
 	writeJSON(w, http.StatusOK, api.GroupMembersResponse{Group: g, Members: members})
 }
 
@@ -236,6 +237,7 @@ func (h *NodeGroupsHandler) AddGroupMembers(w http.ResponseWriter, r *http.Reque
 	if members == nil {
 		members = []api.NodeConfig{}
 	}
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated in NodeConfig, removed in v1.1
 	writeJSON(w, http.StatusOK, api.GroupMembersResponse{Group: g, Members: members})
 }
 

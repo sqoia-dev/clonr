@@ -72,6 +72,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// nodesSunsetDate is the RFC 1123 date after which the deprecated "groups"
+// JSON field in NodeConfig will be removed. Per S6-7 (decisions.md D3): the
+// "groups" field stays in v1.0 responses for backward compatibility but is
+// removed in v1.1. Sunset is set to 90 days after the estimated v1.0 ship
+// date of 2026-07-25 → 2026-10-25.
+const nodesSunsetDate = "Sat, 25 Oct 2026 00:00:00 GMT"
+
+// setNodeConfigSunsetHeader adds the RFC 8594 Sunset header to responses that
+// include NodeConfig objects containing the deprecated "groups" field.
+// The Deprecation header (per draft-ietf-httpapi-deprecation-header) is also
+// included for clients that inspect it.
+func setNodeConfigSunsetHeader(w http.ResponseWriter) {
+	w.Header().Set("Sunset", nodesSunsetDate)
+	w.Header().Set("Deprecation", `true; rel="deprecation"; field="groups"`)
+}
+
 // writeError writes a structured error response, mapping sentinel errors to
 // appropriate HTTP status codes.
 func writeError(w http.ResponseWriter, err error) {
