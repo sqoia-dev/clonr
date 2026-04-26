@@ -15,8 +15,11 @@ import (
 	"sync"
 	"time"
 
+	"strconv"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/metrics"
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
 )
@@ -678,7 +681,8 @@ func apiVersionHeader(next http.Handler) http.Handler {
 	})
 }
 
-// requestLogger logs each request with method, path, status, and duration.
+// requestLogger logs each request with method, path, status, and duration,
+// and increments clustr_api_requests_total with coarsened endpoint labels.
 func requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -690,7 +694,36 @@ func requestLogger(next http.Handler) http.Handler {
 			Int("status", rw.status).
 			Dur("duration", time.Since(start)).
 			Msg("request")
+
+		// S4-1: Increment Prometheus request counter.
+		// Use a coarsened endpoint label (second path segment) to keep cardinality low.
+		endpoint := endpointLabel(r.URL.Path)
+		metrics.APIRequestsTotal.WithLabelValues(endpoint, strconv.Itoa(rw.status), r.Method).Inc()
 	})
+}
+
+// endpointLabel returns a low-cardinality endpoint label for Prometheus.
+// Examples:
+//
+//	/api/v1/nodes/abc123        → "/api/v1/nodes"
+//	/api/v1/images/abc/blob     → "/api/v1/images"
+//	/metrics                    → "/metrics"
+//	/                           → "/"
+func endpointLabel(path string) string {
+	// Strip trailing slash.
+	for len(path) > 1 && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+	parts := strings.SplitN(path, "/", 5)
+	// "/api/v1/<resource>" → keep first 4 segments: ["", "api", "v1", "<resource>"]
+	if len(parts) >= 4 && parts[1] == "api" {
+		return "/" + parts[1] + "/" + parts[2] + "/" + parts[3]
+	}
+	// Top-level paths like /metrics, /ui/…
+	if len(parts) >= 2 && parts[1] != "" {
+		return "/" + parts[1]
+	}
+	return "/"
 }
 
 // panicRecovery converts panics into 500 responses and logs them.
