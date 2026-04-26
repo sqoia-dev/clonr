@@ -321,6 +321,141 @@ func requireRole(minimum string) func(http.Handler) http.Handler {
 	}
 }
 
+// requireGroupAccess returns a middleware that enforces group-scoped operator access:
+//   - Admin scope (API key or session): always passes.
+//   - Operator session scope: allowed only if the user has a membership in the
+//     group that owns the node identified by nodeIDParam.
+//     The group lookup is: node_configs.group_id (fast-path column).
+//     Nodes with no group assigned → 403 (operator has no implicit access).
+//   - Readonly scope: always 403.
+//   - Node scope: always 403 (node keys cannot trigger reimages / mutations).
+//
+// Use this on: POST reimage, power ops, PUT node, DELETE node, group reimage.
+// Must be placed after apiKeyAuth in the middleware chain.
+func requireGroupAccess(nodeIDParam string, database *db.DB) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+			// Admin scope passes unconditionally (both API key admin and session admin).
+			if scope == api.KeyScopeAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Readonly always rejected.
+			if scope == api.KeyScope("readonly") {
+				writeForbidden(w, "readonly users cannot perform state-changing operations")
+				return
+			}
+			// Node-scoped keys are not authorized for operator-gated routes.
+			if scope == api.KeyScopeNode {
+				writeForbidden(w, "node keys cannot perform operator actions")
+				return
+			}
+			// Operator session: check group membership.
+			if scope == api.KeyScopeOperator {
+				userID := userIDFromContext(r.Context())
+				if userID == "" {
+					writeForbidden(w, "cannot determine operator identity")
+					return
+				}
+				nodeID := chi.URLParam(r, nodeIDParam)
+				if nodeID == "" {
+					writeForbidden(w, "cannot determine target node")
+					return
+				}
+				groupID, err := database.GetGroupIDForNode(r.Context(), nodeID)
+				if err != nil {
+					log.Error().Err(err).Str("node_id", nodeID).Msg("requireGroupAccess: lookup node group")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "internal server error", Code: "internal_error"})
+					return
+				}
+				if groupID == "" {
+					writeForbidden(w, "this node is not assigned to any group — only admin can manage ungrouped nodes")
+					return
+				}
+				ok, err := database.UserHasGroupAccess(r.Context(), userID, groupID)
+				if err != nil {
+					log.Error().Err(err).Str("user_id", userID).Str("group_id", groupID).
+						Msg("requireGroupAccess: check membership")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "internal server error", Code: "internal_error"})
+					return
+				}
+				if !ok {
+					writeForbidden(w, "operator not assigned to this node's group")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Unknown scope.
+			writeForbidden(w, "unrecognized scope")
+		})
+	}
+}
+
+// requireGroupAccessByGroupID is like requireGroupAccess but takes the group ID
+// directly from the URL (groupIDParam) instead of resolving it from a node.
+// Used for group-level operations like POST /node-groups/{id}/reimage.
+func requireGroupAccessByGroupID(groupIDParam string, database *db.DB) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+			if scope == api.KeyScopeAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if scope == api.KeyScope("readonly") {
+				writeForbidden(w, "readonly users cannot perform state-changing operations")
+				return
+			}
+			if scope == api.KeyScopeNode {
+				writeForbidden(w, "node keys cannot perform operator actions")
+				return
+			}
+			if scope == api.KeyScopeOperator {
+				userID := userIDFromContext(r.Context())
+				if userID == "" {
+					writeForbidden(w, "cannot determine operator identity")
+					return
+				}
+				groupID := chi.URLParam(r, groupIDParam)
+				if groupID == "" {
+					writeForbidden(w, "cannot determine target group")
+					return
+				}
+				ok, err := database.UserHasGroupAccess(r.Context(), userID, groupID)
+				if err != nil {
+					log.Error().Err(err).Str("user_id", userID).Str("group_id", groupID).
+						Msg("requireGroupAccessByGroupID: check membership")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "internal server error", Code: "internal_error"})
+					return
+				}
+				if !ok {
+					writeForbidden(w, "operator not assigned to this group")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeForbidden(w, "unrecognized scope")
+		})
+	}
+}
+
 // requireNodeOwnership returns a middleware that ensures the authenticated node key
 // matches the {id} URL parameter. Admin keys always pass. Node keys are only allowed
 // if their bound node_id matches the URL {id} parameter.

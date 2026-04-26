@@ -19,9 +19,13 @@ const API = {
     },
 
     // _redirectToLogin navigates to /login if not already there.
+    // Preserves the current hash as a ?next= param so the user lands back
+    // on the right page after re-authenticating.
     _redirectToLogin() {
         if (window.location.pathname !== '/login') {
-            window.location.href = '/login';
+            const hash = window.location.hash || '';
+            const next = hash ? encodeURIComponent(hash) : '';
+            window.location.href = '/login' + (next ? '?next=' + next : '');
         }
     },
 
@@ -132,7 +136,7 @@ const API = {
         },
     },
     nodes: {
-        list()                { return API.get('/nodes'); },
+        list(params = {})     { return API.get('/nodes', params); },
         get(id)               { return API.get(`/nodes/${id}`); },
         create(body)          { return API.post('/nodes', body); },
         update(id, body)      { return API.put(`/nodes/${id}`, body); },
@@ -272,11 +276,16 @@ const API = {
         rotate(id)            { return API.post(`/admin/api-keys/${id}/rotate`, {}); },
     },
     users: {
-        list()                        { return API.get('/admin/users'); },
-        create(body)                  { return API.post('/admin/users', body); },
-        update(id, body)              { return API.put(`/admin/users/${id}`, body); },
-        resetPassword(id, password)   { return API.post(`/admin/users/${id}/reset-password`, { password }); },
-        disable(id)                   { return API.del(`/admin/users/${id}`); },
+        list()                             { return API.get('/admin/users'); },
+        create(body)                       { return API.post('/admin/users', body); },
+        update(id, body)                   { return API.put(`/admin/users/${id}`, body); },
+        resetPassword(id, password)        { return API.post(`/admin/users/${id}/reset-password`, { password }); },
+        disable(id)                        { return API.del(`/admin/users/${id}`); },
+        getGroupMemberships(id)            { return API.get(`/users/${id}/group-memberships`); },
+        setGroupMemberships(id, groupIDs)  { return API.put(`/users/${id}/group-memberships`, { group_ids: groupIDs }); },
+    },
+    audit: {
+        query(params = {}) { return API.get('/audit', params); },
     },
     system: {
         // initramfs — GET current status + history, POST to rebuild, DELETE history entry.

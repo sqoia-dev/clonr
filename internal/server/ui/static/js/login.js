@@ -58,7 +58,18 @@
                 if (body.force_password_change) {
                     window.location.href = '/set-password';
                 } else {
-                    window.location.href = '/';
+                    // Honour the ?next= param set by api.js when session expired.
+                    // next is a URL-encoded hash like "%23%2Fnodes%2Fabc" so we
+                    // redirect to "/" then append it directly as the hash.
+                    const params = new URLSearchParams(window.location.search);
+                    const next = params.get('next');
+                    if (next) {
+                        const decoded = decodeURIComponent(next);
+                        // decoded should be a hash fragment starting with '#'
+                        window.location.href = '/' + (decoded.startsWith('#') ? decoded : '#' + decoded);
+                    } else {
+                        window.location.href = '/';
+                    }
                 }
                 return;
             }

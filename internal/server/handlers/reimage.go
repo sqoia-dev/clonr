@@ -27,11 +27,14 @@ import (
 
 // ReimageHandler handles all /api/v1/nodes/{id}/reimage and /api/v1/reimage routes.
 type ReimageHandler struct {
-	DB             *db.DB
-	Orchestrator   *reimage.Orchestrator
+	DB           *db.DB
+	Orchestrator *reimage.Orchestrator
+	Audit        *db.AuditService
 	// GetActorLabel returns a human-readable label for the authenticated caller
 	// (e.g. "user:<id>" or "key:<label>"). Used for RequestedBy audit attribution.
-	GetActorLabel  func(r *http.Request) string
+	GetActorLabel func(r *http.Request) string
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
 }
 
 // ─── POST /api/v1/nodes/{id}/reimage ─────────────────────────────────────────
@@ -159,6 +162,21 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		final = req // best effort
 	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeReimage, "node", nodeID,
+			r.RemoteAddr, nil, map[string]interface{}{
+				"reimage_id": req.ID,
+				"image_id":   imageID,
+				"scheduled":  body.ScheduledAt != nil,
+				"dry_run":    req.DryRun,
+			})
+	}
+
 	writeJSON(w, http.StatusOK, final)
 }
 

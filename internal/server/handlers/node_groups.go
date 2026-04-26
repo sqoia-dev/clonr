@@ -27,6 +27,9 @@ var allowedRoles = map[string]bool{
 type NodeGroupsHandler struct {
 	DB           *db.DB
 	Orchestrator *reimage.Orchestrator
+	Audit        *db.AuditService
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
 }
 
 // ListNodeGroups handles GET /api/v1/node-groups.
@@ -82,6 +85,14 @@ func (h *NodeGroupsHandler) CreateNodeGroup(w http.ResponseWriter, r *http.Reque
 		log.Error().Err(err).Msg("create node group")
 		writeError(w, err)
 		return
+	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionGroupCreate, "node_group", g.ID,
+			r.RemoteAddr, nil, map[string]string{"name": g.Name})
 	}
 	writeJSON(w, http.StatusCreated, g)
 }
@@ -159,15 +170,32 @@ func (h *NodeGroupsHandler) UpdateNodeGroup(w http.ResponseWriter, r *http.Reque
 		writeError(w, err)
 		return
 	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionGroupUpdate, "node_group", id,
+			r.RemoteAddr, map[string]string{"name": existing.Name}, map[string]string{"name": g.Name})
+	}
 	writeJSON(w, http.StatusOK, g)
 }
 
 // DeleteNodeGroup handles DELETE /api/v1/node-groups/:id.
 func (h *NodeGroupsHandler) DeleteNodeGroup(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	existing, _ := h.DB.GetNodeGroupFull(r.Context(), id)
 	if err := h.DB.DeleteNodeGroup(r.Context(), id); err != nil {
 		writeError(w, err)
 		return
+	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionGroupDelete, "node_group", id,
+			r.RemoteAddr, map[string]string{"name": existing.Name}, nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -262,6 +290,18 @@ func (h *NodeGroupsHandler) ReimageGroup(w http.ResponseWriter, r *http.Request)
 		// Job was created but we can't read it back — return the ID at minimum.
 		writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
 		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionGroupReimage, "node_group", id,
+			r.RemoteAddr, nil, map[string]interface{}{
+				"job_id":   jobID,
+				"image_id": req.ImageID,
+			})
 	}
 
 	writeJSON(w, http.StatusAccepted, jobToStatus(job))

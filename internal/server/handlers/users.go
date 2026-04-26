@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +36,11 @@ type UsersHandler struct {
 	// Lives here as a function field to avoid importing golang.org/x/crypto
 	// directly in the handlers package (kept in server package instead).
 	HashPassword func(plaintext string) (string, error)
+
+	// Audit records state-changing events.
+	Audit *db.AuditService
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
 }
 
 // userResponse is the safe wire type for a user — never includes password_hash.
@@ -147,6 +153,14 @@ func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 		return
 	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionUserCreate, "user", id,
+			r.RemoteAddr, nil, map[string]string{"username": req.Username, "role": req.Role})
+	}
 	writeJSON(w, http.StatusCreated, toUserResponse(created))
 }
 
@@ -230,6 +244,17 @@ func (h *UsersHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"id": id})
 		return
 	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionUserUpdate, "user", id,
+			r.RemoteAddr,
+			map[string]string{"role": string(user.Role), "disabled": fmt.Sprintf("%v", user.IsDisabled())},
+			map[string]string{"role": string(updated.Role), "disabled": fmt.Sprintf("%v", updated.IsDisabled())},
+		)
+	}
 	writeJSON(w, http.StatusOK, toUserResponse(updated))
 }
 
@@ -274,6 +299,15 @@ func (h *UsersHandler) HandleResetPassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionUserResetPassword, "user", id,
+			r.RemoteAddr, nil, nil)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -311,7 +345,134 @@ func (h *UsersHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionUserDelete, "user", id,
+			r.RemoteAddr, map[string]string{"username": user.Username}, nil)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GroupMembershipsRequest is the body for PUT /api/v1/users/{id}/group-memberships.
+type GroupMembershipsRequest struct {
+	GroupIDs []string `json:"group_ids"`
+}
+
+// HandleGetGroupMemberships handles GET /api/v1/users/{id}/group-memberships.
+// Returns the list of group IDs the user has operator access to.
+// Admin-only (operators cannot manage memberships).
+func (h *UsersHandler) HandleGetGroupMemberships(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeValidationError(w, "user id is required")
+		return
+	}
+	groupIDs, err := h.DB.GetUserGroupMemberships(r.Context(), id)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", id).Msg("users: get group memberships failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+	if groupIDs == nil {
+		groupIDs = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"group_ids": groupIDs})
+}
+
+// HandleSetGroupMemberships handles PUT /api/v1/users/{id}/group-memberships.
+// Replaces the user's group operator assignments with the supplied list.
+// Admin-only.
+func (h *UsersHandler) HandleSetGroupMemberships(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeValidationError(w, "user id is required")
+		return
+	}
+
+	var req GroupMembershipsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "request body must be valid JSON")
+		return
+	}
+	if req.GroupIDs == nil {
+		req.GroupIDs = []string{}
+	}
+
+	// Verify user exists.
+	user, err := h.DB.GetUser(r.Context(), id)
+	if errors.Is(err, db.ErrUserNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found", "code": "not_found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+
+	// Only operators can have group memberships (admins and readonly don't use this table).
+	if user.Role != db.UserRoleOperator {
+		writeValidationError(w, "group memberships can only be assigned to operator-role users")
+		return
+	}
+
+	if err := h.DB.SetUserGroupMemberships(r.Context(), id, req.GroupIDs); err != nil {
+		log.Error().Err(err).Str("user_id", id).Msg("users: set group memberships failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+
+	groupIDs, _ := h.DB.GetUserGroupMemberships(r.Context(), id)
+	if groupIDs == nil {
+		groupIDs = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"group_ids": groupIDs})
+}
+
+// HandleListWithMemberships handles GET /api/v1/admin/users with group memberships included.
+// This replaces HandleList for the settings UI to avoid a second round-trip.
+func (h *UsersHandler) HandleListWithMemberships(w http.ResponseWriter, r *http.Request) {
+	users, err := h.DB.ListUsers(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("users: list failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "internal server error", "code": "internal_error",
+		})
+		return
+	}
+	// Fetch group memberships for all users in one call.
+	allMemberships, err := h.DB.ListAllUserGroupMemberships(r.Context())
+	if err != nil {
+		// Non-fatal: return users without membership data.
+		log.Warn().Err(err).Msg("users: list group memberships failed (non-fatal)")
+	}
+
+	// Build a map userID → []groupID.
+	membershipMap := map[string][]string{}
+	for _, m := range allMemberships {
+		membershipMap[m.UserID] = append(membershipMap[m.UserID], m.GroupID)
+	}
+
+	type userWithMemberships struct {
+		userResponse
+		GroupIDs []string `json:"group_ids"`
+	}
+
+	out := make([]userWithMemberships, len(users))
+	for i, u := range users {
+		gids := membershipMap[u.ID]
+		if gids == nil {
+			gids = []string{}
+		}
+		out[i] = userWithMemberships{
+			userResponse: toUserResponse(u),
+			GroupIDs:     gids,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

@@ -213,4 +213,93 @@ priority security or reliability fixes.
 
 ---
 
-*Next sprint: Sprint 3 — RBAC + Audit Trail (2026-05-25)*
+## Sprint 3 — RBAC + Audit Trail (2026-05-25 → 2026-06-07)
+
+### Access Control
+
+- **[S3-1] 3-tier RBAC: admin / operator / readonly roles**
+  Migration 043: `user_group_memberships(user_id, group_id, role)` table with
+  FK cascade, PRIMARY KEY `(user_id, group_id)`, and indexes on both FKs.
+  New DB helpers: `SetUserGroupMemberships`, `GetUserGroupMemberships`,
+  `UserHasGroupAccess`, `ListAllUserGroupMemberships`, `GetGroupIDForNode`.
+  `requireGroupAccess` and `requireGroupAccessByGroupID` middleware enforce
+  group-scoped operator access on all mutation routes. Admin scope passes
+  unconditionally; readonly and node-scoped keys always get 403.
+  7 table-driven tests in `internal/server/rbac_test.go`.
+
+- **[S3-2] UI permission gating for destructive actions**
+  Reimage button, power controls, and Delete node are hidden in the nodes list
+  and node detail when `Auth._role === 'readonly'`. Delete node and node
+  management actions additionally hidden for `operator` role. Delete Image
+  is admin-only. "Add Node" button hidden for non-admin. Power actions
+  extracted to shared `_nodeRowActions` helper used by both initial render
+  and auto-refresh.
+
+- **[S3-3] Settings > Users: group membership assignment UI**
+  Users table gains a "Group Memberships" column showing NodeGroup chips for
+  operator accounts. An "Edit" button opens a modal with checkboxes for all
+  defined NodeGroups. Save calls `PUT /api/v1/users/{id}/group-memberships`.
+  API endpoints: `GET /api/v1/users/{id}/group-memberships` and
+  `PUT /api/v1/users/{id}/group-memberships` (admin only).
+  Users list response from `GET /admin/users` now includes `group_ids` array
+  per user (back-filled via `ListAllUserGroupMemberships`).
+
+### Audit Trail
+
+- **[S3-4] `audit_log` table**
+  Migration 044: `audit_log(id, actor_id, actor_label, action, resource_type,
+  resource_id, old_value TEXT, new_value TEXT, ip_addr, created_at INTEGER)`.
+  Indexes on `created_at DESC`, `actor_id`, `(resource_type, resource_id)`,
+  `action`. 24 action constants defined (`AuditActionNode*`, `AuditActionImage*`,
+  `AuditActionGroup*`, `AuditActionUser*`, `AuditActionAPIKey*`).
+  `AuditService.Record()` is best-effort (errors logged, never propagated).
+
+- **[S3-5] Audit calls wired to all mutation handlers**
+  Nodes (create/update/delete), reimage (create), node groups (create/update/
+  delete/reimage), images (create/delete), users (create/update/delete/
+  reset-password, group-memberships) all record to the audit log.
+  `GET /api/v1/audit` (admin only) supports filters: `since`, `until`,
+  `actor`, `action`, `resource_type`, `limit`, `offset`.
+
+### Operations / Reliability
+
+- **[S3-7] Nodes list: hostname/MAC/status search**
+  Search input in the nodes page header. `GET /api/v1/nodes?search=` performs
+  a LIKE query on `hostname`, `primary_mac`, and `status`. Client-side debounce
+  (300ms) updates sections in place without a full-page reload.
+
+- **[S3-8] Scheduled reimage datetime picker**
+  Reimage modal now includes an optional `datetime-local` input for
+  `scheduled_at`. Empty = immediate. Non-empty schedules via the existing
+  `scheduled_at` field in `POST /api/v1/nodes/{id}/reimage`. Toast confirms
+  whether the reimage was queued or scheduled.
+
+- **[S3-9] Disk space pre-flight at startup + periodic monitor**
+  `clustr-serverd` checks available disk on `CLUSTR_IMAGE_DIR` at startup and
+  every 15 minutes. Logs WARN at 80%, ERROR at 90%. At 95% the server logs
+  FATAL and exits to prevent partial image writes corrupting the store.
+  `diskUsagePct` uses `syscall.Statfs` (Linux-native, no cgo).
+
+- **[S3-10] `CLUSTR_AUTH_DEV_MODE` loopback guard**
+  If `CLUSTR_AUTH_DEV_MODE=1` and the listen address is not loopback
+  (`127.x.x.x`, `::1`, `localhost`), the server refuses to start with a clear
+  error message. Prevents accidentally running insecure dev mode on a
+  network-accessible address.
+
+### Session UX
+
+- **[S3-6] Session expiry: 401 → `/login?next=` redirect**
+  `api.js`'s `_redirectToLogin` now appends `?next=<encoded-hash>` so the
+  user returns to the right page after re-authenticating. `login.js` reads
+  `?next=` on successful login and restores the hash.
+
+### Documentation
+
+- **[S3-11] `docs/rbac.md`**
+  Covers: 3-tier role model, permission matrix, group-scoped operator semantics,
+  session vs API key auth, bootstrap admin flow, and migration story from
+  single-tenant to multi-user. Implements decision D12 from `decisions.md`.
+
+---
+
+*Next sprint: Sprint 4 — Production-Readiness + Observability*

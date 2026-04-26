@@ -45,6 +45,11 @@ type ServerConfig struct {
 	// LogArchiveDir is where log purge summary events are written (future cold archive).
 	// Default: /var/lib/clustr/log-archive
 	LogArchiveDir string `json:"log_archive_dir"` // CLUSTR_LOG_ARCHIVE_DIR
+
+	// AuditRetention is the TTL for audit_log rows (D13).
+	// From CLUSTR_AUDIT_RETENTION (Go duration string, e.g. "90d").
+	// Default: 0 (server treats as 90 days).
+	AuditRetention time.Duration `json:"audit_retention"` // CLUSTR_AUDIT_RETENTION
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -103,7 +108,8 @@ func LoadServerConfig() ServerConfig {
 		LDAPDataDir:   envOrDefault("CLUSTR_LDAP_DATA_DIR", "/var/lib/clustr/ldap"),
 		LDAPConfigDir: envOrDefault("CLUSTR_LDAP_CONFIG_DIR", "/etc/clustr/ldap"),
 		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
-		LogArchiveDir: envOrDefault("CLUSTR_LOG_ARCHIVE_DIR", "/var/lib/clustr/log-archive"),
+		LogArchiveDir:  envOrDefault("CLUSTR_LOG_ARCHIVE_DIR", "/var/lib/clustr/log-archive"),
+		AuditRetention: parseAuditRetention(),
 	}
 }
 
@@ -143,6 +149,20 @@ func parseLogRetention() time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// parseAuditRetention parses CLUSTR_AUDIT_RETENTION as a Go duration string.
+// Falls back to 0 (meaning "use the server default of 90 days") on parse error.
+func parseAuditRetention() time.Duration {
+	v := os.Getenv("CLUSTR_AUDIT_RETENTION")
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
 		return 0
 	}
 	return d

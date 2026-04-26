@@ -792,6 +792,14 @@ Example `RAIDSpec` in a node config:
 
 ---
 
+## Access Control
+
+clustr uses a 3-tier role model: **admin** (full access), **operator** (group-scoped mutations), and **readonly** (view only). Operators are scoped to specific NodeGroups — they can only reimage and power nodes within the groups they are assigned to.
+
+See [docs/rbac.md](docs/rbac.md) for the full permission matrix, group-scoped operator semantics, bootstrap flow, and migration guide.
+
+---
+
 ## Security
 
 ### SSRF protection

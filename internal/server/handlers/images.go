@@ -40,6 +40,10 @@ type ImagesHandler struct {
 	// Progress is used by DeleteImage to check for active deploys.
 	// It is optional — when nil, the active-deploy guard is skipped.
 	Progress ProgressStoreIface
+	// Audit records state-changing events.
+	Audit *db.AuditService
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
 	// blobSem is the semaphore controlling max concurrent blob streams.
 	// Initialised once on first use via blobSemaphoreOnce; always access via blobSemaphore().
 	blobSem     chan struct{}
@@ -137,6 +141,15 @@ func (h *ImagesHandler) CreateImage(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("create image")
 		writeError(w, err)
 		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionImageCreate, "image", img.ID,
+			r.RemoteAddr, nil, map[string]string{"name": img.Name, "format": string(img.Format)})
 	}
 
 	writeJSON(w, http.StatusCreated, img)
@@ -309,6 +322,15 @@ func (h *ImagesHandler) DeleteImage(w http.ResponseWriter, r *http.Request) {
 		Bool("force", force).
 		Int("nodes_unassigned", len(nodes)).
 		Msg("image deleted")
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionImageDelete, "image", id,
+			r.RemoteAddr, map[string]string{"name": img.Name}, nil)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

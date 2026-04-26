@@ -2044,7 +2044,7 @@ const Pages = {
                         ${img.status === 'ready'
                             ? `<button class="btn btn-secondary" onclick="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
                             : ''}
-                        <button class="btn btn-danger btn-sm" onclick="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>
+                        ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" onclick="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>` : ''}
                     </div>
                 </div>
 
@@ -2504,12 +2504,22 @@ const Pages = {
         if (chevron) chevron.innerHTML = collapsed ? '&#9650;' : '&#9660;';
     },
 
+    // _nodesSearchTimer is used to debounce the search input.
+    _nodesSearchTimer: null,
+
+    // _nodesSearchQuery tracks the current search query so the auto-refresh
+    // can re-use it.
+    _nodesSearchQuery: '',
+
     async nodes() {
         App.render(loading('Loading nodes…'));
         try {
             // Parse optional ?group= query param for group filter.
             const urlParams = new URLSearchParams(window.location.hash.includes('?') ? window.location.hash.split('?')[1] : '');
             const groupFilter = urlParams.get('group') || '';
+
+            // Reset search state on page load.
+            Pages._nodesSearchQuery = '';
 
             const [nodesResp, imagesResp, groupsResp] = await Promise.all([
                 API.nodes.list(),
@@ -2551,6 +2561,8 @@ const Pages = {
                 : `<div class="card">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
                     groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>Add Node</button>`)}</div>`;
 
+            const canAdd = Auth._role === 'admin';
+
             App.render(`
                 <div class="page-header">
                     <div>
@@ -2558,12 +2570,15 @@ const Pages = {
                         <div class="page-subtitle" id="nodes-subtitle">${filteredNodes.length}${groupFilter ? ' (filtered)' : ''} of ${nodes.length} node${nodes.length !== 1 ? 's' : ''}</div>
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>
+                        <input id="nodes-search" type="search" placeholder="Search hostname, MAC, status…"
+                            style="width:220px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-secondary);color:var(--text-primary);font-size:13px"
+                            oninput="Pages._nodesSearchDebounced(this.value)">
+                        ${canAdd ? `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                             </svg>
                             Add Node
-                        </button>
+                        </button>` : ''}
                     </div>
                 </div>
 
@@ -2574,7 +2589,9 @@ const Pages = {
 
                 ${filterBanner}
 
-                ${sectionsHtml}
+                <div id="nodes-sections-container">
+                    ${sectionsHtml}
+                </div>
             `);
 
             // Incremental auto-refresh — updates rows in-place without blowing away the DOM.
@@ -2585,6 +2602,44 @@ const Pages = {
 
         } catch (e) {
             App.render(alertBox(`Failed to load nodes: ${e.message}`));
+        }
+    },
+
+    // _nodesSearchDebounced debounces the search input and fires _nodesSearch
+    // after 300ms of idle typing.
+    _nodesSearchDebounced(value) {
+        Pages._nodesSearchQuery = value.trim();
+        if (Pages._nodesSearchTimer) clearTimeout(Pages._nodesSearchTimer);
+        Pages._nodesSearchTimer = setTimeout(() => Pages._nodesSearch(), 300);
+    },
+
+    // _nodesSearch fires a ?search= request and re-renders the sections container.
+    async _nodesSearch() {
+        const q = Pages._nodesSearchQuery;
+        const container = document.getElementById('nodes-sections-container');
+        const subtitle  = document.getElementById('nodes-subtitle');
+        if (!container) return;
+
+        try {
+            const [nodesResp] = await Promise.all([
+                API.nodes.list({ search: q }),
+            ]);
+            const nodes  = nodesResp.nodes || [];
+            const images = Pages._nodesImages || [];
+            const groupMap = Pages._nodesGroupMap || {};
+            const imgMap = Object.fromEntries(images.map(i => [i.id, i]));
+
+            if (subtitle) subtitle.textContent = q
+                ? `${nodes.length} result${nodes.length !== 1 ? 's' : ''} for "${q}"`
+                : `${nodes.length} node${nodes.length !== 1 ? 's' : ''}`;
+
+            if (!nodes.length) {
+                container.innerHTML = `<div class="card">${emptyState('No nodes found', q ? `No nodes match "${escHtml(q)}"` : 'No nodes registered yet.')}</div>`;
+                return;
+            }
+            container.innerHTML = Pages._nodesRoleSections(nodes, imgMap, images, groupMap);
+        } catch (e) {
+            if (container) container.innerHTML = alertBox(`Search failed: ${e.message}`);
         }
     },
 
@@ -2648,25 +2703,34 @@ const Pages = {
             </td>
             <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
             <td>
-                <div class="flex gap-6" style="align-items:center">
-                    <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
-                    <div class="actions-dropdown" id="pwr-dd-${n.id}">
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
-                            &#9889;
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
-                        </button>
-                        <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
-                            <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
-                            <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
-                            <div class="actions-dropdown-sep"></div>
-                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
-                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
-                            <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
-                        </div>
-                    </div>
-                </div>
+                ${Pages._nodeRowActions(n)}
             </td>
         </tr>`;
+    },
+
+    // _nodeRowActions renders the actions cell for a node row.
+    // Power actions are shown only to admin/operator; readonly sees View only.
+    _nodeRowActions(n) {
+        const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        const pwrDropdown = canMutate ? `
+            <div class="actions-dropdown" id="pwr-dd-${n.id}">
+                <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
+                    &#9889;
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
+                    <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
+                    <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
+                    <div class="actions-dropdown-sep"></div>
+                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
+                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
+                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
+                </div>
+            </div>` : '';
+        return `<div class="flex gap-6" style="align-items:center">
+            <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
+            ${pwrDropdown}
+        </div>`;
     },
 
     // nodesRefresh — called by the auto-refresh timer. Updates the nodes table
@@ -2705,24 +2769,8 @@ const Pages = {
                     const cells = tr.querySelectorAll('td');
                     if (cells[2]) cells[2].innerHTML = nodeBadge(n);
                     if (cells[5]) cells[5].textContent = fmtRelative(n.updated_at);
-                    // Refresh action buttons.
-                    if (cells[6]) cells[6].innerHTML = `<div class="flex gap-6" style="align-items:center">
-                        <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
-                        <div class="actions-dropdown" id="pwr-dd-${n.id}">
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
-                                &#9889;
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
-                            </button>
-                            <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
-                                <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
-                                <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
-                                <div class="actions-dropdown-sep"></div>
-                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
-                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
-                                <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
-                            </div>
-                        </div>
-                    </div>`;
+                    // Refresh action buttons using the shared helper (role-aware).
+                    if (cells[6]) cells[6].innerHTML = Pages._nodeRowActions(n);
                     existing.delete(key);
                 } else {
                     // New node appeared — insert into its role-appropriate tbody.
@@ -3397,6 +3445,7 @@ const Pages = {
                     </div>
                     <div class="flex gap-8">
                         ${captureBtn}
+                        ${Auth._role === 'readonly' ? '' : `
                         <div class="actions-dropdown" id="node-actions-dropdown">
                             <button class="btn btn-secondary" onclick="Pages._toggleActionsDropdown()">
                                 Actions
@@ -3406,11 +3455,12 @@ const Pages = {
                                 <button class="actions-dropdown-item" onclick="Pages._nodeActionsRediscover('${node.id}');Pages._toggleActionsDropdown()">Re-discover hardware</button>
                                 <button class="actions-dropdown-item" onclick="Pages._nodeActionsTriggerReimage('${node.id}','${escHtml(displayName)}');Pages._toggleActionsDropdown()">Trigger reimage</button>
                                 ${iface ? `<button class="actions-dropdown-item" onclick="Pages.showCaptureModal(${JSON.stringify('root@' + iface.ip_address.split('/')[0])},${JSON.stringify((node.hostname && node.hostname !== '(none)') ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture' : '')});Pages._toggleActionsDropdown()">Capture as image</button>` : ''}
-                                <div class="actions-dropdown-sep"></div>
-                                <button class="actions-dropdown-item danger" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}');Pages._toggleActionsDropdown()">Delete node</button>
+                                ${Auth._role === 'admin' ? `<div class="actions-dropdown-sep"></div>
+                                <button class="actions-dropdown-item danger" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}');Pages._toggleActionsDropdown()">Delete node</button>` : ''}
                             </div>
                         </div>
-                        <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}')">Delete</button>
+                        ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}')">Delete</button>` : ''}
+                        `}
                     </div>
                 </div>
 
@@ -3437,7 +3487,7 @@ const Pages = {
                         (timeout at ${fmtDate(node.deploy_verify_timeout_at)}).
                         Node may not be bootable — possible causes: bootloader failure, kernel panic,
                         network misconfiguration, or <code>/etc/clustr/node-token</code> not written correctly.
-                        Attach serial console to investigate or <button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Re-deploy</button>
+                        Attach serial console to investigate or ${Auth._role !== 'readonly' ? `<button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Re-deploy</button>` : ''}
                     </div>` : ''}
                     ${(node.deploy_completed_preboot_at && !node.deploy_verified_booted_at && !node.deploy_verify_timeout_at) ? `
                     <div class="alert alert-warning" style="margin-bottom:12px">
@@ -3492,7 +3542,7 @@ const Pages = {
                                             ? `<span class="badge badge-warning">Reimage pending</span>
                                                <span class="text-dim" style="font-size:12px">Node will re-deploy on next PXE boot</span>`
                                             : `<span class="badge badge-neutral">Normal</span>
-                                               <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Request Reimage</button>`}
+                                               ${Auth._role !== 'readonly' ? `<button type="button" class="btn btn-secondary btn-sm" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Request Reimage</button>` : ''}`}
                                     </div>
                                 </div>
                             </div>`)}
@@ -4793,21 +4843,73 @@ const Pages = {
         });
     },
 
-    async _nodeActionsTriggerReimage(nodeId, displayName) {
-        Pages.showConfirmModal({
-            title: 'Trigger Reimage',
-            message: `Trigger reimage of <strong>${escHtml(displayName)}</strong>?<br><br>The node will re-deploy on next PXE boot.`,
-            confirmText: 'Trigger Reimage',
-            danger: true,
-            onConfirm: async () => {
-                try {
-                    await API.request('POST', `/nodes/${nodeId}/reimage`, {});
-                    Pages.nodeDetail(nodeId);
-                } catch (e) {
-                    Pages.showAlertModal('Trigger Reimage Failed', escHtml(e.message));
-                }
-            },
-        });
+    _nodeActionsTriggerReimage(nodeId, displayName) {
+        // Open the full reimage modal with optional scheduled_at.
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'reimage-trigger-modal';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:440px" role="dialog" aria-modal="true">
+                <div class="modal-header">
+                    <span class="modal-title">Trigger Reimage</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('reimage-trigger-modal').remove()">&#215;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin:0 0 14px;font-size:13px">
+                        Trigger reimage of <strong>${escHtml(displayName)}</strong>. The node will
+                        re-deploy on its next PXE boot.
+                    </p>
+                    <div class="form-group">
+                        <label for="reimage-scheduled-at" style="font-size:13px">
+                            Schedule for (optional)
+                            <span class="tooltip-icon" title="Leave empty to trigger immediately. Set a future time to schedule the reimage." style="cursor:help;font-size:11px;color:var(--text-secondary)">(?)</span>
+                        </label>
+                        <input id="reimage-scheduled-at" type="datetime-local" class="form-input"
+                            style="margin-top:4px"
+                            min="${new Date().toISOString().slice(0,16)}">
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">
+                            Leave empty to trigger immediately. Times are in your local timezone.
+                        </div>
+                    </div>
+                    <div id="reimage-trigger-error" style="color:var(--error);font-size:13px;margin-top:8px;display:none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="document.getElementById('reimage-trigger-modal').remove()">Cancel</button>
+                    <button class="btn btn-danger" id="reimage-trigger-btn" onclick="Pages._nodeActionsTriggerReimageSubmit('${nodeId}')">Trigger Reimage</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    },
+
+    async _nodeActionsTriggerReimageSubmit(nodeId) {
+        const overlay = document.getElementById('reimage-trigger-modal');
+        const btn     = document.getElementById('reimage-trigger-btn');
+        const errEl   = document.getElementById('reimage-trigger-error');
+        if (!overlay) return;
+
+        const scheduledInput = document.getElementById('reimage-scheduled-at');
+        const body = {};
+        if (scheduledInput && scheduledInput.value) {
+            // Convert local datetime to UTC ISO string.
+            body.scheduled_at = new Date(scheduledInput.value).toISOString();
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Submitting…';
+        if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+        try {
+            await API.request('POST', `/nodes/${nodeId}/reimage`, body);
+            overlay.remove();
+            const msg = body.scheduled_at
+                ? `Reimage scheduled for ${new Date(body.scheduled_at).toLocaleString()}`
+                : 'Reimage queued — node will re-deploy on next PXE boot';
+            App.toast(msg, 'success');
+            Pages.nodeDetail(nodeId);
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = 'Trigger Reimage';
+            if (errEl) { errEl.textContent = e.message; errEl.style.display = ''; }
+        }
     },
 
     // ── Cancel a single reimage request ──────────────────────────────────────
@@ -7880,13 +7982,18 @@ const Pages = {
 
     async _settingsUsersTab() {
         try {
-            const resp = await API.users.list();
-            const users = (resp && resp.users) ? resp.users : [];
+            const [usersResp, groupsResp] = await Promise.all([
+                API.users.list(),
+                API.nodeGroups.list().catch(() => ({ groups: [] })),
+            ]);
+            const users  = (usersResp && usersResp.users) ? usersResp.users : [];
+            const groups = (groupsResp && (groupsResp.groups || groupsResp.node_groups)) || [];
+            const groupMap = Object.fromEntries(groups.map(g => [g.id, g]));
 
             const adminCount = users.filter(u => u.role === 'admin' && !u.disabled).length;
 
             const rows = users.length === 0
-                ? `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:24px">No users</td></tr>`
+                ? `<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:24px">No users</td></tr>`
                 : users.map(u => {
                     const roleBadge = u.role === 'admin'
                         ? `<span class="badge badge-info">admin</span>`
@@ -7899,11 +8006,27 @@ const Pages = {
                     // Disable delete/disable for the last admin.
                     const isLastAdmin = u.role === 'admin' && !u.disabled && adminCount <= 1;
                     const actionDisabled = isLastAdmin ? 'disabled title="Cannot disable/delete the last admin"' : '';
+
+                    // Group memberships column — only meaningful for operators.
+                    let groupCell = '<span class="text-dim">—</span>';
+                    if (u.role === 'operator') {
+                        const memberGroupIDs = Array.isArray(u.group_ids) ? u.group_ids : [];
+                        const chips = memberGroupIDs.map(gid => {
+                            const g = groupMap[gid];
+                            return g
+                                ? `<span class="badge badge-info badge-sm" style="cursor:default">${escHtml(g.name)}</span>`
+                                : `<span class="badge badge-neutral badge-sm text-mono" style="font-size:10px">${gid.substring(0,8)}</span>`;
+                        });
+                        const editBtn = `<button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._settingsEditGroupMemberships('${u.id}','${escHtml(u.username)}',${JSON.stringify(memberGroupIDs)},${JSON.stringify(groups)})">Edit</button>`;
+                        groupCell = `<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">${chips.length ? chips.join('') : '<span class="text-dim">none</span>'}${editBtn}</div>`;
+                    }
+
                     return `<tr>
                         <td>${escHtml(u.username)} ${mustChange}</td>
                         <td>${roleBadge}${disabledBadge}</td>
                         <td class="text-sm text-secondary">${fmtDate(u.created_at)}</td>
                         <td class="text-sm text-secondary">${lastLogin}</td>
+                        <td>${groupCell}</td>
                         <td>
                             <div style="display:flex;gap:6px;flex-wrap:wrap;">
                                 <button class="btn btn-secondary btn-sm" onclick="Pages._settingsResetUserPassword('${u.id}')">Reset PW</button>
@@ -7923,7 +8046,7 @@ const Pages = {
                     <table class="table">
                         <thead>
                             <tr>
-                                <th>Username</th><th>Role</th><th>Created</th><th>Last Login</th><th>Actions</th>
+                                <th>Username</th><th>Role</th><th>Created</th><th>Last Login</th><th>Group Memberships</th><th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>${rows}</tbody>
@@ -7931,6 +8054,64 @@ const Pages = {
                 </div>`;
         } catch (err) {
             return alertBox('Failed to load users: ' + err.message);
+        }
+    },
+
+    // _settingsEditGroupMemberships opens a modal to assign operator → NodeGroups.
+    _settingsEditGroupMemberships(userID, username, currentGroupIDs, allGroups) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'group-membership-modal';
+        const checklist = allGroups.map(g => `
+            <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer">
+                <input type="checkbox" value="${escHtml(g.id)}"
+                    ${currentGroupIDs.includes(g.id) ? 'checked' : ''}>
+                <span>${escHtml(g.name)}</span>
+            </label>`).join('');
+
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:420px" role="dialog" aria-modal="true">
+                <div class="modal-header">
+                    <span class="modal-title">Group Memberships — ${escHtml(username)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('group-membership-modal').remove()">&#215;</button>
+                </div>
+                <div class="modal-body">
+                    <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                        Select the NodeGroups this operator can manage. Operator scope allows reimage and
+                        power actions on nodes within the selected groups.
+                    </p>
+                    ${allGroups.length
+                        ? `<div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px">${checklist}</div>`
+                        : `<p class="text-dim" style="font-size:13px">No node groups defined yet. Create groups first.</p>`}
+                    <div id="gm-error" style="color:var(--error);font-size:13px;margin-top:8px;display:none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="document.getElementById('group-membership-modal').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="gm-save-btn" onclick="Pages._settingsEditGroupMembershipsSubmit('${userID}')">Save</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    },
+
+    async _settingsEditGroupMembershipsSubmit(userID) {
+        const overlay = document.getElementById('group-membership-modal');
+        const errEl   = document.getElementById('gm-error');
+        const btn     = document.getElementById('gm-save-btn');
+        if (!overlay) return;
+
+        const selected = Array.from(overlay.querySelectorAll('input[type=checkbox]:checked')).map(el => el.value);
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+        try {
+            await API.users.setGroupMemberships(userID, selected);
+            overlay.remove();
+            App.toast('Group memberships updated', 'success');
+            Pages._settingsRender('users');
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = 'Save';
+            if (errEl) { errEl.textContent = e.message; errEl.style.display = ''; }
         }
     },
 

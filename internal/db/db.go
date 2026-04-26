@@ -814,24 +814,42 @@ func (db *DB) NodeGetHostname(ctx context.Context, nodeID string) (string, error
 // the node list page shows the correct group even when the denormalised fast-path
 // column on node_configs is stale or NULL.
 func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error) {
-	var rows *sql.Rows
-	var err error
+	return db.SearchNodeConfigs(ctx, baseImageID, "")
+}
+
+// SearchNodeConfigs lists node configs with optional baseImageID and/or a
+// free-text search term. The search term is matched case-insensitively against
+// hostname, primary_mac, and status (LIKE '%term%').
+func (db *DB) SearchNodeConfigs(ctx context.Context, baseImageID, search string) ([]api.NodeConfig, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	whereClauses := []string{}
+	args := []interface{}{}
 
 	if baseImageID != "" {
-		rows, err = db.sql.QueryContext(ctx,
-			`SELECT `+nodeConfigColsJoined+`
-			 FROM node_configs nc
-			 LEFT JOIN node_group_memberships m ON m.node_id = nc.id
-			 WHERE nc.base_image_id = ?
-			 ORDER BY nc.hostname ASC`,
-			baseImageID)
-	} else {
-		rows, err = db.sql.QueryContext(ctx,
-			`SELECT `+nodeConfigColsJoined+`
-			 FROM node_configs nc
-			 LEFT JOIN node_group_memberships m ON m.node_id = nc.id
-			 ORDER BY nc.hostname ASC`)
+		whereClauses = append(whereClauses, "nc.base_image_id = ?")
+		args = append(args, baseImageID)
 	}
+	if search != "" {
+		like := "%" + search + "%"
+		whereClauses = append(whereClauses, "(nc.hostname LIKE ? OR nc.primary_mac LIKE ? OR nc.status LIKE ?)")
+		args = append(args, like, like, like)
+	}
+
+	where := ""
+	if len(whereClauses) > 0 {
+		where = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	rows, err = db.sql.QueryContext(ctx,
+		`SELECT `+nodeConfigColsJoined+`
+		 FROM node_configs nc
+		 LEFT JOIN node_group_memberships m ON m.node_id = nc.id`+where+`
+		 ORDER BY nc.hostname ASC`,
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("db: list node configs: %w", err)
 	}

@@ -47,6 +47,7 @@ type BuildInfo struct {
 type Server struct {
 	cfg                 config.ServerConfig
 	db                  *db.DB
+	audit               *db.AuditService
 	broker              *LogBroker
 	progress            *ProgressStore
 	buildProgress       *BuildProgressStore
@@ -133,6 +134,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		db:                  database,
+		audit:               db.NewAuditService(database),
 		broker:              NewLogBroker(),
 		progress:            NewProgressStore(),
 		buildProgress:       buildProg,
@@ -197,6 +199,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	}
 	go s.reimageOrchestrator.Scheduler(ctx)
 	go s.runLogPurger(ctx)
+	go s.runAuditPurger(ctx)
+	go s.runDiskSpaceMonitor(ctx)
 	// ADR-0008: Post-reboot verification timeout scanner.
 	go s.runVerifyTimeoutScanner(ctx)
 	// LDAP module health checker.
@@ -395,6 +399,96 @@ func generatePurgeID() string {
 	return fmt.Sprintf("purge-%d", time.Now().UnixNano())
 }
 
+// runAuditPurger ticks every hour and deletes audit_log rows older than
+// CLUSTR_AUDIT_RETENTION (default 90 days, D13).
+func (s *Server) runAuditPurger(ctx context.Context) {
+	retention := 90 * 24 * time.Hour // default 90 days (D13)
+	if v := s.cfg.AuditRetention; v != 0 {
+		retention = v
+	}
+	log.Info().Str("retention", retention.String()).Msg("audit purger: started")
+
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("audit purger: stopping")
+			return
+		case <-ticker.C:
+			olderThan := time.Now().Add(-retention)
+			n, err := s.db.PurgeAuditLog(ctx, olderThan)
+			if err != nil {
+				log.Error().Err(err).Msg("audit purger: failed")
+				continue
+			}
+			if n > 0 {
+				log.Info().Int64("rows", n).Str("older_than", olderThan.Format(time.RFC3339)).
+					Msg("audit purger: purged rows")
+			}
+		}
+	}
+}
+
+// diskSpaceThresholds are the disk usage fractions at which we warn / error / fatal.
+const (
+	diskWarnThreshold  = 0.80
+	diskErrorThreshold = 0.90
+	diskFatalThreshold = 0.95
+)
+
+// runDiskSpaceMonitor checks disk space on CLUSTR_IMAGE_DIR every 15 minutes
+// and logs WARN at 80%, ERROR at 90%, FATAL+exit at 95% (S3-9).
+func (s *Server) runDiskSpaceMonitor(ctx context.Context) {
+	checkDisk := func() bool {
+		pct, err := diskUsagePct(s.cfg.ImageDir)
+		if err != nil {
+			log.Warn().Err(err).Str("dir", s.cfg.ImageDir).Msg("disk monitor: could not check usage (non-fatal)")
+			return true
+		}
+		switch {
+		case pct >= diskFatalThreshold:
+			log.Error().
+				Str("dir", s.cfg.ImageDir).
+				Str("usage", fmt.Sprintf("%.1f%%", pct*100)).
+				Msg("disk space CRITICAL: image directory is ≥95% full — shutting down to prevent data corruption")
+			return false // signal caller to exit
+		case pct >= diskErrorThreshold:
+			log.Error().
+				Str("dir", s.cfg.ImageDir).
+				Str("usage", fmt.Sprintf("%.1f%%", pct*100)).
+				Msg("disk space ERROR: image directory is ≥90% full — free space immediately")
+		case pct >= diskWarnThreshold:
+			log.Warn().
+				Str("dir", s.cfg.ImageDir).
+				Str("usage", fmt.Sprintf("%.1f%%", pct*100)).
+				Msg("disk space WARNING: image directory is ≥80% full")
+		}
+		return true
+	}
+
+	// Initial check at startup.
+	if ok := checkDisk(); !ok {
+		// Fatal — exit the process so systemd restarts it after space is freed.
+		log.Fatal().Msg("disk space >95%: refusing to continue")
+		return
+	}
+
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if ok := checkDisk(); !ok {
+				log.Fatal().Msg("disk space >95%: shutting down")
+				return
+			}
+		}
+	}
+}
+
 // buildRouter constructs the chi router and registers all routes.
 func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
@@ -435,6 +529,8 @@ func (s *Server) buildRouter() chi.Router {
 	// Handler instances.
 	apiKeysH := s.buildAPIKeysHandler()
 	usersH := s.buildUsersHandler()
+	auditH := &handlers.AuditHandler{DB: s.db}
+	// Audit service and actor-info closure are wired after getActorInfo is defined below.
 
 	health := &handlers.HealthHandler{
 		Version:       s.buildInfo.Version,
@@ -444,9 +540,37 @@ func (s *Server) buildRouter() chi.Router {
 		BootDir:       s.cfg.PXE.BootDir,
 		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clustr.img",
 	}
-	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
+	// getActorInfo extracts (actorID, actorLabel) from a request context.
+	// actorID is users.id for session auth, api_keys.id for Bearer auth, or "".
+	// actorLabel is "user:<id>" or "key:<label>" for display in audit log.
+	getActorInfo := func(r *http.Request) (string, string) {
+		if uid := userIDFromContext(r.Context()); uid != "" {
+			return uid, "user:" + uid
+		}
+		if kid := keyIDFromContext(r.Context()); kid != "" {
+			label := keyLabelFromContext(r.Context())
+			if label == "" {
+				label = kid
+			}
+			return kid, "key:" + label
+		}
+		return "", actorLabel(r.Context())
+	}
+	// Wire audit + actor info into handlers that need it.
+	usersH.Audit = s.audit
+	usersH.GetActorInfo = getActorInfo
+
+	images := &handlers.ImagesHandler{
+		DB:           s.db,
+		ImageDir:     s.cfg.ImageDir,
+		Progress:     s.progress,
+		Audit:        s.audit,
+		GetActorInfo: getActorInfo,
+	}
 	nodes := &handlers.NodesHandler{
-		DB: s.db,
+		DB:           s.db,
+		Audit:        s.audit,
+		GetActorInfo: getActorInfo,
 		FlipToDiskFirst: s.flipNodeToDiskFirst,
 		LDAPNodeConfig: func(ctx context.Context) (*api.LDAPNodeConfig, error) {
 			return s.ldapMgr.NodeConfig(ctx)
@@ -470,7 +594,12 @@ func (s *Server) buildRouter() chi.Router {
 		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
 		ServerIP:        s.cfg.PXE.ServerIP,
 	}
-	nodeGroups := &handlers.NodeGroupsHandler{DB: s.db, Orchestrator: s.reimageOrchestrator}
+	nodeGroups := &handlers.NodeGroupsHandler{
+		DB:           s.db,
+		Orchestrator: s.reimageOrchestrator,
+		Audit:        s.audit,
+		GetActorInfo: getActorInfo,
+	}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	// Use NewFactory so the build semaphore is initialised (capacity from
 	// CLUSTR_MAX_CONCURRENT_BUILDS, default 4). Context is wired later via
@@ -519,9 +648,11 @@ func (s *Server) buildRouter() chi.Router {
 	reimageH := &handlers.ReimageHandler{
 		DB:           s.db,
 		Orchestrator: s.reimageOrchestrator,
+		Audit:        s.audit,
 		GetActorLabel: func(r *http.Request) string {
 			return actorLabel(r.Context())
 		},
+		GetActorInfo: getActorInfo,
 	}
 	boot := &handlers.BootHandler{
 		BootDir:   s.cfg.PXE.BootDir,
@@ -633,11 +764,18 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
 
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
-			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleList)
+			// GET /admin/users includes group_ids for each user (S3-3).
+			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleListWithMemberships)
 			r.With(requireRole("admin")).Post("/admin/users", usersH.HandleCreate)
 			r.With(requireRole("admin")).Put("/admin/users/{id}", usersH.HandleUpdate)
 			r.With(requireRole("admin")).Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
 			r.With(requireRole("admin")).Delete("/admin/users/{id}", usersH.HandleDelete)
+			// Group membership assignment (S3-3).
+			r.With(requireRole("admin")).Get("/users/{id}/group-memberships", usersH.HandleGetGroupMemberships)
+			r.With(requireRole("admin")).Put("/users/{id}/group-memberships", usersH.HandleSetGroupMemberships)
+
+			// Audit log (S3-4) — admin only (operators and readonly cannot read audit log).
+			r.With(requireRole("admin")).Get("/audit", auditH.HandleQuery)
 
 			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
@@ -698,8 +836,9 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/nodes", nodes.ListNodes)
 			r.Post("/nodes", nodes.CreateNode)
 			r.Get("/nodes/{id}", nodes.GetNode)
-			r.Put("/nodes/{id}", nodes.UpdateNode)
-			r.Delete("/nodes/{id}", nodes.DeleteNode)
+			// PUT and DELETE require admin or group-scoped operator access.
+			r.With(requireGroupAccess("id", s.db)).Put("/nodes/{id}", nodes.UpdateNode)
+			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}", nodes.DeleteNode)
 
 			// clientd heartbeat — admin read of latest heartbeat data.
 			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
@@ -728,25 +867,28 @@ func (s *Server) buildRouter() chi.Router {
 			// Group membership management.
 			r.Post("/node-groups/{id}/members", nodeGroups.AddGroupMembers)
 			r.Delete("/node-groups/{id}/members/{node_id}", nodeGroups.RemoveGroupMember)
-			// Rolling group reimage.
-			r.Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
+			// Rolling group reimage — requires admin or group-scoped operator access.
+			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
 			// Group reimage job status polling.
 			r.Get("/reimages/jobs/{jobID}", nodeGroups.GetGroupReimageJob)
 			r.Post("/reimages/jobs/{jobID}/resume", nodeGroups.ResumeGroupReimageJob)
 
 			// IPMI / power management — subpaths of /nodes/{id} must be
 			// registered in the same chi group so the auth middleware applies.
+			// Read-only power status and sensors are visible to all authenticated users.
+			// State-changing power ops require admin or group-scoped operator access.
 			r.Get("/nodes/{id}/power", ipmiH.GetPowerStatus)
-			r.Post("/nodes/{id}/power/on", ipmiH.PowerOn)
-			r.Post("/nodes/{id}/power/off", ipmiH.PowerOff)
-			r.Post("/nodes/{id}/power/cycle", ipmiH.PowerCycle)
-			r.Post("/nodes/{id}/power/reset", ipmiH.PowerReset)
-			r.Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
-			r.Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/on", ipmiH.PowerOn)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/off", ipmiH.PowerOff)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/cycle", ipmiH.PowerCycle)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/reset", ipmiH.PowerReset)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
 			r.Get("/nodes/{id}/sensors", ipmiH.GetSensors)
 
 			// Reimage — queue, track and retry node reimages via the power provider.
-			r.Post("/nodes/{id}/reimage", reimageH.Create)
+			// Create requires group-scoped operator access.
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/reimage", reimageH.Create)
 			r.Get("/nodes/{id}/reimage", reimageH.ListForNode)
 			r.Get("/reimage/{id}", reimageH.Get)
 			r.Delete("/reimage/{id}", reimageH.Cancel)

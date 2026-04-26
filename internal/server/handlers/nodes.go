@@ -54,7 +54,10 @@ func autoHostname(mac string) string {
 
 // NodesHandler handles all /api/v1/nodes routes.
 type NodesHandler struct {
-	DB *db.DB
+	DB    *db.DB
+	Audit *db.AuditService
+	// GetActorInfo returns (actorID, actorLabel) for the current request.
+	GetActorInfo func(r *http.Request) (id, label string)
 	// FlipToDiskFirst, when non-nil, is called by VerifyBoot after recording the
 	// deployed_verified state transition. It should call
 	// SetPersistentBootOrder([BootDisk, BootPXE]) on the node's power provider.
@@ -124,9 +127,10 @@ func sanitizeNodeConfigs(cfgs []api.NodeConfig) []api.NodeConfig {
 // When pagination params are absent the full list is returned (backward compatible).
 func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	baseImageID := r.URL.Query().Get("base_image_id")
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
-	nodes, err := h.DB.ListNodeConfigs(r.Context(), baseImageID)
+	nodes, err := h.DB.SearchNodeConfigs(r.Context(), baseImageID, search)
 	if err != nil {
 		log.Error().Err(err).Msg("list nodes")
 		writeError(w, err)
@@ -223,6 +227,15 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("create node config")
 		writeError(w, err)
 		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeCreate, "node", cfg.ID,
+			r.RemoteAddr, nil, map[string]string{"hostname": cfg.Hostname, "primary_mac": cfg.PrimaryMAC})
 	}
 
 	writeJSON(w, http.StatusCreated, cfg)
@@ -362,15 +375,33 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeUpdate, "node", id,
+			r.RemoteAddr, sanitizeNodeConfig(existing), sanitizeNodeConfig(cfg))
+	}
+
 	writeJSON(w, http.StatusOK, cfg)
 }
 
 // DeleteNode handles DELETE /api/v1/nodes/:id
 func (h *NodesHandler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	existing, _ := h.DB.GetNodeConfig(r.Context(), id)
 	if err := h.DB.DeleteNodeConfig(r.Context(), id); err != nil {
 		writeError(w, err)
 		return
+	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeDelete, "node", id,
+			r.RemoteAddr, map[string]string{"hostname": existing.Hostname}, nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

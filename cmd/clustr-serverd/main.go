@@ -190,6 +190,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	log.Info().Str("version", version).Str("addr", cfg.ListenAddr).Msg("clustr-serverd starting")
 
+	// S3-10: CLUSTR_AUTH_DEV_MODE loopback guard.
+	// If dev mode is enabled, refuse to start unless the listen address is a loopback address.
+	// This prevents accidental exposure of an unauthenticated API in production.
+	if cfg.AuthDevMode {
+		host, _, splitErr := net.SplitHostPort(cfg.ListenAddr)
+		if splitErr != nil {
+			host = cfg.ListenAddr
+		}
+		listenIP := net.ParseIP(host)
+		isLoopback := host == "" || host == "localhost" ||
+			(listenIP != nil && listenIP.IsLoopback())
+		if !isLoopback {
+			return fmt.Errorf("CLUSTR_AUTH_DEV_MODE=1 is set but the listen address %q is not a loopback address — "+
+				"refusing to start to prevent accidental exposure of an unauthenticated API. "+
+				"Either unset CLUSTR_AUTH_DEV_MODE or bind to 127.0.0.1 / localhost", cfg.ListenAddr)
+		}
+		log.Warn().Str("addr", cfg.ListenAddr).Msg("CLUSTR_AUTH_DEV_MODE=1 — running on loopback only (dev mode)")
+	}
+
 	// Ensure all required runtime directories exist on first run.
 	// This prevents panics and confusing errors when the server is installed fresh.
 	requiredDirs := []string{
