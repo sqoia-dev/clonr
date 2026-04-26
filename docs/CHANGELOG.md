@@ -2,6 +2,75 @@
 
 ---
 
+## Feat: management IP alias and Caddy setup (CLUSTR_MGMT_IP) (2026-04-25)
+
+### Background
+
+`clustr-serverd` binds `CLUSTR_LISTEN_ADDR` to the provisioning interface only
+(`10.99.0.1:8080`) to prevent the built-in DHCP server from answering on the
+management LAN (SEC-P0-2). This means the web UI is unreachable from an operator
+workstation on a typical flat or dual-NIC lab network without a separate entry point.
+
+The previous workaround was to note `192.168.1.151` (the dev host's DHCP address)
+in docs, which is fragile — the DHCP lease can change, the address is host-specific,
+and nothing in the install script set it up automatically.
+
+### What changed
+
+**`CLUSTR_MGMT_IP` env var (new):**
+A stable IP alias is now the canonical operator "front door". The recommended address
+is the `.254` host of the management subnet (e.g. `192.168.1.254`). This address:
+- Is almost never in a DHCP pool (which typically occupies the middle range).
+- Is easy to remember and document.
+- Can be pinned in DNS (`clustr.lab.example.com → 192.168.1.254`) independently of
+  whatever DHCP lease the host happens to hold.
+
+**`scripts/setup/install-dev-vm.sh`:**
+- Added `CLUSTR_MGMT_IP` env var with auto-derivation: takes `eth0`'s primary IP
+  and replaces the last octet with `254` if not set explicitly.
+- New step `setup_mgmt_ip_alias`: adds `CLUSTR_MGMT_IP/prefix` as a persistent
+  secondary address to `eth0` via NetworkManager (`nmcli con mod +ipv4.addresses`).
+  Falls back to `ip addr add` on systems without NetworkManager (not persistent).
+- New step `install_caddy`: installs Caddy (COPR on RHEL/Rocky, cloudsmith on Ubuntu),
+  writes `/etc/caddy/Caddyfile` binding both `:80` and `:8080` on `CLUSTR_MGMT_IP`
+  and reverse-proxying to `10.99.0.1:8080`. Enables and starts the Caddy service.
+- `print_status` now reports `CLUSTR_MGMT_IP` and the two operator access URLs.
+
+**`docs/install.md §2` (Network Setup):**
+- New "Management IP and operator access" subsection explaining the `.254` convention,
+  the `CLUSTR_MGMT_IP` env var, and step-by-step alias creation commands for Rocky 9
+  (NetworkManager) and Ubuntu (Netplan and NetworkManager).
+- Env var reference table gains a `CLUSTR_MGMT_IP` row.
+- Login step updated to use `<your-clustr-mgmt-ip>` placeholder with `192.168.1.254`
+  as the canonical example (replacing the old `<server-ip>` placeholder).
+
+**`docs/tls-provisioning.md §3` (Management interface access):**
+- Dual-NIC table updated: `eth0` column now shows `192.168.1.254` (alias) instead of
+  `192.168.1.151` (DHCP address).
+- Full `CLUSTR_MGMT_IP` explanation added at the top of the section.
+- Caddyfile example updated to use `192.168.1.254` with a comment indicating where
+  to substitute the actual `CLUSTR_MGMT_IP` value.
+- Installation steps (§3.2) now include the `nmcli` alias-creation command before the
+  Caddy install steps.
+- Verify commands (§3.4) use `192.168.1.254` throughout.
+- §3.5 (Adding TLS) references `CLUSTR_MGMT_IP` in the DNS pin description.
+
+**`README.md` Quick Start:**
+- §4 (Verify the server is healthy) now explains that `clustr-serverd` binds to the
+  provisioning interface only and provides the `nmcli` command to add the management
+  IP alias, with a pointer to `docs/tls-provisioning.md §3` for the full Caddy setup.
+- Uses `http://<your-clustr-mgmt-ip>/` as the operator browser URL with
+  `192.168.1.254` as the canonical example.
+
+### Result
+
+`CLUSTR_MGMT_IP` is consistent across all five modified files. Running
+`install-dev-vm.sh` now configures the IP alias and Caddy automatically as part of
+the bootstrap sequence. The operator URL is always `http://<CLUSTR_MGMT_IP>/` —
+no more host-specific DHCP addresses in docs or scripts.
+
+---
+
 ## Fix: NEW-GAP-14 + NEW-GAP-15 — true turnkey Slurm deploy (2026-04-25)
 
 ### NEW-GAP-14 (P2) — Stale slurmctld clustername causes FATAL on first boot

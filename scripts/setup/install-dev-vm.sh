@@ -28,7 +28,12 @@
 #   CLUSTR_REPO_DIR   — Local clone destination (default: /opt/clustr)
 #   CLUSTR_DATA_LABEL — XFS volume label for the data disk (default: clustr-data)
 #   CLUSTR_DATA_MOUNT — Mount point for data disk (default: /var/lib/clustr)
-#   GO_VERSION       — Go toolchain version to install (default: go1.24.2)
+#   GO_VERSION        — Go toolchain version to install (default: go1.24.2)
+#   CLUSTR_MGMT_IP    — Stable IP alias for the management interface (default: derive
+#                       from eth0 primary IP by replacing the last octet with .254).
+#                       Caddy binds to this IP so operators can reach the web UI from
+#                       the management LAN without touching CLUSTR_LISTEN_ADDR.
+#                       Example: CLUSTR_MGMT_IP=192.168.1.254
 
 set -euo pipefail
 
@@ -58,6 +63,30 @@ GO_VERSION="${GO_VERSION:-go1.24.2}"
 GO_TARBALL="${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://dl.google.com/go/${GO_TARBALL}"
 GO_SHA256_URL="https://dl.google.com/go/${GO_TARBALL}.sha256"
+
+# CLUSTR_MGMT_IP: stable IP alias on the management interface (eth0).
+# If not set explicitly, derive it by taking eth0's first IPv4 address and
+# replacing the last octet with 254 (the conventional .254 alias pattern).
+# This IP is what Caddy binds to — operators reach the web UI at this address.
+derive_mgmt_ip() {
+    local eth0_ip
+    eth0_ip="$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {print $2; exit}' | cut -d/ -f1)"
+    if [[ -z "${eth0_ip}" ]]; then
+        echo ""
+        return
+    fi
+    # Replace last octet with 254
+    echo "${eth0_ip%.*}.254"
+}
+
+if [[ -z "${CLUSTR_MGMT_IP:-}" ]]; then
+    CLUSTR_MGMT_IP="$(derive_mgmt_ip)"
+    if [[ -n "${CLUSTR_MGMT_IP}" ]]; then
+        log "CLUSTR_MGMT_IP not set — derived from eth0: ${CLUSTR_MGMT_IP}"
+    else
+        warn "Could not derive CLUSTR_MGMT_IP from eth0 — Caddy config step will be skipped"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -333,7 +362,157 @@ install_autodeploy() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7b: PXE provisioning network (eth1 static IP)
+# Step 7b: Management IP alias (CLUSTR_MGMT_IP on eth0)
+# ---------------------------------------------------------------------------
+# clustr-serverd binds CLUSTR_LISTEN_ADDR to the provisioning interface only
+# (10.99.0.1:8080). To reach the web UI from the management LAN, Caddy must
+# listen on a separate IP on eth0. We add a stable IP alias using the .254
+# convention so the operator always has a predictable address to bookmark.
+setup_mgmt_ip_alias() {
+    if [[ -z "${CLUSTR_MGMT_IP}" ]]; then
+        warn "CLUSTR_MGMT_IP is empty — skipping management IP alias setup"
+        return
+    fi
+
+    info "Setting up management IP alias: ${CLUSTR_MGMT_IP}/24 on eth0"
+
+    if ! ip link show eth0 &>/dev/null; then
+        warn "eth0 not found — skipping management IP alias (run again after NIC is attached)"
+        return
+    fi
+
+    # Determine the prefix length from eth0's existing address (default 24 if unknown).
+    local prefix_len
+    prefix_len="$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[2]; exit}')"
+    prefix_len="${prefix_len:-24}"
+
+    # Check if the alias is already present.
+    if ip -4 addr show eth0 2>/dev/null | grep -q "${CLUSTR_MGMT_IP}"; then
+        log "IP alias ${CLUSTR_MGMT_IP} already present on eth0 — skipping"
+        step_done "management IP alias (already configured)"
+        return
+    fi
+
+    # Add the alias via NetworkManager for persistence.
+    if command -v nmcli &>/dev/null; then
+        local mgmt_con
+        mgmt_con="$(nmcli -t -f NAME,DEVICE con show 2>/dev/null | grep ':eth0$' | head -1 | cut -d: -f1)"
+        if [[ -n "${mgmt_con}" ]]; then
+            nmcli con mod "${mgmt_con}" "+ipv4.addresses" "${CLUSTR_MGMT_IP}/${prefix_len}"
+            nmcli con up "${mgmt_con}"
+            log "Added ${CLUSTR_MGMT_IP}/${prefix_len} to NM connection '${mgmt_con}' (eth0)"
+        else
+            warn "No NetworkManager connection found for eth0 — adding alias via ip command (not persistent)"
+            ip addr add "${CLUSTR_MGMT_IP}/${prefix_len}" dev eth0 2>/dev/null || true
+        fi
+    else
+        # Fall back to ip command (non-persistent across reboots).
+        warn "nmcli not found — adding alias via ip command (not persistent across reboots)"
+        ip addr add "${CLUSTR_MGMT_IP}/${prefix_len}" dev eth0 2>/dev/null || true
+    fi
+
+    # Verify.
+    if ip -4 addr show eth0 2>/dev/null | grep -q "${CLUSTR_MGMT_IP}"; then
+        log "Verified: ${CLUSTR_MGMT_IP} is now present on eth0"
+    else
+        warn "Could not verify ${CLUSTR_MGMT_IP} on eth0 — Caddy config may not work correctly"
+    fi
+
+    step_done "management IP alias (${CLUSTR_MGMT_IP}/24 on eth0)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 7c: Install Caddy and write Caddyfile for management interface
+# ---------------------------------------------------------------------------
+# Caddy reverse-proxies CLUSTR_MGMT_IP:{80,8080} → 10.99.0.1:8080 (clustr-serverd).
+# This is the operator's "front door". clustr-serverd stays bound to the
+# provisioning interface only (SEC-P0-2 preserved).
+install_caddy() {
+    if [[ -z "${CLUSTR_MGMT_IP}" ]]; then
+        warn "CLUSTR_MGMT_IP is empty — skipping Caddy install"
+        return
+    fi
+
+    info "Installing Caddy reverse proxy for management interface (${CLUSTR_MGMT_IP})"
+
+    # Install Caddy based on OS.
+    if ! command -v caddy &>/dev/null; then
+        if [[ "${OS_ID}" == "rocky" || "${OS_ID}" == "rhel" || "${OS_ID}" == "almalinux" || "${OS_ID}" == "centos" ]]; then
+            dnf install -y 'dnf-command(copr)' 2>&1 | tail -3 || true
+            dnf copr enable -y @caddy/caddy 2>&1 | tail -3
+            dnf install -y caddy
+        elif [[ "${OS_ID}" == "ubuntu" || "${OS_ID}" == "debian" ]]; then
+            apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>&1 | tail -3
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+                | tee /etc/apt/sources.list.d/caddy-stable.list
+            apt-get update -qq && apt-get install -y caddy
+        else
+            warn "Unknown OS '${OS_ID}' — cannot install Caddy automatically. Install manually and re-run."
+            return
+        fi
+        log "Caddy installed"
+    else
+        log "Caddy already installed"
+    fi
+
+    # Create log directory.
+    mkdir -p /var/log/caddy
+    chown caddy:caddy /var/log/caddy 2>/dev/null || true
+    chmod 750 /var/log/caddy
+
+    # Write Caddyfile.
+    # Both :80 and :8080 on CLUSTR_MGMT_IP proxy to clustr-serverd on the
+    # provisioning interface. :8080 ensures operators with existing bookmarks
+    # or scripts on that port continue working.
+    cat > /etc/caddy/Caddyfile << CADDYFILE
+# clustr management interface bridge
+# Generated by install-dev-vm.sh — do not edit by hand (re-run install to regenerate).
+# CLUSTR_MGMT_IP = ${CLUSTR_MGMT_IP}
+#
+# Binds on the management interface alias (both :80 and :8080) and
+# reverse-proxies to clustr-serverd which is bound to the provisioning
+# interface (10.99.0.1:8080).
+# SEC-P0-2 preserved: DHCP/TFTP/API remain on the provisioning interface only.
+
+http://${CLUSTR_MGMT_IP}, http://${CLUSTR_MGMT_IP}:8080 {
+    bind ${CLUSTR_MGMT_IP}
+
+    reverse_proxy 10.99.0.1:8080 {
+        transport http {
+            read_timeout  3600s
+            write_timeout 3600s
+        }
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/clustr-access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+        format json
+    }
+}
+CADDYFILE
+
+    # Validate and start Caddy.
+    caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile validation failed — check /etc/caddy/Caddyfile"
+    systemctl enable --now caddy
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy
+
+    log "Caddy running — operator access at http://${CLUSTR_MGMT_IP}/ and http://${CLUSTR_MGMT_IP}:8080/"
+    step_done "Caddy management interface bridge (${CLUSTR_MGMT_IP}:{80,8080} → 10.99.0.1:8080)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 7d: PXE provisioning network (eth1 static IP)
 # ---------------------------------------------------------------------------
 setup_pxe_network() {
     info "Configuring eth1 as PXE provisioning NIC (10.99.0.1/24)"
@@ -598,8 +777,16 @@ print_status() {
     echo "Services:"
     systemctl is-active clustr-serverd          && echo "  clustr-serverd:          active" || echo "  clustr-serverd:          FAILED"
     systemctl is-active clustr-autodeploy.timer  && echo "  clustr-autodeploy.timer: active" || echo "  clustr-autodeploy.timer: FAILED"
+    systemctl is-active caddy                  && echo "  caddy:                  active" || echo "  caddy:                  not running (management bridge unavailable)"
     systemctl is-active firewalld              && echo "  firewalld:              active" || echo "  firewalld:              FAILED"
     systemctl is-active dnsmasq               && echo "  dnsmasq:                active" || echo "  dnsmasq:                FAILED"
+    echo ""
+    echo "Management IP (CLUSTR_MGMT_IP): ${CLUSTR_MGMT_IP:-not set}"
+    if [[ -n "${CLUSTR_MGMT_IP}" ]]; then
+        echo "  Operator access: http://${CLUSTR_MGMT_IP}/"
+        echo "  Alt port:        http://${CLUSTR_MGMT_IP}:8080/"
+        echo "  (Both ports are proxied by Caddy → 10.99.0.1:8080)"
+    fi
     echo ""
     echo "NAT Gateway:"
     sysctl net.ipv4.ip_forward | tr -d ' '
@@ -648,6 +835,8 @@ setup_repo
 build_binaries
 install_service
 install_autodeploy
+setup_mgmt_ip_alias
+install_caddy
 setup_pxe_network
 configure_firewall
 setup_nat_gateway

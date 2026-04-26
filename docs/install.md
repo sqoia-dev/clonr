@@ -69,6 +69,83 @@ dnf install -y sqlite rsync curl qemu-kvm qemu-img genisoimage dracut \
 
 clustr requires a **dedicated provisioning interface** on the same L2 segment as the nodes you intend to image. This interface runs the built-in DHCP and TFTP server that delivers the PXE boot environment.
 
+### Management IP and operator access
+
+`clustr-serverd` binds to the **provisioning interface only** (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080` by default). This prevents the built-in DHCP server from answering on any other network segment — a security requirement (see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup) for background).
+
+To reach the web UI and API from your operator workstation on the management LAN, you need an IP on the management interface. The recommended pattern is to add a **stable IP alias** to the management interface (typically `eth0`) using the `.254` host address of the management subnet. For a `192.168.1.0/24` management network this is `192.168.1.254/24`.
+
+**Why `.254`?**
+- The router is conventionally `.1`.
+- DHCP pools typically occupy the middle range (`.100`–`.200` or similar).
+- `.254` is the last usable address before the broadcast address (`.255`), so it is almost never in a DHCP pool and almost never conflicts with an existing host.
+- It is easy to remember: "the provisioning server is always `.254`".
+
+This IP (`CLUSTR_MGMT_IP`) is what Caddy binds to, what your operator browser bookmarks, and what you pin in DNS.
+
+**Adding the IP alias — Rocky Linux 9 (NetworkManager):**
+
+```bash
+# Replace eth0 with your management interface name.
+# Replace 192.168.1.254/24 with your management subnet's .254 address.
+nmcli con mod "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)" \
+    +ipv4.addresses 192.168.1.254/24
+nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
+
+# Verify — both the original DHCP address and .254 should appear:
+ip -4 addr show eth0
+```
+
+This creates a persistent secondary address. The alias survives reboots and NetworkManager restarts without additional configuration.
+
+**Adding the IP alias — Ubuntu 22.04 (Netplan):**
+
+```yaml
+# /etc/netplan/99-clustr-mgmt.yaml
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true           # keep your existing DHCP address
+      addresses:
+        - 192.168.1.254/24  # stable alias for clustr management access
+```
+
+```bash
+netplan apply
+ip -4 addr show eth0   # verify both addresses appear
+```
+
+**Adding the IP alias — Ubuntu with NetworkManager (desktop or server with NM):**
+
+```bash
+nmcli con mod "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)" \
+    +ipv4.addresses 192.168.1.254/24
+nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
+```
+
+**Environment variable — `CLUSTR_MGMT_IP`:**
+
+The install and Caddy configuration scripts recognise the `CLUSTR_MGMT_IP` environment variable to know which IP Caddy should bind to. If unset, the scripts derive it automatically by taking the current management interface IP and replacing the last octet with `254`.
+
+```bash
+# Export before running install-dev-vm.sh or the Caddy config step:
+export CLUSTR_MGMT_IP=192.168.1.254
+
+# Or let the script derive it automatically (uses eth0 address, replaces last octet with .254):
+# e.g. if eth0 = 192.168.1.151/24, CLUSTR_MGMT_IP defaults to 192.168.1.254
+```
+
+**DNS pin (recommended for production):**
+
+Pin a short name to the management IP in your internal DNS so that operators always reach the server by name rather than by IP:
+
+```
+clustr.lab.example.com  →  192.168.1.254
+```
+
+Then set your Caddyfile hostname to `clustr.lab.example.com` and let Caddy obtain a certificate automatically. The `.254` alias remains the canonical stable IP regardless of which DHCP address the host's primary NIC was assigned.
+
 ### Assign a static IP to the provisioning interface
 
 The provisioning interface must have a static IP. The default subnet used by clustr is `10.99.0.0/24`.
@@ -121,7 +198,7 @@ firewall-cmd --reload
 
 **Security note:** Do not expose port 8080 to the management LAN or the internet unless you are using a TLS-terminating reverse proxy (Caddy recommended). The provisioning API carries BMC credentials and image blobs. See [docs/tls-provisioning.md](tls-provisioning.md) for the Caddy setup.
 
-**Dual-NIC operators:** if `clustr-serverd` is bound to the provisioning interface only (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080`) and you need operator access from the management LAN, use Caddy on the same host to bridge the two networks — see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup). The recommended Caddyfile listens on both `:80` and `:8080` of the management interface so that operators with existing bookmarks or scripts on either port continue to work seamlessly. Do not rebind `CLUSTR_LISTEN_ADDR` to `0.0.0.0` — that re-exposes the DHCP server on the management interface.
+**Dual-NIC operators:** if `clustr-serverd` is bound to the provisioning interface only (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080`) and you need operator access from the management LAN, use Caddy on the same host to bridge the two networks — see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup). Caddy binds to `CLUSTR_MGMT_IP` (the management interface alias, typically `.254`) on both `:80` and `:8080` so that operators with existing bookmarks or scripts on either port continue to work seamlessly. Do not rebind `CLUSTR_LISTEN_ADDR` to `0.0.0.0` — that re-exposes the DHCP server on the management interface.
 
 ---
 
@@ -337,6 +414,7 @@ All variables are read from the process environment. With Docker Compose, set th
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `CLUSTR_LISTEN_ADDR` | `:8080` | No | `host:port` to bind the HTTP API. Use the provisioning interface IP to avoid exposing the API on the management LAN. |
+| `CLUSTR_MGMT_IP` | *(derived: mgmt-interface-ip with last octet replaced by `.254`)* | No | The IP alias on the management interface that Caddy binds to. Operators access the web UI and API at this address. Not read by `clustr-serverd` directly — used by the install script and Caddy config generation to know which IP to bind Caddy's `:80` and `:8080` listeners to. Set this explicitly to skip auto-derivation. Example: `192.168.1.254`. |
 | `CLUSTR_DB_PATH` | `/var/lib/clustr/db/clustr.db` | No | Path to the SQLite database file. Parent directory is created automatically on first start. |
 | `CLUSTR_IMAGE_DIR` | `/var/lib/clustr/images` | No | Directory for image blobs (OS rootfs tarballs). Created automatically if absent. |
 | `CLUSTR_BOOT_DIR` | `/var/lib/clustr/boot` | No | Directory for the PXE kernel and initramfs. |
@@ -440,8 +518,10 @@ On the first start (when the users table is empty), `clustr-serverd` automatical
 
 ### Step 1: Log in to the web UI
 
-Open `http://<server-ip>` (or `http://<server-ip>:8080` — both work if Caddy is configured per
-[docs/tls-provisioning.md](tls-provisioning.md)).
+Open `http://<your-clustr-mgmt-ip>` (or `http://<your-clustr-mgmt-ip>:8080` — both work if Caddy is
+configured per [docs/tls-provisioning.md](tls-provisioning.md)). The canonical example management IP
+used throughout this guide is `192.168.1.254`. If you followed the management IP setup in §2, both
+ports proxy through Caddy to `clustr-serverd` on the provisioning interface.
 
 Enter:
 - **Username:** `clustr`

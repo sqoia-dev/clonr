@@ -178,34 +178,48 @@ Most production clustr installations use two network interfaces:
 
 | Interface | Role | IP example |
 |---|---|---|
-| `eth0` | Management / admin LAN | `192.168.1.151` |
+| `eth0` | Management / admin LAN | `192.168.1.254` (alias — see below) |
 | `eth1` | Provisioning (PXE/DHCP/TFTP) | `10.99.0.1` |
 
 `clustr-serverd` binds `CLUSTR_LISTEN_ADDR` to the **provisioning interface only** (`10.99.0.1:8080`). This is the correct security posture — it prevents the DHCP server from answering on the management LAN. However, it also means the web UI is unreachable from an operator workstation on the management network.
 
-The solution is Caddy running on the same host, listening on the management interface and reverse-proxying to the provisioning IP. Caddy can reach `10.99.0.1:8080` as an interface-local connection because both IPs belong to the same host. The clustr-serverd process does not need to be restarted or rebind.
+The solution is Caddy running on the same host, listening on `CLUSTR_MGMT_IP` (a stable IP alias on the management interface) and reverse-proxying to the provisioning IP. Caddy can reach `10.99.0.1:8080` as an interface-local connection because both IPs belong to the same host. The clustr-serverd process does not need to be restarted or rebind.
+
+**`CLUSTR_MGMT_IP` — the management IP alias:**
+
+The recommended address is the `.254` host of the management subnet (e.g. `192.168.1.254` on a `192.168.1.0/24` network). This address is added as an IP alias on `eth0` — it coexists with the DHCP-assigned address and is what Caddy binds to. See [docs/install.md §2](install.md#2-network-setup) for the step-by-step alias creation commands for both Rocky Linux 9 (NetworkManager) and Ubuntu (Netplan).
+
+If `CLUSTR_MGMT_IP` is not set explicitly, the install script derives it by taking the management interface's primary IP and replacing the last octet with `254`. Set it explicitly to override:
+
+```bash
+export CLUSTR_MGMT_IP=192.168.1.254
+```
 
 ### 3.1 Caddyfile for the management bridge
 
-This Caddyfile listens on **both port 80 and port 8080** of the management IP (`bind 192.168.1.151`). Using a single site block with two addresses keeps the config DRY — one reverse_proxy stanza, one log block, no duplication. Adapt the IP to match your management interface address.
+This Caddyfile listens on **both port 80 and port 8080** of `CLUSTR_MGMT_IP`. Using a single site block with two addresses keeps the config DRY — one reverse_proxy stanza, one log block, no duplication. Replace `192.168.1.254` with your actual `CLUSTR_MGMT_IP` value if different.
 
 Port 8080 is included so that operators with existing bookmarks or scripts pointing to `:8080` continue to work without reconfiguration. Both ports proxy identically to `clustr-serverd` on the provisioning interface.
 
 ```caddyfile
 # clustr management interface bridge
-# Binds on the management interface (both :80 and :8080) and reverse-proxies to
-# clustr-serverd which is bound to the provisioning interface (10.99.0.1:8080).
+# Binds on the management interface alias (CLUSTR_MGMT_IP, both :80 and :8080)
+# and reverse-proxies to clustr-serverd which is bound to the provisioning
+# interface (10.99.0.1:8080).
 # This preserves SEC-P0-2: DHCP/TFTP/API remain on the provisioning interface only;
 # Caddy is the sole entry point from the management LAN.
+#
+# Replace 192.168.1.254 with your CLUSTR_MGMT_IP value if different.
+# Default: last octet .254 of the management subnet.
 #
 # :8080 is included so existing operator bookmarks/scripts on either port work
 # without reconfiguration. Both ports proxy identically.
 #
 # clientd nodes continue reaching 10.99.0.1:8080 directly — not through Caddy.
 
-http://192.168.1.151, http://192.168.1.151:8080 {
-    # Bind only to the management interface — do not answer on the provisioning NIC.
-    bind 192.168.1.151
+http://192.168.1.254, http://192.168.1.254:8080 {
+    # Bind only to the management interface alias — do not answer on the provisioning NIC.
+    bind 192.168.1.254
 
     reverse_proxy 10.99.0.1:8080 {
         # Increase timeout for SSE log-streaming and WebSocket (clientd ws).
@@ -234,20 +248,26 @@ http://192.168.1.151, http://192.168.1.151:8080 {
 ### 3.2 Installation steps (Rocky Linux 9)
 
 ```bash
-# Install Caddy from the official COPR
+# 1. Add the management IP alias (CLUSTR_MGMT_IP=192.168.1.254) — idempotent:
+MGMT_CON="$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
+nmcli con mod "${MGMT_CON}" +ipv4.addresses 192.168.1.254/24
+nmcli con up "${MGMT_CON}"
+ip -4 addr show eth0   # verify .254 appears alongside the DHCP address
+
+# 2. Install Caddy from the official COPR
 dnf install -y 'dnf-command(copr)'
 dnf copr enable -y @caddy/caddy
 dnf install -y caddy
 
-# Create log directory with correct ownership
+# 3. Create log directory with correct ownership
 mkdir -p /var/log/caddy
 chown -R caddy:caddy /var/log/caddy
 chmod 750 /var/log/caddy
 
-# Write the Caddyfile (use the template from §3.1 above)
+# 4. Write the Caddyfile (use the template from §3.1 above, adjust IP if needed)
 # /etc/caddy/Caddyfile
 
-# Validate and start
+# 5. Validate and start
 caddy validate --config /etc/caddy/Caddyfile
 systemctl enable --now caddy
 ```
@@ -260,21 +280,23 @@ systemctl enable --now caddy
 # Both ports are served by Caddy — 8080 lets operators with existing bookmarks
 # or scripts on that port continue to work without changes.
 firewall-cmd --permanent --zone=external --add-service=http
-firewall-cmd --permanent --zone=external --add-port=8080/tcp
+firewall-cmd --permanent --add-port=8080/tcp --zone=external
 firewall-cmd --reload
 ```
 
-Port 8080 on the management zone (`external`) is answered by Caddy — not by `clustr-serverd`. The `clustr-serverd` process remains bound to `10.99.0.1:8080` (provisioning interface only). Caddy's `:8080` listener on `192.168.1.151` is a separate socket, verified by `ss -tlnp | grep 8080`. Do not open 8080 on the provisioning zone (`internal`) — clientd traffic reaches `clustr-serverd` on `10.99.0.1:8080` directly without going through Caddy.
+Port 8080 on the management zone (`external`) is answered by Caddy — not by `clustr-serverd`. The `clustr-serverd` process remains bound to `10.99.0.1:8080` (provisioning interface only). Caddy's `:8080` listener on `CLUSTR_MGMT_IP` is a separate socket, verified by `ss -tlnp | grep 8080`. Do not open 8080 on the provisioning zone (`internal`) — clientd traffic reaches `clustr-serverd` on `10.99.0.1:8080` directly without going through Caddy.
 
 ### 3.4 Verify
 
 ```bash
+# Substitute your CLUSTR_MGMT_IP (default: 192.168.1.254) for the IP below.
+
 # From the management LAN — port 80
-curl -s http://192.168.1.151/api/v1/healthz/ready
+curl -s http://192.168.1.254/api/v1/healthz/ready
 # Expected: {"status":"ready","checks":{"db":"ok","boot_dir":"ok","initramfs":"ok"}}
 
 # From the management LAN — port 8080 (existing bookmarks/scripts)
-curl -s http://192.168.1.151:8080/api/v1/healthz/ready
+curl -s http://192.168.1.254:8080/api/v1/healthz/ready
 # Expected: same response — Caddy proxies both ports identically
 
 # Verify clustr-serverd direct access still works from the provisioning host
@@ -282,20 +304,20 @@ curl -s http://10.99.0.1:8080/api/v1/healthz/ready
 # Expected: same response
 
 # Confirm Caddy is answering on both ports (Via header proves the proxy is in the path)
-curl -I http://192.168.1.151/ | grep Via          # Via: 1.1 Caddy
-curl -I http://192.168.1.151:8080/ | grep Via     # Via: 1.1 Caddy
+curl -I http://192.168.1.254/ | grep Via          # Via: 1.1 Caddy
+curl -I http://192.168.1.254:8080/ | grep Via     # Via: 1.1 Caddy
 
-# Confirm socket ownership — Caddy must own :8080 on 192.168.1.151,
+# Confirm socket ownership — Caddy must own :8080 on CLUSTR_MGMT_IP (.254),
 # clustr-serverd must own :8080 on 10.99.0.1 (provisioning NIC only)
 ss -tlnp | grep 8080
 # Expected lines:
-#   LISTEN  192.168.1.151:8080  caddy
+#   LISTEN  192.168.1.254:8080  caddy
 #   LISTEN  10.99.0.1:8080      clustr-serverd
 ```
 
 ### 3.5 Adding TLS (optional but recommended)
 
-If you have a DNS hostname that resolves to `192.168.1.151` from the management LAN and outbound HTTPS to Let's Encrypt, replace the `:80` + `bind` block with a named hostname block:
+If you have a DNS hostname that resolves to `CLUSTR_MGMT_IP` (e.g. `clustr.lab.example.com → 192.168.1.254`) from the management LAN and outbound HTTPS to Let's Encrypt, replace the `:80` + `bind` block with a named hostname block:
 
 ```caddyfile
 clustr.mgmt.example.com {
