@@ -1,5 +1,96 @@
 # clustr Changelog
 
+---
+
+## Sprint 5 — Persona Polish (2026-06-22 → 2026-07-06)
+
+### Hardware Discovery
+
+- **[S5-2] GPU detection via PCI sysfs**
+  `DiscoverGPUs()` in `internal/hardware/gpu.go` enumerates `/sys/bus/pci/devices`
+  for PCI class `0x03xx` (VGA, XGA, 3D Controller, Display Controller) without
+  requiring `lspci`. Vendor/device IDs are resolved to readable names; VRAM is
+  read from AMD's `mem_info_vram_total` or NVIDIA's BAR0 `resource` file.
+  `SystemInfo.GPUs []GPU` is populated in `Discover()`. Returns `nil, nil` when
+  sysfs is absent (CI-safe). Tests in `gpu_test.go`.
+
+### UI / UX
+
+- **[S5-1] Power state column in nodes list**
+  The nodes list now shows a "Power" column. After the table renders, a batch
+  of concurrent IPMI/provider power-status calls (capped at 10 in-flight) fills
+  in the state for each node that has a BMC or power provider configured.
+  Nodes without power management show `—`.
+
+- **[S5-3] Server-side sort for nodes list**
+  `GET /api/v1/nodes` accepts `?sort=hostname|status|last_deploy|group` and
+  `?dir=asc|desc`. The nodes list table headers for Host, Status, Updated, and
+  Group are now clickable; the current sort column shows an arrow indicator.
+  Sort state persists across auto-refresh cycles.
+
+- **[S5-4] Bulk reimage from nodes list**
+  A checkbox column appears for admin/operator roles. Selecting one or more nodes
+  shows a floating action bar with a "Reimage Selected" button. The modal lets
+  the operator choose a target image (or use each node's assigned image) and
+  toggle dry-run. Reimage requests are submitted individually with a concurrency
+  loop (no rate limit at the UI layer).
+
+- **[S5-5] Retry and Re-deploy from nodes list row actions**
+  Nodes in a failed deploy state show a "Retry" button that finds the most recent
+  failed reimage and posts to `/reimage/:id/retry`. Nodes with an assigned image
+  and no active failure show a "Re-deploy" button that opens the reimage modal
+  pre-populated with the node's current image.
+
+- **[S5-6] CI API key preset in key-creation modal**
+  The "Create API Key" modal now includes a "CI / Pipeline key" quick-preset
+  that fills scope=node, label="ci-key", and TTL=30 days with one click.
+  After a node-scoped key is created, the confirmation dialog shows a ready-to-use
+  `curl` snippet for triggering a reimage from a CI pipeline.
+
+- **[S5-7] Dry-run checkbox in group reimage modal**
+  The group reimage modal now includes the same "Dry run" checkbox as the
+  single-node reimage modal. When checked, `dry_run: true` is passed to
+  `POST /node-groups/:id/reimage`.
+
+- **[S5-8] Images page: Build from ISO first + onboarding callout**
+  "Build from ISO" is now the primary (blue) button on the Images page.
+  Pull, Capture, and Import are secondary. When no images exist and no filter
+  is active, an info callout card explains each build method to new operators.
+  The empty-state action button also defaults to "Build from ISO".
+
+- **[S5-9] First-deploy wizard on dashboard**
+  When no images and no nodes exist, the Dashboard shows a 3-step getting-started
+  wizard: (1) Build an Image, (2) Register a Node, (3) Deploy. The wizard
+  disappears automatically once images or nodes are present.
+
+- **[S5-10] Deployments direct nav link + full-page view**
+  A "Deployments" link appears in the sidebar (activity-waveform icon).
+  `#/deploys` renders a dedicated page with a live-progress table (SSE-backed)
+  and a full reimage history table with retry/cancel actions.
+
+- **[S5-11] GET /api/v1/progress 404 routing — documented**
+  The routing asymmetry is intentional and already documented in `server.go`:
+  `POST /deploy/progress` is outside the admin auth group (node-scoped key from
+  initramfs); `GET /deploy/progress`, `/stream`, and `/:mac` are inside the
+  admin group (operator read). No routing gap exists.
+
+- **[S5-12] Node config change history**
+  Migration 047 creates `node_config_history` — an append-only, field-level
+  audit trail written on every `UpdateNode` call. `DiffNodeConfigFields` diffs
+  the before/after `NodeConfig` structs and records only changed non-sensitive
+  fields. `GET /api/v1/nodes/:id/config-history` (paginated) exposes the log.
+  A "Config History" tab in the node detail view shows the change log with
+  actor label and timestamp.
+
+### GPU Display
+
+- **[S5-2 UI] GPU inventory in node Hardware tab**
+  The Hardware tab now renders a "GPUs (N)" card when the node's hardware profile
+  includes GPU entries. The table shows model, vendor ID, device ID, PCI address,
+  and VRAM size.
+
+---
+
 All notable changes are grouped by sprint. Items marked [P0] or [P1] are
 priority security or reliability fixes.
 
