@@ -2,6 +2,32 @@
 
 ---
 
+## Turnkey gap-fill round 2 — Slurm auto-install (2026-04-25)
+
+### NEW-GAP-2 (code) — `munge_key_present` in Slurm status
+
+- `GET /api/v1/modules/slurm/status` now returns `"munge_key_present": <bool>`.
+  `true` iff `slurm_secrets` has a row for `munge.key`. Lets operators confirm
+  the munge key was generated without needing a separate DB query.
+
+### Item 2 — Auto-install Slurm at deploy time (Option B: operator-provided repo URL)
+
+- **Design choice: Option B** — the operator provides `slurm_repo_url` at
+  module-enable time. This avoids tying clustr to a specific Slurm distribution
+  and works equally well with OpenHPC, SchedMD RPMs, or any custom dnf repo.
+- `POST /api/v1/modules/slurm/enable` now accepts `slurm_repo_url` (optional).
+  Stored in `slurm_module_config.slurm_repo_url` (migration 050).
+- At deploy finalize time, if `slurm_repo_url` is set, `finalize.go` writes
+  `/etc/yum.repos.d/clustr-slurm.repo` into the chroot and runs
+  `dnf install -y slurm munge` (+ `slurm-slurmctld` for controllers,
+  `slurm-slurmd` for compute nodes) inside the chroot before config injection.
+- The existing GAP-14 binary-existence guard remains in place as the safety net
+  for nodes without a Slurm role (they correctly skip service enable).
+- Non-fatal: if `dnf` fails (unreachable repo, network error), the error is
+  logged as WARN and the deploy continues — operator can diagnose and re-image.
+
+---
+
 ## Docs — Slurm turnkey path (2026-04-25)
 
 ### Documentation

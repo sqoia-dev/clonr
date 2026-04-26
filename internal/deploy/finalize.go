@@ -2133,6 +2133,23 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 	}
 	_ = hasSlurmConf // always written if present
 
+	// ── Auto-install Slurm packages (Option B: operator-provided repo URL) ───
+	// When SlurmRepoURL is set, clustr adds the repo and installs slurm + munge
+	// inside the chroot before writing config files.  This makes the deploy
+	// truly turnkey for images (e.g. Rocky 10) where EPEL does not carry Slurm.
+	//
+	// The operator provides the URL at module-enable time via:
+	//   POST /api/v1/modules/slurm/enable  {"slurm_repo_url": "https://..."}
+	// and it is stored in slurm_module_config.slurm_repo_url.
+	//
+	// Package selection by role:
+	//   controller / dbd → slurm slurm-slurmctld munge
+	//   compute (gres)   → slurm slurm-slurmd munge
+	//   neither (fallback)→ slurm munge
+	if slurmCfg.SlurmRepoURL != "" {
+		installSlurmInChroot(ctx, mountRoot, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres)
+	}
+
 	// ── Create directories ────────────────────────────────────────────────────
 	dirs := []struct {
 		path string
@@ -2370,6 +2387,56 @@ func ldapDomainFromBaseDN(baseDN string) string {
 // writeSudoersDropin writes a sudoers drop-in file to
 // <mountRoot>/etc/sudoers.d/<group_cn> granting sudo access to the named LDAP group.
 // The file is written with mode 0440 as required by sudo.
+// installSlurmInChroot adds a dnf repo and installs Slurm + munge packages
+// inside the chroot rooted at mountRoot.  All steps are non-fatal — on failure
+// the deploy continues and the GAP-14 binary-existence guard in the service-
+// enable block will simply skip enabling the missing daemons.
+//
+// Package selection:
+//   - controller / dbd node (hasSlurmdbd): slurm slurm-slurmctld munge
+//   - compute node (hasGres): slurm slurm-slurmd munge
+//   - fallback (no role yet): slurm munge  (minimal; enables munge at least)
+func installSlurmInChroot(ctx context.Context, mountRoot, repoURL string, hasSlurmdbd, hasGres bool) {
+	log := logger()
+
+	// Build package list for this role.
+	pkgs := []string{"slurm", "munge"}
+	if hasSlurmdbd {
+		pkgs = append(pkgs, "slurm-slurmctld")
+	}
+	if hasGres {
+		pkgs = append(pkgs, "slurm-slurmd")
+	}
+
+	log.Info().Str("repo_url", repoURL).Strs("packages", pkgs).
+		Msg("finalize slurm: auto-install: adding repo and installing packages in chroot")
+
+	// Step 1: Write a .repo file directly rather than calling dnf config-manager,
+	// because config-manager may not be installed in the chroot image.
+	repoContent := "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL + "\nenabled=1\ngpgcheck=0\n"
+	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	if err := os.MkdirAll(filepath.Join(mountRoot, "etc", "yum.repos.d"), 0o755); err != nil {
+		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create yum.repos.d (non-fatal)")
+		return
+	}
+	if err := os.WriteFile(repoPath, []byte(repoContent), 0o644); err != nil {
+		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write repo file (non-fatal)")
+		return
+	}
+	log.Info().Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
+		Msg("finalize slurm: auto-install: repo file written")
+
+	// Step 2: Install packages inside chroot.
+	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False"}, pkgs...)
+	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
+	if err != nil {
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize slurm: auto-install: dnf install failed (non-fatal) — check repo URL and image network access during deploy")
+		return
+	}
+	log.Info().Strs("packages", pkgs).Msg("finalize slurm: auto-install: packages installed successfully")
+}
+
 // When cfg.NoPasswd is true, the rule uses NOPASSWD:ALL.
 func writeSudoersDropin(mountRoot string, cfg *api.SudoersNodeConfig) error {
 	dir := filepath.Join(mountRoot, "etc", "sudoers.d")

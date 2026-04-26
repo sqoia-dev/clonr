@@ -1422,9 +1422,11 @@ type SlurmModuleConfig struct {
 // Nil means the Slurm module is not active; finalize.go skips writeSlurmConfig().
 // Non-nil means the module is enabled and this node should receive Slurm configs.
 type SlurmNodeConfig struct {
-	ClusterName string            `json:"cluster_name"`
-	Configs     []SlurmConfigFile `json:"configs"`      // rendered content per file, ready to write
-	Scripts     []SlurmScriptFile `json:"scripts,omitempty"`
+	ClusterName  string            `json:"cluster_name"`
+	Configs      []SlurmConfigFile `json:"configs"`      // rendered content per file, ready to write
+	Scripts      []SlurmScriptFile `json:"scripts,omitempty"`
+	// SlurmRepoURL is the dnf repo URL for auto-install.  Empty = skip auto-install.
+	SlurmRepoURL string            `json:"slurm_repo_url,omitempty"`
 }
 
 // SlurmConfigFile is a rendered config file, ready for delivery to a node.

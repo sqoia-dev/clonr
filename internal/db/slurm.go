@@ -21,6 +21,7 @@ type SlurmModuleConfigRow struct {
 	Status       string   // not_configured|ready|disabled|error
 	ClusterName  string
 	ManagedFiles []string // decoded from JSON
+	SlurmRepoURL string   // optional dnf repo URL for auto-install at deploy time
 	CreatedAt    int64
 	UpdatedAt    int64
 }
@@ -213,19 +214,21 @@ type SlurmUpgradeOpUpdate struct {
 // Returns sql.ErrNoRows if the row has never been inserted.
 func (db *DB) SlurmGetConfig(ctx context.Context) (*SlurmModuleConfigRow, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT enabled, status, cluster_name, managed_files, created_at, updated_at
+		`SELECT enabled, status, cluster_name, managed_files, slurm_repo_url, created_at, updated_at
 		 FROM slurm_module_config WHERE id = 1`)
 
 	var cfg SlurmModuleConfigRow
 	var clusterName sql.NullString
 	var managedFilesJSON string
+	var repoURL sql.NullString
 
 	if err := row.Scan(&cfg.Enabled, &cfg.Status, &clusterName, &managedFilesJSON,
-		&cfg.CreatedAt, &cfg.UpdatedAt); err != nil {
+		&repoURL, &cfg.CreatedAt, &cfg.UpdatedAt); err != nil {
 		return nil, err
 	}
 
 	cfg.ClusterName = clusterName.String
+	cfg.SlurmRepoURL = repoURL.String
 	if managedFilesJSON != "" {
 		_ = json.Unmarshal([]byte(managedFilesJSON), &cfg.ManagedFiles)
 	}
@@ -242,16 +245,21 @@ func (db *DB) SlurmSaveConfig(ctx context.Context, cfg SlurmModuleConfigRow) err
 		return fmt.Errorf("db: SlurmSaveConfig: marshal managed_files: %w", err)
 	}
 	now := time.Now().Unix()
+	var repoURL interface{}
+	if cfg.SlurmRepoURL != "" {
+		repoURL = cfg.SlurmRepoURL
+	}
 	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO slurm_module_config (id, enabled, status, cluster_name, managed_files, created_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?)
+		INSERT INTO slurm_module_config (id, enabled, status, cluster_name, managed_files, slurm_repo_url, created_at, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			enabled      = excluded.enabled,
-			status       = excluded.status,
-			cluster_name = excluded.cluster_name,
-			managed_files= excluded.managed_files,
-			updated_at   = excluded.updated_at
-	`, cfg.Enabled, cfg.Status, cfg.ClusterName, string(filesJSON), now, now)
+			enabled        = excluded.enabled,
+			status         = excluded.status,
+			cluster_name   = excluded.cluster_name,
+			managed_files  = excluded.managed_files,
+			slurm_repo_url = excluded.slurm_repo_url,
+			updated_at     = excluded.updated_at
+	`, cfg.Enabled, cfg.Status, cfg.ClusterName, string(filesJSON), repoURL, now, now)
 	if err != nil {
 		return fmt.Errorf("db: SlurmSaveConfig: %w", err)
 	}

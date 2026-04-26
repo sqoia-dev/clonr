@@ -114,6 +114,12 @@ func (m *Manager) restoreFromDB(ctx context.Context) {
 type EnableRequest struct {
 	ClusterName  string   `json:"cluster_name"`
 	ManagedFiles []string `json:"managed_files,omitempty"`
+	// SlurmRepoURL is the dnf repo URL used for auto-install at deploy time.
+	// When set, finalize.go adds this repo to the node's dnf config inside the
+	// chroot and runs `dnf install -y slurm slurm-slurmctld slurm-slurmd munge`
+	// before writing Slurm config files.  Leave empty to manage packages manually.
+	// Example: "https://packages.schedmd.com/rhel/9/x86_64/slurm-el9.repo"
+	SlurmRepoURL string `json:"slurm_repo_url,omitempty"`
 }
 
 // Enable activates the Slurm module with the given cluster configuration.
@@ -145,6 +151,7 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 		Status:       statusReady,
 		ClusterName:  req.ClusterName,
 		ManagedFiles: managedFiles,
+		SlurmRepoURL: req.SlurmRepoURL,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -255,12 +262,13 @@ func (m *Manager) Disable(ctx context.Context) error {
 
 // SlurmModuleStatus is the response for GET /api/v1/slurm/status.
 type SlurmModuleStatus struct {
-	Enabled        bool             `json:"enabled"`
-	Status         string           `json:"status"`
-	ClusterName    string           `json:"cluster_name"`
-	ManagedFiles   []string         `json:"managed_files"`
-	ConnectedNodes []string         `json:"connected_nodes"`
-	DriftSummary   *DriftSummary    `json:"drift_summary,omitempty"`
+	Enabled         bool          `json:"enabled"`
+	Status          string        `json:"status"`
+	ClusterName     string        `json:"cluster_name"`
+	ManagedFiles    []string      `json:"managed_files"`
+	ConnectedNodes  []string      `json:"connected_nodes"`
+	MungeKeyPresent bool          `json:"munge_key_present"`
+	DriftSummary    *DriftSummary `json:"drift_summary,omitempty"`
 }
 
 // DriftSummary is a compact per-file sync summary included in the status response.
@@ -285,12 +293,17 @@ func (m *Manager) Status(ctx context.Context) (*SlurmModuleStatus, error) {
 		connectedNodes = m.hub.ConnectedNodes()
 	}
 
+	// munge_key_present: true iff slurm_secrets has a row for "munge.key".
+	_, mungeErr := m.db.SlurmGetSecret(ctx, "munge.key")
+	mungeKeyPresent := mungeErr == nil
+
 	resp := &SlurmModuleStatus{
-		Enabled:        row.Enabled,
-		Status:         row.Status,
-		ClusterName:    row.ClusterName,
-		ManagedFiles:   row.ManagedFiles,
-		ConnectedNodes: connectedNodes,
+		Enabled:         row.Enabled,
+		Status:          row.Status,
+		ClusterName:     row.ClusterName,
+		ManagedFiles:    row.ManagedFiles,
+		ConnectedNodes:  connectedNodes,
+		MungeKeyPresent: mungeKeyPresent,
 	}
 
 	// Compute drift summary.
@@ -430,9 +443,10 @@ func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNode
 	}
 
 	return &api.SlurmNodeConfig{
-		ClusterName: cfg.ClusterName,
-		Configs:     configs,
-		Scripts:     scripts,
+		ClusterName:  cfg.ClusterName,
+		Configs:      configs,
+		Scripts:      scripts,
+		SlurmRepoURL: cfg.SlurmRepoURL,
 	}, nil
 }
 

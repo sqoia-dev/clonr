@@ -7,7 +7,7 @@ everything Slurm-related in clustr.
 **Contents**
 
 1. [Overview](#1-overview)
-2. [Prerequisites — Slurm in the base image](#2-prerequisites--slurm-in-the-base-image)
+2. [Image prerequisites](#2-image-prerequisites)
 3. [Enabling the Slurm module](#3-enabling-the-slurm-module)
 4. [Controller vs worker roles](#4-controller-vs-worker-roles)
 5. [Munge key distribution](#5-munge-key-distribution)
@@ -32,80 +32,90 @@ cluster painful to maintain at scale:
 - Role assignment (controller vs. worker) stored per-node so a reimage
   automatically installs the right services (`slurmctld` vs. `slurmd`).
 
-The module does **not** install Slurm binaries. Slurm packages must exist in
-the base image before the module can configure them. This is the only
-prerequisite that requires operator action before enabling the module.
+When the module is enabled with a `slurm_repo_url`, clustr **auto-installs
+Slurm packages** at deploy finalize time on any node that has a Slurm role.
+No pre-baking of Slurm into the base image is required — a standard Rocky
+Linux 9/10 or Ubuntu image is sufficient. Operators who want faster deploys or
+air-gapped operation can still pre-install Slurm in a gold image; clustr
+detects the binaries and skips the install step automatically.
 
 ---
 
-## 2. Prerequisites — Slurm in the base image
+## 2. Image prerequisites
 
-### Why the image must include Slurm before deploy
+### Recommended path — any base image, auto-install at deploy time
 
-clustr injects munge keys and writes `/etc/slurm/*.conf` during the deploy
-finalize phase. These steps only work if `slurmd`, `slurmctld`, `munge`, and
-the `/etc/slurm/` directory already exist in the rootfs. If the packages are
-absent, the finalize phase logs non-fatal warnings and continues — but the
-resulting node will have an empty `/etc/slurm/` and a degraded systemd state
-(`slurmd.service` enabled but the binary is missing).
+As of the auto-install feature, **Slurm does not need to be in the base image**
+for the default turnkey path. When the Slurm module is enabled and a node has a
+Slurm role (`controller` or `worker`), clustr installs Slurm packages from
+`slurm_repo_url` automatically during the deploy finalize phase, before
+injecting the munge key and writing `slurm.conf`.
 
-### Option A — Install Slurm into an existing image via chroot
+You can start with any standard base image (Rocky Linux 9/10, AlmaLinux 9/10,
+or Ubuntu 22.04/24.04). The only requirement is that `dnf` (RPM-based) or
+`apt` (Debian-based) is available in the rootfs.
 
-Use `clustr shell` to drop into an interactive chroot and install Slurm:
+**What auto-install does during finalize:**
+
+1. Adds the repository at `slurm_repo_url` to the node's rootfs package manager.
+2. Installs: `slurm`, `slurm-slurmd`, `slurm-slurmctld`, `munge`, `munge-libs`.
+3. Injects the munge key into `/etc/munge/munge.key`.
+4. Writes `/etc/slurm/slurm.conf` and companion config files.
+5. Enables `munge`, `slurmd` (workers) or `slurmctld` (controller) in systemd.
+
+If `slurm_repo_url` is unreachable at finalize time, the install step logs a
+WARN and the deploy continues — the node boots without Slurm installed. Check
+the deploy logs and re-image once the repo is reachable.
+
+**Providing the repo URL:**
+
+Pass `slurm_repo_url` when enabling the module (see §3). The OpenHPC
+community repository for EL9 is the recommended starting point:
+
+```
+https://repos.openhpc.community/OpenHPC/3/EL_9
+```
+
+For EL10 or Ubuntu, substitute the appropriate repo URL from your distro's
+Slurm package provider.
+
+### Advanced path — pre-install Slurm in the image (gold image)
+
+For production clusters where deploy speed matters, or where the provisioning
+network cannot reach an external repo at finalize time, pre-installing Slurm
+in a gold image removes the network dependency and makes every reimage faster.
+
+**When to use this path:**
+
+- Large clusters (100+ nodes) where finalize time per node matters.
+- Air-gapped environments with no external repo access.
+- Operators who want a fully reproducible, pre-validated binary set.
+
+**How to build a gold image with Slurm pre-installed:**
 
 ```bash
-# On the clustr-serverd host
+# On the clustr-serverd host — drop into an interactive chroot of your base image
 clustr shell <image-id>
 
-# Inside the chroot — Rocky Linux 9 example using EPEL + SchedMD RPMs:
-dnf install -y epel-release
-dnf install -y slurm slurm-slurmd slurm-slurmctld munge munge-libs munge-devel
+# Inside the chroot — Rocky Linux 9 example using OpenHPC repo:
+dnf install -y https://github.com/openhpc/ohpc/releases/download/v3.0.GA/ohpc-release-3-1.el9.x86_64.rpm
+dnf install -y slurm-ohpc slurm-slurmd-ohpc slurm-slurmctld-ohpc munge munge-libs
 
 # Verify the binaries are present
-which slurmd slurmctld munge mungekey
+which slurmd slurmctld munge
 
-# Exit the chroot — changes are committed automatically
+# Exit the chroot — changes are committed to the image automatically
 exit
 ```
 
-After exiting, the image status returns to `ready`. Trigger a fresh reimage to
-deploy the updated rootfs to your nodes.
+After exiting, the image status returns to `ready`. When this pre-installed
+image is deployed, clustr detects that Slurm binaries are already present and
+skips the package install step — it proceeds directly to munge key injection
+and config file writes.
 
-**Rocky Linux 10 note:** the EPEL Slurm package for EL10 may not be available
-at the time of your install. Use SchedMD's official RPM repository
-(https://www.schedmd.com/downloads/) or build from source (see Option B).
-
-### Option B — Pull or build a purpose-built Slurm image
-
-If you have a pre-built image that already includes Slurm (for example, a
-Rocky Linux 9 base image with the HPC software stack), pull it directly:
-
-```bash
-curl -s -X POST http://10.99.0.1:8080/api/v1/factory/pull \
-  -H "Authorization: Bearer <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "rocky9-slurm",
-    "version": "1.0",
-    "os": "Rocky Linux 9",
-    "url": "https://your-image-server.internal/rocky9-slurm-base.tar.gz",
-    "format": "filesystem"
-  }'
-```
-
-### Verifying Slurm is present in the image
-
-Before enabling the module, confirm the packages are in the rootfs:
-
-```bash
-# Quick check — look for the slurmd binary in the image tree
-ls /var/lib/clustr/images/<image-id>/rootfs/usr/sbin/slurmd
-ls /var/lib/clustr/images/<image-id>/rootfs/usr/sbin/munge
-
-# Or via the API — look at the image metadata packages list
-curl -s http://10.99.0.1:8080/api/v1/images/<image-id>/metadata \
-  -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
-```
+**Note:** When using a gold image, `slurm_repo_url` is still required at
+module enable time but is used only as a fallback for nodes whose image does
+not include Slurm. Set it to the correct repo for your distro regardless.
 
 ---
 
@@ -137,7 +147,13 @@ the full auto-install flow.
    `slurm.conf`, `cgroup.conf`, `gres.conf`, `plugstack.conf`, `topology.conf`.
    These are rendered from the current node inventory and can be edited via the
    web UI (Slurm > Configs) or the API.
-3. **Module status set to `enabled`.** The web UI Slurm section becomes active.
+3. **`cluster_name` and `slurm_repo_url` stored.** The values from the request
+   body are persisted in the module config. `cluster_name` is used as the
+   `ClusterName` directive in every rendered `slurm.conf`. `slurm_repo_url` is
+   used by the auto-install step at deploy finalize time.
+4. **Module status set to `enabled`.** The web UI Slurm section becomes active.
+   From this point, every node deploy with a Slurm role will auto-install Slurm
+   from `slurm_repo_url` (unless binaries are already present in the image).
 
 ### Verify the module is enabled
 
@@ -355,13 +371,18 @@ reimage.
 
 ## 7. First job submission — `srun hostname` smoke test
 
+With auto-install enabled, this smoke test works on a fresh Rocky Linux 9 or
+10 base image with no Slurm pre-baked. After a single reimage of your
+controller and worker nodes, `srun hostname` should succeed end-to-end.
+
 ### Prerequisites checklist
 
 Before attempting job submission, verify all of the following:
 
-- [ ] Slurm module is enabled and `munge_key_present: true`
+- [ ] Slurm module is enabled (`munge_key_present: true` in status response)
+- [ ] `slurm_repo_url` is set and reachable from the provisioning host
 - [ ] At least one node has `role=controller` and at least one has `role=worker`
-- [ ] All nodes have been reimaged after the module was enabled (so they have the munge key and current `slurm.conf`)
+- [ ] All nodes have been reimaged after the module was enabled (auto-install, munge key, and `slurm.conf` are injected at that reimage)
 - [ ] All nodes: `systemctl status munge` shows `active (running)`
 - [ ] Controller node: `systemctl status slurmctld` shows `active (running)`
 - [ ] Worker nodes: `systemctl status slurmd` shows `active (running)`
@@ -447,8 +468,14 @@ the reason string.
 
 ### Upgrading Slurm
 
-Slurm upgrades require replacing the binaries in the base image. The supported
-path is:
+**Auto-install path:** Update `slurm_repo_url` (via `POST
+/api/v1/modules/slurm/enable` with the new repo URL, or through Settings >
+Slurm > Module Config in the web UI) to point to the repository containing the
+new Slurm version. Then reimage all nodes — the updated packages are installed
+automatically at finalize time. No image rebuild required.
+
+**Gold image path:** Slurm upgrades require replacing the binaries in the base
+image. The steps are:
 
 1. Create a new image version with the updated Slurm RPMs installed (use
    `clustr shell <image-id>` to chroot into a copy of the current image and
@@ -521,11 +548,12 @@ All Slurm API routes require an admin-scoped Bearer token.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `slurmd.service` degraded after reimage | Slurm not installed in the base image | Install `slurm slurm-slurmd munge` in the image via `clustr shell` and reimage. See §2. |
-| `munge -n | unmunge` fails with `STATUS: Socket communication error` | munge service not running | `systemctl start munge`. If it fails to start, check `journalctl -u munge` for the reason. |
-| `munge -n | unmunge` fails with `STATUS: Invalid credential` | munge key mismatch — node has a different key than the server | Reimage the node. The correct key will be injected at finalize time. |
+| Slurm module enabled but `slurmd` not installed after reimage | `slurm_repo_url` was unreachable at finalize time (non-fatal WARN — deploy continued, Slurm skipped) | Check deploy logs for the WARN line. Verify the URL is accessible: `curl -I <slurm_repo_url>` from the clustr-serverd host. Fix network/firewall/DNS, then reimage. |
+| `slurmd.service` degraded after reimage (advanced/gold-image path) | Slurm binaries missing from the pre-built image | Either switch to the recommended auto-install path (set `slurm_repo_url`, reimage), or re-bake the gold image with Slurm installed. See §2. |
+| `munge -n \| unmunge` fails with `STATUS: Socket communication error` | munge service not running | `systemctl start munge`. If it fails to start, check `journalctl -u munge` for the reason. |
+| `munge -n \| unmunge` fails with `STATUS: Invalid credential` | munge key mismatch — node has a different key than the server | Reimage the node. The correct key will be injected at finalize time. |
 | `sinfo` shows all nodes as `down` | slurmctld not reachable, or node hostnames do not match `slurm.conf` | Check `slurmctld` is running on the controller. Verify `NodeName` lines in `slurm.conf` match actual node hostnames. |
 | `srun` hangs indefinitely | Port 6817 (slurmctld) or 6818 (slurmd) blocked by firewall | Open the Slurm ports on the provisioning network: `firewall-cmd --add-port=6817-6818/tcp --permanent && firewall-cmd --reload`. |
-| `POST /api/v1/slurm/enable` returns 500 | `CLUSTR_SECRET_KEY` not set — munge key cannot be encrypted | Set `CLUSTR_SECRET_KEY` in `secrets.env` and restart the server. |
-| Slurm configs not written to `/etc/slurm/` after reimage | Module was not enabled before the reimage was triggered | Enable the module (`POST /api/v1/slurm/enable`), then reimage the nodes. |
+| `POST /api/v1/modules/slurm/enable` returns 500 | `CLUSTR_SECRET_KEY` not set — munge key cannot be encrypted | Set `CLUSTR_SECRET_KEY` in `secrets.env` and restart the server. |
+| Slurm configs not written to `/etc/slurm/` after reimage | Module was not enabled before the reimage was triggered | Enable the module (`POST /api/v1/modules/slurm/enable`), then reimage the nodes. |
 | `GET /api/v1/slurm/nodes` returns 404 | Routes not yet implemented in this build | Check the server version. This route is planned for Sprint 4+ builds. In the interim, use `GET /api/v1/slurm/roles` to see role assignments. |
