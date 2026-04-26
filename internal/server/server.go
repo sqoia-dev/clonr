@@ -625,12 +625,9 @@ func (s *Server) buildRouter() chi.Router {
 	// GAP-20: wire audit into API key handler (create/revoke/rotate).
 	apiKeysH.Audit = s.audit
 	apiKeysH.GetActorInfo = getActorInfo
-	// GAP-20: wire actor label into slurm manager so routes.go reads from the
+	// GAP-20: wire actor info into slurm manager so routes.go reads from the
 	// correct context key (server middleware's ctxKeyKeyLabel, not a local type).
-	s.slurmMgr.GetActorLabel = func(r *http.Request) string {
-		_, label := getActorInfo(r)
-		return label
-	}
+	s.slurmMgr.GetActorInfo = getActorInfo
 
 	images := &handlers.ImagesHandler{
 		DB:                s.db,

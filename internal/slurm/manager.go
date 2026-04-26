@@ -65,10 +65,11 @@ type Manager struct {
 	// GAP-20: wired from server.go after construction.
 	Audit *db.AuditService
 
-	// GetActorLabel returns a human-readable actor label (e.g. "key:bootstrap")
-	// from a request context. Wired from server.go after getActorInfo is defined.
-	// Falls back to "unknown" when nil.
-	GetActorLabel func(r *http.Request) string
+	// GetActorInfo returns (actorID, actorLabel) from a request context.
+	// actorID is the api_keys.id or users.id; actorLabel is "key:<label>" or
+	// "user:<id>". Wired from server.go after getActorInfo is defined.
+	// Falls back to ("", "unknown") when nil.
+	GetActorInfo func(r *http.Request) (id, label string)
 
 	mu  sync.RWMutex
 	cfg *db.SlurmModuleConfigRow // in-memory cache, loaded from DB on New()

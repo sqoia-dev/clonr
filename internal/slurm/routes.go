@@ -128,8 +128,8 @@ func (m *Manager) handleEnable(w http.ResponseWriter, r *http.Request) {
 
 	// GAP-20: audit slurm module enable.
 	if m.Audit != nil {
-		actor := m.actorLabel(r)
-		m.Audit.Record(r.Context(), "", actor, db.AuditActionSlurmConfigChange, "slurm_module", "enable",
+		actorID, actorLabel := m.actorInfo(r)
+		m.Audit.Record(r.Context(), actorID, actorLabel, db.AuditActionSlurmConfigChange, "slurm_module", "enable",
 			r.RemoteAddr, nil, map[string]string{"cluster_name": req.ClusterName})
 	}
 
@@ -221,7 +221,8 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	// GAP-20: audit slurm config file save.
 	if m.Audit != nil {
-		m.Audit.Record(r.Context(), "", authoredBy, db.AuditActionSlurmConfigChange, "slurm_config", filename,
+		actorID, actorLabel := m.actorInfo(r)
+		m.Audit.Record(r.Context(), actorID, actorLabel, db.AuditActionSlurmConfigChange, "slurm_config", filename,
 			r.RemoteAddr, nil, map[string]interface{}{"filename": filename, "version": ver, "message": body.Message})
 	}
 
@@ -1161,15 +1162,21 @@ func scriptRowToAPI(row db.SlurmScriptRow) api.SlurmScriptFile {
 	}
 }
 
-// actorLabel returns a human-readable label for the request actor.
-// Uses the injected GetActorLabel closure when available (set by server.go
-// after the auth middleware is fully wired) so that it reads from the correct
-// context key. Falls back to "unknown" when the closure is not yet set.
-func (m *Manager) actorLabel(r *http.Request) string {
-	if m.GetActorLabel != nil {
-		return m.GetActorLabel(r)
+// actorInfo returns (actorID, actorLabel) for the request.
+// Uses the injected GetActorInfo closure when available (set by server.go
+// after the auth middleware is fully wired). Falls back to ("", "unknown").
+func (m *Manager) actorInfo(r *http.Request) (string, string) {
+	if m.GetActorInfo != nil {
+		return m.GetActorInfo(r)
 	}
-	return "unknown"
+	return "", "unknown"
+}
+
+// actorLabel returns only the human-readable label for the request actor.
+// Convenience wrapper around actorInfo for call sites that only need the label.
+func (m *Manager) actorLabel(r *http.Request) string {
+	_, label := m.actorInfo(r)
+	return label
 }
 
 func jsonResponse(w http.ResponseWriter, body interface{}, code int) {
