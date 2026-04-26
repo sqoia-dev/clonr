@@ -238,11 +238,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// GAP-23: Warn about stale clonr.db left from the pre-rename installation.
 	// The file is harmless but confuses operators who see an unexpected DB file.
 	// We do NOT auto-delete — this is an explicit operator action.
-	{
-		staleDB := filepath.Join(filepath.Dir(cfg.DBPath), "clonr.db")
-		if _, statErr := os.Stat(staleDB); statErr == nil {
-			if cfg.DBPath != staleDB { // don't warn when both paths resolve to the same file
-				log.Warn().Str("path", staleDB).
+	// Check both the DB directory and its parent: old installs placed clonr.db at
+	// the data root (/var/lib/clustr/clonr.db) while the current layout uses a
+	// db/ subdirectory (/var/lib/clustr/db/clustr.db).
+	for _, staleCandidate := range []string{
+		filepath.Join(filepath.Dir(cfg.DBPath), "clonr.db"),           // same dir as DB
+		filepath.Join(filepath.Dir(filepath.Dir(cfg.DBPath)), "clonr.db"), // parent dir (data root)
+	} {
+		if _, statErr := os.Stat(staleCandidate); statErr == nil {
+			if cfg.DBPath != staleCandidate { // don't warn when both paths resolve to the same file
+				log.Warn().Str("path", staleCandidate).
 					Msg("stale clonr.db found from pre-rename installation; can be safely deleted")
 			}
 		}
