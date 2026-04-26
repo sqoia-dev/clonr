@@ -80,7 +80,9 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Post("/slurm/builds", m.handleStartBuild)
 	r.Get("/slurm/builds/{build_id}", m.handleGetBuild)
 	r.Delete("/slurm/builds/{build_id}", m.handleDeleteBuild)
-	r.Get("/slurm/builds/{build_id}/artifact", m.handleDownloadArtifact)
+	// NOTE: GET /slurm/builds/{build_id}/artifact is intentionally NOT registered here.
+	// It is registered as a public route (no admin key required) in server.go so that
+	// nodes can download artifacts using only a HMAC-signed URL. See ServeArtifact.
 	r.Get("/slurm/builds/{build_id}/logs", m.handleBuildLogs)
 	r.Post("/slurm/builds/{build_id}/set-active", m.handleSetActiveBuild)
 
@@ -824,6 +826,14 @@ func (m *Manager) handleDownloadArtifact(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", row.ArtifactSizeBytes))
 	}
 	http.ServeContent(w, r, filepath.Base(cleanPath), time.Time{}, f)
+}
+
+// ServeArtifact is the public (no-auth-middleware) handler for Slurm artifact downloads.
+// It wraps handleDownloadArtifact so that nodes can download binaries using only a
+// HMAC-signed URL (token + expires query params) without needing an admin API key.
+// Registered outside the admin-role group in server.go at /api/v1/slurm/builds/{build_id}/artifact.
+func (m *Manager) ServeArtifact(w http.ResponseWriter, r *http.Request) {
+	m.handleDownloadArtifact(w, r)
 }
 
 func (m *Manager) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
