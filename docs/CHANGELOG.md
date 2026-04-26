@@ -2,6 +2,42 @@
 
 ---
 
+## Fix: NEW-GAP-14 + NEW-GAP-15 — true turnkey Slurm deploy (2026-04-25)
+
+### NEW-GAP-14 (P2) — Stale slurmctld clustername causes FATAL on first boot
+
+**Root cause:** Base images captured after a prior Slurm install may contain
+`/var/spool/slurmctld/clustername` (or other state files). On first boot after
+deploy, slurmctld reads the stale file and fails with `CLUSTER NAME MISMATCH`
+because the on-disk name differs from `cluster_name` in `slurm.conf`.
+
+**Fix (`internal/deploy/finalize.go`):** In `writeSlurmConfig`, before calling
+`os.MkdirAll` on `var/spool/slurmctld` and `var/spool/slurmd`, the code now
+calls `os.RemoveAll` on each directory if it exists. This is safe because
+clustr always does a full reimage — there is no in-service state to preserve.
+Ownership is then set correctly by the existing `chown -R slurm:slurm` pass.
+
+### NEW-GAP-15 (P3) — False "dnf install failed (non-fatal)" on gold images
+
+**Root cause:** `installSlurmInChroot` unconditionally ran `dnf install` even
+when Slurm packages were already present in the image (e.g., a pre-built gold
+image). dnf exits non-zero when it has nothing to do in some configurations,
+triggering the warning log and audit event despite nothing being wrong.
+
+**Fix (`internal/deploy/finalize.go`):** Before running `dnf install`,
+`installSlurmInChroot` now executes `rpm -q <pkg>...` inside the chroot. If all
+required packages are already installed, it logs `INFO slurm packages already
+present in image, skipping dnf install` and returns immediately. Only runs dnf
+when at least one package is missing.
+
+### Result
+
+These two fixes close the final gaps from Round 5 verification. The onboarding
+walkthrough verdict is updated from NEAR-TURNKEY to **TURNKEY ✓**. All 25 gaps
+(23 original + 2 Round-5) are now closed.
+
+---
+
 ## Docs: Round 5 turnkey verification — srun works (2026-04-26)
 
 Added "Final Turnkey Verification — Round 5" to `docs/onboarding-walkthrough.md`.

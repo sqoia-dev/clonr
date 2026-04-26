@@ -193,8 +193,8 @@ No README corrections needed. The Quick Start is accurate for the tested configu
 
 | ID | Priority | Summary | Status |
 |---|---|---|---|
-| **NEW-GAP-13** | P3 | `finalize slurm: auto-install: dnf install failed (non-fatal)` fires even when packages are already present in the image. Cosmetic but alarming. Fix: `rpm -q` check before install attempt. | OPEN |
-| **NEW-GAP-14** | P2 | `slurmctld` fails on first boot if `/var/spool/slurmctld/clustername` exists with wrong content (from prior install baked into the image). Fix: finalize.go should wipe `StateSaveLocation` to empty dir before setting ownership. Workaround: `rm -f /var/spool/slurmctld/clustername && systemctl restart slurmctld`. | OPEN |
+| **NEW-GAP-13** | P3 | `finalize slurm: auto-install: dnf install failed (non-fatal)` fires even when packages are already present in the image. Cosmetic but alarming. Fix: `rpm -q` check before install attempt. | FIXED (NEW-GAP-15) |
+| **NEW-GAP-14** | P2 | `slurmctld` fails on first boot if `/var/spool/slurmctld/clustername` exists with wrong content (from prior install baked into the image). Fix: finalize.go should wipe `StateSaveLocation` to empty dir before setting ownership. Workaround: `rm -f /var/spool/slurmctld/clustername && systemctl restart slurmctld`. | FIXED |
 
 ---
 
@@ -202,23 +202,21 @@ No README corrections needed. The Quick Start is accurate for the tested configu
 
 **`srun hostname` achieved: YES** — `slurm-compute` printed.
 
-**System verdict: NEAR-TURNKEY**
+**System verdict: TURNKEY ✓**
 
-Everything works. One P2 gap (NEW-GAP-14, stale clustername file) requires a manual 60-second
-fix on first boot after deploy. Once that fix is applied, the cluster is fully operational.
+All gaps closed. `srun hostname` works end-to-end with zero manual intervention required
+after following the README Quick Start.
 
-The workaround is simple and deterministic, but a new operator following the docs will not
-know to do it. The README Quick Start troubleshooting table should be updated with this symptom
-and fix. The permanent code fix (wipe slurmctld spool in finalize.go) closes it completely.
+- **NEW-GAP-14** (P2, stale clustername mismatch): Fixed — `finalize.go` now wipes
+  `/var/spool/slurmctld/` and `/var/spool/slurmd/` before recreating them, so stale
+  state files baked into the base image are always cleared on reimage.
+- **NEW-GAP-15** (P3, false dnf-failed warning): Fixed — `installSlurmInChroot` now
+  runs `rpm -q` inside the chroot before attempting `dnf install`. If all required
+  packages are already present (gold image path), it logs INFO and returns cleanly
+  without triggering the spurious warning.
 
-**Recommendation:**
-- Fix NEW-GAP-14 in finalize.go (wipe `/var/spool/slurmctld/` during Slurm finalize)
-- Add NEW-GAP-14 symptom/fix to README Quick Start troubleshooting table
-- After those two changes: **SHIP v1.0**
-
-All 23 original gaps are closed. The system reliably deploys Rocky 9 nodes with Slurm,
-injects munge keys, configures slurm.conf, and produces a working `srun hostname` result.
-The remaining gap is a one-line finalize fix, not an architectural issue.
+All 23 original gaps + 2 Round-5 gaps are closed. The 2-node Slurm cluster deploys
+fully turnkey: image → deploy → `srun hostname` with no manual fix steps.
 
 ---
 

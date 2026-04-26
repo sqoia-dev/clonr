@@ -2271,6 +2271,38 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 		}{"var/spool/slurmctld", 0o755})
 	}
 
+	// NEW-GAP-14: Wipe slurmctld and slurmd spool directories before (re)creating
+	// them.  A base image captured after a prior Slurm install may contain stale
+	// state files — most critically /var/spool/slurmctld/clustername — which
+	// causes slurmctld to FATAL on first boot with "CLUSTER NAME MISMATCH" because
+	// the on-disk name differs from the cluster_name in slurm.conf.
+	//
+	// We wipe the directories unconditionally for any node that is receiving a
+	// Slurm role.  This is safe because we always do a clean reimage: the node's
+	// disk is freshly written from the base image, so there is no in-service state
+	// to preserve.  After the wipe we recreate the directory at the correct
+	// ownership (slurm:slurm) so slurmctld/slurmd start cleanly on first boot.
+	spoolDirsToWipe := []string{}
+	if hasGres || !hasSlurmdbd {
+		spoolDirsToWipe = append(spoolDirsToWipe, "var/spool/slurmd")
+	}
+	if hasSlurmdbd {
+		spoolDirsToWipe = append(spoolDirsToWipe, "var/spool/slurmctld")
+	}
+	for _, sp := range spoolDirsToWipe {
+		fullPath := filepath.Join(mountRoot, sp)
+		if _, err := os.Stat(fullPath); err == nil {
+			// Directory exists — remove all contents to clear stale state files.
+			if err := os.RemoveAll(fullPath); err != nil {
+				log.Warn().Err(err).Str("path", sp).
+					Msg("finalize slurm: wipe spool dir failed (non-fatal) — stale state files may remain")
+			} else {
+				log.Info().Str("path", sp).
+					Msg("finalize slurm: wiped spool dir to remove stale state (prevents clustername mismatch on first boot)")
+			}
+		}
+	}
+
 	for _, d := range dirs {
 		fullPath := filepath.Join(mountRoot, d.path)
 		if err := os.MkdirAll(fullPath, d.mode); err != nil {
@@ -2641,7 +2673,24 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	log.Info().Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
 		Msg("finalize slurm: auto-install: repo file written")
 
-	// Step 4: Install packages inside chroot.
+	// Step 4: Check whether all required packages are already installed in the
+	// chroot before running dnf.  Gold images that were captured with Slurm
+	// pre-installed will have all packages present; running dnf install in that
+	// case produces a spurious "dnf install failed (non-fatal)" warning even
+	// though everything is already in place (NEW-GAP-15).
+	//
+	// `rpm -q <pkg>...` exits 0 if ALL listed packages are installed, non-zero
+	// if any are missing.  We run it inside the chroot so rpm reads the chroot
+	// RPM database, not the host's.
+	rpmArgs := append([]string{mountRoot, "rpm", "-q"}, pkgs...)
+	if rpmOut, rpmErr := exec.CommandContext(ctx, "chroot", rpmArgs...).CombinedOutput(); rpmErr == nil {
+		log.Info().Strs("packages", pkgs).
+			Msg("finalize slurm: auto-install: slurm packages already present in image, skipping dnf install")
+		_ = rpmOut
+		return
+	}
+
+	// Step 5: Install packages inside chroot (one or more packages missing).
 	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False"}, pkgs...)
 	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
 	if err != nil {
