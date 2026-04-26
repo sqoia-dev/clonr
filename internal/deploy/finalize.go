@@ -2116,11 +2116,25 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 
 	log := logger()
 
-	// Determine which roles this node has based on which config files it received.
-	// slurmdbd.conf → controller or dbd; gres.conf → compute; slurm.conf → all.
+	// Determine which roles this node has.
+	// Prefer the explicit Roles field populated by manager.NodeConfig().
+	// Fall back to inferring from config file names for backward compatibility
+	// with payloads that predate the Roles field.
 	hasSlurmdbd := false
 	hasGres := false
 	hasSlurmConf := false
+
+	if len(slurmCfg.Roles) > 0 {
+		for _, r := range slurmCfg.Roles {
+			switch r {
+			case "controller":
+				hasSlurmdbd = true
+			case "compute":
+				hasGres = true
+			}
+		}
+	}
+
 	for _, cf := range slurmCfg.Configs {
 		switch cf.Filename {
 		case "slurmdbd.conf":

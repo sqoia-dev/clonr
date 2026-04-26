@@ -34,8 +34,11 @@ const (
 )
 
 // defaultManagedFiles is the list of files the module manages by default.
+// slurmdbd.conf is included so that controller nodes receive it and
+// installSlurmInChroot can detect the controller role (hasSlurmdbd flag).
 var defaultManagedFiles = []string{
 	"slurm.conf",
+	"slurmdbd.conf",
 	"gres.conf",
 	"cgroup.conf",
 	"topology.conf",
@@ -95,6 +98,9 @@ func New(database *db.DB, hub ClientdHubIface) *Manager {
 }
 
 // restoreFromDB loads the singleton config row into memory on startup.
+// If the module is already enabled, it also seeds any managed files that have
+// no existing template yet (e.g. slurmdbd.conf added to defaultManagedFiles
+// after the module was first enabled).
 func (m *Manager) restoreFromDB(ctx context.Context) {
 	row, err := m.db.SlurmGetConfig(ctx)
 	if err != nil {
@@ -106,6 +112,15 @@ func (m *Manager) restoreFromDB(ctx context.Context) {
 	m.mu.Lock()
 	m.cfg = row
 	m.mu.Unlock()
+
+	// Seed any managed files that have no template yet.  This handles the case
+	// where a file is added to defaultManagedFiles after the module was first
+	// enabled (e.g. slurmdbd.conf).  seedDefaultTemplates is idempotent.
+	if row.Enabled && len(row.ManagedFiles) > 0 {
+		if err := m.seedDefaultTemplates(ctx, row.ClusterName, row.ManagedFiles); err != nil {
+			log.Warn().Err(err).Msg("slurm: restoreFromDB: seed default templates failed (non-fatal)")
+		}
+	}
 }
 
 // ─── Enable ───────────────────────────────────────────────────────────────────
@@ -265,6 +280,7 @@ type SlurmModuleStatus struct {
 	Enabled         bool          `json:"enabled"`
 	Status          string        `json:"status"`
 	ClusterName     string        `json:"cluster_name"`
+	SlurmRepoURL    string        `json:"slurm_repo_url,omitempty"`
 	ManagedFiles    []string      `json:"managed_files"`
 	ConnectedNodes  []string      `json:"connected_nodes"`
 	MungeKeyPresent bool          `json:"munge_key_present"`
@@ -301,6 +317,7 @@ func (m *Manager) Status(ctx context.Context) (*SlurmModuleStatus, error) {
 		Enabled:         row.Enabled,
 		Status:          row.Status,
 		ClusterName:     row.ClusterName,
+		SlurmRepoURL:    row.SlurmRepoURL,
 		ManagedFiles:    row.ManagedFiles,
 		ConnectedNodes:  connectedNodes,
 		MungeKeyPresent: mungeKeyPresent,
@@ -444,6 +461,7 @@ func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNode
 
 	return &api.SlurmNodeConfig{
 		ClusterName:  cfg.ClusterName,
+		Roles:        roles,
 		Configs:      configs,
 		Scripts:      scripts,
 		SlurmRepoURL: cfg.SlurmRepoURL,

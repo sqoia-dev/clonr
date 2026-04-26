@@ -1423,6 +1423,7 @@ type SlurmModuleConfig struct {
 // Non-nil means the module is enabled and this node should receive Slurm configs.
 type SlurmNodeConfig struct {
 	ClusterName  string            `json:"cluster_name"`
+	Roles        []string          `json:"roles,omitempty"`        // e.g. ["controller"] or ["compute"]
 	Configs      []SlurmConfigFile `json:"configs"`      // rendered content per file, ready to write
 	Scripts      []SlurmScriptFile `json:"scripts,omitempty"`
 	// SlurmRepoURL is the dnf repo URL for auto-install.  Empty = skip auto-install.
