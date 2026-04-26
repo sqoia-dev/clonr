@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sqoia-dev/clustr/internal/secrets"
 	"github.com/sqoia-dev/clustr/pkg/api"
 	_ "modernc.org/sqlite" // register "sqlite" driver
 )
@@ -468,7 +469,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal hardware_profile: %w", err)
 	}
-	bmcConfig, err := marshalNullableJSON(cfg.BMC, "{}")
+	bmcConfigRaw, err := marshalNullableJSON(cfg.BMC, "{}")
 	if err != nil {
 		return fmt.Errorf("db: marshal bmc_config: %w", err)
 	}
@@ -476,7 +477,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ib_config: %w", err)
 	}
-	powerProvider, err := marshalNullableJSON(cfg.PowerProvider, "{}")
+	powerProviderRaw, err := marshalNullableJSON(cfg.PowerProvider, "{}")
 	if err != nil {
 		return fmt.Errorf("db: marshal power_provider: %w", err)
 	}
@@ -490,13 +491,17 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		return fmt.Errorf("db: marshal extra_mounts: %w", err)
 	}
 
+	// Encrypt credential blobs at rest (S1-16).
+	bmcConfig, bmcEncrypted := encryptNodeBlob(bmcConfigRaw, "{}")
+	powerProvider, ppEncrypted := encryptNodeBlob(powerProviderRaw, "{}")
+
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
-			 detected_firmware)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 detected_firmware, bmc_config_encrypted, power_provider_encrypted)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -505,11 +510,74 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
 		cfg.DetectedFirmware,
+		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
 	}
 	return nil
+}
+
+// encryptNodeBlob attempts to encrypt a JSON blob with AES-256-GCM.
+// Returns (value, encrypted) — if encryption fails (key not set or invalid),
+// returns the original value with encrypted=false (fail-open for create).
+func encryptNodeBlob(jsonBlob, emptyVal string) (string, bool) {
+	if jsonBlob == "" || jsonBlob == emptyVal {
+		return jsonBlob, false
+	}
+	enc, err := secrets.Encrypt([]byte(jsonBlob))
+	if err != nil {
+		// CLUSTR_SECRET_KEY not set or invalid — store plaintext, flag unencrypted.
+		// MigrateBMCCredentials() will re-encrypt on next startup once key is set.
+		return jsonBlob, false
+	}
+	return enc, true
+}
+
+// MigrateBMCCredentials re-encrypts any plaintext BMC and power_provider credentials
+// on first run after migration 039. Safe to call multiple times — rows already marked
+// as encrypted are skipped. Returns (changed, error).
+func (db *DB) MigrateBMCCredentials(ctx context.Context) (bool, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, bmc_config, power_provider
+		FROM node_configs
+		WHERE (bmc_config_encrypted = 0 AND bmc_config != '' AND bmc_config != '{}')
+		   OR (power_provider_encrypted = 0 AND power_provider != '' AND power_provider != '{}')
+	`)
+	if err != nil {
+		return false, fmt.Errorf("db: MigrateBMCCredentials: query: %w", err)
+	}
+	defer rows.Close()
+
+	type row struct{ id, bmc, pp string }
+	var toMigrate []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.bmc, &r.pp); err != nil {
+			return false, fmt.Errorf("db: MigrateBMCCredentials: scan: %w", err)
+		}
+		toMigrate = append(toMigrate, r)
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("db: MigrateBMCCredentials: rows: %w", err)
+	}
+
+	changed := false
+	for _, r := range toMigrate {
+		encBMC, bmcFlag := encryptNodeBlob(r.bmc, "{}")
+		encPP, ppFlag := encryptNodeBlob(r.pp, "{}")
+		_, err = db.sql.ExecContext(ctx, `
+			UPDATE node_configs
+			SET bmc_config = ?, bmc_config_encrypted = ?,
+			    power_provider = ?, power_provider_encrypted = ?
+			WHERE id = ?
+		`, encBMC, boolToInt(bmcFlag), encPP, boolToInt(ppFlag), r.id)
+		if err != nil {
+			return changed, fmt.Errorf("db: MigrateBMCCredentials: update %s: %w", r.id, err)
+		}
+		changed = true
+	}
+	return changed, nil
 }
 
 // UpsertNodeByMAC creates a new NodeConfig for the given MAC, or updates the
@@ -622,12 +690,14 @@ func nullableString(s string) interface{} {
 // ADR-0008: deploy_completed_preboot_at, deploy_verified_booted_at,
 //           deploy_verify_timeout_at, and last_seen_at added in migration 022.
 // Migration 026: detected_firmware added.
+// Migration 039: bmc_config_encrypted, power_provider_encrypted added (S1-16).
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
 	       created_at, updated_at, group_id, disk_layout_override, extra_mounts,
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
-	       deploy_verify_timeout_at, last_seen_at, detected_firmware`
+	       deploy_verify_timeout_at, last_seen_at, detected_firmware,
+	       bmc_config_encrypted, power_provider_encrypted`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
 // the "nc" table alias and replaces group_id with a COALESCE that prefers the
@@ -642,7 +712,8 @@ const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.
 	       COALESCE(m.group_id, nc.group_id) AS group_id,
 	       nc.disk_layout_override, nc.extra_mounts,
 	       nc.deploy_completed_preboot_at, nc.deploy_verified_booted_at,
-	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware`
+	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware,
+	       nc.bmc_config_encrypted, nc.power_provider_encrypted`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -748,7 +819,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal hardware_profile: %w", err)
 	}
-	bmcConfig, err := marshalNullableJSON(cfg.BMC, "{}")
+	bmcConfigRaw, err := marshalNullableJSON(cfg.BMC, "{}")
 	if err != nil {
 		return fmt.Errorf("db: marshal bmc_config: %w", err)
 	}
@@ -756,7 +827,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ib_config: %w", err)
 	}
-	powerProvider, err := marshalNullableJSON(cfg.PowerProvider, "{}")
+	powerProviderRaw, err := marshalNullableJSON(cfg.PowerProvider, "{}")
 	if err != nil {
 		return fmt.Errorf("db: marshal power_provider: %w", err)
 	}
@@ -770,13 +841,18 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		return fmt.Errorf("db: marshal extra_mounts: %w", err)
 	}
 
+	// Encrypt credential blobs at rest (S1-16).
+	bmcConfig, bmcEncrypted := encryptNodeBlob(bmcConfigRaw, "{}")
+	powerProvider, ppEncrypted := encryptNodeBlob(powerProviderRaw, "{}")
+
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
 		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?,
 		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
-		    detected_firmware = ?
+		    detected_firmware = ?,
+		    bmc_config_encrypted = ?, power_provider_encrypted = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
@@ -785,6 +861,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
 		time.Now().Unix(), cfg.DetectedFirmware,
+		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
 		cfg.ID,
 	)
 	if err != nil {
@@ -1370,6 +1447,9 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		deployVerifiedBootedAtVal    sql.NullInt64
 		deployVerifyTimeoutAtVal     sql.NullInt64
 		lastSeenAtVal                sql.NullInt64
+		// S1-16 (migration 039): encryption flag columns.
+		bmcConfigEncrypted     bool
+		powerProviderEncrypted bool
 	)
 
 	err := s.Scan(
@@ -1384,9 +1464,22 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&deployCompletedPrebootAtVal, &deployVerifiedBootedAtVal,
 		&deployVerifyTimeoutAtVal, &lastSeenAtVal,
 		&cfg.DetectedFirmware,
+		&bmcConfigEncrypted, &powerProviderEncrypted,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
+	}
+	// Decrypt credential blobs if marked encrypted (S1-16).
+	if bmcConfigEncrypted && bmcConfigJSON != "" && bmcConfigJSON != "{}" {
+		if plain, derr := secrets.Decrypt(bmcConfigJSON); derr == nil {
+			bmcConfigJSON = string(plain)
+		}
+		// Decryption failure leaves ciphertext — fail-closed; BMC calls will error.
+	}
+	if powerProviderEncrypted && powerProviderJSON != "" && powerProviderJSON != "{}" {
+		if plain, derr := secrets.Decrypt(powerProviderJSON); derr == nil {
+			powerProviderJSON = string(plain)
+		}
 	}
 	if err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: scan node config: %w", err)

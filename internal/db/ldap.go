@@ -5,9 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/sqoia-dev/clustr/internal/secrets"
 )
 
 // LDAPModuleConfig is the persisted state of the LDAP module singleton.
+// ServiceBindPassword and AdminPasswd are stored encrypted at rest (S1-15, D4).
+// The DB layer transparently encrypts on write and decrypts on read.
 type LDAPModuleConfig struct {
 	Enabled             bool
 	Status              string // disabled|provisioning|ready|error
@@ -21,26 +25,22 @@ type LDAPModuleConfig struct {
 	ServerCertNotAfter  time.Time
 	AdminPasswordHash   string
 	ServiceBindDN       string
-	// ServiceBindPassword is stored plaintext in v1.
-	// V2 hardening: encrypt at rest. See migration comment in 027_ldap_module.sql.
+	// ServiceBindPassword is decrypted at read time (migration 038+).
 	ServiceBindPassword string
-	// AdminPasswd is the plaintext Directory Manager password, stored under the
-	// same threat model as ServiceBindPassword (file-permission protected SQLite).
-	// Added by migration 028. A future coordinated pass should encrypt both at rest.
+	// AdminPasswd is the Directory Manager password, decrypted at read time (migration 038+).
 	AdminPasswd string
 	BaseDNLocked        bool
 	LastProvisionedAt   time.Time
 	LastCheckedAt       time.Time
 	LastCheckError      string
 	// SudoersEnabled indicates whether the clustr-admins LDAP group sudoers feature is active.
-	// Added by migration 036.
 	SudoersEnabled bool
 	// SudoersGroupCN is the CN of the LDAP group written into /etc/sudoers.d on deployed nodes.
-	// Default: "clustr-admins". Added by migration 036.
 	SudoersGroupCN string
 }
 
 // LDAPGetConfig reads the singleton LDAP module config row.
+// Decrypts service_bind_password and admin_passwd at read time (migration 038+).
 // Returns sql.ErrNoRows if the row has never been inserted (migration not applied).
 func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 	row := db.sql.QueryRowContext(ctx, `
@@ -51,7 +51,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			admin_password_hash, service_bind_dn, service_bind_password,
 			base_dn_locked, last_provisioned_at, last_checked_at, last_check_error,
 			admin_passwd,
-			sudoers_enabled, sudoers_group_cn
+			sudoers_enabled, sudoers_group_cn,
+			service_bind_password_encrypted, admin_passwd_encrypted
 		FROM ldap_module_config WHERE id = 1
 	`)
 
@@ -59,6 +60,7 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 	var serverCertNotAfter sql.NullString
 	var lastProvisionedAt sql.NullString
 	var lastCheckedAt sql.NullString
+	var sbpEncrypted, apEncrypted bool
 
 	err := row.Scan(
 		&cfg.Enabled, &cfg.Status, &cfg.StatusDetail, &cfg.BaseDN,
@@ -68,9 +70,24 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		&cfg.BaseDNLocked, &lastProvisionedAt, &lastCheckedAt, &cfg.LastCheckError,
 		&cfg.AdminPasswd,
 		&cfg.SudoersEnabled, &cfg.SudoersGroupCN,
+		&sbpEncrypted, &apEncrypted,
 	)
 	if err != nil {
 		return LDAPModuleConfig{}, err
+	}
+
+	// Decrypt credentials if marked as encrypted.
+	if sbpEncrypted && cfg.ServiceBindPassword != "" {
+		if plain, derr := secrets.Decrypt(cfg.ServiceBindPassword); derr == nil {
+			cfg.ServiceBindPassword = string(plain)
+		}
+		// If decryption fails (wrong key), leave the ciphertext — caller will see garbage
+		// and the module will error on use. This is intentional: fail-closed.
+	}
+	if apEncrypted && cfg.AdminPasswd != "" {
+		if plain, derr := secrets.Decrypt(cfg.AdminPasswd); derr == nil {
+			cfg.AdminPasswd = string(plain)
+		}
 	}
 
 	if serverCertNotAfter.Valid && serverCertNotAfter.String != "" {
@@ -93,6 +110,9 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 }
 
 // LDAPSaveConfig saves the full LDAP module config to the singleton row.
+// Encrypts service_bind_password and admin_passwd at write time (S1-15, D4).
+// If CLUSTR_SECRET_KEY is not set, the write is rejected to prevent storing
+// credentials in plaintext after the encryption migration has been applied.
 func (db *DB) LDAPSaveConfig(ctx context.Context, cfg LDAPModuleConfig) error {
 	var notAfterStr *string
 	if !cfg.ServerCertNotAfter.IsZero() {
@@ -103,6 +123,29 @@ func (db *DB) LDAPSaveConfig(ctx context.Context, cfg LDAPModuleConfig) error {
 	if !cfg.LastProvisionedAt.IsZero() {
 		s := cfg.LastProvisionedAt.UTC().Format(time.RFC3339)
 		lastProvStr = &s
+	}
+
+	// Encrypt credentials. Both fields are encrypted independently.
+	sbpCiphertext := cfg.ServiceBindPassword
+	sbpEncrypted := false
+	if cfg.ServiceBindPassword != "" {
+		enc, err := secrets.Encrypt([]byte(cfg.ServiceBindPassword))
+		if err != nil {
+			return fmt.Errorf("db: LDAPSaveConfig: encrypt service_bind_password: %w", err)
+		}
+		sbpCiphertext = enc
+		sbpEncrypted = true
+	}
+
+	apCiphertext := cfg.AdminPasswd
+	apEncrypted := false
+	if cfg.AdminPasswd != "" {
+		enc, err := secrets.Encrypt([]byte(cfg.AdminPasswd))
+		if err != nil {
+			return fmt.Errorf("db: LDAPSaveConfig: encrypt admin_passwd: %w", err)
+		}
+		apCiphertext = enc
+		apEncrypted = true
 	}
 
 	_, err := db.sql.ExecContext(ctx, `
@@ -120,15 +163,19 @@ func (db *DB) LDAPSaveConfig(ctx context.Context, cfg LDAPModuleConfig) error {
 			admin_password_hash = ?,
 			service_bind_dn = ?,
 			service_bind_password = ?,
+			service_bind_password_encrypted = ?,
 			last_provisioned_at = ?,
-			admin_passwd = ?
+			admin_passwd = ?,
+			admin_passwd_encrypted = ?
 		WHERE id = 1
 	`,
 		cfg.Enabled, cfg.Status, cfg.StatusDetail, cfg.BaseDN,
 		cfg.CACertPEM, cfg.CAKeyPEM, cfg.CACertFingerprint,
 		cfg.ServerCertPEM, cfg.ServerKeyPEM, notAfterStr,
-		cfg.AdminPasswordHash, cfg.ServiceBindDN, cfg.ServiceBindPassword,
-		lastProvStr, cfg.AdminPasswd,
+		cfg.AdminPasswordHash, cfg.ServiceBindDN,
+		sbpCiphertext, boolToInt(sbpEncrypted),
+		lastProvStr,
+		apCiphertext, boolToInt(apEncrypted),
 	)
 	if err != nil {
 		return fmt.Errorf("db: LDAPSaveConfig: %w", err)
@@ -177,7 +224,9 @@ func (db *DB) LDAPDisable(ctx context.Context) error {
 			admin_password_hash = '',
 			service_bind_dn = '',
 			service_bind_password = '',
+			service_bind_password_encrypted = 0,
 			admin_passwd = '',
+			admin_passwd_encrypted = 0,
 			base_dn_locked = 0,
 			last_provisioned_at = NULL,
 			last_checked_at = NULL,
@@ -190,17 +239,84 @@ func (db *DB) LDAPDisable(ctx context.Context) error {
 	return nil
 }
 
-// LDAPSetAdminPasswd writes only the admin_passwd column atomically.
-// Called by Enable() after provisioning so the plaintext password survives restarts.
+// LDAPSetAdminPasswd writes only the admin_passwd column atomically, encrypting it.
+// Called by Enable() after provisioning so the encrypted password survives restarts.
 func (db *DB) LDAPSetAdminPasswd(ctx context.Context, passwd string) error {
+	ciphertext := passwd
+	encrypted := false
+	if passwd != "" {
+		enc, err := secrets.Encrypt([]byte(passwd))
+		if err != nil {
+			return fmt.Errorf("db: LDAPSetAdminPasswd: encrypt: %w", err)
+		}
+		ciphertext = enc
+		encrypted = true
+	}
 	_, err := db.sql.ExecContext(ctx,
-		`UPDATE ldap_module_config SET admin_passwd = ? WHERE id = 1`,
-		passwd,
+		`UPDATE ldap_module_config SET admin_passwd = ?, admin_passwd_encrypted = ? WHERE id = 1`,
+		ciphertext, boolToInt(encrypted),
 	)
 	if err != nil {
 		return fmt.Errorf("db: LDAPSetAdminPasswd: %w", err)
 	}
 	return nil
+}
+
+// MigrateLDAPCredentials re-encrypts any plaintext LDAP credentials on first run
+// after the encryption migration (038). Safe to call multiple times — rows already
+// marked as encrypted are skipped. Returns (changed, error) where changed indicates
+// at least one row was encrypted.
+func (db *DB) MigrateLDAPCredentials(ctx context.Context) (bool, error) {
+	// Read current state directly (not via LDAPGetConfig, which decrypts).
+	var sbp, ap string
+	var sbpEncrypted, apEncrypted bool
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT service_bind_password, service_bind_password_encrypted,
+		       admin_passwd, admin_passwd_encrypted
+		FROM ldap_module_config WHERE id = 1
+	`).Scan(&sbp, &sbpEncrypted, &ap, &apEncrypted)
+	if err == sql.ErrNoRows {
+		return false, nil // no row yet — nothing to migrate
+	}
+	if err != nil {
+		return false, fmt.Errorf("db: MigrateLDAPCredentials: read: %w", err)
+	}
+
+	changed := false
+
+	// Encrypt service_bind_password if plaintext and non-empty.
+	if !sbpEncrypted && sbp != "" {
+		enc, err := secrets.Encrypt([]byte(sbp))
+		if err != nil {
+			return false, fmt.Errorf("db: MigrateLDAPCredentials: encrypt service_bind_password: %w", err)
+		}
+		_, err = db.sql.ExecContext(ctx,
+			`UPDATE ldap_module_config SET service_bind_password = ?, service_bind_password_encrypted = 1 WHERE id = 1`,
+			enc,
+		)
+		if err != nil {
+			return false, fmt.Errorf("db: MigrateLDAPCredentials: write service_bind_password: %w", err)
+		}
+		changed = true
+	}
+
+	// Encrypt admin_passwd if plaintext and non-empty.
+	if !apEncrypted && ap != "" {
+		enc, err := secrets.Encrypt([]byte(ap))
+		if err != nil {
+			return false, fmt.Errorf("db: MigrateLDAPCredentials: encrypt admin_passwd: %w", err)
+		}
+		_, err = db.sql.ExecContext(ctx,
+			`UPDATE ldap_module_config SET admin_passwd = ?, admin_passwd_encrypted = 1 WHERE id = 1`,
+			enc,
+		)
+		if err != nil {
+			return false, fmt.Errorf("db: MigrateLDAPCredentials: write admin_passwd: %w", err)
+		}
+		changed = true
+	}
+
+	return changed, nil
 }
 
 // LDAPCountConfiguredNodes returns the number of nodes with ldap_node_state rows.

@@ -19,6 +19,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 	"github.com/sqoia-dev/clustr/internal/pxe"
+	"github.com/sqoia-dev/clustr/internal/secrets"
 	"github.com/sqoia-dev/clustr/internal/server"
 )
 
@@ -224,6 +225,40 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	log.Info().Str("db", cfg.DBPath).Msg("database ready")
+
+	// S1-15/16: Validate CLUSTR_SECRET_KEY in non-dev mode.
+	// The server hard-fails if the key is unset to prevent credentials being stored
+	// in plaintext (LDAP passwords, BMC passwords) after the encryption migrations.
+	if !cfg.AuthDevMode {
+		if err := secrets.ValidateKey(); err != nil {
+			return fmt.Errorf("startup: %w", err)
+		}
+		log.Info().Msg("secret key: validated")
+	} else {
+		log.Warn().Msg("CLUSTR_AUTH_DEV_MODE=1 — CLUSTR_SECRET_KEY not validated (dev mode only)")
+	}
+
+	// S1-15: Re-encrypt any plaintext LDAP credentials from pre-038 deployments.
+	{
+		ctx := context.Background()
+		changed, err := database.MigrateLDAPCredentials(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("startup: LDAP credential migration failed (non-fatal; credentials remain plaintext until re-saved)")
+		} else if changed {
+			log.Info().Msg("startup: LDAP credentials re-encrypted at rest (migration 038)")
+		}
+	}
+
+	// S1-16: Re-encrypt any plaintext BMC/power_provider credentials from pre-039 deployments.
+	{
+		ctx := context.Background()
+		changed, err := database.MigrateBMCCredentials(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("startup: BMC credential migration failed (non-fatal; credentials remain plaintext until re-saved)")
+		} else if changed {
+			log.Info().Msg("startup: BMC/power_provider credentials re-encrypted at rest (migration 039)")
+		}
+	}
 
 	// Graceful shutdown on SIGINT / SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
