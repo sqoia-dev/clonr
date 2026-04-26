@@ -98,7 +98,7 @@ func TestBaseImage_List(t *testing.T) {
 		}
 	}
 
-	images, err := d.ListBaseImages(ctx, "")
+	images, err := d.ListBaseImages(ctx, "", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestBaseImage_List(t *testing.T) {
 		t.Errorf("count: got %d want 3", len(images))
 	}
 
-	filtered, err := d.ListBaseImages(ctx, string(api.ImageStatusBuilding))
+	filtered, err := d.ListBaseImages(ctx, string(api.ImageStatusBuilding), "")
 	if err != nil {
 		t.Fatalf("list filtered: %v", err)
 	}
