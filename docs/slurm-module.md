@@ -21,6 +21,13 @@ everything Slurm-related in clustr.
 
 ## 1. Overview
 
+> **User accounts required before jobs will run.** The Slurm daemon users
+> (`slurm`, `munge`) are created automatically by the package installer. Human
+> users who actually submit jobs must be provisioned on every node with
+> consistent UIDs and GIDs before `srun` will work. See
+> [docs/user-management.md](user-management.md) for the three approaches (local
+> sysaccounts, clustr LDAP, external LDAP) and a full smoke test.
+
 The clustr Slurm module automates the operational chores that make a Slurm
 cluster painful to maintain at scale:
 
@@ -473,6 +480,9 @@ Before attempting job submission, verify all of the following:
 - [ ] Controller node: `systemctl status slurmctld` shows `active (running)`
 - [ ] Worker nodes: `systemctl status slurmd` shows `active (running)`
 - [ ] Munge authentication works: `munge -n | unmunge` returns `STATUS: Success (0)` on every node
+- [ ] Human users are provisioned on all nodes with consistent UIDs/GIDs — see [docs/user-management.md](user-management.md). For a quick first test, run the smoke test below as `root` (root always exists on all nodes); switch to a real user for production validation.
+
+**Note on the smoke test below:** Running `srun hostname` as `root` from the controller is sufficient to verify that Slurm, munge, and the network are functioning. It does not validate user provisioning. After confirming the cluster is functional as root, follow [docs/user-management.md §6](user-management.md#6-smoke-test--submit-a-job-as-alice) to run the same job as a real user (`alice`) and validate the full UID mapping pipeline.
 
 ### Run the smoke test
 

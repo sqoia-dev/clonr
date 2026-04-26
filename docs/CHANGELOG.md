@@ -2,6 +2,25 @@
 
 ---
 
+## Docs: user management guide (2026-04-25)
+
+Added `docs/user-management.md` covering the two-category split (system daemon users vs.
+human users), three provisioning approaches (local sysaccounts, clustr LDAP, external LDAP),
+a full alice smoke test, and Slurm-specific notes (cgroup.conf, slurmdbd accounting, NFS home
+directories).
+
+Updated `docs/slurm-module.md` to add an explicit dependency callout at §1 and a note in the
+§7 smoke test prerequisites explaining that running as root is valid for first-pass verification
+but user provisioning is required for real workloads.
+
+Updated `docs/install.md` to add §10 (Provisioning Human User Accounts) and a link in See Also.
+
+Updated `README.md` Quick Start Step 8 to clarify that the root smoke test bypasses user
+provisioning, explain why that is acceptable for initial verification, and direct operators to
+user-management.md for next steps.
+
+---
+
 ## Turnkey verification Round 7 — od fix + Slurm user creation docs (2026-04-25)
 
 ### Problem 1: `od: not found` in deploy initramfs — SSH password generation fails

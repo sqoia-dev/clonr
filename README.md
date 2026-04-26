@@ -387,6 +387,8 @@ sinfo                # Expected: batch partition with slurm-compute in idle stat
 
 ### Step 8 — Submit the smoke test job
 
+The test below runs as `root`. This is sufficient to verify that Slurm, munge, and networking are working correctly. Root exists on every node by definition, so it bypasses the user provisioning requirement — which is exactly what you want for a first-pass verification before dealing with user accounts.
+
 ```bash
 # From the controller node (SSH in first):
 ssh root@10.99.0.100
@@ -415,6 +417,8 @@ PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
 batch*       up   infinite      1   idle slurm-compute
 ```
 
+**Next step — provision real users:** The test above runs jobs as root, which is not appropriate for production use. For real workloads you need human user accounts (`alice`, `bob`, etc.) provisioned on every node with consistent UIDs and GIDs. See **[docs/user-management.md](docs/user-management.md)** for the three approaches and a smoke test that submits a job as a real user.
+
 ---
 
 ### Troubleshooting the smoke test
@@ -425,8 +429,10 @@ batch*       up   infinite      1   idle slurm-compute
 | `munge -n \| unmunge` fails | Key mismatch or munge not running | Reimage both nodes so they get the same munge key from clustr. |
 | `sinfo` shows `down` | `slurmd` not reaching controller | Check `SlurmctldHost` in `/etc/slurm/slurm.conf` matches the actual controller hostname. Open port 6817-6818/tcp on any firewall. |
 | `srun` hangs | Controller unreachable from worker | `ping slurm-controller` from the worker. Verify both nodes are on the same provisioning network. |
+| `srun` fails for non-root users | User not provisioned on all nodes | See [docs/user-management.md](docs/user-management.md). Verify `id <username>` returns the same UID on every node. |
 
 For full Slurm operator docs, see [docs/slurm-module.md](docs/slurm-module.md).
+For user provisioning, see [docs/user-management.md](docs/user-management.md).
 
 ---
 

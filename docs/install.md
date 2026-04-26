@@ -791,10 +791,24 @@ This creates a `group_reimage_job` that fans out individual reimage requests wit
 
 ---
 
+## 10. Provisioning Human User Accounts
+
+After your first nodes are deployed, your cluster has system daemon accounts (`slurm`, `munge`, `root`) but no human users. Before cluster users can submit Slurm jobs, they must exist on every node with consistent UIDs and GIDs.
+
+clustr provides two built-in mechanisms:
+
+- **sysaccounts module** — Injects local `/etc/passwd` entries at deploy time. Best for lab clusters with a small, stable user list. No external dependencies.
+- **LDAP module** — Runs `slapd` on the clustr-serverd host; deployed nodes authenticate via `sssd`. Best for multi-user production clusters where users are added or removed regularly.
+
+See **[docs/user-management.md](user-management.md)** for the full operator guide, including example API calls, a validation procedure, and a Slurm smoke test that runs as a real user.
+
+---
+
 ## See Also
 
 - [docs/rbac.md](rbac.md) — Role model, group-scoped operators, user management
 - [docs/upgrade.md](upgrade.md) — Upgrade procedure, migration notes, rollback
 - [docs/tls-provisioning.md](tls-provisioning.md) — TLS setup with Caddy, initramfs HTTPS configuration
 - [docs/slurm-module.md](slurm-module.md) — Slurm module operator guide: enable, configure, first job
+- [docs/user-management.md](user-management.md) — Human user provisioning: sysaccounts, LDAP, smoke test
 - [README.md](../README.md) — Quick Start and architecture overview
