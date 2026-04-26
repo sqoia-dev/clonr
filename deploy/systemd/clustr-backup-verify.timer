@@ -1,0 +1,17 @@
+[Unit]
+Description=clustr weekly backup verification timer — runs every Sunday at 03:00
+# Pairs with the daily clustr-backup.timer (02:00). Running 1h after backup
+# ensures the most recent backup has been written before verification starts.
+Requires=clustr-backup-verify.service
+
+[Timer]
+# Fire every Sunday at 03:00 local time.
+OnCalendar=Sun *-*-* 03:00:00
+# Allow up to 5 minutes of drift — fine for a weekly health check.
+AccuracySec=5m
+# If the system was off during the scheduled window, run on next boot.
+Persistent=true
+Unit=clustr-backup-verify.service
+
+[Install]
+WantedBy=timers.target

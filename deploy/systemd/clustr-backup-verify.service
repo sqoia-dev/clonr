@@ -1,0 +1,29 @@
+[Unit]
+Description=clustr backup verification — restore test against most recent DB backup
+# Runs after the backup timer to ensure a fresh backup is available.
+After=local-fs.target clustr-backup.service
+# Do not block boot if this fails — it is a health-check, not a critical service.
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/clustr-backup-verify.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clustr-backup-verify
+
+# Configuration overrides for non-default deployments.
+Environment=CLUSTR_BACKUP_DIR=/var/lib/clustr/backups
+Environment=CLUSTR_SERVERD_BIN=/usr/local/bin/clustr-serverd
+# Alternate HTTP port for the ephemeral verification instance (must not conflict with production).
+Environment=CLUSTR_BACKUP_VERIFY_PORT=18080
+# Seconds to wait for /api/v1/healthz/ready before declaring failure.
+Environment=CLUSTR_BACKUP_VERIFY_WAIT=30
+
+# Give the verification run enough time to start the server and probe it.
+# 5 minutes is generous — the server starts in under 5s on normal hardware.
+TimeoutStartSec=5min
+
+# Do not restart on failure — the timer drives cadence.
+Restart=no

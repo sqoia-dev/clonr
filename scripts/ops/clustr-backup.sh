@@ -124,6 +124,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6. S4-7: Warn on captured images that are not backed up
+#
+# Images with build_method='capture' are NOT rebuildable from ISO cache —
+# they represent a live node's rootfs at a point in time. If the image blob
+# at CLUSTR_IMAGE_DIR is lost, the captured state is unrecoverable. We query
+# the DB for all ready+active captured images and emit an explicit WARNING
+# so operators know what is at risk before data loss occurs.
+#
+# This check runs even when CLUSTR_BACKUP_REMOTE is unset, because the risk
+# exists on local-only backups too (images and DB backups on the same volume).
+# ---------------------------------------------------------------------------
+CAPTURED_IMAGES=$(sqlite3 "${DB_BACKUP}" \
+    "SELECT id || ' | ' || name || ' | created_at=' || created_at \
+     FROM base_images \
+     WHERE build_method = 'capture' \
+       AND status IN ('ready', 'building', 'interrupted') \
+     ORDER BY created_at DESC;" 2>&1) || {
+    log "WARNING: Could not query captured images from backup DB (non-fatal): ${CAPTURED_IMAGES}"
+    CAPTURED_IMAGES=""
+}
+
+if [[ -n "${CAPTURED_IMAGES}" ]]; then
+    while IFS= read -r img_row; do
+        [[ -z "${img_row}" ]] && continue
+        IMG_ID="${img_row%% |*}"
+        IMG_LABEL="${img_row}"
+
+        # Check whether the image blob exists on disk. If it does, the data is
+        # present locally but is still at risk if CLUSTR_BACKUP_REMOTE is not set.
+        BLOB_PATH=$(sqlite3 "${DB_BACKUP}" \
+            "SELECT blob_path FROM base_images WHERE id = '${IMG_ID}';" 2>/dev/null || true)
+
+        if [[ -n "${BLOB_PATH}" ]] && [[ -f "${BLOB_PATH}" ]]; then
+            if [[ -z "${CLUSTR_BACKUP_REMOTE}" ]]; then
+                log "WARNING: Captured image [${IMG_LABEL}] is not rebuildable from ISO cache and is NOT backed up off-site. Set CLUSTR_BACKUP_REMOTE to protect this image."
+            else
+                log "WARNING: Captured image [${IMG_LABEL}] is not rebuildable from ISO cache. Image blob exists locally and is being synced off-site via CLUSTR_BACKUP_REMOTE."
+            fi
+        else
+            log "WARNING: Captured image [${IMG_LABEL}] is not rebuildable from ISO cache and its blob is NOT found on disk at [${BLOB_PATH:-<no blob_path recorded>}]. This image data may already be lost."
+        fi
+    done <<< "${CAPTURED_IMAGES}"
+else
+    log "No captured images found in DB — no captured-image backup risk."
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 log "Backup complete. DB backup: ${DB_BACKUP} ($(du -h "${DB_BACKUP}" | cut -f1))"
