@@ -128,7 +128,7 @@ func (m *Manager) handleEnable(w http.ResponseWriter, r *http.Request) {
 
 	// GAP-20: audit slurm module enable.
 	if m.Audit != nil {
-		actor := keyLabelFromContext(r)
+		actor := m.actorLabel(r)
 		m.Audit.Record(r.Context(), "", actor, db.AuditActionSlurmConfigChange, "slurm_module", "enable",
 			r.RemoteAddr, nil, map[string]string{"cluster_name": req.ClusterName})
 	}
@@ -211,7 +211,7 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authoredBy := keyLabelFromContext(r)
+	authoredBy := m.actorLabel(r)
 	ver, err := m.db.SlurmSaveConfigVersion(r.Context(), filename, body.Content, authoredBy, body.Message)
 	if err != nil {
 		log.Error().Err(err).Str("filename", filename).Msg("slurm: save config version failed")
@@ -379,7 +379,7 @@ func (m *Manager) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	initiatedBy := keyLabelFromContext(r)
+	initiatedBy := m.actorLabel(r)
 
 	req := PushRequest{
 		Filenames:   body.Filenames,
@@ -597,7 +597,7 @@ func (m *Manager) handleSaveScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authoredBy := keyLabelFromContext(r)
+	authoredBy := m.actorLabel(r)
 	ver, err := m.db.SlurmSaveScriptVersion(r.Context(), scriptType, body.DestPath, body.Content, authoredBy, body.Message)
 	if err != nil {
 		log.Error().Err(err).Str("script_type", scriptType).Msg("slurm: save script version failed")
@@ -722,7 +722,7 @@ func (m *Manager) handleStartBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	initiatedBy := keyLabelFromContext(r)
+	initiatedBy := m.actorLabel(r)
 	cfg := BuildConfig{
 		SlurmVersion:   body.SlurmVersion,
 		Arch:           body.Arch,
@@ -928,7 +928,7 @@ func (m *Manager) handleStartUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	initiatedBy := keyLabelFromContext(r)
+	initiatedBy := m.actorLabel(r)
 	opID, err := m.StartUpgrade(r.Context(), req, initiatedBy)
 	if err != nil {
 		log.Error().Err(err).Msg("slurm: start upgrade failed")
@@ -1059,7 +1059,7 @@ func (m *Manager) handleSlurmRoles(w http.ResponseWriter, r *http.Request) {
 // nodes using reconfigure as the apply action. Returns a push operation ID
 // that callers can poll via GET /slurm/push-ops/{op_id}.
 func (m *Manager) handleSlurmSync(w http.ResponseWriter, r *http.Request) {
-	initiatedBy := keyLabelFromContext(r)
+	initiatedBy := m.actorLabel(r)
 
 	req := PushRequest{
 		ApplyAction: "reconfigure",
@@ -1161,14 +1161,13 @@ func scriptRowToAPI(row db.SlurmScriptRow) api.SlurmScriptFile {
 	}
 }
 
-// keyLabelFromContext extracts an API key label from the request context.
-// Falls back to "unknown" when no label is set.
-func keyLabelFromContext(r *http.Request) string {
-	type keyLabelKey struct{}
-	if v := r.Context().Value(keyLabelKey{}); v != nil {
-		if s, ok := v.(string); ok {
-			return s
-		}
+// actorLabel returns a human-readable label for the request actor.
+// Uses the injected GetActorLabel closure when available (set by server.go
+// after the auth middleware is fully wired) so that it reads from the correct
+// context key. Falls back to "unknown" when the closure is not yet set.
+func (m *Manager) actorLabel(r *http.Request) string {
+	if m.GetActorLabel != nil {
+		return m.GetActorLabel(r)
 	}
 	return "unknown"
 }
