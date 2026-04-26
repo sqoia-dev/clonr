@@ -1,0 +1,22 @@
+---
+# clustr Ansible top-level playbook
+#
+# Usage:
+#   ansible-playbook -i inventory.ini deploy/ansible/site.yml
+#   ansible-playbook -i inventory.ini deploy/ansible/site.yml --check    # dry-run
+#   ansible-playbook -i inventory.ini deploy/ansible/site.yml --tags firewall
+#
+# Inventory example (inventory.ini):
+#   [clustr_servers]
+#   provisioner.hpc.example.com ansible_user=root
+#
+# Override variables in group_vars/ or host_vars/ — see roles/clustr/defaults/main.yml.
+# Store secrets (clustr_secret_key, clustr_session_secret) in Ansible Vault.
+
+- name: Install and configure clustr provisioning server
+  hosts: clustr_servers
+  become: true
+
+  roles:
+    - role: clustr
+      tags: [always]

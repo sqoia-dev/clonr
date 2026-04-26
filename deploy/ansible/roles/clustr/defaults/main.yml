@@ -1,0 +1,116 @@
+---
+# clustr Ansible role — default variables
+#
+# Override any of these in your inventory, group_vars, or host_vars.
+# Secrets (clustr_secret_key, clustr_session_secret) MUST be overridden and
+# should be stored in Ansible Vault — never in plaintext.
+
+# ─── Release selection ─────────────────────────────────────────────────────────
+
+# Version to install.  "latest" queries the GitHub Releases API at play time.
+# Pin to a specific tag (e.g. "v1.0.0") for reproducible installs.
+clustr_version: "latest"
+
+# GitHub organisation/repo for release downloads.
+clustr_github_repo: "sqoia-dev/clustr"
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+
+clustr_bin_dir: "/usr/local/bin"
+clustr_data_dir: "/var/lib/clustr"
+clustr_config_dir: "/etc/clustr"
+
+clustr_db_path: "{{ clustr_data_dir }}/db/clustr.db"
+clustr_image_dir: "{{ clustr_data_dir }}/images"
+clustr_boot_dir: "{{ clustr_data_dir }}/boot"
+clustr_tftp_dir: "{{ clustr_data_dir }}/tftpboot"
+clustr_log_archive_dir: "{{ clustr_data_dir }}/log-archive"
+clustr_tmp_dir: "{{ clustr_data_dir }}/tmp"
+clustr_backup_dir: "{{ clustr_data_dir }}/backups"
+clustr_iso_cache_dir: "{{ clustr_data_dir }}/iso-cache"
+
+# ─── Network / listen ─────────────────────────────────────────────────────────
+
+# API listen address.  Use the provisioning interface IP to avoid exposing
+# the API on the management LAN or the internet.
+clustr_listen_addr: "10.99.0.1:8080"
+
+# ─── PXE / DHCP / TFTP ────────────────────────────────────────────────────────
+
+clustr_pxe_enabled: true
+
+# Provisioning network interface (DHCP/TFTP binds here).
+# Must be set to the actual interface name on the target host.
+clustr_pxe_interface: "eth1"
+
+# DHCP pool for nodes without a static IP assigned in clustr.
+clustr_pxe_range: "10.99.0.100-10.99.0.200"
+
+# IP advertised as next-server in DHCP offers.
+# Nodes download initramfs from this address over HTTP.
+clustr_pxe_server_ip: "10.99.0.1"
+
+# Provisioning subnet prefix length (DHCP Option 1).
+clustr_pxe_subnet_cidr: 24
+
+# ─── Security ─────────────────────────────────────────────────────────────────
+
+# AES-256-GCM key for encrypting BMC and LDAP credentials at rest.
+# REQUIRED — server refuses to start if unset outside dev mode.
+# Generate: openssl rand -hex 32
+# MUST be overridden in Ansible Vault.
+clustr_secret_key: ""
+
+# HMAC key for browser session tokens.
+# If unset the server generates a random key at startup and invalidates all
+# sessions on every restart.
+# Generate: openssl rand -hex 64
+# MUST be overridden in Ansible Vault.
+clustr_session_secret: ""
+
+# Set to "1" to mark session cookies as Secure.
+# Required when clustr is behind a TLS-terminating reverse proxy.
+clustr_session_secure: "0"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+clustr_log_level: "info"
+clustr_log_retention: "168h"            # 7 days
+clustr_log_max_rows_per_node: 50000
+
+# ─── Deploy tuning ────────────────────────────────────────────────────────────
+
+clustr_verify_timeout: "5m"
+clustr_flip_concurrency: 5
+clustr_allow_private_urls: false
+
+# ─── Firewall ─────────────────────────────────────────────────────────────────
+
+# Ports to open on the provisioning interface.
+# These are opened via firewalld (RHEL/Rocky) or ufw (Ubuntu/Debian).
+clustr_firewall_ports:
+  - { port: 8080, proto: tcp, description: "clustr API + web UI" }
+  - { port: 67,   proto: udp, description: "DHCP server" }
+  - { port: 69,   proto: udp, description: "TFTP server" }
+
+# Interface to apply firewall rules to.  Defaults to the PXE interface.
+# Set to empty string to apply rules to the default zone instead.
+clustr_firewall_interface: "{{ clustr_pxe_interface }}"
+
+# ─── Ops scripts ──────────────────────────────────────────────────────────────
+
+# Install backup + restore-verify scripts and systemd timer units.
+clustr_install_backup: true
+
+# Backup timer schedule (systemd calendar expression).
+clustr_backup_schedule: "daily"
+
+# Restore-verify timer schedule — runs after the backup window.
+clustr_backup_verify_schedule: "Sun *-*-* 03:00:00"
+
+# Optional off-site rsync destination for backups.
+# Format: user@host:/path  — unset means local-only backup.
+clustr_backup_remote: ""
+
+# Port used by the ephemeral restore-verify clustr-serverd instance.
+clustr_backup_verify_port: 18080

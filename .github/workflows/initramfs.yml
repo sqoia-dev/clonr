@@ -5,9 +5,36 @@ on:
     tags:
       - "v*"
 
+# S6-9 — Gate initramfs artifact on ci.yml success.
+#
+# The initramfs binary is the most sensitive release artifact: it runs as root
+# on every node during a deploy.  Shipping a broken or test-failing binary
+# would affect every node that PXE-boots on next reimage.
+#
+# Combined with release.yml's needs: [lab-validate], the full gate chain is:
+#   go test passes (ci.yml / test job)
+#   → initramfs built (this workflow)
+#   → lab-validate passes (vm201 BIOS + vm202 UEFI)
+#   → release artifacts published (release.yml)
+#
+# Implementation: this workflow calls ci.yml as a reusable workflow and declares
+# needs: [ci] on the build job.  The ci job must complete successfully before
+# the initramfs is built and attached to the release.
+
 jobs:
+  # ─── CI gate ─────────────────────────────────────────────────────────────────
+  ci:
+    name: CI gate (lint + test + build + security)
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ─── Build initramfs ─────────────────────────────────────────────────────────
   build-initramfs:
     name: Build initramfs image
+    # Only execute after the full CI suite (lint, test, build, gosec, govulncheck,
+    # trivy) is green.  This means no initramfs is attached to a release if any
+    # test or security check fails.
+    needs: [ci]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -66,6 +66,83 @@ and will be removed in **v1.1**. All endpoints returning `NodeConfig` now emit a
 
 ## Sprint 6 — Release Readiness (2026-07-06 → 2026-07-19)
 
+### CI / Build Gates
+
+- **[S6-9] `initramfs.yml` gates on `ci.yml` success**
+  `initramfs.yml` now calls `ci.yml` via `workflow_call` and declares
+  `needs: [ci]` on the build job. The initramfs artifact is built and attached
+  to a release only after lint, tests, build, gosec, govulncheck, and trivy all
+  pass. Combined with `release.yml`'s existing `needs: [lab-validate]`, the
+  complete gate chain is: `go test` passes → initramfs built → lab validation
+  green → release artifacts published. No initramfs binary ships without green
+  CI and green lab validation.
+
+- **[S6-1] Reproducible iPXE build from source in CI** (SEC-P0-3)
+  New `.github/workflows/ipxe-build.yml` workflow pins iPXE at `v1.21.1`,
+  builds `ipxe.efi` from source with `EXTRA_CFLAGS="-DCOLOUR_CMD -DIMAGE_PNG
+  -DCONSOLE_CMD"`, computes SHA-256, and compares it to the committed value in
+  `deploy/pxe/ipxe.efi.sha256`. A mismatch fails the build and blocks any
+  release. On tag push, the CI-built binary and its SHA-256 sidecar are attached
+  to the GitHub Release so operators can verify the binary they downloaded.
+  `deploy/pxe/README.md` updated with full provenance record: version tag,
+  build flags, SHA-256, and CI verification reference.
+  `internal/bootassets/assets.go` updated with v1.21.1 tag and CI gate note.
+  **Closes SEC-P0-3 from ops-review.**
+
+### Packaging
+
+- **[S6-2] Docker Compose install package** (primary packaging — Decision D7)
+  `deploy/docker-compose/docker-compose.yml` — production-ready Compose file
+  with `network_mode: host` (required for DHCP/TFTP broadcast binding),
+  volume mount for `/var/lib/clustr`, `/dev/kvm` pass-through, capability grants
+  (`NET_BIND_SERVICE`, `SYS_ADMIN`, `SYS_CHROOT`, `MKNOD`), cgroup device rule
+  for loop block devices (`b 7:* rwm`), healthcheck via the S1-10 readiness
+  endpoint, and an 8 GB memory ceiling.
+  `deploy/docker-compose/.env.example` — fully documented template for all
+  `CLUSTR_*` environment variables with inline comments and generation commands.
+  README "Quick Start" section rewritten to use Docker Compose as the primary
+  install path (creates dirs, generates secrets, fetches the Compose file, runs
+  `docker compose up -d`) replacing the obsolete bare `docker run` one-liner.
+
+- **[S6-3] Ansible role for bare-metal install** (secondary packaging — Decision D7)
+  `deploy/ansible/` role covering:
+  - Version resolution (`latest` queries GitHub Releases API; specific tag pins for reproducibility)
+  - SHA-256 verified binary download and atomic swap
+  - Data directory creation (idempotent `file:` tasks)
+  - `secrets.env` written with `no_log: true` (prevents secrets in Ansible output)
+  - `clustr.env` from `roles/clustr/templates/clustr.env.j2` (all variables templated)
+  - systemd unit from `roles/clustr/templates/clustr-serverd.service.j2`
+  - Backup + restore-verify script download and timer enablement
+  - Firewall rules via `firewalld` (Rocky/RHEL) or `ufw` (Ubuntu/Debian)
+  - Restart guard: checks for active reimages before triggering a handler-driven restart
+  - Post-install readiness endpoint smoke test
+  - Tags: `install`, `config`, `systemd`, `firewall`
+  `deploy/ansible/site.yml` — example top-level playbook.
+  `deploy/ansible/README.md` — usage, variable reference, idempotency guarantees.
+
+### Documentation
+
+- **[S6-4] `docs/upgrade.md`** — operator upgrade guide
+  Covers: how migrations work (automatic at startup, transactional, fail-closed),
+  Docker Compose and bare-metal upgrade procedures with checksum verification,
+  which env vars invalidate sessions on rotation (`CLUSTR_SESSION_SECRET` logs
+  out all users; `CLUSTR_SECRET_KEY` transparently re-encrypts credentials —
+  no session impact), how to confirm a successful upgrade (version endpoint,
+  readiness checks, migration log output), and full rollback procedure (stop,
+  restore DB from S4-8 verified backup, restore old binary, restart, verify).
+  Linked from README and `docs/install.md`.
+
+- **[S6-5] `docs/tls-provisioning.md`** — TLS provisioning guide (HA-5)
+  Covers: when TLS is required (threat model decision table), Caddy as the
+  recommended terminator (install, Caddyfile with header hardening, Secure
+  cookie activation, firewall lockdown of port 8080, internal PKI options via
+  DNS-01 challenge or manual cert), configuring `CLUSTR_SERVER` in the iPXE
+  initramfs boot script for HTTPS, injecting a private CA cert into initramfs,
+  physically-isolated network exception (conditions under which HTTP is
+  acceptable: L2 isolation, no routing, restricted physical access), and
+  nginx/Traefik/HAProxy alternatives with example configs.
+  `docs/install.md` §2 now links to this document. Linked from README.
+
 ### Schema Cleanup
 
 - **[S6-6] Drop `node_configs.group_id` column** (migration 048)

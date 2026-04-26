@@ -1,0 +1,15 @@
+---
+# OS-family conditional variables.
+# These are merged at runtime — do not override these in inventory.
+
+# Map ansible_os_family → package manager and firewall tool.
+_clustr_os_vars:
+  RedHat:
+    firewall_tool: firewalld
+    pkg_manager: dnf
+  Debian:
+    firewall_tool: ufw
+    pkg_manager: apt
+
+# Resolved values (used in tasks).
+clustr_firewall_tool: "{{ _clustr_os_vars[ansible_os_family]['firewall_tool'] }}"

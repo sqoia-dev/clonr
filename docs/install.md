@@ -119,7 +119,7 @@ firewall-cmd --permanent --add-port=8080/tcp
 firewall-cmd --reload
 ```
 
-**Security note:** Do not expose port 8080 to the management LAN or the internet unless you are using a TLS-terminating reverse proxy (Caddy recommended). The provisioning API carries BMC credentials and image blobs. See `docs/tls-provisioning.md` (Sprint 6) for the Caddy setup.
+**Security note:** Do not expose port 8080 to the management LAN or the internet unless you are using a TLS-terminating reverse proxy (Caddy recommended). The provisioning API carries BMC credentials and image blobs. See [docs/tls-provisioning.md](tls-provisioning.md) for the Caddy setup.
 
 ---
 
@@ -576,6 +576,7 @@ If the node is reachable and running the expected OS, the smoke test passes.
 
 ## See Also
 
-- `docs/rbac.md` — Role model, group-scoped operators, user management
-- `docs/upgrade.md` — Upgrade procedure, migration notes, rollback (Sprint 6)
-- `README.md` — Quick Start and architecture overview
+- [docs/rbac.md](rbac.md) — Role model, group-scoped operators, user management
+- [docs/upgrade.md](upgrade.md) — Upgrade procedure, migration notes, rollback
+- [docs/tls-provisioning.md](tls-provisioning.md) — TLS setup with Caddy, initramfs HTTPS configuration
+- [README.md](../README.md) — Quick Start and architecture overview

@@ -10,23 +10,59 @@ The system has two binaries: `clustr-serverd` (the management server) and `clust
 
 ## Quick Start
 
-### 1. Start the server
+The fastest path to a running clustr instance is Docker Compose. For production HPC environments that need DHCP/TFTP on the host network namespace, or for operators who prefer bare-metal installs, see [docs/install.md](docs/install.md).
+
+### 1. Create directories and secrets
 
 ```bash
-# Using Docker (recommended):
-docker run -d \
-  -p 8080:8080 \
-  -v /var/lib/clustr:/var/lib/clustr \
-  -e CLUSTR_AUTH_TOKEN=mytoken \
-  ghcr.io/sqoia-dev/clustr-server
+# Data directories
+mkdir -p /var/lib/clustr/{db,images,boot,tftpboot,iso-cache,backups,log-archive,tmp}
+chmod 700 /var/lib/clustr
 
-# Or build and run directly:
-make server
-CLUSTR_AUTH_TOKEN=mytoken ./bin/clustr-serverd
+# Config directory
+mkdir -p /etc/clustr && chmod 700 /etc/clustr
 
-# With built-in PXE server enabled:
-CLUSTR_AUTH_TOKEN=mytoken ./bin/clustr-serverd --pxe
+# Generate secrets (never commit these)
+echo "CLUSTR_SECRET_KEY=$(openssl rand -hex 32)"     > /etc/clustr/secrets.env
+echo "CLUSTR_SESSION_SECRET=$(openssl rand -hex 64)" >> /etc/clustr/secrets.env
+chmod 400 /etc/clustr/secrets.env
 ```
+
+### 2. Create clustr.env
+
+```bash
+# Download the example and edit for your provisioning interface:
+curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/.env.example \
+  -o /etc/clustr/clustr.env
+# Edit CLUSTR_LISTEN_ADDR, CLUSTR_PXE_INTERFACE, CLUSTR_PXE_SERVER_IP
+# to match your provisioning network interface.
+chmod 600 /etc/clustr/clustr.env
+```
+
+### 3. Start the server
+
+```bash
+# Download the Compose file and start:
+curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/docker-compose.yml \
+  -o /etc/clustr/docker-compose.yml
+
+cd /etc/clustr
+docker compose up -d
+
+# Capture the one-time bootstrap admin API key printed at first startup:
+docker compose logs -f clustr 2>&1 | grep -A2 "Bootstrap admin"
+```
+
+### 4. Verify the server is healthy
+
+```bash
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
+# All checks should be "ok"
+```
+
+Open `http://10.99.0.1:8080` in a browser and log in with `clustr` / `clustr`. You will be prompted to change the password immediately.
+
+For a full walk-through — including image builds, node registration, and the first-deploy smoke test — see [docs/install.md](docs/install.md).
 
 ### 2. Pull an image
 
@@ -900,6 +936,10 @@ Binaries land in `bin/`:
 ## Installation
 
 For a production install — covering Docker Compose (primary), bare-metal / Ansible (secondary), env var reference, bootstrap admin step, and first-deploy smoke test — see **[docs/install.md](docs/install.md)**.
+
+- **Upgrade procedure:** [docs/upgrade.md](docs/upgrade.md) — how migrations work, which env vars invalidate sessions on rotation, rollback procedure
+- **TLS setup:** [docs/tls-provisioning.md](docs/tls-provisioning.md) — Caddy TLS termination, initramfs HTTPS configuration, air-gapped guidance
+- **RBAC:** [docs/rbac.md](docs/rbac.md) — role model, group-scoped operators, bootstrap admin flow
 
 ---
 

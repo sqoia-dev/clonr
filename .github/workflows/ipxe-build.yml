@@ -1,0 +1,192 @@
+name: iPXE reproducible build
+
+# S6-1 — Reproducible iPXE build from source in CI (SEC-P0-3)
+#
+# Problem: the iPXE binary shipped in deploy/pxe/ipxe.efi was built outside CI
+# with no verifiable provenance.  Any operator accepting this binary is trusting
+# a pre-built blob.  For a tool that runs before the OS exists on a node, that
+# is an unacceptable security posture.
+#
+# Solution: this workflow pins to a specific upstream iPXE git tag, builds
+# ipxe.efi from source, computes its SHA-256, and compares it to the value
+# committed in deploy/pxe/ipxe.efi.sha256.  A mismatch fails the build.
+#
+# On tag push: the rebuilt binary is attached to the GitHub Release alongside
+# its SHA-256 checksum, so operators can verify the binary they downloaded.
+#
+# The committed binary (deploy/pxe/ipxe.efi) is kept as the canonical artifact
+# for historical reasons and for operators who want to embed it at build time
+# (internal/bootassets/ipxe.efi is the Go embed source).  When a new iPXE
+# version is needed, update IPXE_TAG below, rebuild locally per
+# deploy/pxe/BUILD.md, commit the new binary + sha256, then let this workflow
+# confirm the committed hash matches a fresh CI build.
+#
+# Feature flags — match deploy/pxe/BUILD.md exactly:
+#   COLOUR_CMD   cpair command (boot menu colour coding)
+#   CONSOLE_CMD  console command (output console selection)
+#   IMAGE_PNG    PNG image loading (logo/splash)
+#
+# iPXE tag pinned here must match the version recorded in:
+#   deploy/pxe/README.md       (version + build flags)
+#   internal/bootassets/assets.go (SHA-256 comment)
+#   deploy/pxe/ipxe.efi.sha256    (authoritative hash)
+
+on:
+  # Run on every v* tag push so release artifacts are always verified.
+  # Also runs when the binary or sha256 change on main or in a PR.
+  # Path filters do not apply to tag pushes — tag events always run this workflow.
+  push:
+    tags:
+      - "v*"
+    branches: [main]
+    paths:
+      - "deploy/pxe/ipxe.efi"
+      - "deploy/pxe/ipxe.efi.sha256"
+      - "internal/bootassets/ipxe.efi"
+      - ".github/workflows/ipxe-build.yml"
+  pull_request:
+    paths:
+      - "deploy/pxe/ipxe.efi"
+      - "deploy/pxe/ipxe.efi.sha256"
+      - "internal/bootassets/ipxe.efi"
+      - ".github/workflows/ipxe-build.yml"
+  workflow_dispatch:
+
+env:
+  # Pin to a specific upstream iPXE release tag for reproducibility.
+  # Update this value (and rebuild the committed binary + sha256) when
+  # upgrading iPXE.  The tag must exist at https://github.com/ipxe/ipxe/tags.
+  IPXE_TAG: v1.21.1
+  # Feature flags for the build — must match deploy/pxe/BUILD.md.
+  IPXE_EXTRA_CFLAGS: "-DCOLOUR_CMD -DIMAGE_PNG -DCONSOLE_CMD"
+
+jobs:
+  build-and-verify:
+    name: Build iPXE ${{ env.IPXE_TAG }} and verify SHA-256
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout clustr
+        uses: actions/checkout@v4
+
+      # ── Install iPXE build dependencies ──────────────────────────────────────
+      # All packages are version-pinned by Ubuntu 22.04 universe.  If a dep
+      # changes its behaviour between runs, the sha256 comparison below catches it.
+      - name: Install iPXE build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            gcc \
+            binutils \
+            make \
+            perl \
+            liblzma-dev \
+            mtools \
+            xorriso \
+            gcc-x86-64-linux-gnu \
+            isolinux
+
+      # ── Clone iPXE at the pinned tag ─────────────────────────────────────────
+      # --depth 1 keeps the checkout fast; the tag is the sole reference needed.
+      # --branch accepts tag names as well as branch names with git >= 2.x.
+      - name: Clone iPXE at ${{ env.IPXE_TAG }}
+        run: |
+          git clone \
+            --depth 1 \
+            --branch "$IPXE_TAG" \
+            https://github.com/ipxe/ipxe.git /tmp/ipxe
+          echo "iPXE commit: $(git -C /tmp/ipxe rev-parse HEAD)"
+
+      # ── Build ipxe.efi ───────────────────────────────────────────────────────
+      - name: Build ipxe.efi (x86-64 UEFI)
+        run: |
+          make -C /tmp/ipxe/src \
+            bin-x86_64-efi/ipxe.efi \
+            EXTRA_CFLAGS="$IPXE_EXTRA_CFLAGS" \
+            -j"$(nproc)"
+
+      # ── Compute SHA-256 of the freshly-built binary ──────────────────────────
+      - name: Compute SHA-256 of built binary
+        id: built_sha
+        run: |
+          BUILT_SHA=$(sha256sum /tmp/ipxe/src/bin-x86_64-efi/ipxe.efi | awk '{print $1}')
+          echo "sha=${BUILT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Built SHA-256: ${BUILT_SHA}"
+
+      # ── Read the committed SHA-256 ───────────────────────────────────────────
+      - name: Read committed SHA-256
+        id: committed_sha
+        run: |
+          COMMITTED_SHA=$(awk '{print $1}' deploy/pxe/ipxe.efi.sha256)
+          echo "sha=${COMMITTED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Committed SHA-256: ${COMMITTED_SHA}"
+
+      # ── Compare: fail loudly on mismatch ─────────────────────────────────────
+      # A mismatch means either:
+      #   a) the committed binary does not match the stated iPXE tag/flags, or
+      #   b) the committed sha256 file is wrong.
+      # Either case is a supply-chain integrity failure and must block the build.
+      - name: Verify SHA-256 matches committed value
+        run: |
+          BUILT="${{ steps.built_sha.outputs.sha }}"
+          COMMITTED="${{ steps.committed_sha.outputs.sha }}"
+          echo "Built:     ${BUILT}"
+          echo "Committed: ${COMMITTED}"
+          if [ "${BUILT}" != "${COMMITTED}" ]; then
+            echo ""
+            echo "FATAL: iPXE SHA-256 mismatch."
+            echo "The committed binary does not match a fresh build at tag ${IPXE_TAG}"
+            echo "with flags: ${IPXE_EXTRA_CFLAGS}"
+            echo ""
+            echo "To fix: rebuild ipxe.efi per deploy/pxe/BUILD.md, copy to"
+            echo "  deploy/pxe/ipxe.efi and internal/bootassets/ipxe.efi,"
+            echo "  update deploy/pxe/ipxe.efi.sha256, and commit."
+            exit 1
+          fi
+          echo "SHA-256 verified: ${BUILT}"
+
+      # ── Write SHA-256 sidecar for the release artifact ───────────────────────
+      - name: Write release sha256 sidecar
+        run: |
+          sha256sum /tmp/ipxe/src/bin-x86_64-efi/ipxe.efi \
+            | sed 's|/tmp/ipxe/src/bin-x86_64-efi/||' \
+            > /tmp/ipxe.efi.sha256
+          echo "Sidecar contents:"
+          cat /tmp/ipxe.efi.sha256
+
+      # ── Upload built binary as a workflow artifact ────────────────────────────
+      # Available for download from the Actions run; attached to the Release
+      # in the next step (tag-push only).
+      - name: Upload built ipxe.efi as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipxe-efi-${{ env.IPXE_TAG }}
+          path: |
+            /tmp/ipxe/src/bin-x86_64-efi/ipxe.efi
+            /tmp/ipxe.efi.sha256
+          retention-days: 90
+
+      # ── Attach to GitHub Release (tag push only) ──────────────────────────────
+      # The release notes include the iPXE version, feature flags, and the
+      # SHA-256 so operators can verify the binary they download.
+      - name: Attach iPXE binary to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          append_body: true
+          body: |
+
+            ## iPXE UEFI Binary
+
+            **Version:** `${{ env.IPXE_TAG }}`
+            **Feature flags:** `${{ env.IPXE_EXTRA_CFLAGS }}`
+            **SHA-256:** `${{ steps.built_sha.outputs.sha }}`
+
+            Built from source in CI. Verify before use:
+            ```sh
+            sha256sum ipxe.efi
+            # Must match: ${{ steps.built_sha.outputs.sha }}
+            ```
+          files: |
+            /tmp/ipxe/src/bin-x86_64-efi/ipxe.efi
+            /tmp/ipxe.efi.sha256

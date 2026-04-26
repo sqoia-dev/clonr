@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # workflow_call allows other workflows (initramfs.yml) to use this as a gate.
+  # S6-9: initramfs.yml declares needs: [ci] and calls this workflow so that
+  # no initramfs artifact is published unless lint, test, build, and all three
+  # security scanners pass.
+  workflow_call:
 
 jobs:
   lint:

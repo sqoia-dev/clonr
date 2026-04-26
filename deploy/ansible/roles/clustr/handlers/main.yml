@@ -1,0 +1,54 @@
+---
+# Handlers are only triggered when a task reports "changed".
+# Re-running the playbook against a live server with no config changes
+# will NOT restart the service — fully idempotent.
+
+- name: reload systemd
+  systemd:
+    daemon_reload: true
+
+- name: restart clustr-serverd
+  # Guard: do not restart during an active reimage if the admin key is known.
+  # If the API is unreachable (first install), skip the guard and restart.
+  block:
+    - name: Check for active reimages
+      uri:
+        url: "http://{{ clustr_listen_addr }}/api/v1/reimages?status=running&per_page=1"
+        headers:
+          Authorization: "Bearer {{ clustr_admin_key | default('') }}"
+        timeout: 5
+      register: _active_reimages
+      failed_when: false
+      when: clustr_admin_key is defined and clustr_admin_key | length > 0
+
+    - name: Abort restart if reimages are active
+      fail:
+        msg: >
+          clustr-serverd restart skipped: {{ _active_reimages.json.total | default(0) }}
+          active reimage(s) in progress. Re-run after deploys complete or
+          override with --extra-vars "clustr_force_restart=true".
+      when:
+        - clustr_admin_key is defined
+        - clustr_admin_key | length > 0
+        - _active_reimages.json is defined
+        - (_active_reimages.json.total | default(0)) > 0
+        - not (clustr_force_restart | default(false) | bool)
+
+    - name: Restart clustr-serverd service
+      systemd:
+        name: clustr-serverd
+        state: restarted
+        enabled: true
+  listen: restart clustr-serverd
+
+- name: enable and start clustr-serverd
+  systemd:
+    name: clustr-serverd
+    state: started
+    enabled: true
+
+- name: reload firewalld
+  service:
+    name: firewalld
+    state: reloaded
+  when: clustr_firewall_tool == 'firewalld'
