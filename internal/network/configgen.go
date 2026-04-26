@@ -58,6 +58,42 @@ var vendorTemplateFile = map[string]string{
 	"mellanox":  "templates/generic.cfg.tmpl",
 }
 
+// RenderSwitchTemplate renders a vendor-specific switch configuration template
+// using the provided SwitchConfigData. The vendor string selects the template
+// (e.g. "arista", "dell", "juniper", "cisco"); unknown or empty vendors fall
+// back to the generic template. This is the pure inner function — it has no DB
+// dependency and is used directly by tests.
+func RenderSwitchTemplate(vendor string, data SwitchConfigData) (string, error) {
+	// Set sensible defaults.
+	if data.MTU == 0 {
+		data.MTU = 9000
+	}
+	if data.EnablePFC && data.PFCPriority == 0 {
+		data.PFCPriority = 3
+	}
+
+	tmplFile, ok := vendorTemplateFile[strings.ToLower(vendor)]
+	if !ok {
+		tmplFile = "templates/generic.cfg.tmpl"
+	}
+
+	tmplContent, err := switchTemplates.ReadFile(tmplFile)
+	if err != nil {
+		return "", fmt.Errorf("network: render template %s: %w", tmplFile, err)
+	}
+
+	tmpl, err := template.New("switch").Parse(string(tmplContent))
+	if err != nil {
+		return "", fmt.Errorf("network: parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("network: execute template: %w", err)
+	}
+	return buf.String(), nil
+}
+
 // GenerateSwitchConfig renders a vendor-specific configuration for the given
 // switch ID using the provided SwitchConfigData. Returns the rendered text.
 // If the switch vendor is unknown or empty, the generic template is used.
@@ -75,35 +111,9 @@ func (m *Manager) GenerateSwitchConfig(ctx context.Context, switchID string, dat
 		data.Role = string(sw.Role)
 	}
 
-	// Set sensible defaults.
-	if data.MTU == 0 {
-		data.MTU = 9000
-	}
-	if data.EnablePFC && data.PFCPriority == 0 {
-		data.PFCPriority = 3
-	}
-
-	// Select template by vendor.
-	vendor := strings.ToLower(sw.Vendor)
-	tmplFile, ok := vendorTemplateFile[vendor]
-	if !ok {
-		tmplFile = "templates/generic.cfg.tmpl"
-	}
-
-	tmplContent, err := switchTemplates.ReadFile(tmplFile)
+	out, err := RenderSwitchTemplate(sw.Vendor, data)
 	if err != nil {
-		return "", fmt.Errorf("network: generate config: read template %s: %w", tmplFile, err)
+		return "", fmt.Errorf("network: generate config: %w", err)
 	}
-
-	tmpl, err := template.New("switch").Parse(string(tmplContent))
-	if err != nil {
-		return "", fmt.Errorf("network: generate config: parse template: %w", err)
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("network: generate config: execute template: %w", err)
-	}
-
-	return buf.String(), nil
+	return out, nil
 }
