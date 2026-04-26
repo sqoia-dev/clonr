@@ -21,6 +21,10 @@ import (
 // BootHandler serves boot assets and dynamic iPXE scripts over HTTP.
 // Boot files (vmlinuz, initramfs.img) are served from BootDir.
 // iPXE chainload files (ipxe.efi, undionly.kpxe) are served from TFTPDir.
+//
+// Post-deploy UEFI boot uses `exit` (firmware walks BootOrder to the OS NVRAM entry
+// written by FixEFIBoot), not server-side grub.efi chain-boot.
+// See docs/boot-architecture.md for the full architectural decision record.
 type BootHandler struct {
 	// BootDir is the directory containing vmlinuz and initramfs.img.
 	BootDir string
@@ -29,10 +33,6 @@ type BootHandler struct {
 	// ServerURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
 	// Used to generate the iPXE boot script.
 	ServerURL string
-	// ImageDir is the root directory where image subdirectories live.
-	// Each image subdirectory may contain a grub.efi file extracted at build time.
-	// Used by ServeGrubEFI to serve the correct bootloader for a node's image.
-	ImageDir string
 	// DB is used to look up node state by MAC for PXE boot routing.
 	// When nil the handler always returns the full boot script (safe default).
 	DB *db.DB
@@ -358,117 +358,6 @@ func (h *BootHandler) ServeInitramfs(w http.ResponseWriter, r *http.Request) {
 func (h *BootHandler) ServeIPXEEFI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/efi")
 	http.ServeContent(w, r, "ipxe.efi", time.Time{}, bytes.NewReader(bootassets.IPXEEFI))
-}
-
-// ServeGrubEFI handles GET /api/v1/boot/grub.efi.
-//
-// Serves the grubx64.efi binary extracted from the node's assigned image at
-// build time. This allows UEFI iPXE boot scripts to chain directly to the OS
-// bootloader rather than relying on `exit` and OVMF's BootOrder, which is less
-// reliable across firmware implementations (ADR-0010).
-//
-// Query param: mac — the node's primary MAC address (iPXE sets ${mac}).
-// If the MAC is missing, the node is unknown, or the image has no grub.efi
-// (e.g. BIOS-only images), 404 is returned.
-func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
-	mac := r.URL.Query().Get("mac")
-	if mac == "" || h.DB == nil || h.ImageDir == "" {
-		writeError(w, api.ErrNotFound)
-		return
-	}
-
-	nodeCfg, err := h.DB.GetNodeConfigByMAC(r.Context(), mac)
-	if err != nil {
-		if errors.Is(err, api.ErrNotFound) {
-			writeError(w, api.ErrNotFound)
-			return
-		}
-		log.Error().Err(err).Str("mac", mac).Msg("grub.efi: lookup node by MAC")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if nodeCfg.BaseImageID == "" {
-		writeError(w, api.ErrNotFound)
-		return
-	}
-
-	grubPath := filepath.Join(h.ImageDir, nodeCfg.BaseImageID, "grub.efi")
-	f, err := os.Open(grubPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Debug().
-				Str("mac", mac).
-				Str("image_id", nodeCfg.BaseImageID).
-				Str("path", grubPath).
-				Msg("grub.efi: file not present for this image (BIOS image or not yet extracted)")
-			writeError(w, api.ErrNotFound)
-			return
-		}
-		log.Error().Err(err).Str("path", grubPath).Msg("grub.efi: open file")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer f.Close()
-
-	stat, err := f.Stat()
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	log.Info().
-		Str("mac", mac).
-		Str("hostname", nodeCfg.Hostname).
-		Str("image_id", nodeCfg.BaseImageID).
-		Msg("grub.efi: serving for UEFI iPXE chain-boot")
-
-	w.Header().Set("Content-Type", "application/efi")
-	http.ServeContent(w, r, "grub.efi", stat.ModTime(), f)
-}
-
-// ServeGrubCfg handles GET /api/v1/boot/grub.cfg.
-//
-// When iPXE chainloads grub.efi via HTTP, GRUB sets $prefix to the directory
-// it was loaded from — i.e. (http,server)/api/v1/boot — and immediately
-// attempts to read ($prefix)/grub.cfg from the same HTTP server. Without this
-// endpoint GRUB drops to the grub> rescue shell.
-//
-// The stub served here uses GRUB's search command to locate the local disk
-// partition that contains the OS-installed grub.cfg, then redirects GRUB to
-// that config via configfile. This works regardless of the disk layout because
-// search scans all partitions rather than relying on a hardcoded device path.
-//
-// Module availability: the server-side grub.efi is a standalone binary built by
-// grub2-mkimage at image-creation/finalization time with the deployed OS's own
-// modules from /usr/lib/grub/x86_64-efi/. It has http + efinet + net + xfs +
-// ext2 + fat + part_gpt + search compiled in and an empty prefix (-p '') so
-// GRUB derives the HTTP base URL from the chain-load URL. The distro RPM
-// grubx64.efi is NOT used (it has a hardcoded ESP prefix and drops to rescue
-// when loaded over HTTP). No insmod is needed; all modules are compiled in.
-func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
-	const cfg = `# grub.cfg stub served by clustr — redirects to local disk config.
-# No insmod needed: grub.efi is a standalone grub2-mkimage binary with all
-# required modules compiled in (http, efinet, xfs, ext2, fat, search, etc.).
-# Modules cannot be loaded over HTTP anyway.
-
-search --file --set=root /grub2/grub.cfg
-if [ -f ($root)/grub2/grub.cfg ]; then
-    configfile ($root)/grub2/grub.cfg
-fi
-
-search --file --set=root /EFI/rocky/grub.cfg
-if [ -f ($root)/EFI/rocky/grub.cfg ]; then
-    configfile ($root)/EFI/rocky/grub.cfg
-fi
-
-echo "FATAL: clustr could not locate grub.cfg on any local partition"
-echo "Expected /grub2/grub.cfg or /EFI/rocky/grub.cfg on a GPT partition."
-echo "Check that the disk image deployed correctly and grub2-install ran."
-sleep 30
-`
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(cfg))
 }
 
 // ServeUndionlyKPXE handles GET /api/v1/boot/undionly.kpxe.

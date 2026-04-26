@@ -22,7 +22,6 @@ import (
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
-	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 	"golang.org/x/sys/unix"
 )
 
@@ -71,18 +70,6 @@ type FilesystemDeployer struct {
 	// Empty means auto-detect via findClientdBin (searches alongside os.Args[0],
 	// /opt/clustr/bin/, and /usr/local/bin/).
 	ClientdBinPath string
-
-	// ImageDir is the server-side base directory where image subdirectories live
-	// (e.g. /var/lib/clustr/images). When set together with ImageID, a standalone
-	// grub.efi is rebuilt (via grub2-mkimage with the deployed OS's own modules)
-	// and written to <ImageDir>/<ImageID>/grub.efi after UEFI bootloader
-	// installation. The standalone binary is built for HTTP chain-boot (http +
-	// efinet + xfs modules compiled in, empty prefix). Leave empty to skip.
-	ImageDir string
-
-	// ImageID is the ID of the base image being deployed. Used together with
-	// ImageDir to construct the destination path for the standalone grub.efi.
-	ImageID string
 
 	// Progress is an optional messenger that receives human-readable sub-step
 	// descriptions during Finalize. Set to a *client.ProgressReporter (or any
@@ -911,43 +898,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 		log.Info().Str("path", grubx64Path).Msg("  ✓ grubx64.efi verified post-install")
 
-		// Rebuild the server-side standalone grub.efi using grub2-mkimage with the
-		// deployed OS's own modules (from mountRoot/usr/lib/grub/x86_64-efi/).
-		//
-		// We rebuild here (post grub2-install) rather than relying solely on the
-		// binary built at image-creation time because:
-		//   1. grub2-install may have updated the module set on the deployed disk.
-		//   2. The module directory is now definitely present and version-matched.
-		//
-		// The standalone binary is built with:
-		//   - http + efinet + net modules compiled in (HTTP chain-boot capable)
-		//   - xfs + ext2 + fat compiled in (can search XFS /boot and / partitions)
-		//   - Empty prefix (-p '') so GRUB derives prefix from the HTTP URL it was
-		//     chain-loaded from; it then fetches ($prefix)/grub.cfg automatically.
-		//   - An embedded config that falls back to explicit HTTP configfile if
-		//     auto-prefix resolution does not fire.
-		//
-		// The distro RPM grubx64.efi is NOT used here: it has a hardcoded prefix
-		// pointing at the ESP (e.g. (,gpt1)/EFI/rocky) and drops straight to the
-		// grub> rescue prompt when chain-loaded over HTTP because the ESP is not
-		// visible and no grub.cfg path can be resolved.
-		reportStep("Updating server boot binary")
-		log.Info().Msg("  → Rebuilding standalone grub.efi for HTTP chain-boot...")
-		if d.ImageDir != "" && d.ImageID != "" {
-			serverGrubPath := filepath.Join(d.ImageDir, d.ImageID, "grub.efi")
-			if buildErr := isoinstaller.BuildStandaloneGrubEFI(mountRoot, serverGrubPath); buildErr != nil {
-				log.Warn().Err(buildErr).Str("dst", serverGrubPath).
-					Msg("finalize: standalone grub.efi build failed — server chain-boot binary not updated (non-fatal; next re-finalize will retry)")
-			} else {
-				if fi, statErr := os.Stat(serverGrubPath); statErr == nil {
-					log.Info().Str("dst", serverGrubPath).Int64("size", fi.Size()).
-						Msg("finalize: rebuilt standalone grub.efi for HTTP chain-boot")
-				} else {
-					log.Info().Str("dst", serverGrubPath).
-						Msg("finalize: rebuilt standalone grub.efi for HTTP chain-boot")
-				}
-			}
-		}
+		log.Info().Msg("finalize: OS bootloader installed — post-deploy UEFI boot uses firmware BootOrder (exit to firmware, see docs/boot-architecture.md)")
 
 		// Step 5: create/repair the NVRAM boot entry so OVMF knows to load our EFI
 		// binary. FixEFIBoot removes stale entries and creates a fresh one pointing

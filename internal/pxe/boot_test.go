@@ -46,8 +46,10 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 	}
 }
 
-// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a grub.efi chain URL,
-// a boot menu with reimage option, and NOT sanboot (INT 13h is a BIOS concept).
+// TestGenerateDiskBootScript_UEFI verifies UEFI nodes get a bare `exit` in the
+// :disk label body (ADR: post-deploy UEFI uses `exit`, not chain-boot — see
+// docs/boot-architecture.md), a boot menu with reimage option, and NOT sanboot
+// (INT 13h is a BIOS concept) and NOT a grub.efi chain URL (removed path).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test")
 	if err != nil {
@@ -55,9 +57,22 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 	out := string(script)
 
-	// Must chain grub.efi from the clustr server.
-	if !strings.Contains(out, "/api/v1/boot/grub.efi") {
-		t.Errorf("UEFI disk boot script must contain grub.efi chain URL; got:\n%s", out)
+	// Must NOT reference grub.efi — server-side chain-boot path has been removed.
+	if strings.Contains(out, "/api/v1/boot/grub.efi") {
+		t.Errorf("UEFI disk boot script must NOT contain grub.efi chain URL (removed path); got:\n%s", out)
+	}
+
+	// The :disk label body must be a bare `exit` so firmware walks BootOrder
+	// to the OS NVRAM entry written by FixEFIBoot.
+	diskBodyFound := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			diskBodyFound = true
+			break
+		}
+	}
+	if !diskBodyFound {
+		t.Errorf("UEFI disk boot script must contain bare 'exit' line (firmware BootOrder handoff); got:\n%s", out)
 	}
 
 	// Must NOT contain `exit 1` (breaks OVMF BootOrder routing).
@@ -75,6 +90,11 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 	}
 	if !strings.Contains(out, "reimage") {
 		t.Errorf("UEFI disk boot script missing reimage menu item; got:\n%s", out)
+	}
+
+	// Reimage URL must still reference the server (chain into iPXE endpoint).
+	if !strings.Contains(out, "http://10.0.0.1:8080/api/v1/boot/ipxe") {
+		t.Errorf("UEFI disk boot script missing reimage URL with server; got:\n%s", out)
 	}
 
 	if !strings.Contains(out, "node201") {
@@ -95,9 +115,21 @@ func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
 		t.Errorf("default (empty firmware) disk boot script must not use sanboot; got:\n%s", out)
 	}
 
-	// Default (UEFI) should have grub chain.
-	if !strings.Contains(out, "/api/v1/boot/grub.efi") {
-		t.Errorf("default (UEFI) disk boot script must contain grub.efi chain URL; got:\n%s", out)
+	// Default (UEFI) must NOT reference grub.efi — server-side chain-boot path removed.
+	if strings.Contains(out, "/api/v1/boot/grub.efi") {
+		t.Errorf("default (UEFI) disk boot script must NOT contain grub.efi chain URL (removed path); got:\n%s", out)
+	}
+
+	// Must contain bare exit for BootOrder handoff.
+	exitFound := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			exitFound = true
+			break
+		}
+	}
+	if !exitFound {
+		t.Errorf("default (UEFI) disk boot script must contain bare 'exit' line; got:\n%s", out)
 	}
 }
 

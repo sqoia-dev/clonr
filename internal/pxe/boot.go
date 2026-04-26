@@ -131,15 +131,18 @@ goto disk
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
-// Presents a 5-second boot menu. The default "disk" action chain-loads grubx64.efi
-// directly from the clustr server (served from the image's extracted EFI binary).
-// This is more reliable than plain `exit` on OVMF, which depends on BootOrder being
-// correctly set via efibootmgr — chain-loading works regardless of BootOrder state.
+// Presents a 5-second boot menu. The default "disk" action issues `exit` to return
+// control to the UEFI firmware. Firmware walks BootOrder: the PXE entry is retried
+// (which returns this same disk-boot script and exits again), then the OS NVRAM entry
+// written by FixEFIBoot loads \EFI\rocky\grubx64.efi from the local ESP.
+// If NVRAM is wiped (cold-aisle reset, AC loss), UEFI spec falls through to
+// \EFI\BOOT\BOOTX64.EFI which grub2-install --removable always writes.
 //
-// Falls back to plain `exit` (returns to firmware) if the grub chain fails (e.g. for
-// images where grub.efi was not extracted because the image is BIOS-type or was built
-// before grub.efi extraction was added). The fallback `exit` restores the previous
-// behavior so UEFI nodes with correct BootOrder still boot correctly.
+// This is symmetric with the BIOS `sanboot` path: in both cases the server makes
+// the routing decision in iPXE then hands off to the OS-installed bootloader.
+// No server-side grub binary, no HTTP chain-boot of GRUB.
+//
+// ADR: post-deploy UEFI uses `exit`, not chain-boot — see docs/boot-architecture.md
 //
 // The "reimage" option re-chains to the boot endpoint with force_reimage=1.
 //
@@ -168,7 +171,7 @@ item --gap --
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
 :disk
-chain {{.ServerURL}}/api/v1/boot/grub.efi?mac=${mac} || exit
+exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
@@ -203,7 +206,7 @@ var diskBootUEFITmpl = template.Must(template.New("diskboot-uefi").Parse(diskBoo
 type diskBootScriptData struct {
 	Hostname  string
 	// ServerURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
-	// Used to build the grub.efi chain URL and the reimage re-chain URL.
+	// Used to build the reimage re-chain URL in the boot menu.
 	// The ${mac} variable in the template is expanded by iPXE at runtime.
 	ServerURL string
 	// Version is the clustr server version string displayed in the boot menu.
@@ -230,8 +233,8 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 // "bios" is treated as UEFI (fail-safe: UEFI is the default for new images).
 //
 // serverURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
-// It is embedded in the boot script for the grub.efi chain URL and the reimage
-// re-chain URL. The ${mac} variable in the script is expanded by iPXE at runtime.
+// It is embedded in the boot script for the reimage re-chain URL.
+// The ${mac} variable in the script is expanded by iPXE at runtime.
 func GenerateDiskBootScript(hostname, firmware, serverURL, version string) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
