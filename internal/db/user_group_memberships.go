@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -101,17 +102,21 @@ func (db *DB) ListAllUserGroupMemberships(ctx context.Context) ([]UserGroupMembe
 	return out, rows.Err()
 }
 
-// GetGroupIDForNode returns the primary group_id for a node (fast-path from node_configs).
-// Returns "" if the node has no group assigned.
+// GetGroupIDForNode returns the primary group_id for a node.
+// S6-6: node_configs.group_id column dropped; reads from node_group_memberships
+// WHERE is_primary = 1. Returns "" if the node has no primary group assigned.
 func (db *DB) GetGroupIDForNode(ctx context.Context, nodeID string) (string, error) {
-	var groupID string
+	var groupID sql.NullString
 	err := db.sql.QueryRowContext(ctx,
-		`SELECT COALESCE(group_id, '') FROM node_configs WHERE id = ?`, nodeID,
+		`SELECT group_id FROM node_group_memberships WHERE node_id = ? AND is_primary = 1 LIMIT 1`, nodeID,
 	).Scan(&groupID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("db: get group id for node: %w", err)
 	}
-	return groupID, nil
+	return groupID.String, nil
 }
 
 // PurgeAuditLog deletes audit_log rows older than olderThan.
