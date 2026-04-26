@@ -515,6 +515,11 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 // UpsertNodeByMAC creates a new NodeConfig for the given MAC, or updates the
 // hardware_profile and hostname of the existing record if one already exists.
 // Returns the resulting NodeConfig (created or updated).
+//
+// Concurrency: wraps the check+insert in an exclusive transaction to prevent
+// duplicate-registration races when multiple PXE nodes boot simultaneously.
+// With SQLite's single-writer model and a _busy_timeout=5000ms DSN, concurrent
+// callers block on the transaction acquisition rather than racing on TOCTOU.
 func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.NodeConfig, error) {
 	cfg.PrimaryMAC = strings.ToLower(cfg.PrimaryMAC)
 	hwProfile, err := json.Marshal(cfg.HardwareProfile)
@@ -522,62 +527,85 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		return api.NodeConfig{}, fmt.Errorf("db: marshal hardware_profile: %w", err)
 	}
 
-	// Check whether a record for this MAC already exists.
-	existing, err := db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
-	if err == nil {
-		// Exists — update hardware_profile and detected_firmware. Only overwrite
-		// hostname when the stored hostname was auto-generated; admin-set hostnames
-		// are preserved.
-		newHostname := existing.Hostname
-		newHostnameAuto := existing.HostnameAuto
-		if existing.HostnameAuto && cfg.Hostname != "" {
-			newHostname = cfg.Hostname
-			newHostnameAuto = cfg.HostnameAuto
-		}
-		_, err = db.sql.ExecContext(ctx, `
-			UPDATE node_configs
-			SET hardware_profile = ?, hostname = ?, hostname_auto = ?, detected_firmware = ?, updated_at = ?
-			WHERE primary_mac = ?
-		`, string(hwProfile), newHostname, boolToInt(newHostnameAuto), cfg.DetectedFirmware, time.Now().Unix(), cfg.PrimaryMAC)
-		if err != nil {
-			return api.NodeConfig{}, fmt.Errorf("db: upsert node (update): %w", err)
-		}
-		return db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
-	}
-
-	if err != api.ErrNotFound {
-		return api.NodeConfig{}, fmt.Errorf("db: upsert node (lookup): %w", err)
-	}
-
-	// New node — insert a stub with no image assigned.
+	// Marshal new-node fields upfront (needed only on INSERT, but harmless to do early).
 	interfaces, _ := json.Marshal(cfg.Interfaces)
 	sshKeys, _ := json.Marshal(cfg.SSHKeys)
 	groups, _ := json.Marshal(cfg.Groups)
 	customVars, _ := json.Marshal(cfg.CustomVars)
 
-	now := time.Now().UTC()
-	cfg.CreatedAt = now
-	cfg.UpdatedAt = now
-
-	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO node_configs
-			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
-			 detected_firmware)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]', ?)
-	`,
-		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
-		string(interfaces), string(sshKeys), cfg.KernelArgs,
-		string(groups), string(customVars),
-		string(hwProfile),
-		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
-		cfg.DetectedFirmware,
-	)
+	// BEGIN IMMEDIATE acquires a write lock before any reads, preventing TOCTOU
+	// when two PXE nodes with the same MAC boot concurrently (unlikely but possible
+	// with identical hardware or cloned VMs).
+	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return api.NodeConfig{}, fmt.Errorf("db: upsert node (insert): %w", err)
+		return api.NodeConfig{}, fmt.Errorf("db: upsert node (begin tx): %w", err)
 	}
-	return cfg, nil
+	defer tx.Rollback() //nolint:errcheck
+
+	// Check inside the transaction whether this MAC already exists.
+	var existingID string
+	var existingHostname string
+	var existingHostnameAuto bool
+	scanErr := tx.QueryRowContext(ctx,
+		`SELECT id, hostname, hostname_auto FROM node_configs WHERE primary_mac = ?`,
+		cfg.PrimaryMAC,
+	).Scan(&existingID, &existingHostname, &existingHostnameAuto)
+
+	now := time.Now().UTC()
+
+	switch {
+	case scanErr == nil:
+		// Record exists — update hardware_profile and detected_firmware.
+		// Preserve admin-set hostnames: only overwrite when hostname_auto=1.
+		newHostname := existingHostname
+		newHostnameAuto := existingHostnameAuto
+		if existingHostnameAuto && cfg.Hostname != "" {
+			newHostname = cfg.Hostname
+			newHostnameAuto = cfg.HostnameAuto
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE node_configs
+			SET hardware_profile = ?, hostname = ?, hostname_auto = ?, detected_firmware = ?, updated_at = ?
+			WHERE primary_mac = ?
+		`, string(hwProfile), newHostname, boolToInt(newHostnameAuto), cfg.DetectedFirmware, now.Unix(), cfg.PrimaryMAC)
+		if err != nil {
+			return api.NodeConfig{}, fmt.Errorf("db: upsert node (update): %w", err)
+		}
+
+	case scanErr == sql.ErrNoRows:
+		// New node — insert a stub with no image assigned.
+		cfg.CreatedAt = now
+		cfg.UpdatedAt = now
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO node_configs
+				(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
+				 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
+				 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+				 detected_firmware)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]', ?)
+		`,
+			cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
+			string(interfaces), string(sshKeys), cfg.KernelArgs,
+			string(groups), string(customVars),
+			string(hwProfile),
+			cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
+			cfg.DetectedFirmware,
+		)
+		if err != nil {
+			return api.NodeConfig{}, fmt.Errorf("db: upsert node (insert): %w", err)
+		}
+
+	default:
+		return api.NodeConfig{}, fmt.Errorf("db: upsert node (lookup): %w", scanErr)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return api.NodeConfig{}, fmt.Errorf("db: upsert node (commit): %w", err)
+	}
+
+	// Read the final record outside the transaction — the write lock is released
+	// and we get a clean consistent snapshot.
+	return db.GetNodeConfigByMAC(ctx, cfg.PrimaryMAC)
 }
 
 // nullableString returns nil when s is empty, otherwise the string value.
