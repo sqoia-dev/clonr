@@ -22,9 +22,11 @@ import (
 // Boot files (vmlinuz, initramfs.img) are served from BootDir.
 // iPXE chainload files (ipxe.efi, undionly.kpxe) are served from TFTPDir.
 //
-// Post-deploy UEFI boot uses `exit` (firmware walks BootOrder to the OS NVRAM entry
-// written by FixEFIBoot), not server-side grub.efi chain-boot.
-// See docs/boot-architecture.md for the full architectural decision record.
+// Post-deploy UEFI boot uses `exit` — firmware advances to scsi0 and UEFI
+// removable-media auto-discovery loads \EFI\BOOT\BOOTX64.EFI from the ESP
+// (written by grub2-install --removable --no-nvram during finalize). No custom
+// NVRAM OS entry is created or managed by clustr.
+// See docs/boot-architecture.md §8 for the full architectural decision record.
 type BootHandler struct {
 	// BootDir is the directory containing vmlinuz and initramfs.img.
 	BootDir string

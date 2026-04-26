@@ -993,10 +993,11 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 //   - --efi-directory=/boot/efi : path to the mounted ESP (chroot-relative)
 //   - --boot-directory=/boot : path to /boot partition (chroot-relative)
 //   - --bootloader-id=rocky : writes to EFI/rocky/ subdir on the ESP
-//   - --removable : ALSO writes EFI/BOOT/BOOTX64.EFI (OVMF fallback when NVRAM
-//     entries are absent — critical for VMs whose pflash vars are reset on reimage)
-//   - --no-nvram : do NOT write NVRAM entries; FixEFIBoot handles NVRAM separately
-//     via efibootmgr --create, which gives us control over the loader path and label
+//   - --removable : writes \EFI\BOOT\BOOTX64.EFI with the correct prefix baked in;
+//     this is the post-deploy boot target for UEFI removable-media auto-discovery
+//     (UEFI §3.5.1.1 — works across reimages, NVRAM wipes, AC loss)
+//   - --no-nvram : do NOT write NVRAM entries — clustr relies on removable-media
+//     auto-discovery; no custom OS NVRAM entry is created (see docs/boot-architecture.md §8)
 //
 // The function sets up the bind mounts that grub2-install requires (/proc for
 // device detection, /sys for efivars read, /dev for block device access).

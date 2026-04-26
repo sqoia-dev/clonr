@@ -132,17 +132,19 @@ goto disk
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
 // Presents a 5-second boot menu. The default "disk" action issues `exit` to return
-// control to the UEFI firmware. Firmware walks BootOrder: the PXE entry is retried
-// (which returns this same disk-boot script and exits again), then the OS NVRAM entry
-// written by FixEFIBoot loads \EFI\rocky\grubx64.efi from the local ESP.
-// If NVRAM is wiped (cold-aisle reset, AC loss), UEFI spec falls through to
-// \EFI\BOOT\BOOTX64.EFI which grub2-install --removable always writes.
+// control to the UEFI firmware. Firmware walks the Proxmox/BMC boot order:
+// net0 (PXE) is retried — the server returns this same disk-boot script and iPXE
+// exits again — then scsi0 is tried and UEFI removable-media auto-discovery loads
+// \EFI\BOOT\BOOTX64.EFI from the ESP (written by grub2-install --removable --no-nvram).
+// No custom NVRAM OS entry is created. Removable-media discovery works across reimages,
+// NVRAM wipes, AC loss, and cold-aisle resets — it does not depend on PARTUUID.
 //
 // This is symmetric with the BIOS `sanboot` path: in both cases the server makes
 // the routing decision in iPXE then hands off to the OS-installed bootloader.
 // No server-side grub binary, no HTTP chain-boot of GRUB.
 //
-// ADR: post-deploy UEFI uses `exit`, not chain-boot — see docs/boot-architecture.md
+// ADR: post-deploy UEFI uses `exit` + removable-media discovery, not chain-boot or
+// NVRAM entries — see docs/boot-architecture.md §8
 //
 // The "reimage" option re-chains to the boot endpoint with force_reimage=1.
 //

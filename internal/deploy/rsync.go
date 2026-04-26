@@ -795,12 +795,14 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 	//      inside the chroot (the RPM %post scriptlet copies grubx64.efi to the
 	//      mounted ESP under /boot/efi/EFI/rocky/).
 	//   3. Run grub2-install --target=x86_64-efi INSIDE THE CHROOT so module
-	//      versions match the deployed OS. --removable also writes the fallback
-	//      path \EFI\BOOT\BOOTX64.EFI which OVMF uses when NVRAM entries are absent.
-	//   4. Verify grubx64.efi is present post-install (fatal if missing).
-	//   5. Create/repair the NVRAM boot entry via efibootmgr.
+	//      versions match the deployed OS. --removable writes \EFI\BOOT\BOOTX64.EFI
+	//      with the correct prefix baked in — this is the post-deploy boot target.
+	//      --no-nvram skips grub2-install's own NVRAM write (no NVRAM entry needed).
+	//   4. Verify \EFI\BOOT\BOOTX64.EFI exists post-install (fatal if missing).
+	//      Firmware uses UEFI removable-media auto-discovery to find this binary.
+	//      No custom NVRAM OS entry is created. See docs/boot-architecture.md §8.
 	//
-	// All steps are FATAL — a UEFI node with no EFI binary cannot boot.
+	// Steps 1–4 are FATAL — a UEFI node without \EFI\BOOT\BOOTX64.EFI cannot boot.
 	hasESP := false
 	espPartNum := 0
 	{
@@ -870,10 +872,10 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		// boot with "symbol not found", which appears as a flicker/black screen at
 		// the OVMF picker when the user selects the disk.
 		//
-		// --removable writes EFI/BOOT/BOOTX64.EFI (the OVMF fallback path used when
-		// NVRAM entries are absent — critical for VMs whose pflash vars are reset on reimage).
-		// --no-nvram skips grub2-install's own NVRAM write; FixEFIBoot (step 5) handles
-		// NVRAM via efibootmgr so we have full control over label and loader path.
+		// --removable writes \EFI\BOOT\BOOTX64.EFI with the correct prefix baked in.
+		// This is the load-bearing binary for UEFI removable-media auto-discovery
+		// (UEFI §3.5.1.1). --no-nvram skips grub2-install's own NVRAM write — no
+		// custom OS NVRAM entry is created (see docs/boot-architecture.md §8).
 		reportStep("Running GRUB installer in chroot")
 		log.Info().Msg("  → Running grub2-install --target=x86_64-efi in chroot...")
 		log.Info().Str("disk", d.targetDisk).Msg("finalize: running grub2-install --target=x86_64-efi inside chroot")
@@ -885,34 +887,28 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 		log.Info().Msg("finalize: grub2-install --target=x86_64-efi (chroot) succeeded")
 
-		// Step 4: verify grubx64.efi exists post-install. grub2-install can exit 0
-		// but silently skip writing the binary in some edge cases (missing modules,
-		// wrong chroot state). A missing binary means OVMF will loop at the picker.
+		// Step 4: verify BOOTX64.EFI exists post-install. grub2-install --removable
+		// writes \EFI\BOOT\BOOTX64.EFI with the correct prefix baked in — this is
+		// the load-bearing binary for UEFI removable-media auto-discovery (§3.5.1.1).
+		// grub2-install can exit 0 but silently skip writing the binary in some edge
+		// cases (missing modules, wrong chroot state). A missing BOOTX64.EFI means
+		// removable-media discovery will find nothing and OVMF will loop at the picker.
 		reportStep("Verifying bootloader binary")
+		bootx64Path := filepath.Join(efiDir, "EFI", "BOOT", "BOOTX64.EFI")
+		if _, err := os.Stat(bootx64Path); err != nil {
+			return &BootloaderError{
+				Targets: []string{d.targetDisk},
+				Cause: fmt.Errorf("UEFI: grub2-install --removable exited 0 but %s is missing — "+
+					"removable-media boot will fail: %w", bootx64Path, err),
+			}
+		}
+		log.Info().Str("path", bootx64Path).Msg("  ✓ BOOTX64.EFI verified post-install (removable-media boot target)")
+		// Soft check: \EFI\rocky\grubx64.efi is the RPM-shipped binary, not load-bearing.
 		if _, err := os.Stat(grubx64Path); err != nil {
-			return &BootloaderError{
-				Targets: []string{d.targetDisk},
-				Cause: fmt.Errorf("UEFI: grub2-install exited 0 but %s is missing: %w",
-					grubx64Path, err),
-			}
+			log.Warn().Err(err).Str("path", grubx64Path).Msg("finalize: \\EFI\\rocky\\grubx64.efi missing (non-fatal — BOOTX64.EFI is load-bearing)")
 		}
-		log.Info().Str("path", grubx64Path).Msg("  ✓ grubx64.efi verified post-install")
 
-		log.Info().Msg("finalize: OS bootloader installed — post-deploy UEFI boot uses firmware BootOrder (exit to firmware, see docs/boot-architecture.md)")
-
-		// Step 5: create/repair the NVRAM boot entry so OVMF knows to load our EFI
-		// binary. FixEFIBoot removes stale entries and creates a fresh one pointing
-		// to \EFI\rocky\grubx64.efi on the ESP.
-		reportStep("Configuring UEFI boot entry")
-		log.Info().Msg("  → Creating NVRAM boot entry...")
-		if err := FixEFIBoot(ctx, d.targetDisk, espPartNum, "Rocky Linux", `\EFI\rocky\grubx64.efi`); err != nil {
-			return &BootloaderError{
-				Targets: []string{d.targetDisk},
-				Cause:   fmt.Errorf("UEFI: FixEFIBoot: %w", err),
-			}
-		}
-		log.Info().Str("disk", d.targetDisk).Int("esp_part", espPartNum).
-			Msg("  ✓ UEFI bootloader installation complete")
+		log.Info().Msg("finalize: skipping NVRAM entry creation — relying on UEFI removable-media discovery of \\EFI\\BOOT\\BOOTX64.EFI (see docs/boot-architecture.md §8)")
 	}
 
 	// If the layout includes RAID arrays, wait for the initial resync to complete
@@ -1058,7 +1054,7 @@ func partitionDevices(defaultDisk string, layout api.DiskLayout) []string {
 // bootable, matching RAID1's redundancy guarantee.
 //
 // UEFI RAID: this function is only called from the hasBIOSGrub block; the
-// UEFI path uses efibootmgr and does not go through this function.
+// UEFI path uses grub2-install --removable and does not go through this function.
 func grubInstallTargets(defaultDisk string, layout api.DiskLayout) []string {
 	if len(layout.RAIDArrays) == 0 {
 		return []string{defaultDisk}

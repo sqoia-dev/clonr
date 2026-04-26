@@ -14,31 +14,24 @@ type EFIBootEntry struct {
 	Active  bool
 }
 
-// FixEFIBoot creates or repairs EFI boot entries for a freshly deployed system.
-// It creates a new boot entry pointing to the ESP partition and sets it as the
-// first boot option.
+// ManualCreateEFIEntry is a DIAGNOSTIC-ONLY helper that creates an NVRAM boot
+// entry via efibootmgr. It is NOT called by the deploy or autodeploy paths —
+// clustr relies on UEFI removable-media auto-discovery of \EFI\BOOT\BOOTX64.EFI
+// for post-deploy boot (see docs/boot-architecture.md §8).
 //
-// Parameters:
-//   - disk: the full device path of the target disk, e.g. /dev/nvme0n1
-//   - espPartNum: the partition number of the ESP (usually 1), 1-indexed
-//   - label: the boot menu label, e.g. "Rocky Linux"
-//   - loader: the EFI loader path relative to the ESP, e.g. "\EFI\rocky\grubx64.efi"
-func FixEFIBoot(ctx context.Context, disk string, espPartNum int, label, loader string) error {
+// WARNING: this function has a known stale-PARTUUID hazard. efibootmgr --create
+// bakes the current ESP PARTUUID into the NVRAM device path. parted mklabel gpt
+// regenerates PARTUUID on every reimage; the NVRAM entry becomes stale after any
+// subsequent reimage (pflash survives disk wipe). Use only for manual diagnostics
+// on a node you do not intend to reimage.
+func ManualCreateEFIEntry(ctx context.Context, disk string, espPartNum int, label, loader string) error {
 	if label == "" {
 		label = "Linux"
 	}
 	if loader == "" {
-		loader = `\EFI\rocky\grubx64.efi`
+		loader = `\EFI\BOOT\BOOTX64.EFI`
 	}
 
-	// Remove stale entries with the same label to avoid duplicates.
-	if err := removeStaleEntries(ctx, label); err != nil {
-		// Non-fatal — proceed even if cleanup fails.
-		_ = err
-	}
-
-	// Create new boot entry.
-	// efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "Linux" --loader '\EFI\...'
 	args := []string{
 		"--create",
 		"--disk", disk,
@@ -51,65 +44,6 @@ func FixEFIBoot(ctx context.Context, disk string, espPartNum int, label, loader 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("efiboot: create entry: %w\noutput: %s", err, string(out))
-	}
-
-	// Set boot order so the new entry is first.
-	newNum, err := parseNewBootNum(string(out))
-	if err != nil {
-		// Cannot determine the new boot number — set order based on existing list.
-		return setBootOrderFirst(ctx)
-	}
-
-	return setBootEntry(ctx, newNum)
-}
-
-// removeStaleEntries deletes existing efibootmgr entries that match label
-// exactly or whose labels contain known OS-like substrings. Firmware and
-// network entries (PXE, IPv4, IPv6, IPMI, BMC, Network, Shell, HTTP) are
-// always preserved so the node can still PXE-boot after the next reimage.
-func removeStaleEntries(ctx context.Context, label string) error {
-	entries, err := listBootEntries(ctx)
-	if err != nil {
-		return err
-	}
-
-	// OS-like labels to remove (case-insensitive substring match).
-	osLabels := []string{"rocky", "linux", "red hat", "centos", "fedora", "uefi os"}
-	// Labels to preserve (firmware/network entries).
-	keepLabels := []string{"pxe", "ipv4", "ipv6", "ipmi", "bmc", "network", "shell", "http"}
-
-	for _, e := range entries {
-		upper := strings.ToUpper(e.Label)
-
-		// Always preserve firmware/network entries.
-		preserve := false
-		for _, k := range keepLabels {
-			if strings.Contains(upper, strings.ToUpper(k)) {
-				preserve = true
-				break
-			}
-		}
-		if preserve {
-			continue
-		}
-
-		// Remove if exact label match OR matches any OS-like label.
-		shouldRemove := strings.EqualFold(e.Label, label)
-		if !shouldRemove {
-			for _, os := range osLabels {
-				if strings.Contains(upper, strings.ToUpper(os)) {
-					shouldRemove = true
-					break
-				}
-			}
-		}
-
-		if shouldRemove {
-			cmd := exec.CommandContext(ctx, "efibootmgr", "--delete-bootnum", "--bootnum", e.BootNum)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("efiboot: remove %s: %w\noutput: %s", e.BootNum, err, string(out))
-			}
-		}
 	}
 	return nil
 }
@@ -142,70 +76,6 @@ func listBootEntries(ctx context.Context) ([]EFIBootEntry, error) {
 	return entries, nil
 }
 
-// parseNewBootNum extracts the new boot entry number from efibootmgr --create output.
-// Output typically contains a line like: "Boot0001* label"
-func parseNewBootNum(output string) (string, error) {
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "Boot") && strings.Contains(line, "*") {
-			if len(line) >= 8 {
-				return line[4:8], nil
-			}
-		}
-	}
-	return "", fmt.Errorf("efiboot: cannot parse new boot number from output")
-}
-
-// setBootEntry sets the specified boot entry as first in the persistent BootOrder
-// and activates it. It reads the current BootOrder, removes any duplicate occurrence
-// of bootNum, then prepends bootNum to produce the new order. This writes a permanent
-// BootOrder rather than the one-shot BootNext variable, so the firmware always finds
-// a valid boot target after the first boot.
-func setBootEntry(ctx context.Context, bootNum string) error {
-	// Activate the entry.
-	activateCmd := exec.CommandContext(ctx, "efibootmgr", "--bootnum", bootNum, "--active")
-	if out, err := activateCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("efiboot: activate %s: %w\noutput: %s", bootNum, err, string(out))
-	}
-
-	// Read the current BootOrder so we can prepend the new entry.
-	currentOut, err := exec.CommandContext(ctx, "efibootmgr").Output()
-	var existingOrder []string
-	if err == nil {
-		existingOrder = parseBootOrder(string(currentOut))
-	}
-
-	// Build new order: new entry first, then existing entries (excluding any
-	// duplicate of the new entry to avoid repeated entries).
-	newOrder := []string{bootNum}
-	for _, num := range existingOrder {
-		if strings.TrimSpace(num) != bootNum {
-			newOrder = append(newOrder, strings.TrimSpace(num))
-		}
-	}
-
-	orderStr := strings.Join(newOrder, ",")
-	orderCmd := exec.CommandContext(ctx, "efibootmgr", "-o", orderStr)
-	if out, err := orderCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("efiboot: set BootOrder %s: %w\noutput: %s", orderStr, err, string(out))
-	}
-	return nil
-}
-
-// setBootOrderFirst reads the current boot order and makes the first active entry
-// the next boot target. Used as fallback when new entry number is unknown.
-func setBootOrderFirst(ctx context.Context) error {
-	entries, err := listBootEntries(ctx)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Active {
-			return setBootEntry(ctx, e.BootNum)
-		}
-	}
-	return fmt.Errorf("efiboot: no active boot entries found")
-}
-
 // parseBootOrder parses the "BootOrder: XXXX,YYYY,..." line from efibootmgr output.
 // Returns a slice of boot numbers in current order, or nil if not found.
 func parseBootOrder(output string) []string {
@@ -223,23 +93,15 @@ func parseBootOrder(output string) []string {
 }
 
 // SetPXEBootFirst reorders the NVRAM BootOrder so the first PXE entry (IPv4 or
-// IPv6) precedes any OS boot entries. This is called after finalize to ensure
-// that OVMF/EDK2 and physical UEFI firmware come back to clustr's PXE server on
-// the next reboot, allowing the server to confirm state before routing the node
-// to disk via iPXE exit.
+// IPv6) precedes any OS boot entries. This is a utility for bare-metal scenarios
+// where the BMC-level boot order is not configurable from inside the OS but
+// efivar-mediated BootOrder is. It is NOT called from the deploy path — Proxmox
+// boot order (net0;scsi0) and BMC-level boot order handle "PXE first" on our
+// supported platforms. Preserved for potential future use.
 //
 // On BIOS systems (where efibootmgr is not available or EFI variables are
 // inaccessible), this function logs a warning and returns nil — it is a no-op
 // on non-EFI systems.
-//
-// Logic:
-//  1. Read current BootOrder from efibootmgr.
-//  2. Find the first PXE entry (label contains "PXE" or "IPv4" or "IPv6").
-//  3. Move the PXE entry to position 0 in BootOrder (before the OS entry).
-//  4. Write the new BootOrder via efibootmgr -o.
-//
-// Both PXE and OS entries are kept — only the order changes. The OS entry
-// remains second so disk boot works after the server routes via iPXE exit.
 func SetPXEBootFirst(ctx context.Context) error {
 	out, err := exec.CommandContext(ctx, "efibootmgr", "-v").Output()
 	if err != nil {
@@ -275,9 +137,7 @@ func SetPXEBootFirst(ctx context.Context) error {
 
 	if pxeIdx < 0 {
 		// No PXE entry in NVRAM — common on fresh OVMF VMs where PXE is dynamic
-		// and not persisted. The OS entry is already first in BootOrder from
-		// FixEFIBoot, which is a valid state: the node boots OS, phones home, and
-		// clustr manages future boot order from there.
+		// and not persisted. Removable-media discovery handles OS boot; no action needed.
 		return nil
 	}
 

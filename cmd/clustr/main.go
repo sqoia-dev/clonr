@@ -408,7 +408,9 @@ func newDeployCmd() *cobra.Command {
   4. Preflight: validate disk size and architecture
   5. Deploy: download and write the image
   6. Finalize: apply hostname, network, SSH keys
-  7. Fix EFI boot entries (if --fix-efi is set)
+     UEFI: grub2-install --removable writes \EFI\BOOT\BOOTX64.EFI; no NVRAM
+     entry is created — firmware uses removable-media auto-discovery (§3.5.1.1).
+     See docs/boot-architecture.md §8.
 
 With --auto: discovers hardware, registers with the server, and waits for an
 admin to assign a base image before proceeding with deployment. Intended for
@@ -679,34 +681,14 @@ PXE-booted nodes running from initramfs.`,
 			deployLog.Info().Str("component", "chroot").Msg("node configuration applied")
 			progressReporter.EndPhase("")
 
-			// Step 7: EFI boot repair (UEFI images only, optional).
-			// For BIOS images, grub2-install into the biosboot partition (run by
-			// Finalize when a biosboot partition is detected) is the complete boot
-			// setup — efibootmgr is not applicable and must not be called.
-			isBIOSImage := img.Firmware == "bios"
+			// UEFI boot is handled entirely by grub2-install --removable writing
+			// \EFI\BOOT\BOOTX64.EFI during Finalize. No NVRAM entry is created.
+			// Firmware uses removable-media auto-discovery (UEFI §3.5.1.1).
+			// --fix-efi is accepted for backwards compatibility but is a no-op.
+			// See docs/boot-architecture.md §8.
 			if flagFixEFI {
-				if isBIOSImage {
-					printPhase(phaseDone, "EFI boot repair skipped (BIOS image)")
-					deployLog.Info().Str("component", "efiboot").Str("firmware", "bios").
-						Msg("skipping FixEFIBoot — BIOS image; grub2-install into biosboot partition is sufficient")
-				} else {
-					printPhase(phaseInProgress, "Repairing EFI boot entries")
-					deployLog.Info().Str("component", "efiboot").Msg("repairing EFI boot entries")
-					disk := flagDisk
-					if disk == "" {
-						disk = "/dev/sda"
-					}
-					label := img.Name
-					if err := deploy.FixEFIBoot(ctx, disk, 1, label, `\EFI\rocky\grubx64.efi`); err != nil {
-						// Non-fatal — log the error but don't fail the deployment.
-						consolePrintln("") // close the in-progress line
-						printPhase(phaseFailed, fmt.Sprintf("EFI boot repair (non-fatal): %v", err))
-						deployLog.Warn().Str("component", "efiboot").Err(err).Msg("EFI boot repair failed (non-fatal)")
-					} else {
-						printPhase(phaseDone, "EFI boot entry set")
-						deployLog.Info().Str("component", "efiboot").Msg("EFI boot entry set")
-					}
-				}
+				deployLog.Warn().Str("component", "efiboot").
+					Msg("--fix-efi flag is deprecated and has no effect; clustr no longer manages EFI NVRAM entries (see docs/boot-architecture.md §8)")
 			}
 
 			totalDuration := time.Since(start).Round(time.Second)
@@ -1213,48 +1195,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			Str("layout_source", layoutSource).
 			Msg("EFI boot setup: skipping — effective layout has no ESP partition (BIOS deploy or BIOS layout override)")
 	} else {
-		// Step 1: Create the OS NVRAM boot entry pointing at grubx64.efi on the ESP.
-		//
-		// FixEFIBoot calls `efibootmgr --create` which writes directly to
-		// /sys/firmware/efi/efivars on the running (UEFI-booted) initramfs host.
-		// efivarfs is available here because the deploy initramfs itself boots via
-		// UEFI — the firmware exposes efivars at /sys/firmware/efi/efivars and the
-		// initramfs kernel mounts efivarfs there automatically.
-		//
-		// efibootmgr does NOT run inside the nspawn chroot, so no bind mount of
-		// /sys/firmware/efi is needed — it runs directly on the host (initramfs).
-		targetDisk := deployer.ResolvedDisk()
-		if targetDisk == "" {
-			targetDisk = "/dev/sda" // safe fallback: single-disk nodes
-		}
-		espPartNum := effectiveESPPartNum
-		label := img.Name
 		deployLog.Info().
-			Str("disk", targetDisk).
-			Int("esp_part", espPartNum).
-			Str("label", label).
-			Msg("EFI boot setup: creating NVRAM OS boot entry via efibootmgr")
-		efiBootCtx, efiBootCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if efiErr := deploy.FixEFIBoot(efiBootCtx, targetDisk, espPartNum, label, `\EFI\rocky\grubx64.efi`); efiErr != nil {
-			efiBootCancel()
-			// Fatal for UEFI deploys: without an NVRAM entry pointing to grubx64.efi,
-			// OVMF has no OS to boot and falls through to PXE on every restart,
-			// looping forever. The node cannot be left in this state.
-			printPhase(phaseFailed, "EFI boot entry")
-			printDeployError("efi_boot_entry", fmt.Sprintf("efibootmgr --create failed: %v", efiErr))
-			return Wrap(ExitBootloader, "efi_boot_entry", fmt.Errorf("efibootmgr --create failed: %w", efiErr))
-		}
-		efiBootCancel()
-		deployLog.Info().Str("label", label).Msg("EFI boot setup: NVRAM OS boot entry created — OS is first in BootOrder")
-		// NOTE: SetPXEBootFirst is intentionally NOT called here.
-		//
-		// FixEFIBoot already placed the OS entry first in NVRAM BootOrder. Proxmox
-		// enforces the initial post-reimage PXE boot via VM-level boot order
-		// (boot=order=net0;scsi0), not via NVRAM. Calling SetPXEBootFirst would put
-		// a PXE entry before the OS in BootOrder, which causes OVMF to try HTTP IPv6
-		// boot (or similar) instead of the OS disk when the iPXE script exits after
-		// seeing NodeStateDeployed. Leave BootOrder with OS first so OVMF always has
-		// a direct path to grubx64.efi after iPXE exits.
+			Str("disk", deployer.ResolvedDisk()).
+			Int("esp_part", effectiveESPPartNum).
+			Msg("EFI boot setup: skipping NVRAM entry — relying on UEFI removable-media discovery (see docs/boot-architecture.md §8)")
 	}
 	// ──────────────────────────────────────────────────────────────────────
 
@@ -1412,6 +1356,15 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 
 // ─── fix-efiboot ─────────────────────────────────────────────────────────────
 
+// newFixEFIBootCmd returns the deprecated fix-efiboot diagnostic command.
+//
+// DEPRECATED: clustr no longer manages EFI NVRAM entries in normal operation.
+// Post-deploy UEFI boot relies on UEFI removable-media auto-discovery of
+// \EFI\BOOT\BOOTX64.EFI written by grub2-install --removable --no-nvram.
+// Use this command only as a manual diagnostic on a node you do not intend
+// to reimage — efibootmgr --create bakes the current ESP PARTUUID into the
+// device path, which becomes stale after any subsequent reimage.
+// See docs/boot-architecture.md §8.
 func newFixEFIBootCmd() *cobra.Command {
 	var (
 		flagDisk    string
@@ -1422,23 +1375,28 @@ func newFixEFIBootCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "fix-efiboot",
-		Short: "Repair EFI boot entries on a deployed node",
-		Long: `fix-efiboot creates or replaces EFI NVRAM boot entries for a deployed system.
-It removes any existing entries with the same label, creates a fresh entry
-pointing to the ESP partition, and sets it as the first boot target.`,
+		Short: "[DEPRECATED] Manual diagnostic: create an EFI NVRAM boot entry",
+		Long: `DEPRECATED: clustr no longer manages EFI NVRAM entries during deployment.
+Post-deploy UEFI boot relies on UEFI removable-media auto-discovery of
+\EFI\BOOT\BOOTX64.EFI. Use this command only as a manual diagnostic tool.
+
+WARNING: efibootmgr --create bakes the current ESP PARTUUID into the NVRAM
+device path. This entry becomes stale after any subsequent reimage (pflash
+survives disk wipe; the new ESP gets a new PARTUUID). Do not use on nodes
+you plan to reimage. See docs/boot-architecture.md §8.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if flagDisk == "" {
 				return fmt.Errorf("--disk is required")
 			}
 
 			ctx := context.Background()
-			fmt.Fprintf(os.Stderr, "Repairing EFI boot entry on %s partition %d...\n", flagDisk, flagESPPart)
+			fmt.Fprintf(os.Stderr, "[DEPRECATED] Creating EFI NVRAM entry on %s partition %d (diagnostic only — see docs/boot-architecture.md §8)...\n", flagDisk, flagESPPart)
 
-			if err := deploy.FixEFIBoot(ctx, flagDisk, flagESPPart, flagLabel, flagLoader); err != nil {
+			if err := deploy.ManualCreateEFIEntry(ctx, flagDisk, flagESPPart, flagLabel, flagLoader); err != nil {
 				return fmt.Errorf("fix-efiboot: %w", err)
 			}
 
-			fmt.Println("EFI boot entry set successfully.")
+			fmt.Println("EFI boot entry created (diagnostic only — clustr does not manage NVRAM in normal operation).")
 			return nil
 		},
 	}
@@ -1446,7 +1404,7 @@ pointing to the ESP partition, and sets it as the first boot target.`,
 	cmd.Flags().StringVar(&flagDisk, "disk", "", "Target disk device, e.g. /dev/nvme0n1 (required)")
 	cmd.Flags().IntVar(&flagESPPart, "esp", 1, "ESP partition number (default: 1)")
 	cmd.Flags().StringVar(&flagLabel, "label", "Linux", "Boot menu label")
-	cmd.Flags().StringVar(&flagLoader, "loader", `\EFI\rocky\grubx64.efi`, "EFI loader path relative to ESP")
+	cmd.Flags().StringVar(&flagLoader, "loader", `\EFI\BOOT\BOOTX64.EFI`, "EFI loader path relative to ESP")
 
 	return cmd
 }

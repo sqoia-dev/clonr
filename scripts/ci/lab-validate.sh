@@ -155,8 +155,12 @@ reimage_vm() {
     local deploy_log="$ARTIFACT_DIR/deploy-vm${vmid}.log"
     log "VM${vmid}: triggering reimage"
 
-    # Power cycle the VM to PXE boot via Proxmox
-    ssh_proxmox "qm set ${vmid} --boot order=net0 2>/dev/null; qm stop ${vmid} --skiplock 2>/dev/null; sleep 2; qm start ${vmid}" >> "$deploy_log" 2>&1 \
+    # Power cycle the VM to PXE boot via Proxmox.
+    # Boot order: net0;scsi0 — PXE first, then disk via UEFI removable-media
+    # discovery of \EFI\BOOT\BOOTX64.EFI. Both entries are required: net0 for
+    # the deploy-routing decision, scsi0 for the post-deploy OS boot.
+    # See docs/boot-architecture.md §8.
+    ssh_proxmox "qm set ${vmid} --boot order=net0;scsi0 2>/dev/null; qm stop ${vmid} --skiplock 2>/dev/null; sleep 2; qm start ${vmid}" >> "$deploy_log" 2>&1 \
         || { log "VM${vmid}: failed to power cycle"; return 1; }
 
     # Get node ID by hostname/MAC lookup from clustr API (best effort)
