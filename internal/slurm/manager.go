@@ -108,7 +108,16 @@ type EnableRequest struct {
 // Enable activates the Slurm module with the given cluster configuration.
 // Creates default config file templates from embedded defaults if no config
 // files exist yet. Idempotent — safe to call while already enabled.
+//
+// Hard-fails if CLUSTR_SECRET_KEY is unset or is the insecure default: the
+// Slurm module uses AES-256-GCM to encrypt munge keys and other secrets at
+// rest. Without a deployment-specific key, every installation would share the
+// same publicly-known encryption key.
 func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
+	if err := validateSecretKey(); err != nil {
+		return err
+	}
+
 	if req.ClusterName == "" {
 		return fmt.Errorf("slurm: cluster_name is required")
 	}

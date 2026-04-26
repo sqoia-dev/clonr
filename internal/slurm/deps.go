@@ -258,20 +258,52 @@ func (m *Manager) decryptSecret(ciphertextHex string) ([]byte, error) {
 	return aesGCMDecrypt(key, ciphertextHex)
 }
 
+// defaultSecretKey is the insecure fallback value that was previously used when
+// CLUSTR_SECRET_KEY was unset. It is checked at enable-time so deployments that
+// accidentally ship without an explicit key are refused rather than silently
+// using a publicly-known encryption key.
+const defaultSecretKey = "clustr-slurm-secrets-v1"
+
+// validateSecretKey returns an error if CLUSTR_SECRET_KEY is unset or is the
+// well-known default. Call this before enabling the Slurm module.
+func validateSecretKey() error {
+	v := os.Getenv("CLUSTR_SECRET_KEY")
+	if v == "" {
+		return fmt.Errorf(
+			"slurm: CLUSTR_SECRET_KEY must be set to a strong random value before enabling Slurm. " +
+				"Generate one with: openssl rand -hex 32",
+		)
+	}
+	if v == defaultSecretKey {
+		return fmt.Errorf(
+			"slurm: CLUSTR_SECRET_KEY is set to the insecure default value %q. " +
+				"Set it to a strong random value before enabling Slurm. " +
+				"Generate one with: openssl rand -hex 32",
+			defaultSecretKey,
+		)
+	}
+	return nil
+}
+
 // secretEncryptionKey derives a 32-byte AES key from CLUSTR_SECRET_KEY.
+// Returns an error if the key is unset or is the insecure default — callers
+// should have already called validateSecretKey() at enable-time, but this
+// provides a hard stop for any path that bypasses that check.
 func (m *Manager) secretEncryptionKey() ([]byte, error) {
 	envKey := os.Getenv("CLUSTR_SECRET_KEY")
-	if envKey != "" {
-		raw, err := hex.DecodeString(envKey)
-		if err == nil && len(raw) == 32 {
-			return raw, nil
-		}
-		// Arbitrary string: hash to 32 bytes.
-		h := sha256.Sum256([]byte(envKey))
-		return h[:], nil
+	if envKey == "" || envKey == defaultSecretKey {
+		return nil, fmt.Errorf(
+			"slurm: CLUSTR_SECRET_KEY is not set or is the insecure default. " +
+				"Set CLUSTR_SECRET_KEY to a strong random value (openssl rand -hex 32) " +
+				"and restart clustr-serverd",
+		)
 	}
-	log.Warn().Msg("slurm: CLUSTR_SECRET_KEY not set — using derived key (set CLUSTR_SECRET_KEY in production)")
-	h := sha256.Sum256([]byte("clustr-slurm-secrets-v1"))
+	raw, err := hex.DecodeString(envKey)
+	if err == nil && len(raw) == 32 {
+		return raw, nil
+	}
+	// Arbitrary string (not valid hex-32): hash to 32 bytes.
+	h := sha256.Sum256([]byte(envKey))
 	return h[:], nil
 }
 
