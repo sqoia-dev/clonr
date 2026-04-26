@@ -462,10 +462,6 @@ type NodeConfig struct {
 	// script while this flag is set, causing the node to deploy fresh.
 	// Cleared by the deploy-complete callback once deployment finalizes.
 	ReimagePending  bool                 `json:"reimage_pending,omitempty"`
-	// LastDeploySucceededAt is the Unix timestamp of the most recent successful
-	// deployment finalize. Back-compat alias for DeployCompletedPrebootAt (ADR-0008).
-	// Deprecated: use DeployCompletedPrebootAt. Will be removed in v1.0.
-	LastDeploySucceededAt *time.Time `json:"last_deploy_succeeded_at,omitempty"`
 	// LastDeployFailedAt is the Unix timestamp of the most recent failed deploy.
 	// Used by State() to determine NodeStateFailed.
 	LastDeployFailedAt *time.Time `json:"last_deploy_failed_at,omitempty"`
@@ -504,27 +500,21 @@ type NodeConfig struct {
 //
 // ADR-0008 two-phase priority order (highest to lowest):
 //  1. ReimagePending — always overrides everything else.
-//  2. LastDeployFailedAt after effective preboot timestamp — node is in error.
+//  2. LastDeployFailedAt after deploy_completed_preboot_at — node is in error.
 //  3. DeployVerifiedBootedAt set — deployed_verified (OS phoned home post-boot).
 //  4. DeployVerifyTimeoutAt set — deploy_verify_timeout (OS never phoned home).
 //  5. DeployCompletedPrebootAt set — deployed_preboot (initramfs done, awaiting boot).
-//  6. LastDeploySucceededAt set (back-compat) — falls through to deployed_verified.
-//  7. BaseImageID set — node is configured but never deployed.
-//  8. Otherwise — node is registered but has no image.
+//  6. BaseImageID set — node is configured but never deployed.
+//  7. Otherwise — node is registered but has no image.
+//
+// S6-8: LastDeploySucceededAt back-compat fallback removed (column dropped in migration 049).
 func (n *NodeConfig) State() NodeState {
 	if n.ReimagePending {
 		return NodeStateReimagePending
 	}
 
-	// Determine the effective "deploy succeeded" timestamp for failure comparison.
-	// Prefer the new ADR-0008 field; fall back to the legacy alias.
-	effectivePreboot := n.DeployCompletedPrebootAt
-	if effectivePreboot == nil {
-		effectivePreboot = n.LastDeploySucceededAt
-	}
-
 	if n.LastDeployFailedAt != nil {
-		if effectivePreboot == nil || n.LastDeployFailedAt.After(*effectivePreboot) {
+		if n.DeployCompletedPrebootAt == nil || n.LastDeployFailedAt.After(*n.DeployCompletedPrebootAt) {
 			return NodeStateFailed
 		}
 	}
@@ -538,12 +528,6 @@ func (n *NodeConfig) State() NodeState {
 	}
 	if n.DeployCompletedPrebootAt != nil {
 		return NodeStateDeployedPreboot
-	}
-
-	// Back-compat: legacy last_deploy_succeeded_at without new ADR-0008 fields
-	// maps to deployed_verified (it implies full success from before two-phase model).
-	if n.LastDeploySucceededAt != nil {
-		return NodeStateDeployedVerified
 	}
 
 	if n.BaseImageID != "" {

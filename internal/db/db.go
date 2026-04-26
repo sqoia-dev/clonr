@@ -546,16 +546,16 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+			 power_provider, created_at, updated_at, disk_layout_override, extra_mounts,
 			 detected_firmware, bmc_config_encrypted, power_provider_encrypted)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(tags), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
-		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
+		diskLayoutOverride, extraMounts,
 		cfg.DetectedFirmware,
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
 	)
@@ -699,9 +699,9 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 			INSERT INTO node_configs
 				(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 				 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-				 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+				 power_provider, created_at, updated_at, disk_layout_override, extra_mounts,
 				 detected_firmware)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]', ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, '{}', '[]', ?)
 		`,
 			cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 			string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -742,26 +742,30 @@ func nullableString(s string) interface{} {
 //           deploy_verify_timeout_at, and last_seen_at added in migration 022.
 // Migration 026: detected_firmware added.
 // Migration 039: bmc_config_encrypted, power_provider_encrypted added (S1-16).
-// nodeConfigCols references the tags column (renamed from groups in migration 041).
+// Migration 041: tags column (renamed from groups).
+// Migration 048 (S6-6): group_id column dropped; resolved via correlated subquery.
+// Migration 049 (S6-8): last_deploy_succeeded_at column dropped; use deploy_completed_preboot_at.
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
-	       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
-	       created_at, updated_at, group_id, disk_layout_override, extra_mounts,
+	       power_provider, reimage_pending, last_deploy_failed_at,
+	       created_at, updated_at,
+	       (SELECT group_id FROM node_group_memberships WHERE node_id = id AND is_primary = 1 LIMIT 1) AS group_id,
+	       disk_layout_override, extra_mounts,
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
 	       deploy_verify_timeout_at, last_seen_at, detected_firmware,
 	       bmc_config_encrypted, power_provider_encrypted`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
-// the "nc" table alias and replaces group_id with a COALESCE that prefers the
-// authoritative node_group_memberships row (alias "m") over the denormalised
-// fast-path column on node_configs. Use this constant in any query that LEFT
-// JOINs node_group_memberships m ON m.node_id = nc.id.
+// the "nc" table alias. The caller must LEFT JOIN node_group_memberships m ON
+// m.node_id = nc.id AND m.is_primary = 1 to populate the group_id column.
+// Migration 048 (S6-6): group_id now comes exclusively from the is_primary join row.
+// Migration 049 (S6-8): last_deploy_succeeded_at removed; use deploy_completed_preboot_at.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
 	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
-	       nc.power_provider, nc.reimage_pending, nc.last_deploy_succeeded_at, nc.last_deploy_failed_at,
+	       nc.power_provider, nc.reimage_pending, nc.last_deploy_failed_at,
 	       nc.created_at, nc.updated_at,
-	       COALESCE(m.group_id, nc.group_id) AS group_id,
+	       m.group_id,
 	       nc.disk_layout_override, nc.extra_mounts,
 	       nc.deploy_completed_preboot_at, nc.deploy_verified_booted_at,
 	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware,
@@ -847,7 +851,7 @@ func (db *DB) SearchNodeConfigs(ctx context.Context, baseImageID, search string)
 	rows, err = db.sql.QueryContext(ctx,
 		`SELECT `+nodeConfigColsJoined+`
 		 FROM node_configs nc
-		 LEFT JOIN node_group_memberships m ON m.node_id = nc.id`+where+`
+		 LEFT JOIN node_group_memberships m ON m.node_id = nc.id AND m.is_primary = 1`+where+`
 		 ORDER BY nc.hostname ASC`,
 		args...)
 	if err != nil {
@@ -925,7 +929,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
 		    kernel_args = ?, tags = ?, custom_vars = ?, base_image_id = ?,
 		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?,
-		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
+		    disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
 		    detected_firmware = ?,
 		    bmc_config_encrypted = ?, power_provider_encrypted = ?
 		WHERE id = ?
@@ -934,7 +938,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
 		string(tags), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
-		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
+		diskLayoutOverride, extraMounts,
 		time.Now().Unix(), cfg.DetectedFirmware,
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
 		cfg.ID,
@@ -986,8 +990,8 @@ func (db *DB) SetReimagePending(ctx context.Context, nodeID string, pending bool
 }
 
 // RecordDeploySucceeded marks a node's last deployment as pre-boot successful.
-// ADR-0008: Sets deploy_completed_preboot_at = now() (the canonical new field) and
-// also dual-writes last_deploy_succeeded_at for back-compat (removed in v1.0).
+// ADR-0008: Sets deploy_completed_preboot_at = now() (the canonical field).
+// S6-8: last_deploy_succeeded_at dual-write removed (column dropped in migration 049).
 // Also clears all ADR-0008 verification fields from any prior deploy cycle so the
 // node enters the deployed_preboot state cleanly.
 // Clears reimage_pending. Called by the deploy-complete callback from the
@@ -996,14 +1000,13 @@ func (db *DB) RecordDeploySucceeded(ctx context.Context, nodeID string) error {
 	now := time.Now().Unix()
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
-		SET last_deploy_succeeded_at      = ?,
-		    deploy_completed_preboot_at   = ?,
+		SET deploy_completed_preboot_at   = ?,
 		    deploy_verified_booted_at     = NULL,
 		    deploy_verify_timeout_at      = NULL,
 		    reimage_pending               = 0,
 		    updated_at                    = ?
 		WHERE id = ?
-	`, now, now, now, nodeID)
+	`, now, now, nodeID)
 	if err != nil {
 		return fmt.Errorf("db: record deploy succeeded: %w", err)
 	}
@@ -1544,42 +1547,45 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
-		cfg                          api.NodeConfig
-		hostnameAuto                 int
-		interfacesJSON               string
-		sshKeysJSON                  string
-		groupsJSON                   string
-		customVarsJSON               string
-		baseImageID                  sql.NullString
-		hwProfileJSON                string
-		bmcConfigJSON                string
-		ibConfigJSON                 string
-		powerProviderJSON            string
-		reimagePending               int
-		lastDeploySucceededAtVal     sql.NullInt64
-		lastDeployFailedAtVal        sql.NullInt64
-		createdAtUnix                int64
-		updatedAtUnix                int64
-		groupID                      sql.NullString
-		diskLayoutOverrideJSON       string
-		extraMountsJSON              string
+		cfg                         api.NodeConfig
+		hostnameAuto                int
+		interfacesJSON              string
+		sshKeysJSON                 string
+		groupsJSON                  string
+		customVarsJSON              string
+		baseImageID                 sql.NullString
+		hwProfileJSON               string
+		bmcConfigJSON               string
+		ibConfigJSON                string
+		powerProviderJSON           string
+		reimagePending              int
+		lastDeployFailedAtVal       sql.NullInt64
+		createdAtUnix               int64
+		updatedAtUnix               int64
+		// S6-6 (migration 048): group_id from subquery or join; still nullable.
+		groupID                     sql.NullString
+		diskLayoutOverrideJSON      string
+		extraMountsJSON             string
 		// ADR-0008: two-phase deploy verification columns (migration 022).
-		deployCompletedPrebootAtVal  sql.NullInt64
-		deployVerifiedBootedAtVal    sql.NullInt64
-		deployVerifyTimeoutAtVal     sql.NullInt64
-		lastSeenAtVal                sql.NullInt64
+		deployCompletedPrebootAtVal sql.NullInt64
+		deployVerifiedBootedAtVal   sql.NullInt64
+		deployVerifyTimeoutAtVal    sql.NullInt64
+		lastSeenAtVal               sql.NullInt64
 		// S1-16 (migration 039): encryption flag columns.
 		bmcConfigEncrypted     bool
 		powerProviderEncrypted bool
 	)
 
+	// Column order matches nodeConfigCols / nodeConfigColsJoined:
+	// S6-6: group_id is a subquery/join result, not a physical column.
+	// S6-8: last_deploy_succeeded_at removed; deploy_completed_preboot_at is canonical.
 	err := s.Scan(
 		&cfg.ID, &cfg.Hostname, &hostnameAuto, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
 		&groupsJSON, &customVarsJSON, &baseImageID,
 		&hwProfileJSON, &bmcConfigJSON, &ibConfigJSON,
 		&powerProviderJSON, &reimagePending,
-		&lastDeploySucceededAtVal, &lastDeployFailedAtVal,
+		&lastDeployFailedAtVal,
 		&createdAtUnix, &updatedAtUnix,
 		&groupID, &diskLayoutOverrideJSON, &extraMountsJSON,
 		&deployCompletedPrebootAtVal, &deployVerifiedBootedAtVal,
@@ -1625,10 +1631,6 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		}
 	}
 
-	if lastDeploySucceededAtVal.Valid {
-		t := time.Unix(lastDeploySucceededAtVal.Int64, 0).UTC()
-		cfg.LastDeploySucceededAt = &t
-	}
 	if lastDeployFailedAtVal.Valid {
 		t := time.Unix(lastDeployFailedAtVal.Int64, 0).UTC()
 		cfg.LastDeployFailedAt = &t
@@ -2048,16 +2050,9 @@ func (db *DB) UpdateNodeGroup(ctx context.Context, g api.NodeGroup) error {
 	return requireOneRow(res, "node_groups", g.ID)
 }
 
-// DeleteNodeGroup removes a NodeGroup. Nodes in the group have their group_id
-// cleared first to avoid orphaned references.
+// DeleteNodeGroup removes a NodeGroup. Membership rows are removed via
+// the FK cascade on node_group_memberships.
 func (db *DB) DeleteNodeGroup(ctx context.Context, id string) error {
-	// Clear group membership on any nodes in this group.
-	_, err := db.sql.ExecContext(ctx,
-		`UPDATE node_configs SET group_id = NULL, updated_at = ? WHERE group_id = ?`,
-		time.Now().Unix(), id)
-	if err != nil {
-		return fmt.Errorf("db: clear node group memberships before delete: %w", err)
-	}
 	res, err := db.sql.ExecContext(ctx, `DELETE FROM node_groups WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("db: delete node group: %w", err)
@@ -2065,19 +2060,21 @@ func (db *DB) DeleteNodeGroup(ctx context.Context, id string) error {
 	return requireOneRow(res, "node_groups", id)
 }
 
-// AssignNodeToGroup sets or clears the group_id for a node. Pass empty groupID to remove.
+// AssignNodeToGroup updates a node's primary group assignment via
+// node_group_memberships. Pass empty groupID to remove the primary flag (node
+// retains any secondary memberships; use RemoveGroupMember for full removal).
+// S6-6: node_configs.group_id column dropped; writes through memberships only.
 func (db *DB) AssignNodeToGroup(ctx context.Context, nodeID, groupID string) error {
-	var gid interface{}
-	if groupID != "" {
-		gid = groupID
+	if groupID == "" {
+		// Clear primary flag on all memberships for this node.
+		_, err := db.sql.ExecContext(ctx,
+			`UPDATE node_group_memberships SET is_primary = 0 WHERE node_id = ?`, nodeID)
+		if err != nil {
+			return fmt.Errorf("db: assign node to group (clear primary): %w", err)
+		}
+		return nil
 	}
-	res, err := db.sql.ExecContext(ctx,
-		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
-		gid, time.Now().Unix(), nodeID)
-	if err != nil {
-		return fmt.Errorf("db: assign node to group: %w", err)
-	}
-	return requireOneRow(res, "node_configs", nodeID)
+	return db.SetPrimaryGroupMember(ctx, nodeID, groupID)
 }
 
 // SetNodeLayoutOverride sets or clears the disk_layout_override for a node.
@@ -2134,8 +2131,9 @@ func scanNodeGroup(s scanner) (api.NodeGroup, error) {
 // ─── Group membership operations (020_group_memberships) ────────────────────
 
 // AddGroupMember inserts a node_group_memberships row. Idempotent via INSERT OR IGNORE.
-// Also updates node_configs.group_id to this group (last-write wins for single-group display).
 // If this is the node's first group membership, marks it is_primary=1 automatically (S2-5).
+// S6-6: node_configs.group_id fast-path column dropped; authoritative source is
+// node_group_memberships WHERE is_primary = 1.
 func (db *DB) AddGroupMember(ctx context.Context, groupID, nodeID string) error {
 	_, err := db.sql.ExecContext(ctx,
 		`INSERT OR IGNORE INTO node_group_memberships (node_id, group_id) VALUES (?, ?)`,
@@ -2151,11 +2149,6 @@ func (db *DB) AddGroupMember(ctx context.Context, groupID, nodeID string) error 
 		WHERE node_id = ? AND group_id = ?
 		  AND (SELECT COUNT(*) FROM node_group_memberships WHERE node_id = ? AND is_primary = 1) = 0
 	`, nodeID, groupID, nodeID)
-
-	// Update the fast-path group_id on node_configs for display / layout resolution.
-	_, _ = db.sql.ExecContext(ctx,
-		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
-		groupID, time.Now().Unix(), nodeID)
 	return nil
 }
 
@@ -2184,14 +2177,11 @@ func (db *DB) SetPrimaryGroupMember(ctx context.Context, nodeID, groupID string)
 	if err := requireOneRow(res, "node_group_memberships", nodeID+"/"+groupID); err != nil {
 		return err
 	}
-	// Sync fast-path column.
-	_, _ = tx.ExecContext(ctx,
-		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
-		groupID, time.Now().Unix(), nodeID)
 	return tx.Commit()
 }
 
 // RemoveGroupMember deletes a node_group_memberships row. No-op if absent.
+// S6-6: node_configs.group_id fast-path column dropped; no secondary cleanup needed.
 func (db *DB) RemoveGroupMember(ctx context.Context, groupID, nodeID string) error {
 	_, err := db.sql.ExecContext(ctx,
 		`DELETE FROM node_group_memberships WHERE node_id = ? AND group_id = ?`,
@@ -2199,11 +2189,6 @@ func (db *DB) RemoveGroupMember(ctx context.Context, groupID, nodeID string) err
 	if err != nil {
 		return fmt.Errorf("db: remove group member: %w", err)
 	}
-	// Clear group_id on node_configs if this was the node's active group.
-	_, _ = db.sql.ExecContext(ctx,
-		`UPDATE node_configs SET group_id = NULL, updated_at = ?
-		 WHERE id = ? AND group_id = ?`,
-		time.Now().Unix(), nodeID, groupID)
 	return nil
 }
 

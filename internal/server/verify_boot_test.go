@@ -327,8 +327,10 @@ func TestVerifyBoot_TimeoutScanner_SetsDeployVerifyTimeoutAt(t *testing.T) {
 	}
 }
 
-func TestMigration022_DualWrite_BackCompat(t *testing.T) {
-	// Verify the dual-write path and back-compat state logic.
+func TestMigration022_DeploySucceeded_StateTransitions(t *testing.T) {
+	// Verify the deploy_completed_preboot_at → deployed_verified state progression.
+	// S6-8: last_deploy_succeeded_at column dropped; this test verifies the
+	// canonical ADR-0008 two-phase path without any back-compat fallbacks.
 	ctx := context.Background()
 	dir := t.TempDir()
 	database, err := db.Open(filepath.Join(dir, "migration022.db"))
@@ -339,7 +341,7 @@ func TestMigration022_DualWrite_BackCompat(t *testing.T) {
 
 	nodeCfg := api.NodeConfig{
 		ID:         "migration022-test-node",
-		Hostname:   "legacy-node",
+		Hostname:   "deploy-state-node",
 		PrimaryMAC: "dd:ee:ff:00:01:02",
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
@@ -348,43 +350,29 @@ func TestMigration022_DualWrite_BackCompat(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	// Step 1: Simulate a legacy row (only last_deploy_succeeded_at set, no new fields).
-	legacyTs := time.Now().Add(-1 * time.Hour).Unix()
-	if _, err := database.SQL().ExecContext(ctx,
-		`UPDATE node_configs SET last_deploy_succeeded_at = ?, reimage_pending = 0 WHERE id = ?`,
-		legacyTs, nodeCfg.ID,
-	); err != nil {
-		t.Fatalf("set legacy timestamp: %v", err)
-	}
-	legacy, err := database.GetNodeConfig(ctx, nodeCfg.ID)
+	// Step 1: Fresh node — no deploy history.
+	fresh, err := database.GetNodeConfig(ctx, nodeCfg.ID)
 	if err != nil {
-		t.Fatalf("get legacy: %v", err)
+		t.Fatalf("get fresh: %v", err)
 	}
-	// Back-compat: legacy row → deployed_verified (full success was proven before ADR-0008).
-	if legacy.State() != api.NodeStateDeployedVerified {
-		t.Errorf("legacy back-compat state: got %s want deployed_verified", legacy.State())
-	}
-	if legacy.LastDeploySucceededAt == nil {
-		t.Error("legacy: last_deploy_succeeded_at should be non-nil")
+	if fresh.State() != api.NodeStateRegistered {
+		t.Errorf("fresh state: got %s want registered", fresh.State())
 	}
 
-	// Step 2: Use new dual-write path.
+	// Step 2: RecordDeploySucceeded — sets deploy_completed_preboot_at.
 	if err := database.RecordDeploySucceeded(ctx, nodeCfg.ID); err != nil {
 		t.Fatalf("RecordDeploySucceeded: %v", err)
 	}
-	afterDualWrite, err := database.GetNodeConfig(ctx, nodeCfg.ID)
+	afterDeploy, err := database.GetNodeConfig(ctx, nodeCfg.ID)
 	if err != nil {
-		t.Fatalf("get after dual-write: %v", err)
+		t.Fatalf("get after deploy: %v", err)
 	}
-	if afterDualWrite.DeployCompletedPrebootAt == nil {
+	if afterDeploy.DeployCompletedPrebootAt == nil {
 		t.Error("deploy_completed_preboot_at should be set after RecordDeploySucceeded")
 	}
-	if afterDualWrite.LastDeploySucceededAt == nil {
-		t.Error("last_deploy_succeeded_at back-compat field should also be set (dual-write)")
-	}
-	// After dual-write, the node is in deployed_preboot (waiting for OS phone-home).
-	if afterDualWrite.State() != api.NodeStateDeployedPreboot {
-		t.Errorf("dual-write state: got %s want deployed_preboot", afterDualWrite.State())
+	// Node is in deployed_preboot (waiting for OS phone-home).
+	if afterDeploy.State() != api.NodeStateDeployedPreboot {
+		t.Errorf("post-deploy state: got %s want deployed_preboot", afterDeploy.State())
 	}
 
 	// Step 3: Phone home — transition to deployed_verified.

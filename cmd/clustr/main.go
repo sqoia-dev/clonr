@@ -1203,8 +1203,8 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	// ──────────────────────────────────────────────────────────────────────
 
 	// ── Deploy complete callback ────────────────────────────────────────────
-	// Tell the server the deploy succeeded. This sets last_deploy_succeeded_at
-	// and clears reimage_pending, transitioning the node to NodeStateDeployed.
+	// Tell the server the deploy succeeded. This sets deploy_completed_preboot_at
+	// and clears reimage_pending, transitioning the node to NodeStateDeployedPreboot.
 	// On the next PXE boot (after the node reboots) the boot handler will see
 	// NodeStateDeployed and return "#!ipxe\nexit" so the BIOS boots from disk.
 	//

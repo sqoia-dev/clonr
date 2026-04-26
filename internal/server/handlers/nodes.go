@@ -33,8 +33,9 @@ func sortNodeConfigs(nodes []api.NodeConfig, col string, desc bool) {
 		case "status":
 			cmp = strings.Compare(string(a.State()), string(b.State()))
 		case "last_deploy":
-			ta := a.LastDeploySucceededAt
-			tb := b.LastDeploySucceededAt
+			// S6-8: sort by deploy_completed_preboot_at (canonical ADR-0008 field).
+			ta := a.DeployCompletedPrebootAt
+			tb := b.DeployCompletedPrebootAt
 			if ta == nil && tb == nil {
 				cmp = 0
 			} else if ta == nil {
@@ -210,6 +211,9 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.Nodes = nodes
 	}
+	// S6-7: signal that the "groups" field in NodeConfig is deprecated and will
+	// be removed in v1.1.
+	setNodeConfigSunsetHeader(w)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -293,6 +297,7 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, nil, map[string]string{"hostname": cfg.Hostname, "primary_mac": cfg.PrimaryMAC})
 	}
 
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated, removed in v1.1
 	writeJSON(w, http.StatusCreated, cfg)
 }
 
@@ -304,6 +309,7 @@ func (h *NodesHandler) GetNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated, removed in v1.1
 	writeJSON(w, http.StatusOK, sanitizeNodeConfig(cfg))
 }
 
@@ -373,15 +379,13 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		powerProvider = existing.PowerProvider // preserve existing credentials
 	}
 
-	// Preserve the existing group assignment unless explicitly changed in the request.
-	// An empty GroupID in the request means "leave as-is", not "clear the group".
-	// To unassign a node from its group, the caller must use the dedicated
-	// group-membership endpoint rather than sending an empty group_id here.
-	var groupID string
+	// S6-6: group_id column dropped. GroupID changes now route through
+	// AssignNodeToGroup (which writes to node_group_memberships). An empty GroupID
+	// in the request means "leave as-is". To clear, use the dedicated
+	// group-membership endpoint.
+	desiredGroupID := existing.GroupID
 	if req.GroupID != "" {
-		groupID = req.GroupID
-	} else {
-		groupID = existing.GroupID
+		desiredGroupID = req.GroupID
 	}
 
 	// S2-4: accept both "tags" and deprecated "groups" from the request body.
@@ -404,7 +408,7 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		CustomVars:         req.CustomVars,
 		BaseImageID:        req.BaseImageID,
 		PowerProvider:      powerProvider,
-		GroupID:            groupID,
+		GroupID:            desiredGroupID,
 		DiskLayoutOverride: layoutOverride,
 		ExtraMounts:        req.ExtraMounts,
 		CreatedAt:          existing.CreatedAt,
@@ -430,6 +434,16 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// S6-6: If the group assignment changed, propagate through node_group_memberships.
+	if desiredGroupID != existing.GroupID {
+		if err := h.DB.AssignNodeToGroup(r.Context(), id, desiredGroupID); err != nil {
+			log.Warn().Err(err).Str("node_id", id).Str("group_id", desiredGroupID).
+				Msg("update node: group assignment write failed (non-fatal)")
+		} else {
+			cfg.GroupID = desiredGroupID
+		}
+	}
+
 	// S5-12: Record field-level config change history.
 	aID, aLabel := "", ""
 	if h.GetActorInfo != nil {
@@ -446,6 +460,7 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, sanitizeNodeConfig(existing), sanitizeNodeConfig(cfg))
 	}
 
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated, removed in v1.1
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -479,6 +494,7 @@ func (h *NodesHandler) GetNodeByMAC(w http.ResponseWriter, r *http.Request) {
 	// Pre-merge group extra mounts so the deploy client receives the full
 	// effective mount list in ExtraMounts without needing a separate group lookup.
 	cfg = mergeGroupExtraMounts(r.Context(), h.DB, cfg)
+	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated, removed in v1.1
 	writeJSON(w, http.StatusOK, sanitizeNodeConfig(cfg))
 }
 
@@ -742,8 +758,8 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 
 // DeployComplete handles POST /api/v1/nodes/:id/deploy-complete.
 // Called by the clustr CLI after a successful deployment finalize.
-// Sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
-// node to NodeStateDeployed. Subsequent PXE boots will return "exit" (disk boot).
+// Sets deploy_completed_preboot_at and clears reimage_pending, transitioning the
+// node to NodeStateDeployedPreboot. Subsequent PXE boots will return "exit" (disk boot).
 // Also transitions any active reimage record to succeeded.
 func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

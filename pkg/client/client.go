@@ -224,8 +224,8 @@ func (c *Client) FlipToDisk(ctx context.Context, nodeID string, cycle bool) erro
 
 // ReportDeployComplete calls POST /api/v1/nodes/:id/deploy-complete.
 // Called by the clustr CLI after a successful deployment finalize. The server
-// sets last_deploy_succeeded_at and clears reimage_pending, transitioning the
-// node to NodeStateDeployed so subsequent PXE boots return "exit" (disk boot).
+// sets deploy_completed_preboot_at and clears reimage_pending, transitioning the
+// node to NodeStateDeployedPreboot so subsequent PXE boots return "exit" (disk boot).
 func (c *Client) ReportDeployComplete(ctx context.Context, nodeID string) error {
 	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
 }

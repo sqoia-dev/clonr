@@ -20,22 +20,41 @@ func newNodesHandler(d *db.DB) *NodesHandler {
 }
 
 // makeTestNodeWithGroup creates a NodeConfig with a pre-assigned group and
-// inserts it into d.
+// inserts it into d. S6-6: group assignment goes through node_group_memberships,
+// not the now-dropped node_configs.group_id column.
 func makeTestNodeWithGroup(t *testing.T, d *db.DB, mac, hostname, groupID string) api.NodeConfig {
 	t.Helper()
+	ctx := t.Context()
 	now := time.Now().UTC().Truncate(time.Second)
+
+	// Ensure the node_groups row exists (required by FK constraint).
+	_ = d.CreateNodeGroup(ctx, api.NodeGroup{
+		ID:        groupID,
+		Name:      groupID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+
 	cfg := api.NodeConfig{
 		ID:         "node-" + mac,
 		Hostname:   hostname,
 		PrimaryMAC: mac,
-		GroupID:    groupID,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	if err := d.CreateNodeConfig(t.Context(), cfg); err != nil {
+	if err := d.CreateNodeConfig(ctx, cfg); err != nil {
 		t.Fatalf("makeTestNodeWithGroup CreateNodeConfig: %v", err)
 	}
-	return cfg
+	// Add the group membership and mark it as primary.
+	if err := d.AddGroupMember(ctx, groupID, cfg.ID); err != nil {
+		t.Fatalf("makeTestNodeWithGroup AddGroupMember: %v", err)
+	}
+	// Re-read the node so GroupID is populated from the membership.
+	updated, err := d.GetNodeConfig(ctx, cfg.ID)
+	if err != nil {
+		t.Fatalf("makeTestNodeWithGroup GetNodeConfig: %v", err)
+	}
+	return updated
 }
 
 // putNodeRequest fires UpdateNode against the handler with the given body,
@@ -107,6 +126,17 @@ func TestUpdateNode_UpdatesGroupID_WhenProvided(t *testing.T) {
 	)
 
 	node := makeTestNodeWithGroup(t, d, mac, hostname, oldGroup)
+
+	// Create the target group so the FK constraint is satisfied.
+	now := time.Now().UTC()
+	_ = d.CreateNodeGroup(t.Context(), api.NodeGroup{
+		ID:        newGroup,
+		Name:      newGroup,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	// Also add the node to the new group (membership must exist for SetPrimaryGroupMember).
+	_ = d.AddGroupMember(t.Context(), newGroup, node.ID)
 
 	w := putNodeRequest(t, newNodesHandler(d), node.ID, map[string]any{
 		"hostname":    hostname,
