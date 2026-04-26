@@ -70,6 +70,27 @@ func toUserResponse(u db.UserRecord) userResponse {
 	return r
 }
 
+// HandleGetUser handles GET /api/v1/users/{id} — single user read.
+// GAP-21: required for the /users/{id} CRUD alias routes.
+func (h *UsersHandler) HandleGetUser(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeValidationError(w, "user id is required")
+		return
+	}
+	user, err := h.DB.GetUser(r.Context(), id)
+	if errors.Is(err, db.ErrUserNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found", "code": "not_found"})
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Str("user_id", id).Msg("users: get user failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserResponse(user))
+}
+
 // HandleList handles GET /api/v1/admin/users.
 func (h *UsersHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	users, err := h.DB.ListUsers(r.Context())

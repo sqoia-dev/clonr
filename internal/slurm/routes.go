@@ -55,6 +55,14 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Put("/nodes/{node_id}/slurm/role", m.handleSetRole)
 	r.Get("/nodes/{node_id}/slurm/sync-status", m.handleNodeSyncStatus)
 
+	// GAP-17: flat node/role/sync endpoints expected by the walkthrough nav.
+	// /slurm/nodes — list all clustr-managed nodes with their Slurm roles.
+	r.Get("/slurm/nodes", m.handleSlurmNodes)
+	// /slurm/roles — list the available Slurm role strings.
+	r.Get("/slurm/roles", m.handleSlurmRoles)
+	// /slurm/sync — trigger a push of all managed configs to all worker nodes.
+	r.Post("/slurm/sync", m.handleSlurmSync)
+
 	// Role summary and lookup.
 	r.Get("/slurm/nodes/by-role/{role}", m.handleNodesByRole)
 	r.Get("/slurm/roles/summary", m.handleRoleSummary)
@@ -993,6 +1001,65 @@ func (m *Manager) handleRotateMungeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, map[string]string{"status": "ok", "message": "munge key rotated"}, http.StatusOK)
+}
+
+// ─── GAP-17 flat endpoints ────────────────────────────────────────────────────
+
+// handleSlurmNodes is GET /api/v1/slurm/nodes.
+// Returns all clustr-managed nodes that have a Slurm role assignment,
+// along with their assigned roles and whether they are currently connected.
+func (m *Manager) handleSlurmNodes(w http.ResponseWriter, r *http.Request) {
+	allRoles, err := m.db.SlurmListAllNodeRoles(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: list nodes failed")
+		jsonError(w, "failed to list Slurm nodes", http.StatusInternalServerError)
+		return
+	}
+
+	type slurmNodeEntry struct {
+		NodeID    string   `json:"node_id"`
+		Roles     []string `json:"roles"`
+		Connected bool     `json:"connected"`
+	}
+
+	entries := make([]slurmNodeEntry, 0, len(allRoles))
+	for _, entry := range allRoles {
+		connected := m.hub != nil && m.hub.IsConnected(entry.NodeID)
+		entries = append(entries, slurmNodeEntry{
+			NodeID:    entry.NodeID,
+			Roles:     entry.Roles,
+			Connected: connected,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"nodes": entries, "total": len(entries)}, http.StatusOK)
+}
+
+// handleSlurmRoles is GET /api/v1/slurm/roles.
+// Returns the canonical list of Slurm node roles supported by clustr.
+func (m *Manager) handleSlurmRoles(w http.ResponseWriter, r *http.Request) {
+	roles := []string{"controller", "worker", "dbd", "login"}
+	jsonResponse(w, map[string]interface{}{"roles": roles, "total": len(roles)}, http.StatusOK)
+}
+
+// handleSlurmSync is POST /api/v1/slurm/sync.
+// Triggers a push of all managed Slurm config files to all connected worker
+// nodes using reconfigure as the apply action. Returns a push operation ID
+// that callers can poll via GET /slurm/push-ops/{op_id}.
+func (m *Manager) handleSlurmSync(w http.ResponseWriter, r *http.Request) {
+	initiatedBy := keyLabelFromContext(r)
+
+	req := PushRequest{
+		ApplyAction: "reconfigure",
+	}
+
+	op, err := m.StartPush(r.Context(), req, initiatedBy)
+	if err != nil {
+		log.Error().Err(err).Msg("slurm: sync (push) failed to start")
+		jsonError(w, "sync failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, op, http.StatusAccepted)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

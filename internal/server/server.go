@@ -851,6 +851,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Put("/admin/users/{id}", usersH.HandleUpdate)
 			r.With(requireRole("admin")).Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
 			r.With(requireRole("admin")).Delete("/admin/users/{id}", usersH.HandleDelete)
+			// GAP-21: /api/v1/users CRUD aliases — Sprint 3 docs and the walkthrough
+			// expect these paths; /admin/users is the canonical path but /users also works.
+			r.With(requireRole("admin")).Get("/users", usersH.HandleListWithMemberships)
+			r.With(requireRole("admin")).Post("/users", usersH.HandleCreate)
+			r.With(requireRole("admin")).Get("/users/{id}", usersH.HandleGetUser)
+			r.With(requireRole("admin")).Put("/users/{id}", usersH.HandleUpdate)
+			r.With(requireRole("admin")).Delete("/users/{id}", usersH.HandleDelete)
 			// Group membership assignment (S3-3).
 			r.With(requireRole("admin")).Get("/users/{id}/group-memberships", usersH.HandleGetGroupMemberships)
 			r.With(requireRole("admin")).Put("/users/{id}/group-memberships", usersH.HandleSetGroupMemberships)

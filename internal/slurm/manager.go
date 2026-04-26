@@ -146,6 +146,24 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 		log.Warn().Err(err).Msg("slurm: seed default templates failed (non-fatal)")
 	}
 
+	// GAP-19: Auto-generate a munge key on first enable if one does not already
+	// exist. This is idempotent — if a key already exists we leave it alone so
+	// existing deployments are not invalidated. GenerateMungeKey uses upsert,
+	// so calling it when a key already exists would rotate it; we guard against
+	// that by checking first.
+	if _, err := m.db.SlurmGetSecret(ctx, "munge.key"); err != nil {
+		// ErrNoRows (or any error) → no key yet → generate one.
+		if genErr := m.GenerateMungeKey(ctx); genErr != nil {
+			// Non-fatal: the operator can generate the key manually via
+			// POST /api/v1/slurm/munge-key/generate. Log clearly.
+			log.Warn().Err(genErr).Msg("slurm: auto-generate munge key on enable failed (non-fatal) — run POST /slurm/munge-key/generate manually")
+		} else {
+			log.Info().Msg("slurm: munge key auto-generated on first enable")
+		}
+	} else {
+		log.Debug().Msg("slurm: munge key already exists — skipping auto-generation")
+	}
+
 	// Update in-memory cache.
 	m.mu.Lock()
 	m.cfg = &row
