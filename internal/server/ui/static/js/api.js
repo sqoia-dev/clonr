@@ -141,6 +141,10 @@ const API = {
         create(body)          { return API.post('/nodes', body); },
         update(id, body)      { return API.put(`/nodes/${id}`, body); },
         del(id)               { return API.del(`/nodes/${id}`); },
+        // S5-12: config change history for a node.
+        configHistory(id, page = 1, perPage = 30) {
+            return API.get(`/nodes/${id}/config-history`, { page, per_page: perPage });
+        },
         power: {
             status(id)              { return API.get(`/nodes/${id}/power`); },
             on(id)                  { return API.post(`/nodes/${id}/power/on`); },
@@ -255,7 +259,7 @@ const API = {
     reimages: {
         // listForNode fetches reimage history for a single node.
         listForNode(nodeId)                 { return API.get(`/nodes/${nodeId}/reimage`); },
-        // list fetches all reimage records with optional filters.
+        // list fetches all reimage records with optional filters. Pass { limit } for pagination.
         list(params = {})                   { return API.get('/reimages', params); },
         get(id)                             { return API.get(`/reimage/${id}`); },
         cancel(id)                          { return API.del(`/reimage/${id}`); },

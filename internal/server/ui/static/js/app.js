@@ -39,6 +39,9 @@ const Router = {
         if (Pages._closePowerDropdownsOnOutsideClick) {
             document.removeEventListener('click', Pages._closePowerDropdownsOnOutsideClick);
         }
+        // S5-4: Remove bulk action bar if navigating away from nodes.
+        const bulkBar = document.getElementById('nodes-bulk-action-bar');
+        if (bulkBar) bulkBar.remove();
 
         // Match exact or prefix.
         let handler = this._routes[hash];
@@ -159,6 +162,8 @@ const App = {
             else if (parts[2] === 'groups') Pages.nodeGroups();
             else Pages.nodeDetail(parts[2]);
         });
+        // S5-10: Direct deployments route — active deployments table reachable in one click.
+        Router.register('/deploys',  ()   => Pages.deploys());
         Router.register('/settings', ()   => Pages.settings());
         Router.register('/ldap',     (h)  => {
             const parts = h.split('/');
@@ -596,6 +601,44 @@ const Pages = {
                 </div>
 
                 ${staleInitramfsWarning}
+
+                ${(images.length === 0 && nodes.length === 0) ? `
+                <!-- S5-9: First-deploy wizard — shown when there are no images and no nodes. -->
+                <div class="card" style="margin-bottom:24px;border:1px solid var(--accent);background:linear-gradient(135deg,var(--surface-secondary) 0%,var(--bg-primary) 100%)">
+                    <div class="card-header">
+                        <h2 class="card-title" style="display:flex;align-items:center;gap:10px">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:20px;height:20px"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg>
+                            Getting Started
+                        </h2>
+                        <span class="text-dim text-sm">Complete these steps to deploy your first node</span>
+                    </div>
+                    <div style="padding:16px 20px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
+                        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                                <span style="width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">1</span>
+                                <span style="font-weight:600;font-size:14px">Build an Image</span>
+                            </div>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">Use <em>Build from ISO</em> to create a rootfs image from a standard Linux installer. This is the recommended starting point.</p>
+                            <a href="#/images" class="btn btn-primary btn-sm">Go to Images</a>
+                        </div>
+                        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                                <span style="width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-secondary);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">2</span>
+                                <span style="font-weight:600;font-size:14px">Register a Node</span>
+                            </div>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">PXE-boot a physical or virtual machine. clustr's iPXE menu will auto-register the node when it phones home.</p>
+                            <a href="#/nodes" class="btn btn-secondary btn-sm">Go to Nodes</a>
+                        </div>
+                        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                                <span style="width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-secondary);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">3</span>
+                                <span style="font-weight:600;font-size:14px">Deploy</span>
+                            </div>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">Assign the image to the node and trigger a reimage. Live progress appears here on the dashboard.</p>
+                            <a href="#/deploys" class="btn btn-secondary btn-sm">View Deployments</a>
+                        </div>
+                    </div>
+                </div>` : ''}
 
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -1037,37 +1080,50 @@ const Pages = {
                     </div>
                     <div class="flex gap-8" style="align-items:center">
                         ${tagFilterHtml}
-                        <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
-                        <button class="btn btn-secondary" onclick="Pages.showBuildFromISOModal()">
+                        <!-- S5-8: secondary actions grouped together, Build from ISO is primary -->
+                        <span title="Pull a pre-built image tarball from a URL or registry">
+                            <button class="btn btn-secondary" onclick="Pages.showPullModal()">Pull</button>
+                        </span>
+                        <span title="Capture the running OS of an SSH-reachable host into a clustr image">
+                            <button class="btn btn-secondary" onclick="Pages.showCaptureModal()">Capture from Host</button>
+                        </span>
+                        <span title="Import a raw ISO file already present on the server filesystem">
+                            <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
+                        </span>
+                        <!-- Build from ISO is first-choice and visually highlighted -->
+                        <button class="btn btn-primary" onclick="Pages.showBuildFromISOModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/>
                             </svg>
                             Build from ISO
-                        </button>
-                        <button class="btn btn-secondary" onclick="Pages.showCaptureModal()">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                            </svg>
-                            Capture from Host
-                        </button>
-                        <button class="btn btn-primary" onclick="Pages.showPullModal()">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
-                            </svg>
-                            Pull Image
                         </button>
                     </div>
                 </div>
 
                 ${this._initramfsCard(initramfsInfo)}
 
+                ${images.length === 0 && !filterTag ? `
+                <!-- S5-8: Getting-started callout for new operators (Persona D) -->
+                <div class="alert alert-info" style="margin-bottom:16px;display:flex;align-items:flex-start;gap:14px">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:20px;height:20px;flex-shrink:0;margin-top:2px">
+                        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <div>
+                        <div style="font-weight:600;margin-bottom:4px">New here? Build from ISO is the recommended starting point.</div>
+                        <div style="font-size:13px;color:var(--text-secondary)">
+                            Provide a standard Linux ISO (Rocky, Ubuntu, Debian, RHEL) and clustr will perform an unattended install into a deployable image.
+                            Use <strong>Pull</strong> if you have an existing clustr image tarball, <strong>Capture from Host</strong> to clone a running OS, or <strong>Import ISO</strong> to stage a raw ISO file.
+                        </div>
+                    </div>
+                </div>` : ''}
+
                 ${images.length === 0
                     ? `<div class="card"><div class="card-body">${emptyState(
                         filterTag ? `No images with tag "${filterTag}"` : 'No images yet',
-                        filterTag ? 'Try a different tag filter or clear the filter.' : 'Pull your first image to get started.',
+                        filterTag ? 'Try a different tag filter or clear the filter.' : 'Use "Build from ISO" to create your first image.',
                         filterTag
                             ? `<button class="btn btn-secondary" onclick="Pages.images()">Clear Filter</button>`
-                            : `<button class="btn btn-primary" onclick="Pages.showPullModal()">Pull Image</button>`
+                            : `<button class="btn btn-primary" onclick="Pages.showBuildFromISOModal()">Build from ISO</button>`
                     )}</div></div>`
                     : `<div class="image-grid">${images.map(img => this._imageCard(img)).join('')}</div>`
                 }
@@ -2464,8 +2520,28 @@ const Pages = {
             }
         }
 
+        // S5-3: Sortable column headers. Current sort state persisted on Pages.
+        const sortCol = Pages._nodesSortCol || '';
+        const sortDir = Pages._nodesSortDir || 'asc';
+        const sortIcon = (col) => {
+            if (sortCol !== col) return ' <span style="opacity:0.3;font-size:10px">&#8597;</span>';
+            return sortDir === 'asc' ? ' <span style="font-size:10px">&#8593;</span>' : ' <span style="font-size:10px">&#8595;</span>';
+        };
+        const sortClick = (col) => `onclick="Pages._nodesSortBy('${col}')"`;
+        // S5-4: Select-all checkbox.
+        const selectAllCb = (Auth._role === 'admin' || Auth._role === 'operator')
+            ? `<th style="width:32px"><input type="checkbox" id="nodes-select-all" title="Select all" onchange="Pages._nodesSelectAll(this.checked)"></th>`
+            : '';
         const tableHeader = `<thead><tr>
-            <th>Host</th><th>Image</th><th>Status</th><th>Hardware</th><th>Group</th><th>Updated</th><th>Actions</th>
+            ${selectAllCb}
+            <th style="cursor:pointer" ${sortClick('hostname')}>Host${sortIcon('hostname')}</th>
+            <th>Image</th>
+            <th style="cursor:pointer" ${sortClick('status')}>Status${sortIcon('status')}</th>
+            <th>Hardware</th>
+            <th style="cursor:pointer" ${sortClick('group')}>Group${sortIcon('group')}</th>
+            <th style="cursor:pointer" ${sortClick('last_deploy')}>Updated${sortIcon('last_deploy')}</th>
+            <th style="min-width:80px">Power</th>
+            <th>Actions</th>
         </tr></thead>`;
 
         return Pages._nodesRoleOrder.map(({ role, label }) => {
@@ -2504,6 +2580,163 @@ const Pages = {
         if (chevron) chevron.innerHTML = collapsed ? '&#9650;' : '&#9660;';
     },
 
+    // S5-3: Sort state — persisted on Pages across refresh cycles.
+    _nodesSortCol: '',
+    _nodesSortDir: 'asc',
+
+    // S5-3: _nodesSortBy toggles or sets the sort column and re-fetches.
+    _nodesSortBy(col) {
+        if (Pages._nodesSortCol === col) {
+            Pages._nodesSortDir = Pages._nodesSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+            Pages._nodesSortCol = col;
+            Pages._nodesSortDir = 'asc';
+        }
+        Pages.nodes();
+    },
+
+    // S5-4: Bulk reimage state.
+    _nodesCheckedIds: new Set(),
+
+    // S5-4: _nodesSelectAll selects or deselects all visible node checkboxes.
+    _nodesSelectAll(checked) {
+        document.querySelectorAll('.node-select-cb').forEach(cb => {
+            cb.checked = checked;
+            const id = cb.dataset.id;
+            if (checked) Pages._nodesCheckedIds.add(id);
+            else         Pages._nodesCheckedIds.delete(id);
+        });
+        Pages._nodesUpdateActionBar();
+    },
+
+    // S5-4: _nodesOnCheckboxChange updates _nodesCheckedIds and the action bar.
+    _nodesOnCheckboxChange() {
+        Pages._nodesCheckedIds = new Set();
+        document.querySelectorAll('.node-select-cb:checked').forEach(cb => {
+            Pages._nodesCheckedIds.add(cb.dataset.id);
+        });
+        Pages._nodesUpdateActionBar();
+    },
+
+    // S5-4: _nodesUpdateActionBar shows/hides the bulk action bar.
+    _nodesUpdateActionBar() {
+        const count = Pages._nodesCheckedIds.size;
+        let bar = document.getElementById('nodes-bulk-action-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'nodes-bulk-action-bar';
+            bar.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px 20px;display:flex;align-items:center;gap:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:500;min-width:360px';
+            document.body.appendChild(bar);
+        }
+        if (count === 0) {
+            bar.style.display = 'none';
+            return;
+        }
+        bar.style.display = 'flex';
+        bar.innerHTML = `
+            <span style="font-size:13px;font-weight:600">${count} node${count !== 1 ? 's' : ''} selected</span>
+            <button class="btn btn-primary btn-sm" onclick="Pages._nodesBulkReimage()">Reimage Selected</button>
+            <button class="btn btn-secondary btn-sm" onclick="Pages._nodesSelectAll(false);document.getElementById('nodes-select-all')&&(document.getElementById('nodes-select-all').checked=false)">Clear</button>`;
+    },
+
+    // S5-4: _nodesBulkReimage opens a modal to reimage all checked nodes.
+    async _nodesBulkReimage() {
+        const ids = Array.from(Pages._nodesCheckedIds);
+        if (!ids.length) return;
+
+        const images = Pages._nodesImages || [];
+        const readyImages = images.filter(i => i.status === 'ready');
+
+        const modal = document.createElement('div');
+        modal.id = 'bulk-reimage-modal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
+        modal.innerHTML = `
+            <div class="card" style="width:460px;max-width:95vw;">
+                <div class="card-header">
+                    <h2 class="card-title">Bulk Reimage (${ids.length} nodes)</h2>
+                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('bulk-reimage-modal').remove()">×</button>
+                </div>
+                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+                    <div class="alert alert-warning">
+                        Each node will be reimaged individually. This cannot be undone.
+                    </div>
+                    <label class="form-label">Image
+                        <select id="brm-image" class="form-input" style="margin-top:4px;">
+                            <option value="">— use each node's assigned image —</option>
+                            ${readyImages.map(i => `<option value="${escHtml(i.id)}">${escHtml(i.name)}${i.version ? ' v' + escHtml(i.version) : ''}</option>`).join('')}
+                        </select>
+                    </label>
+                    <div class="form-group">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+                            <input type="checkbox" id="brm-dry-run">
+                            <span>Dry run — PXE boot but skip disk write</span>
+                        </label>
+                    </div>
+                    <div id="brm-progress" style="display:none;font-size:13px;color:var(--text-secondary)">Submitting…</div>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('bulk-reimage-modal').remove()">Cancel</button>
+                        <button class="btn btn-danger" onclick="Pages._nodesBulkReimageSubmit(${JSON.stringify(ids)})">Reimage ${ids.length} Nodes</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+    },
+
+    // S5-4: Submit individual reimage requests for each selected node.
+    async _nodesBulkReimageSubmit(ids) {
+        const imageId = document.getElementById('brm-image')?.value || '';
+        const dryRun  = !!(document.getElementById('brm-dry-run')?.checked);
+        const progEl  = document.getElementById('brm-progress');
+        if (progEl) progEl.style.display = '';
+
+        let ok = 0, fail = 0;
+        for (const nodeId of ids) {
+            try {
+                const body = { dry_run: dryRun };
+                if (imageId) body.base_image_id = imageId;
+                await API.request('POST', `/nodes/${nodeId}/reimage`, body);
+                ok++;
+            } catch (_) {
+                fail++;
+            }
+            if (progEl) progEl.textContent = `Submitted ${ok + fail} / ${ids.length}…`;
+        }
+
+        document.getElementById('bulk-reimage-modal')?.remove();
+        App.toast(`Bulk reimage: ${ok} queued${fail ? ', ' + fail + ' failed' : ''}`, ok > 0 ? 'success' : 'error');
+        Pages._nodesSelectAll(false);
+        Pages.nodesRefresh();
+    },
+
+    // S5-1: _nodesFetchPower fetches power state for nodes that have BMC/power_provider.
+    // Runs up to concurrencyLimit concurrent requests to avoid overwhelming IPMI/Proxmox.
+    async _nodesFetchPower(nodes, concurrencyLimit = 10) {
+        const powerNodes = nodes.filter(n =>
+            (n.bmc && n.bmc.ip_address) || (n.power_provider && n.power_provider.type)
+        );
+        if (!powerNodes.length) return;
+
+        const queue = [...powerNodes];
+        const workers = Array.from({ length: Math.min(concurrencyLimit, queue.length) }, async () => {
+            while (queue.length) {
+                const n = queue.shift();
+                if (!n) break;
+                try {
+                    const data = await API.nodes.power.status(n.id);
+                    const status = (data && data.status) || 'unknown';
+                    const cell = document.getElementById(`pwr-cell-${n.id}`);
+                    if (cell) {
+                        const cls = { on: 'var(--success)', off: 'var(--text-dim)', unknown: 'var(--text-dim)', error: 'var(--error)' }[status] || 'var(--text-dim)';
+                        cell.innerHTML = `<span style="color:${cls};font-weight:${status === 'on' ? 600 : 400}">${escHtml(status)}</span>`;
+                    }
+                } catch (_) {
+                    // silently skip — power status is best-effort
+                }
+            }
+        });
+        await Promise.all(workers);
+    },
+
     // _nodesSearchTimer is used to debounce the search input.
     _nodesSearchTimer: null,
 
@@ -2520,9 +2753,20 @@ const Pages = {
 
             // Reset search state on page load.
             Pages._nodesSearchQuery = '';
+            // Reset bulk selection state on navigation.
+            Pages._nodesCheckedIds = new Set();
+            const existingBar = document.getElementById('nodes-bulk-action-bar');
+            if (existingBar) existingBar.remove();
+
+            // S5-3: Build sort params from persisted state.
+            const sortParams = {};
+            if (Pages._nodesSortCol) {
+                sortParams.sort = Pages._nodesSortCol;
+                sortParams.dir  = Pages._nodesSortDir || 'asc';
+            }
 
             const [nodesResp, imagesResp, groupsResp] = await Promise.all([
-                API.nodes.list(),
+                API.nodes.list(sortParams),
                 API.images.list(),
                 API.nodeGroups.list().catch(() => ({ groups: [] })),
             ]);
@@ -2600,6 +2844,10 @@ const Pages = {
             // Close power dropdowns when clicking outside any of them.
             document.addEventListener('click', Pages._closePowerDropdownsOnOutsideClick);
 
+            // S5-1: Batch-fetch power states for all nodes with BMC/power_provider configured.
+            // Non-blocking — runs after the page is rendered.
+            Pages._nodesFetchPower(filteredNodes, 10);
+
         } catch (e) {
             App.render(alertBox(`Failed to load nodes: ${e.message}`));
         }
@@ -2673,7 +2921,16 @@ const Pages = {
                 ? ' <span class="badge badge-success badge-sm" title="clustr-clientd is connected and sending heartbeats">Live</span>'
                 : '';
         })();
+        // S5-4: Checkbox cell (admin/operator only).
+        const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        const checkboxCell = canMutate
+            ? `<td style="width:32px"><input type="checkbox" class="node-select-cb" data-id="${escHtml(n.id)}" onchange="Pages._nodesOnCheckboxChange()"></td>`
+            : '';
+        // S5-1: Power state cell. Initially shows — ; populated async by Pages._nodesFetchPower().
+        const powerCell = `<td id="pwr-cell-${escHtml(n.id)}" class="text-dim text-sm">—</td>`;
+
         return `<tr data-key="${escHtml(n.id)}">
+            ${checkboxCell}
             <td>
                 <a href="#/nodes/${n.id}" style="font-weight:500;color:var(--text-primary)">
                     ${hostnameHtml}${liveBadge}
@@ -2702,6 +2959,7 @@ const Pages = {
                 })()}
             </td>
             <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
+            ${powerCell}
             <td>
                 ${Pages._nodeRowActions(n)}
             </td>
@@ -2709,9 +2967,19 @@ const Pages = {
     },
 
     // _nodeRowActions renders the actions cell for a node row.
-    // Power actions are shown only to admin/operator; readonly sees View only.
+    // Power actions and deploy actions shown only to admin/operator; readonly sees View only.
+    // S5-5: Adds "Re-deploy last image" and "Retry" quick-action buttons.
     _nodeRowActions(n) {
         const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        // S5-5: "Retry" appears for nodes in Failed state.
+        const isFailed = n._deployStatus === 'error' || (n.last_deploy_failed_at && (!n.last_deploy_succeeded_at || n.last_deploy_failed_at > n.last_deploy_succeeded_at));
+        const retryBtn = (canMutate && isFailed)
+            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._listRetryLastReimage('${n.id}')" title="Retry the last failed deploy">Retry</button>`
+            : '';
+        // S5-5: "Re-deploy last image" pre-populates reimage modal with last image.
+        const redeployBtn = (canMutate && n.base_image_id && !isFailed)
+            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._listRedeploy('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Re-deploy the currently assigned image">Re-deploy</button>`
+            : '';
         const pwrDropdown = canMutate ? `
             <div class="actions-dropdown" id="pwr-dd-${n.id}">
                 <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
@@ -2729,8 +2997,32 @@ const Pages = {
             </div>` : '';
         return `<div class="flex gap-6" style="align-items:center">
             <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
+            ${retryBtn}${redeployBtn}
             ${pwrDropdown}
         </div>`;
+    },
+
+    // S5-5: _listRetryLastReimage retries the most recent failed reimage for a node.
+    async _listRetryLastReimage(nodeId) {
+        try {
+            const resp = await API.reimages.listForNode(nodeId);
+            const requests = (resp && resp.requests) || [];
+            const failed = requests.find(r => r.status === 'failed');
+            if (!failed) {
+                App.toast('No failed reimage found to retry', 'info');
+                return;
+            }
+            await API.request('POST', `/reimage/${failed.id}/retry`, {});
+            App.toast('Reimage retried', 'success');
+            Pages.nodesRefresh();
+        } catch (e) {
+            App.toast(`Retry failed: ${e.message}`, 'error');
+        }
+    },
+
+    // S5-5: _listRedeploy opens the reimage modal pre-populated with the node's current image.
+    _listRedeploy(nodeId, displayName) {
+        Pages._nodeActionsTriggerReimage(nodeId, displayName);
     },
 
     // nodesRefresh — called by the auto-refresh timer. Updates the nodes table
@@ -3481,6 +3773,7 @@ const Pages = {
                     <div class="tab" id="node-tab-btn-logs" onclick="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
                     <div class="tab" id="node-tab-btn-configpush" onclick="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
                     <div class="tab" id="node-tab-btn-slurm" onclick="Pages._switchNodeTab(this, 'tab-slurm', 'slurm');Pages._onSlurmTabOpen('${escHtml(node.id)}')">Slurm</div>
+                    <div class="tab" id="node-tab-btn-confighistory" onclick="Pages._switchNodeTab(this, 'tab-confighistory', 'confighistory');Pages._onConfigHistoryTabOpen('${escHtml(node.id)}')">Config History</div>
                     ${(node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000) ? `<div class="tab" id="node-tab-btn-diagnostics" onclick="Pages._switchNodeTab(this, 'tab-diagnostics', 'diagnostics')">Diagnostics</div>` : ''}
                 </div>
 
@@ -4130,6 +4423,13 @@ const Pages = {
                     `)}
                 </div>`;
                 })()}
+
+                <!-- S5-12: Config History tab — append-only audit log of node config field changes -->
+                <div id="tab-confighistory" class="tab-panel">
+                    ${cardWrap('Configuration Change History',
+                        `<div id="confighistory-wrap">${loading('Loading history…')}</div>`,
+                        '')}
+                </div>
             `);
 
             // Store original values for revert on each editable tab.
@@ -5919,6 +6219,56 @@ const Pages = {
         Pages._powerTimer = setInterval(() => Pages._refreshPowerStatus(nodeId), 20000);
     },
 
+    // S5-12: _onConfigHistoryTabOpen loads config change history for the given node.
+    // Paginates server-side via GET /api/v1/nodes/:id/config-history?page=&per_page=.
+    async _onConfigHistoryTabOpen(nodeId, page = 1) {
+        const wrap = document.getElementById('confighistory-wrap');
+        if (!wrap) return;
+        wrap.innerHTML = loading('Loading history…');
+        try {
+            const resp = await API.nodes.configHistory(nodeId, page, 30);
+            const rows  = (resp && resp.history) || [];
+            const total = (resp && resp.total)   || 0;
+            const perPage = (resp && resp.per_page) || 30;
+
+            if (!rows.length) {
+                wrap.innerHTML = emptyState('No config changes recorded', 'Configuration changes are recorded each time a node is updated.');
+                return;
+            }
+
+            const pages = Math.ceil(total / perPage);
+            const prevBtn = page > 1
+                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page - 1})">Previous</button>`
+                : '';
+            const nextBtn = page < pages
+                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page + 1})">Next</button>`
+                : '';
+
+            wrap.innerHTML = `
+                <div class="table-wrap"><table aria-label="Config change history">
+                    <thead><tr>
+                        <th>Field</th><th>Old Value</th><th>New Value</th><th>Changed By</th><th>When</th>
+                    </tr></thead>
+                    <tbody>
+                    ${rows.map(r => `<tr>
+                        <td class="text-mono text-sm">${escHtml(r.field_name)}</td>
+                        <td class="text-dim text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.old_value)}">${r.old_value ? escHtml(r.old_value) : '<span class="text-dim">—</span>'}</td>
+                        <td class="text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.new_value)}">${r.new_value ? escHtml(r.new_value) : '<span class="text-dim">—</span>'}</td>
+                        <td class="text-dim text-sm">${r.actor_label ? escHtml(r.actor_label) : '—'}</td>
+                        <td class="text-dim text-sm">${fmtRelative(r.changed_at ? new Date(r.changed_at * 1000).toISOString() : null)}</td>
+                    </tr>`).join('')}
+                    </tbody>
+                </table></div>
+                ${pages > 1 ? `<div style="display:flex;align-items:center;gap:8px;margin-top:12px">
+                    ${prevBtn}
+                    <span class="text-dim text-sm">Page ${page} of ${pages} · ${total} change${total !== 1 ? 's' : ''}</span>
+                    ${nextBtn}
+                </div>` : `<div class="text-dim text-sm" style="margin-top:8px">${total} change${total !== 1 ? 's' : ''} total</div>`}`;
+        } catch (e) {
+            wrap.innerHTML = alertBox(`Failed to load config history: ${e.message}`);
+        }
+    },
+
     // _refreshPowerStatus fetches the current power status from the server and
     // updates the status indicator, label, and button disabled states.
     async _refreshPowerStatus(nodeId) {
@@ -6137,6 +6487,23 @@ const Pages = {
                 </tbody>
             </table></div>`;
             sections.push(cardWrap('NICs', nicHtml));
+        }
+
+        // S5-2: GPU inventory — populated via PCI sysfs enumeration in initramfs.
+        if (hw.GPUs && hw.GPUs.length) {
+            const gpuHtml = `<div class="table-wrap"><table>
+                <thead><tr><th>Model</th><th>Vendor ID</th><th>Device ID</th><th>PCI Address</th><th>VRAM</th></tr></thead>
+                <tbody>
+                ${hw.GPUs.map(g => `<tr>
+                    <td style="font-weight:500">${escHtml(g.model || g.Model || '—')}</td>
+                    <td class="mono dim">${escHtml(g.vendor_id || g.VendorID || '—')}</td>
+                    <td class="mono dim">${escHtml(g.device_id || g.DeviceID || '—')}</td>
+                    <td class="mono dim">${escHtml(g.pci_address || g.PCIAddress || '—')}</td>
+                    <td class="mono dim">${(g.vram_bytes || g.VRAMBytes) ? fmtBytes(g.vram_bytes || g.VRAMBytes) : '—'}</td>
+                </tr>`).join('')}
+                </tbody>
+            </table></div>`;
+            sections.push(cardWrap(`GPUs (${hw.GPUs.length})`, gpuHtml));
         }
 
         if (hw.BMC) {
@@ -6952,6 +7319,13 @@ const Pages = {
                             <div class="form-hint">Pause rollout if this % of a wave fails</div>
                         </div>
                     </div>
+                    <div class="form-group" style="margin-bottom:14px">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+                            <input type="checkbox" id="grm-dry-run">
+                            <span>Dry run — power-cycle and PXE boot nodes but skip disk write</span>
+                        </label>
+                        <div class="form-hint" style="margin-top:4px">Use for hardware discovery or deploy pipeline testing without overwriting disks.</div>
+                    </div>
                     <div style="background:var(--surface-secondary);border-radius:6px;padding:10px 14px;font-size:12px;color:var(--text-secondary);margin-bottom:16px">
                         This will power-cycle all nodes in the group. Each node will PXE boot and deploy the selected image.
                     </div>
@@ -6973,6 +7347,8 @@ const Pages = {
         const imageId = document.getElementById('grm-image')?.value;
         const concurrency = parseInt(document.getElementById('grm-concurrency')?.value || '5', 10);
         const pausePct = parseInt(document.getElementById('grm-pause-pct')?.value || '20', 10);
+        // S5-7: dry_run checkbox support.
+        const dryRun = !!(document.getElementById('grm-dry-run')?.checked);
         const resultEl = document.getElementById('grm-result');
         const submitBtn = document.getElementById('grm-submit');
         const statusEl = document.getElementById('grm-job-status');
@@ -6989,6 +7365,7 @@ const Pages = {
                 image_id: imageId,
                 concurrency: concurrency || 5,
                 pause_on_failure_pct: pausePct >= 0 ? pausePct : 20,
+                dry_run: dryRun,
             });
 
             if (submitBtn) submitBtn.style.display = 'none';
@@ -7764,6 +8141,172 @@ const Pages = {
         }
     },
 
+    // ── Deployments (S5-10) ───────────────────────────────────────────────
+
+    // deploys — full-page deployment history and live progress view.
+    // Shows all reimage records (pending, in_progress, complete, failed) with
+    // live progress for in-flight deploys. Auto-refreshes every 30 s.
+    async deploys() {
+        App.render(loading('Loading deployments…'));
+        try {
+            const [reimagesResp, progressEntries, nodesResp] = await Promise.all([
+                API.reimages.list({ limit: 100 }).catch(() => ({ requests: [] })),
+                API.progress.list().catch(() => []),
+                API.nodes.list().catch(() => ({ nodes: [] })),
+            ]);
+
+            const requests  = (reimagesResp && reimagesResp.requests) || [];
+            const nodes     = (nodesResp && nodesResp.nodes) || [];
+            const nodeMap   = Object.fromEntries(nodes.map(n => [n.id, n]));
+
+            // Build MAC → live progress map for merging into reimage rows.
+            const deployMap = new Map();
+            (progressEntries || []).forEach(p => deployMap.set(p.node_mac, p));
+            Pages._deploysProgressMap = deployMap;
+            Pages._deploysNodeMap = nodeMap;
+
+            App.render(`
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">Deployments</h1>
+                        <div class="page-subtitle">Reimage history and live deploy progress</div>
+                    </div>
+                    <div class="flex gap-8">
+                        <button class="btn btn-secondary btn-sm" onclick="Pages.deploys()" title="Refresh">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                ${cardWrap('Live Progress',
+                    `<div id="deploys-live-container">${Pages._deployProgressTable(deployMap)}</div>`)}
+
+                ${cardWrap('Reimage History',
+                    Pages._deploysHistoryTable(requests, nodeMap))}
+            `);
+
+            // Start SSE stream so live progress updates automatically.
+            App._progressStream = new ProgressStream(deployMap, () => {
+                const container = document.getElementById('deploys-live-container');
+                if (container) container.innerHTML = Pages._deployProgressTable(deployMap);
+            });
+            App._progressStream.connect();
+
+            App.setAutoRefresh(async () => {
+                if (!document.getElementById('deploys-live-container')) return;
+                try {
+                    const [fresh, freshProgress] = await Promise.all([
+                        API.reimages.list({ limit: 100 }).catch(() => null),
+                        API.progress.list().catch(() => null),
+                    ]);
+                    if (fresh) {
+                        const tbody = document.querySelector('#deploys-history-tbody');
+                        if (tbody) tbody.innerHTML = Pages._deploysHistoryRows((fresh.requests || []), Pages._deploysNodeMap || {});
+                    }
+                    if (freshProgress) {
+                        deployMap.clear();
+                        freshProgress.forEach(p => deployMap.set(p.node_mac, p));
+                        const liveEl = document.getElementById('deploys-live-container');
+                        if (liveEl) liveEl.innerHTML = Pages._deployProgressTable(deployMap);
+                    }
+                } catch (_) {}
+            });
+
+        } catch (e) {
+            App.render(alertBox(`Failed to load deployments: ${e.message}`));
+        }
+    },
+
+    // _deploysHistoryTable renders the full reimage history table.
+    _deploysHistoryTable(requests, nodeMap) {
+        if (!requests.length) return emptyState('No reimage history yet', 'Reimage a node to see deploy records here.');
+        return `<div class="table-wrap"><table aria-label="Reimage history">
+            <thead><tr>
+                <th>Node</th><th>Image</th><th>Status</th><th>Started</th><th>Duration</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="deploys-history-tbody">
+                ${Pages._deploysHistoryRows(requests, nodeMap)}
+            </tbody>
+        </table></div>`;
+    },
+
+    // _deploysHistoryRows renders tbody rows for reimage records.
+    _deploysHistoryRows(requests, nodeMap) {
+        const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        return requests.map(r => {
+            const node = nodeMap[r.node_id];
+            const displayName = node
+                ? escHtml(node.hostname || node.primary_mac || r.node_id)
+                : `<span class="text-mono text-dim">${r.node_id ? r.node_id.substring(0, 8) + '…' : '—'}</span>`;
+            const nodeLink = node
+                ? `<a href="#/nodes/${r.node_id}" style="font-weight:500">${displayName}</a>`
+                : displayName;
+
+            const statusCls = {
+                complete:    'badge-ready',
+                pending:     'badge-neutral',
+                triggered:   'badge-info',
+                in_progress: 'badge-warning',
+                failed:      'badge-error',
+                cancelled:   'badge-neutral',
+            }[r.status] || 'badge-neutral';
+
+            const duration = (() => {
+                if (!r.started_at) return '—';
+                const start = new Date(r.started_at).getTime();
+                const end   = r.completed_at ? new Date(r.completed_at).getTime() : Date.now();
+                const secs  = Math.round((end - start) / 1000);
+                if (secs < 60) return `${secs}s`;
+                return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+            })();
+
+            const retryBtn = (canMutate && r.status === 'failed')
+                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._deploysRetry('${r.id}')">Retry</button>`
+                : '';
+            const cancelBtn = (canMutate && (r.status === 'pending' || r.status === 'triggered' || r.status === 'in_progress'))
+                ? `<button class="btn btn-danger btn-sm" onclick="Pages._deploysCancel('${r.id}')">Cancel</button>`
+                : '';
+
+            return `<tr data-key="${escHtml(r.id)}">
+                <td>${nodeLink}</td>
+                <td class="text-dim text-sm text-mono">${r.base_image_id ? r.base_image_id.substring(0, 8) + '…' : '—'}</td>
+                <td><span class="badge ${statusCls}">${escHtml(r.status || '—')}</span></td>
+                <td class="text-dim text-sm">${r.started_at ? fmtRelative(r.started_at) : '—'}</td>
+                <td class="text-dim text-sm">${duration}</td>
+                <td><div class="flex gap-6">${retryBtn}${cancelBtn}</div></td>
+            </tr>`;
+        }).join('');
+    },
+
+    async _deploysRetry(id) {
+        try {
+            await API.reimages.retry(id);
+            App.toast('Reimage queued for retry', 'success');
+            Pages.deploys();
+        } catch (e) {
+            App.toast(`Retry failed: ${e.message}`, 'error');
+        }
+    },
+
+    async _deploysCancel(id) {
+        Pages.showConfirmModal({
+            title: 'Cancel Deploy',
+            message: 'Cancel this reimage request? The node will not be reimaged.',
+            confirmText: 'Cancel Deploy',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.reimages.cancel(id);
+                    App.toast('Deploy cancelled', 'success');
+                    Pages.deploys();
+                } catch (e) {
+                    App.toast(`Cancel failed: ${e.message}`, 'error');
+                }
+            },
+        });
+    },
+
     // ── Settings ───────────────────────────────────────────────────────────
 
     _settingsTab: 'api-keys', // tracks active tab
@@ -8324,16 +8867,28 @@ const Pages = {
     },
 
     _settingsCreateKeyModal() {
+        // S5-6: CI key preset — default expires 30 days out.
+        const defaultExpires = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+        const expiresLocal = new Date(defaultExpires.getTime() - defaultExpires.getTimezoneOffset() * 60000)
+            .toISOString().slice(0, 16);
+
         const modal = document.createElement('div');
         modal.id = 'create-key-modal';
         modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
         modal.innerHTML = `
-            <div class="card" style="width:480px;max-width:95vw;">
+            <div class="card" style="width:520px;max-width:95vw;">
                 <div class="card-header">
                     <h2 class="card-title">Create API Key</h2>
                     <button class="btn btn-ghost btn-sm" onclick="document.getElementById('create-key-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+                    <!-- S5-6: CI preset shortcut -->
+                    <div style="background:var(--surface-secondary);border:1px solid var(--border);border-radius:6px;padding:10px 14px;display:flex;align-items:center;gap:10px">
+                        <span style="font-size:12px;color:var(--text-secondary)">Quick preset:</span>
+                        <button class="btn btn-secondary btn-sm" onclick="Pages._settingsCIKeyPreset()">
+                            CI / Pipeline key (node-scoped, 30-day TTL)
+                        </button>
+                    </div>
                     <label class="form-label">Scope
                         <select id="ckm-scope" class="form-input" style="margin-top:4px;">
                             <option value="admin">admin — full access</option>
@@ -8346,7 +8901,7 @@ const Pages = {
                     <label class="form-label" id="ckm-nodeid-row" style="display:none;">Node ID (required for node scope)
                         <input id="ckm-nodeid" class="form-input" type="text" placeholder="node UUID" style="margin-top:4px;">
                     </label>
-                    <label class="form-label">Expires (ISO8601, optional)
+                    <label class="form-label">Expires (optional — leave blank for no expiry)
                         <input id="ckm-expires" class="form-input" type="datetime-local" style="margin-top:4px;">
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
@@ -8360,6 +8915,23 @@ const Pages = {
         document.getElementById('ckm-scope').addEventListener('change', (e) => {
             document.getElementById('ckm-nodeid-row').style.display = e.target.value === 'node' ? '' : 'none';
         });
+    },
+
+    // S5-6: Pre-fill the create-key modal with CI/pipeline defaults.
+    // node scope, label "ci-key", 30-day TTL.
+    _settingsCIKeyPreset() {
+        const scopeEl   = document.getElementById('ckm-scope');
+        const labelEl   = document.getElementById('ckm-label');
+        const expiresEl = document.getElementById('ckm-expires');
+        const nodeRow   = document.getElementById('ckm-nodeid-row');
+        if (scopeEl)   { scopeEl.value = 'node'; }
+        if (labelEl)   { labelEl.value = 'ci-key'; }
+        if (nodeRow)   { nodeRow.style.display = ''; }
+        if (expiresEl) {
+            const d = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+            expiresEl.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+        }
+        App.toast('CI preset applied — enter the Node ID and click Create', 'info');
     },
 
     async _settingsCreateKeySubmit() {
@@ -8381,10 +8953,53 @@ const Pages = {
         try {
             const resp = await API.apiKeys.create({ scope, label, node_id: nodeID, expires_at: expiresAt });
             document.getElementById('create-key-modal').remove();
-            Pages._settingsShowRawKey(resp.key, 'New API Key Created');
+            // S5-6: For CI (node-scoped) keys, show a curl snippet after creation.
+            if (scope === 'node') {
+                Pages._settingsShowCIKeySnippet(resp.key, nodeID || 'NODE_ID');
+            } else {
+                Pages._settingsShowRawKey(resp.key, 'New API Key Created');
+            }
         } catch (err) {
             App.toast('Create failed: ' + err.message, 'error');
         }
+    },
+
+    // S5-6: After creating a node-scoped key, show the raw key plus a curl snippet
+    // that the operator can paste directly into their CI pipeline.
+    _settingsShowCIKeySnippet(rawKey, nodeId) {
+        const origin = window.location.origin;
+        const curlSnippet = `curl -s -X POST ${origin}/api/v1/nodes/${nodeId}/reimage \\
+  -H "Authorization: Bearer ${rawKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"dry_run": false}'`;
+
+        const modal = document.createElement('div');
+        modal.id = 'rawkey-modal';
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1001;';
+        modal.innerHTML = `
+            <div class="card" style="width:600px;max-width:95vw;">
+                <div class="card-header">
+                    <h2 class="card-title">CI Key Created</h2>
+                </div>
+                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+                    <div class="alert alert-warning">
+                        <strong>Save this key now.</strong> It will not be shown again.
+                    </div>
+                    <div>
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)">API KEY</div>
+                        <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:var(--font-mono);font-size:13px;word-break:break-all;">${escHtml(rawKey)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)">CURL SNIPPET — trigger a reimage from CI</div>
+                        <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:12px;overflow:auto;white-space:pre;margin:0">${escHtml(curlSnippet)}</pre>
+                    </div>
+                    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
+                        <button class="btn btn-secondary" onclick="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(rawKey)}).then(()=>App.toast('Key copied','success'))">Copy Key</button>
+                        <button class="btn btn-primary" onclick="document.getElementById('rawkey-modal').remove()">Done</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
     },
 
     async _settingsRotateKey(id) {
