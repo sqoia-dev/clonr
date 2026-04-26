@@ -22,9 +22,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/image"
+	"github.com/sqoia-dev/clustr/internal/webhook"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // defaultBlobMaxConcurrent is the default maximum number of simultaneous blob
@@ -44,6 +45,8 @@ type ImagesHandler struct {
 	Audit *db.AuditService
 	// GetActorInfo returns (actorID, actorLabel) for audit records.
 	GetActorInfo func(r *http.Request) (id, label string)
+	// WebhookDispatcher, when non-nil, fires image.ready on blob finalize (S4-2).
+	WebhookDispatcher *webhook.Dispatcher
 	// blobSem is the semaphore controlling max concurrent blob streams.
 	// Initialised once on first use via blobSemaphoreOnce; always access via blobSemaphore().
 	blobSem     chan struct{}
@@ -525,6 +528,13 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	if err := h.DB.FinalizeBaseImage(r.Context(), id, n, serverChecksum); err != nil {
 		writeError(w, err)
 		return
+	}
+
+	// S4-2: Fire image.ready webhook now that the blob is finalized.
+	if h.WebhookDispatcher != nil {
+		h.WebhookDispatcher.Dispatch(r.Context(), webhook.EventImageReady, webhook.Payload{
+			ImageID: id,
+		})
 	}
 
 	updated, err := h.DB.GetBaseImage(r.Context(), id)

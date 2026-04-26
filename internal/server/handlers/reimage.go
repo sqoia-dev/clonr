@@ -19,9 +19,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/metrics"
 	"github.com/sqoia-dev/clustr/internal/reimage"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 
@@ -119,6 +120,7 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RequestedBy:  actor,
 		DryRun:       body.DryRun,
 		CreatedAt:    time.Now().UTC(),
+		InjectVars:   body.InjectVars, // S4-11: per-deployment variable overrides
 	}
 
 	if err := h.DB.CreateReimageRequest(r.Context(), req); err != nil {
@@ -256,6 +258,7 @@ func (h *ReimageHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 		log.Warn().Err(err).Str("node_id", req.NodeID).Msg("reimage cancel: clear reimage_pending failed")
 	}
 
+	metrics.DeployTotal.WithLabelValues("canceled").Inc()
 	log.Info().Str("req_id", id).Str("node_id", req.NodeID).Str("prev_status", string(req.Status)).
 		Msg("reimage request canceled")
 	w.WriteHeader(http.StatusNoContent)
@@ -353,6 +356,59 @@ func (h *ReimageHandler) Retry(w http.ResponseWriter, r *http.Request) {
 		final = newReq
 	}
 	writeJSON(w, http.StatusOK, final)
+}
+
+// ─── DELETE /api/v1/nodes/{id}/reimage/active ────────────────────────────────
+
+// CancelActiveForNode handles DELETE /api/v1/nodes/{id}/reimage/active (S4-10).
+// Cancels the in-flight (non-terminal) reimage for a node, looked up by node ID.
+// Returns 404 if no active reimage exists, 200 with the cancelled record on success.
+func (h *ReimageHandler) CancelActiveForNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	// Confirm node exists.
+	if _, err := h.DB.GetNodeConfig(r.Context(), nodeID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage cancel-active: lookup")
+		writeError(w, err)
+		return
+	}
+	if active == nil {
+		writeJSON(w, http.StatusNotFound, api.ErrorResponse{
+			Error: fmt.Sprintf("no active reimage found for node %q", nodeID),
+			Code:  "not_found",
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("canceled by operator (was in %s state)", active.Status)
+	if err := h.DB.UpdateReimageRequestStatus(r.Context(), active.ID, api.ReimageStatusCanceled, msg); err != nil {
+		log.Error().Err(err).Str("req_id", active.ID).Str("node_id", nodeID).Msg("reimage cancel-active: update status")
+		writeError(w, err)
+		return
+	}
+
+	// Clear the reimage_pending flag so future PXE boots route to disk.
+	if err := h.DB.SetReimagePending(r.Context(), nodeID, false); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("reimage cancel-active: clear reimage_pending (non-fatal)")
+	}
+
+	metrics.DeployTotal.WithLabelValues("canceled").Inc()
+	log.Info().Str("req_id", active.ID).Str("node_id", nodeID).
+		Str("prev_status", string(active.Status)).Msg("reimage cancel-active: cancelled in-flight reimage")
+
+	// Return the updated record.
+	updated, err := h.DB.GetReimageRequest(r.Context(), active.ID)
+	if err != nil {
+		updated = *active
+		updated.Status = api.ReimageStatusCanceled
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // ─── GET /api/v1/reimages ─────────────────────────────────────────────────────

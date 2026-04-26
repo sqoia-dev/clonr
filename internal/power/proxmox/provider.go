@@ -22,16 +22,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/power"
 )
 
@@ -65,7 +68,10 @@ type Provider struct {
 //   - "token_id" + "token_secret"       — API token auth (preferred)
 //
 // Optional:
-//   - "insecure" — "true" to skip TLS certificate verification (self-signed)
+//   - "insecure"        — "true" to skip TLS certificate verification (self-signed)
+//   - "tls_ca_cert_path" — path to a PEM CA certificate file. When set, TLS is
+//     verified against this CA instead of the system pool. Takes precedence over
+//     "insecure" if both are set.
 func New(cfg power.ProviderConfig) (power.Provider, error) {
 	apiURL := strings.TrimRight(cfg.Fields["api_url"], "/")
 	if apiURL == "" {
@@ -93,12 +99,37 @@ func New(cfg power.ProviderConfig) (power.Provider, error) {
 		return nil, fmt.Errorf("proxmox provider: must supply either (username+password) or (token_id+token_secret)")
 	}
 
+	// S4-5: Resolve TLS configuration for the Proxmox API connection.
+	//
+	// Priority:
+	//  1. tls_ca_cert_path set → verify TLS against the specified CA (most secure).
+	//  2. insecure=true → skip TLS verification (operator-opted-in, logged as WARN).
+	//  3. Neither set → use the system certificate pool (default Go behaviour).
+	caPath := cfg.Fields["tls_ca_cert_path"]
 	insecure := cfg.Fields["insecure"] == "true"
-	transport := http.DefaultTransport
-	if insecure {
-		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //#nosec G402 -- Proxmox TLS CA cert path support is tracked as S4-5; InsecureSkipVerify is operator-opted-in via node config field "insecure":"true" and is therefore intentional.
+
+	var tlsCfg *tls.Config
+	switch {
+	case caPath != "":
+		caPEM, caErr := os.ReadFile(caPath) //#nosec G304 -- operator-supplied CA cert path from admin-only node config; not user-controlled input
+		if caErr != nil {
+			return nil, fmt.Errorf("proxmox provider: read tls_ca_cert_path %q: %w", caPath, caErr)
 		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("proxmox provider: tls_ca_cert_path %q contains no valid PEM certificates", caPath)
+		}
+		tlsCfg = &tls.Config{RootCAs: pool}
+	case insecure:
+		log.Warn().
+			Str("api_url", apiURL).
+			Msg("proxmox provider: InsecureSkipVerify=true — TLS certificate verification is disabled (set tls_ca_cert_path for production use)")
+		tlsCfg = &tls.Config{InsecureSkipVerify: true} //#nosec G402 -- operator-opted-in via node config "insecure":"true"; logged as WARN above
+	}
+
+	var transport http.RoundTripper = http.DefaultTransport
+	if tlsCfg != nil {
+		transport = &http.Transport{TLSClientConfig: tlsCfg}
 	}
 
 	return &Provider{

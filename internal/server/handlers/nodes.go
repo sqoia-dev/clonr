@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/metrics"
+	"github.com/sqoia-dev/clustr/internal/webhook"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
@@ -100,6 +102,9 @@ type NodesHandler struct {
 	// When non-empty, it is included in ClusterHosts injected during RegisterNode so
 	// deployed nodes can resolve "clustr" in /etc/hosts without depending on DNS.
 	ServerIP string
+	// WebhookDispatcher, when non-nil, is called to fan out webhook events on
+	// deploy-complete, deploy-failed, and verify-boot callbacks (S4-2).
+	WebhookDispatcher *webhook.Dispatcher
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -604,6 +609,27 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// S4-11: Merge per-deployment inject_vars from the active reimage request into
+	// the node's CustomVars. inject_vars are ephemeral — they exist only in the
+	// reimage_requests row and are NOT written back to node_configs, so they never
+	// affect future deploys. Keys from inject_vars override matching node-level keys.
+	if action == "deploy" && nodeCfg.ReimagePending {
+		if injectVars, err := h.DB.GetInjectVarsForActiveReimage(r.Context(), nodeCfg.ID); err != nil {
+			log.Warn().Err(err).Str("node_id", nodeCfg.ID).Msg("register node: failed to fetch inject_vars (non-fatal)")
+		} else if len(injectVars) > 0 {
+			merged := make(map[string]string, len(nodeCfg.CustomVars)+len(injectVars))
+			for k, v := range nodeCfg.CustomVars {
+				merged[k] = v
+			}
+			for k, v := range injectVars {
+				merged[k] = v // inject_vars win on collision
+			}
+			nodeCfg.CustomVars = merged
+			log.Info().Str("node_id", nodeCfg.ID).Int("inject_count", len(injectVars)).
+				Msg("register node: inject_vars merged into CustomVars for this deployment")
+		}
+	}
+
 	// Populate ClusterHosts so the deploy agent can write /etc/hosts with all
 	// cluster node IPs. Only inject on deploy actions — wait responses don't need it.
 	if action == "deploy" {
@@ -686,10 +712,20 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Err(dbErr).Str("reimage_id", active.ID).Msg("deploy-complete: could not update reimage record (non-fatal)")
 		} else {
 			log.Info().Str("reimage_id", active.ID).Str("node_id", id).Msg("deploy-complete: reimage record transitioned to complete")
+			metrics.DeployTotal.WithLabelValues("complete").Inc()
 		}
 	}
 
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
+
+	// S4-2: Fire webhook for deploy.complete.
+	if h.WebhookDispatcher != nil {
+		nodeForWebhook, _ := h.DB.GetNodeConfig(r.Context(), id)
+		h.WebhookDispatcher.Dispatch(r.Context(), webhook.EventDeployComplete, webhook.Payload{
+			NodeID:  id,
+			ImageID: nodeForWebhook.BaseImageID,
+		})
+	}
 
 	// Record LDAP configuration for this node if the module is enabled.
 	// This locks the base DN on the first node to be configured.
@@ -758,6 +794,7 @@ func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 				Str("exit_name", payload.ExitName).
 				Str("phase", payload.Phase).
 				Msg("deploy-failed: reimage record transitioned to failed")
+			metrics.DeployTotal.WithLabelValues("failed").Inc()
 		}
 	}
 
@@ -767,6 +804,16 @@ func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 		Str("exit_name", payload.ExitName).
 		Str("phase", payload.Phase).
 		Msg("deploy-failed: node marked failed")
+
+	// S4-2: Fire webhook for deploy.failed.
+	if h.WebhookDispatcher != nil {
+		nodeForWebhook, _ := h.DB.GetNodeConfig(r.Context(), id)
+		h.WebhookDispatcher.Dispatch(r.Context(), webhook.EventDeployFailed, webhook.Payload{
+			NodeID:  id,
+			ImageID: nodeForWebhook.BaseImageID,
+		})
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
