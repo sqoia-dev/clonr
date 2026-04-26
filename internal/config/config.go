@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+
 // ServerConfig holds all runtime configuration for clustr-serverd.
 // Values can be loaded from a JSON file or from environment variables.
 type ServerConfig struct {
@@ -20,7 +21,8 @@ type ServerConfig struct {
 	SessionSecret   string        `json:"session_secret"`   // CLUSTR_SESSION_SECRET: HMAC key for browser session tokens (32+ bytes)
 	SessionSecure   bool          `json:"session_secure"`   // CLUSTR_SESSION_SECURE=1: set Secure flag on session cookie (requires TLS)
 	LogLevel        string        `json:"log_level"`        // debug, info, warn, error — default "info"
-	LogRetention    time.Duration `json:"log_retention"`    // from CLUSTR_LOG_RETENTION; default 14d
+	LogRetention    time.Duration `json:"log_retention"`    // from CLUSTR_LOG_RETENTION; default 7d (D2)
+	LogMaxRowsPerNode int64       `json:"log_max_rows_per_node"` // from CLUSTR_LOG_MAX_ROWS_PER_NODE; default 50000 (D2)
 	ClustrBinPath    string        `json:"clustr_bin_path"`   // CLUSTR_BIN_PATH: abs path to clustr CLI binary baked into initramfs; default /usr/local/bin/clustr
 	ClientdBinPath  string        `json:"clientd_bin_path"` // CLUSTR_CLIENTD_BIN_PATH: abs path to clustr-clientd binary copied into deployed rootfs; auto-detected when empty
 	// VerifyTimeout is the duration after deploy_completed_preboot_at within which
@@ -91,8 +93,9 @@ func LoadServerConfig() ServerConfig {
 		AuthDevMode:   os.Getenv("CLUSTR_AUTH_DEV_MODE") == "1",
 		SessionSecret: os.Getenv("CLUSTR_SESSION_SECRET"),
 		SessionSecure: os.Getenv("CLUSTR_SESSION_SECURE") == "1",
-		LogLevel:      envOrDefault("CLUSTR_LOG_LEVEL", "info"),
-		LogRetention:  parseLogRetention(),
+		LogLevel:          envOrDefault("CLUSTR_LOG_LEVEL", "info"),
+		LogRetention:      parseLogRetention(),
+		LogMaxRowsPerNode: parseLogMaxRows(),
 		ClustrBinPath:   envOrDefault("CLUSTR_BIN_PATH", "/usr/local/bin/clustr"),
 		ClientdBinPath: os.Getenv("CLUSTR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
 		VerifyTimeout: parseVerifyTimeout(),
@@ -132,7 +135,7 @@ func parseVerifyTimeout() time.Duration {
 
 // parseLogRetention parses CLUSTR_LOG_RETENTION as a Go duration string.
 // Falls back to 0 (meaning "use the server default") on parse error or
-// when the env var is not set. The server's runLogPurger treats 0 as 14d.
+// when the env var is not set. The server's runLogPurger treats 0 as 7d (D2).
 func parseLogRetention() time.Duration {
 	v := os.Getenv("CLUSTR_LOG_RETENTION")
 	if v == "" {
@@ -143,6 +146,21 @@ func parseLogRetention() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// parseLogMaxRows parses CLUSTR_LOG_MAX_ROWS_PER_NODE as an integer.
+// Falls back to 0 (meaning "use the server default") on parse error or
+// when the env var is not set. The server's runLogPurger treats 0 as 50000 (D2).
+func parseLogMaxRows() int64 {
+	v := os.Getenv("CLUSTR_LOG_MAX_ROWS_PER_NODE")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // LoadPXEConfig populates PXEConfig from environment variables.

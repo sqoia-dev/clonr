@@ -5,11 +5,65 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
 )
+
+const defaultPerPage = 50
+const maxPerPage = 500
+
+// pageParams holds parsed pagination parameters.
+type pageParams struct {
+	page    int // 1-based
+	perPage int
+}
+
+// paginate applies pagination to a slice length.
+// Returns (startIdx, endIdx, params) where startIdx/endIdx are the slice bounds
+// and params.page/params.perPage reflect the resolved values.
+func paginate(total, rawPage, rawPerPage int) (start, end int, p pageParams) {
+	perPage := rawPerPage
+	if perPage <= 0 {
+		perPage = defaultPerPage
+	}
+	if perPage > maxPerPage {
+		perPage = maxPerPage
+	}
+	page := rawPage
+	if page <= 0 {
+		page = 1
+	}
+	start = (page - 1) * perPage
+	if start > total {
+		start = total
+	}
+	end = start + perPage
+	if end > total {
+		end = total
+	}
+	return start, end, pageParams{page: page, perPage: perPage}
+}
+
+// parsePaginationQuery parses ?page= and ?per_page= from the request.
+// Returns (page, perPage, pagingRequested) — pagingRequested is true when
+// either parameter is present in the URL.
+func parsePaginationQuery(r *http.Request) (page, perPage int, paging bool) {
+	pageStr := r.URL.Query().Get("page")
+	perPageStr := r.URL.Query().Get("per_page")
+	if pageStr == "" && perPageStr == "" {
+		return 0, 0, false
+	}
+	if v, err := strconv.Atoi(pageStr); err == nil && v > 0 {
+		page = v
+	}
+	if v, err := strconv.Atoi(perPageStr); err == nil && v > 0 {
+		perPage = v
+	}
+	return page, perPage, true
+}
 
 // writeJSON encodes v as JSON and writes it with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {

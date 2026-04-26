@@ -66,8 +66,12 @@ func (h *ImagesHandler) blobSemaphore() chan struct{} {
 }
 
 // ListImages handles GET /api/v1/images
+// Accepts optional ?page= and ?per_page= (default 50) for pagination.
+// When pagination params are absent the full list is returned (backward compatible).
 func (h *ImagesHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	rawPage, rawPerPage, paging := parsePaginationQuery(r)
+
 	images, err := h.DB.ListBaseImages(r.Context(), status)
 	if err != nil {
 		log.Error().Err(err).Msg("list images")
@@ -77,7 +81,21 @@ func (h *ImagesHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	if images == nil {
 		images = []api.BaseImage{}
 	}
-	writeJSON(w, http.StatusOK, api.ListImagesResponse{Images: images, Total: len(images)})
+
+	total := len(images)
+	resp := api.ListImagesResponse{Total: total}
+	if paging {
+		start, end, p := paginate(total, rawPage, rawPerPage)
+		resp.Images = images[start:end]
+		resp.Page = p.page
+		resp.PerPage = p.perPage
+		if end < total {
+			resp.NextCursor = p.page + 1
+		}
+	} else {
+		resp.Images = images
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // CreateImage handles POST /api/v1/images

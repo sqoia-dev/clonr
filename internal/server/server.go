@@ -314,16 +314,27 @@ func (s *Server) flipNodeToDiskFirst(ctx context.Context, nodeID string) error {
 	return nil
 }
 
-// runLogPurger ticks every hour and deletes log entries older than the
-// configured retention window. Retention is read from CLUSTR_LOG_RETENTION
-// (Go duration string, e.g. "336h" for 14 days); defaults to 336h (14d).
+// runLogPurger ticks every hour and applies two-pass log eviction (D2):
+//
+//  Pass 1 — TTL: delete rows older than CLUSTR_LOG_RETENTION (default 7d).
+//  Pass 2 — per-node cap: for each node exceeding CLUSTR_LOG_MAX_ROWS_PER_NODE
+//            (default 50000), delete the oldest rows until it is at the cap.
+//
+// Each cycle appends one row to node_logs_summary for audit purposes.
 // Uses the server-lifetime context so it shuts down cleanly on SIGTERM.
 func (s *Server) runLogPurger(ctx context.Context) {
-	retention := 14 * 24 * time.Hour // default 14 days
+	retention := 7 * 24 * time.Hour // default 7 days (D2: changed from 14d)
 	if v := s.cfg.LogRetention; v != 0 {
 		retention = v
 	}
-	log.Info().Str("retention", retention.String()).Msg("log purger: started")
+	maxRowsPerNode := int64(50000) // default 50K rows per node (D2)
+	if v := s.cfg.LogMaxRowsPerNode; v != 0 {
+		maxRowsPerNode = v
+	}
+	log.Info().
+		Str("retention", retention.String()).
+		Int64("max_rows_per_node", maxRowsPerNode).
+		Msg("log purger: started")
 
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -334,17 +345,54 @@ func (s *Server) runLogPurger(ctx context.Context) {
 			log.Info().Msg("log purger: stopping")
 			return
 		case <-ticker.C:
+			// Pass 1: TTL eviction.
 			olderThan := time.Now().Add(-retention)
-			n, err := s.db.PurgeLogs(ctx, olderThan)
+			ttlRows, err := s.db.PurgeLogs(ctx, olderThan)
 			if err != nil {
 				log.Error().Err(err).Str("older_than", olderThan.Format(time.RFC3339)).
-					Msg("log purger: PurgeLogs failed")
-			} else {
-				log.Info().Int64("rows_purged", n).Str("older_than", olderThan.Format(time.RFC3339)).
-					Str("retention", retention.String()).Msg("log purger: purge complete")
+					Msg("log purger: TTL pass failed")
+				continue
+			}
+
+			// Pass 2: per-node cap eviction.
+			capRows, nodesAffected, err := s.db.PurgeLogsPerNodeCap(ctx, maxRowsPerNode)
+			if err != nil {
+				log.Error().Err(err).Int64("max_rows_per_node", maxRowsPerNode).
+					Msg("log purger: per-node cap pass failed")
+				// Don't skip summary; record what we have so far.
+			}
+
+			total := ttlRows + capRows
+			log.Info().
+				Int64("ttl_rows", ttlRows).
+				Int64("cap_rows", capRows).
+				Int64("total_rows", total).
+				Int64("nodes_capped", nodesAffected).
+				Str("retention", retention.String()).
+				Int64("max_rows_per_node", maxRowsPerNode).
+				Msg("log purger: purge complete")
+
+			// Record summary event for audit trail.
+			summary := db.LogPurgeSummaryRow{
+				ID:            generatePurgeID(),
+				PurgedAt:      time.Now().UTC(),
+				TTLRows:       ttlRows,
+				CapRows:       capRows,
+				TotalRows:     total,
+				RetentionSecs: int64(retention.Seconds()),
+				MaxRowsCap:    maxRowsPerNode,
+				NodeCount:     nodesAffected,
+			}
+			if serr := s.db.RecordLogPurgeSummary(ctx, summary); serr != nil {
+				log.Warn().Err(serr).Msg("log purger: failed to record summary (non-fatal)")
 			}
 		}
 	}
+}
+
+// generatePurgeID returns a short unique ID for a purge summary row.
+func generatePurgeID() string {
+	return fmt.Sprintf("purge-%d", time.Now().UnixNano())
 }
 
 // buildRouter constructs the chi router and registers all routes.

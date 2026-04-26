@@ -878,16 +878,24 @@ type ErrorResponse struct {
 	Code  string `json:"code,omitempty"`
 }
 
-// ListImagesResponse wraps the images list.
+// ListImagesResponse wraps the images list with pagination metadata.
+// page/per_page/next_cursor are present when ?page= or ?per_page= is used.
 type ListImagesResponse struct {
-	Images []BaseImage `json:"images"`
-	Total  int         `json:"total"`
+	Images     []BaseImage `json:"images"`
+	Total      int         `json:"total"`
+	Page       int         `json:"page,omitempty"`
+	PerPage    int         `json:"per_page,omitempty"`
+	NextCursor int         `json:"next_cursor,omitempty"` // next page number, 0 = no more pages
 }
 
-// ListNodesResponse wraps the node configs list.
+// ListNodesResponse wraps the node configs list with pagination metadata.
+// page/per_page/next_cursor are present when ?page= or ?per_page= is used.
 type ListNodesResponse struct {
-	Nodes []NodeConfig `json:"nodes"`
-	Total int          `json:"total"`
+	Nodes      []NodeConfig `json:"nodes"`
+	Total      int          `json:"total"`
+	Page       int          `json:"page,omitempty"`
+	PerPage    int          `json:"per_page,omitempty"`
+	NextCursor int          `json:"next_cursor,omitempty"` // next page number, 0 = no more pages
 }
 
 // HealthResponse is returned by GET /api/v1/health.

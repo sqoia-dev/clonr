@@ -120,8 +120,12 @@ func sanitizeNodeConfigs(cfgs []api.NodeConfig) []api.NodeConfig {
 }
 
 // ListNodes handles GET /api/v1/nodes
+// Accepts optional ?page= and ?per_page= (default 50) for pagination.
+// When pagination params are absent the full list is returned (backward compatible).
 func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	baseImageID := r.URL.Query().Get("base_image_id")
+	rawPage, rawPerPage, paging := parsePaginationQuery(r)
+
 	nodes, err := h.DB.ListNodeConfigs(r.Context(), baseImageID)
 	if err != nil {
 		log.Error().Err(err).Msg("list nodes")
@@ -132,7 +136,22 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 		nodes = []api.NodeConfig{}
 	}
 	nodes = sanitizeNodeConfigs(nodes)
-	writeJSON(w, http.StatusOK, api.ListNodesResponse{Nodes: nodes, Total: len(nodes)})
+
+	total := len(nodes)
+	resp := api.ListNodesResponse{Total: total}
+	if paging {
+		start, end, p := paginate(total, rawPage, rawPerPage)
+		resp.Nodes = nodes[start:end]
+		resp.Page = p.page
+		resp.PerPage = p.perPage
+		// NextCursor is the next page number, 0 means no more pages.
+		if end < total {
+			resp.NextCursor = p.page + 1
+		}
+	} else {
+		resp.Nodes = nodes
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // CreateNode handles POST /api/v1/nodes

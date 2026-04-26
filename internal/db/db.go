@@ -1659,6 +1659,91 @@ func (db *DB) PurgeLogs(ctx context.Context, olderThan time.Time) (int64, error)
 	return n, nil
 }
 
+// PurgeLogsPerNodeCap deletes the oldest log entries for any node that exceeds
+// maxRowsPerNode, keeping only the most recent maxRowsPerNode rows per node.
+// Returns the total number of rows deleted and the number of nodes affected.
+// This is the second pass of the two-pass log purge (TTL first, cap second).
+func (db *DB) PurgeLogsPerNodeCap(ctx context.Context, maxRowsPerNode int64) (int64, int64, error) {
+	// Find all nodes that exceed the cap.
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT node_mac, COUNT(*) as cnt
+		FROM node_logs
+		GROUP BY node_mac
+		HAVING cnt > ?
+	`, maxRowsPerNode)
+	if err != nil {
+		return 0, 0, fmt.Errorf("db: purge per-node cap (list): %w", err)
+	}
+	defer rows.Close()
+
+	type nodeCount struct {
+		mac   string
+		count int64
+	}
+	var overLimit []nodeCount
+	for rows.Next() {
+		var nc nodeCount
+		if err := rows.Scan(&nc.mac, &nc.count); err != nil {
+			return 0, 0, fmt.Errorf("db: purge per-node cap (scan): %w", err)
+		}
+		overLimit = append(overLimit, nc)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("db: purge per-node cap (rows): %w", err)
+	}
+
+	var totalDeleted, nodesAffected int64
+	for _, nc := range overLimit {
+		excess := nc.count - maxRowsPerNode
+		// Delete the oldest `excess` rows for this node.
+		res, err := db.sql.ExecContext(ctx, `
+			DELETE FROM node_logs
+			WHERE id IN (
+				SELECT id FROM node_logs
+				WHERE node_mac = ?
+				ORDER BY timestamp ASC
+				LIMIT ?
+			)
+		`, nc.mac, excess)
+		if err != nil {
+			return totalDeleted, nodesAffected, fmt.Errorf("db: purge per-node cap (delete %s): %w", nc.mac, err)
+		}
+		n, _ := res.RowsAffected()
+		totalDeleted += n
+		nodesAffected++
+	}
+	return totalDeleted, nodesAffected, nil
+}
+
+// LogPurgeSummaryRow is one row in node_logs_summary.
+type LogPurgeSummaryRow struct {
+	ID             string
+	PurgedAt       time.Time
+	TTLRows        int64
+	CapRows        int64
+	TotalRows      int64
+	RetentionSecs  int64
+	MaxRowsCap     int64
+	NodeCount      int64
+}
+
+// RecordLogPurgeSummary appends a purge event to node_logs_summary.
+func (db *DB) RecordLogPurgeSummary(ctx context.Context, row LogPurgeSummaryRow) error {
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO node_logs_summary
+			(id, purged_at, ttl_rows, cap_rows, total_rows, retention_secs, max_rows_cap, node_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		row.ID, row.PurgedAt.Unix(),
+		row.TTLRows, row.CapRows, row.TotalRows,
+		row.RetentionSecs, row.MaxRowsCap, row.NodeCount,
+	)
+	if err != nil {
+		return fmt.Errorf("db: record log purge summary: %w", err)
+	}
+	return nil
+}
+
 // ─── NodeGroup operations ────────────────────────────────────────────────────
 
 // CreateNodeGroup inserts a new NodeGroup.
