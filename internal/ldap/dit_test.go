@@ -38,14 +38,7 @@ func TestServerNameFromURI_LDAPS(t *testing.T) {
 
 // newTestEntry constructs a minimal goldap.Entry with the given attributes.
 func newTestEntry(dn string, attrs map[string][]string) *goldap.Entry {
-	var entryAttrs []*goldap.EntryAttribute
-	for name, vals := range attrs {
-		entryAttrs = append(entryAttrs, &goldap.EntryAttribute{
-			Name:   name,
-			Values: vals,
-		})
-	}
-	return goldap.NewEntry(dn, entryAttrs)
+	return goldap.NewEntry(dn, attrs)
 }
 
 func TestEntryToUser_BasicFields(t *testing.T) {
