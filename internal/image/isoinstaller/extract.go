@@ -177,27 +177,54 @@ func ExtractRootfs(opts ExtractOptions) error {
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 
 	// ── Enumerate partitions ─────────────────────────────────────────────
-	partOut, err := exec.Command("lsblk", "-lno", "NAME,FSTYPE,SIZE", loopDev).CombinedOutput()
+	// Use --pairs output so that empty fields (e.g. FSTYPE on a biosboot
+	// partition) are emitted as KEY="" rather than being collapsed away.
+	// Without --pairs, lsblk compresses empty columns and field[1] becomes
+	// SIZE instead of FSTYPE for biosboot partitions, causing the code to
+	// attempt mounting an unformatted biosboot partition (exit 32 / "wrong fs type").
+	partOut, err := exec.Command("lsblk", "--pairs", "-o", "NAME,FSTYPE,PARTTYPE", loopDev).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("lsblk: %w\noutput: %s", err, partOut)
 	}
+
+	// parsePairsField extracts the value of a key from an lsblk --pairs line.
+	// lsblk --pairs lines look like: NAME="loop0p1" FSTYPE="" PARTTYPE="..."
+	parsePairsField := func(line, key string) string {
+		prefix := key + `="`
+		idx := strings.Index(line, prefix)
+		if idx < 0 {
+			return ""
+		}
+		rest := line[idx+len(prefix):]
+		end := strings.Index(rest, `"`)
+		if end < 0 {
+			return rest
+		}
+		return rest[:end]
+	}
+
+	// biosboot GUID (GPT partition type for GRUB BIOS boot area).
+	const biosbootGUID = "21686148-6449-6e6f-744e-656564454649"
 
 	var rootDev, bootDev, espDev string
 	loopBase := filepath.Base(loopDev)
 
 	for _, line := range strings.Split(strings.TrimSpace(string(partOut)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		name := fields[0]
-		fstype := fields[1]
-		if name == loopBase {
-			continue // skip the loop device itself
+		name := parsePairsField(line, "NAME")
+		fstype := parsePairsField(line, "FSTYPE")
+		parttype := parsePairsField(line, "PARTTYPE")
+
+		if name == "" || name == loopBase {
+			continue // skip header or the loop device itself
 		}
 
 		dev := "/dev/" + name
 		if _, statErr := os.Stat(dev); statErr != nil {
+			continue
+		}
+
+		// Skip biosboot partitions — identified by GUID (no filesystem).
+		if strings.EqualFold(parttype, biosbootGUID) {
 			continue
 		}
 
@@ -208,7 +235,7 @@ func ExtractRootfs(opts ExtractOptions) error {
 			continue
 		}
 
-		// Skip other non-data filesystems (no fstype, biosboot).
+		// Skip other non-data filesystems (no fstype, biosboot by name).
 		if fstype == "" || strings.EqualFold(fstype, "biosboot") {
 			continue
 		}

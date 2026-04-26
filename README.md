@@ -144,34 +144,43 @@ WORK_NODE_ID = <node-id of your worker node>
 
 ---
 
-### Step 1 — Build or pull a Rocky Linux 9 base image
+### Step 1 — Build a Rocky Linux 9 base image
 
-OpenHPC (the recommended Slurm package source) publishes packages for EL9. OpenHPC EL10 packages are not yet available as of 2026-04-26, so **use Rocky Linux 9 for Slurm deployments** until OpenHPC releases EL10 support.
+OpenHPC (the recommended Slurm package source) publishes packages for EL9. **OpenHPC EL10 packages do not exist as of 2026-04-26** (`HTTP 404` at the EL10 repo URL). Use Rocky Linux 9 for all Slurm deployments until OpenHPC publishes EL10 support.
 
 ```bash
-# Kick off a build from the Rocky 9 minimal ISO.
-# Returns immediately; the build runs async (download + QEMU install takes 20-35 min).
+# Kick off a build from the Rocky 9 minimal ISO (BIOS/MBR layout for broad hardware compat).
+# Returns 202 immediately; the build runs async.
+# Total time: ~20-35 min (ISO is cached on second build — 0 download time).
 curl -s -X POST $CLUSTR_URL/api/v1/factory/build-from-iso \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "url":  "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
-    "name": "rocky9",
-    "version": "9.5",
+    "url":         "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
+    "name":        "rocky9",
+    "version":     "9.5",
+    "firmware":    "bios",
     "disk_size_gb": 20,
-    "memory_mb": 4096,
-    "cpus": 4
-  }'
+    "memory_mb":    4096,
+    "cpus":         4
+  }' | python3 -m json.tool
 # Save the "id" field — that is ROCKY9_IMAGE.
 
-# Poll until status is "ready":
-watch -n 10 "curl -s $CLUSTR_URL/api/v1/images/\$ROCKY9_IMAGE \
+# Poll until status is "ready" (check every 30 seconds):
+watch -n 30 "curl -s $CLUSTR_URL/api/v1/images/\$ROCKY9_IMAGE \
   -H 'Authorization: Bearer $TOKEN' | python3 -m json.tool | grep status"
 ```
 
-**Server requirements for build-from-iso:** `/usr/libexec/qemu-kvm` (RHEL/Rocky) or `qemu-system-x86_64` (Ubuntu), plus `xorriso` or `genisoimage`. These are present after `dnf install qemu-kvm xorriso` on Rocky Linux 9.
+**Server requirements:** `/usr/libexec/qemu-kvm` (RHEL/Rocky) or `/usr/bin/qemu-system-x86_64` (Ubuntu). The factory uses KVM acceleration; builds without KVM fall back to TCG (software emulation, 3-5x slower). See [Server Requirements](#server-requirements) for the full package list.
 
-**Alternative — build once, reuse:** Once built, the rocky9 image persists across reboots and cluster resets. You do not need to rebuild it for every verification run.
+**Build once, reuse forever:** The ISO is cached in `/var/lib/clustr/iso-cache/`. Subsequent builds with the same URL skip the download entirely. Once the image is `ready`, it persists across restarts and does not need to be rebuilt.
+
+**Verify repo reachability before continuing** (prevents silent Slurm install failure later):
+
+```bash
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml
+# Expected: HTTP 200. If you get 404, the URL or EL version is wrong.
+```
 
 ---
 
@@ -379,20 +388,27 @@ sinfo                # Expected: batch partition with slurm-compute in idle stat
 ### Step 8 — Submit the smoke test job
 
 ```bash
-# From the controller node:
+# From the controller node (SSH in first):
+ssh root@10.99.0.100
 
-# Single-node job:
-srun --nodes=1 --ntasks=1 hostname
+# Verify the cluster sees all nodes:
+sinfo
+# Expected:
+# PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
+# batch*       up   infinite      1   idle slurm-compute
+
+# Single-task job on the worker:
+srun hostname
 # Expected output: slurm-compute
 
-# 2-node job (requires 2 nodes in the cluster):
-srun --nodes=1 --ntasks=2 hostname
-# Expected output (one line per task):
+# 2-node job (if you have 2 workers, adjust NodeName + PartitionName in slurm.conf):
+srun -N2 hostname
+# Expected output (one line per node):
 # slurm-compute
-# slurm-compute
+# slurm-compute2
 ```
 
-**Expected `sinfo` output (healthy cluster):**
+**Expected `sinfo` output (healthy 1-worker cluster):**
 
 ```
 PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST

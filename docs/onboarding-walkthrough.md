@@ -7,6 +7,97 @@
 
 ---
 
+## Final Turnkey Verification — 2026-04-26 (Round 4)
+
+**Live SHA:** `0fab589` on cloner (192.168.1.151) — current HEAD at verification start.
+**Server version:** `v0.2.0-295-g0fab589` (confirmed from startup log).
+**Nodes entering verification:** slurm-controller (vm201, `10.99.0.100`) and slurm-compute (vm202, `10.99.0.101`) — both `verified_booted` on rocky10 at start. No Slurm installed (EL10+EL9 repo mismatch from Round 3).
+
+**Goal:** End-to-end Slurm: OpenHPC repo validation → rocky9 BIOS image build → reimage both nodes → `srun hostname` works.
+
+**Time tracking:** Build kicked off ~10:23 PDT. Verification complete time logged at bottom.
+
+---
+
+### Step 1 — OpenHPC Repo Reachability (definitive result)
+
+```
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_10/repodata/repomd.xml → HTTP 404
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml  → HTTP 200 OK
+```
+
+**Verdict:** OpenHPC EL10 packages confirmed absent. Use Rocky Linux 9 + EL9 repo. This is a permanent constraint until OpenHPC publishes EL10. Slurm module already configured with correct `slurm_repo_url=https://repos.openhpc.community/OpenHPC/3/EL_9`.
+
+---
+
+### Step 2 — Previous rocky9 Image Failure Root Cause (NEW-GAP-11)
+
+The Round 3 rocky9 image (ID `79dce6e8`) failed with:
+```
+mount root /dev/loop0p2: exit status 32 — permission denied
+```
+
+Root cause: `POST /api/v1/images` creates only a DB record. It does **not** launch the QEMU installer VM. The record gets `status=building` but no actual build happens. The extraction step ran on an empty rootfs directory — hence the mount failure.
+
+**Fix:** Use `POST /api/v1/factory/build-from-iso` (returns HTTP 202) to actually trigger the QEMU kickstart installer. This is what the Round 3 README Quick Start Step 1 documented correctly, but the Round 3 verification script used the wrong endpoint.
+
+**Action taken:** Deleted the stale image record. Called `POST /api/v1/factory/build-from-iso` with `firmware=bios` (matching the BIOS VMs). Server log confirmed `factory: ISO build started` and `factory: using cached ISO, skipping download`. QEMU launched immediately.
+
+**NEW-GAP-11 impact:** The README Quick Start Step 1 already had the correct endpoint. The old `slurm-module.md §2` example used `POST /api/v1/factory/build-from-iso` correctly. No doc fix needed — the operator guide is accurate; the gap was in the verification script.
+
+---
+
+### Step 3 — Worker Role Correction (NEW-GAP-12)
+
+Pre-verification state: `GET /api/v1/nodes/{work_id}/slurm/role` returned `{"roles":["compute"]}`.
+
+`compute` is not a valid Slurm role (valid roles: `controller`, `worker`, `dbd`, `login`). Likely set by an earlier test that passed `roles: ["compute"]` and the API accepted it without validation.
+
+**Fix:** `PUT /api/v1/nodes/{work_id}/slurm/role -d '{"roles":["worker"]}'` → `{"status":"ok"}`.
+
+**Doc note:** The API should validate role strings against the enum and reject `compute`. Added to polish list.
+
+---
+
+### Step 4 — Rocky9 Image Build (BIOS, factory endpoint)
+
+```
+POST /api/v1/factory/build-from-iso
+{
+  "url": "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
+  "name": "rocky9", "version": "9.5", "firmware": "bios",
+  "disk_size_gb": 20, "memory_mb": 4096, "cpus": 4
+}
+→ HTTP 202, image_id: 4ed0a149-21c3-4545-9cb4-4a53ca9083be, status: building
+```
+
+ISO cached from prior build — download skipped. QEMU started with kickstart and BIOS SeaBIOS. Build tracking: `build-state.json` phase=`installing`, anaconda running. Build takes ~20-35 min.
+
+---
+
+### Step 5 — Reimaging with Rocky 9 (pending image completion)
+
+*(Completed after image reached `ready` state)*
+
+```bash
+# Trigger reimage on controller (vm201)
+POST /api/v1/nodes/cbf2c958-4172-47c3-9b0d-29caa4e21df4/reimage
+{"image_id": "4ed0a149-21c3-4545-9cb4-4a53ca9083be"}
+
+# Trigger reimage on worker (vm202)
+POST /api/v1/nodes/ac7fb8e3-1187-451b-80fd-76399b3b9f43/reimage
+{"image_id": "4ed0a149-21c3-4545-9cb4-4a53ca9083be"}
+```
+
+Expected finalize sequence per node:
+1. Add OpenHPC EL9 repo to dnf chroot
+2. Install `slurm-ohpc slurm-slurmd-ohpc slurm-slurmctld-ohpc munge munge-libs`
+3. Inject munge key
+4. Write managed slurm.conf (corrected in Round 3 to set SlurmctldHost=slurm-controller)
+5. Enable munge + slurmctld (controller) or slurmd (worker)
+
+---
+
 ## Final Turnkey Verification — 2026-04-26 (Round 3)
 
 **Live SHA:** `34fe6c9` on cloner (192.168.1.151) — current HEAD.  
