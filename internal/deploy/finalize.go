@@ -2222,7 +2222,27 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 	//   compute (gres)   → slurm slurm-slurmd munge
 	//   neither (fallback)→ slurm munge
 	if slurmCfg.SlurmRepoURL != "" {
+		// installSlurmInChroot runs 'dnf install slurm munge' inside the chroot.
+		// The munge and slurm RPM %pre scriptlets create the munge:munge and
+		// slurm:slurm system users — this is the primary path that ensures those
+		// accounts exist before the chown block below runs.
 		installSlurmInChroot(ctx, mountRoot, nodeID, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres, auditFn)
+	} else {
+		// No SlurmRepoURL — slurm + munge must already be installed in the base
+		// image. The chown steps below require slurm:slurm and munge:munge to
+		// exist in the chroot's /etc/passwd. If those accounts are absent (e.g.
+		// the base image was captured before slurm was installed), the chown will
+		// log a non-fatal warning and slurmctld/munged will fail on first boot.
+		// Ensure one of the following is true:
+		//   1. Base image was captured with slurm + munge pre-installed (accounts
+		//      created by RPM scriptlets at install time).
+		//   2. The SystemAccounts module is configured with slurm (UID 202) and
+		//      munge (UID 1010) entries — these are injected by injectSystemAccounts
+		//      which runs after this function in applyNodeConfig.
+		log.Info().
+			Msg("finalize slurm: no SlurmRepoURL — slurm/munge packages must already exist in base image; " +
+				"if slurm:slurm or munge:munge users are missing, chown will warn and daemons will fail on boot. " +
+				"Add slurm_repo_url via POST /api/v1/modules/slurm/enable or pre-install slurm+munge in the captured image.")
 	}
 
 	// ── Create directories ────────────────────────────────────────────────────

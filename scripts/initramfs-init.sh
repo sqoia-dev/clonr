@@ -289,9 +289,13 @@ ENABLE_SSH=$(cat /proc/cmdline | tr ' ' '\n' | grep '^clustr.ssh=' | cut -d= -f2
 # Generate a random per-boot 8-char hex password. Do NOT log the password value.
 # Any clustr.ssh.pass= on the cmdline is intentionally ignored to prevent passwords
 # appearing in kernel cmdline logs (dmesg, serial console, PXE server logs).
-SSH_PASS=$(dd if=/dev/urandom bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
+#
+# Use tr+head on /dev/urandom — both are busybox applets already symlinked in the
+# initramfs. 'od' is NOT a busybox applet and is not present in the initramfs, so
+# the previous dd|od pipeline produced "od: not found" and an empty SSH_PASS.
+SSH_PASS=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 8)
 if [ -z "$SSH_PASS" ]; then
-    # Fallback if od/dd unavailable: derive from /proc/uptime nanoseconds
+    # Fallback if /dev/urandom is unavailable: derive from /proc/uptime nanoseconds
     SSH_PASS=$(cat /proc/uptime 2>/dev/null | tr -d '.' | cut -c1-8)
 fi
 

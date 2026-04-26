@@ -2,6 +2,68 @@
 
 ---
 
+## Turnkey verification Round 7 — od fix + Slurm user creation docs (2026-04-25)
+
+### Problem 1: `od: not found` in deploy initramfs — SSH password generation fails
+
+Line 292 of `scripts/initramfs-init.sh` generated the per-boot SSH debug password via:
+
+```sh
+SSH_PASS=$(dd if=/dev/urandom bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
+```
+
+`od` is not a busybox applet and is not present in the clustr initramfs. When the
+node reached Step 8b (optional dropbear SSH setup), this line emitted `od: not found`
+to the serial console and left `SSH_PASS` empty, causing the fallback `/proc/uptime`
+path to run. More importantly, the error message was confusing to operators watching
+the console.
+
+### Fix 1: replace od with tr+head on /dev/urandom
+
+Both `tr` and `head` are busybox applets already symlinked in the initramfs. The new
+line is:
+
+```sh
+SSH_PASS=$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 8)
+```
+
+No external binary needed. The fallback (derive from `/proc/uptime`) is retained for
+environments where `/dev/urandom` is absent.
+
+### Problem 2: Slurm system user creation path — how does it work?
+
+User question: "no system users, so how is slurm functioning?"
+
+Root cause of confusion: the `injectSystemAccounts` mechanism (Step 8 of `applyNodeConfig`)
+is for operator-defined accounts (NFS users, cluster users, etc.) stored in the clustr DB.
+Slurm and munge system users are NOT pre-populated in the DB by default.
+
+When `installSlurmInChroot` runs (Step "Slurm module", before Step 8), it executes
+`dnf install slurm munge` inside the chroot with `/proc`, `/sys`, and `/dev` bind-mounted.
+The RPM `%pre` scriptlets for the slurm and munge packages call `useradd` to create:
+- `munge:munge` (UID 1010 / GID 1010 per OpenHPC packaging)
+- `slurm:slurm` (UID 202 / GID 202)
+
+Those scriptlets run correctly because the bind-mounts give them access to `/proc` and
+`/dev`. The chown block that follows in `writeSlurmConfig` then chowns `/etc/slurm`,
+`/var/log/slurm`, etc. to `slurm:slurm` — this succeeds because the users now exist.
+
+### Fix 2: add diagnostic log when SlurmRepoURL is absent
+
+When no `SlurmRepoURL` is configured, `installSlurmInChroot` never runs and slurm/munge
+users must already exist in the base image. Added an explicit `log.Info` message to
+`writeSlurmConfig` explaining this requirement so operators understand what to do when
+the chown step warns "slurm user may not exist in image".
+
+### Summary
+
+| Issue | Root cause | Fix |
+|-------|-----------|-----|
+| `od: not found` on console | `od` not in busybox initramfs | Replace `dd\|od` with `tr -dc 'a-f0-9' < /dev/urandom \| head -c 8` |
+| Slurm user confusion | Users created by RPM scriptlets during dnf install, not by clustr | Documented; added log.Info when SlurmRepoURL absent |
+
+---
+
 ## Turnkey verification Round 6 — Munge key injection (2026-04-26)
 
 ### Problem: munge key never delivered to nodes — munged fails on first boot
