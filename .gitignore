@@ -5,6 +5,13 @@
 /clonr-serverd-*
 /clonr-static
 /initramfs-clonr.img
+# Root-level clustr build artifacts (never commit binaries to repo root)
+/clustr
+/clustr-serverd
+/clustr-serverd-*
+/clustr-static
+/clustr-clientd
+/initramfs-clustr.img
 *.tar.gz
 *.tar.zst
 *.blob
