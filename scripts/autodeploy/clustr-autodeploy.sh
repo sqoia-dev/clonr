@@ -33,10 +33,15 @@ GOBIN="/usr/local/go/bin/go"
 # Source the systemd unit's EnvironmentFile or inline Environment values if present.
 _LISTEN_ADDR="${CLUSTR_LISTEN_ADDR:-}"
 if [[ -z "${_LISTEN_ADDR}" ]]; then
-    # Try to extract from the systemd unit directly (covers the production setup where
-    # Environment=CLUSTR_LISTEN_ADDR=<ip>:<port> is set inline in the service file)
+    # Extract from systemd unit. The property output is:
+    #   Environment=KEY=val KEY2=val2 ...
+    # Strip the leading "Environment=" then split on spaces to find the
+    # CLUSTR_LISTEN_ADDR token, then take everything after the first "=".
     _LISTEN_ADDR=$(systemctl show clustr-serverd --property=Environment 2>/dev/null \
-        | tr ' ' '\n' | grep 'CLUSTR_LISTEN_ADDR=' | cut -d= -f2 || true)
+        | sed 's/^Environment=//' \
+        | tr ' ' '\n' \
+        | grep '^CLUSTR_LISTEN_ADDR=' \
+        | cut -d= -f2- || true)
 fi
 # Fallback to localhost if not found (covers dev environments with default binding)
 _HEALTH_HOST="${_LISTEN_ADDR:-localhost:8080}"
@@ -223,6 +228,40 @@ fi
 
 if [ "${BUILD_STATUS}" = "unknown" ]; then
     log "Could not reach clustr-serverd API to check build status — proceeding with restart"
+fi
+
+# ---------------------------------------------------------------------------
+# Reimage-in-progress guard — defer restart if any node reimage is active
+# ---------------------------------------------------------------------------
+# Restarting clustr-serverd while a reimage is running interrupts the
+# orchestrator goroutine and may leave a node mid-deploy with no server to
+# report back to. Query /api/v1/reimages for non-terminal records.
+# If the endpoint is unreachable or returns 401 (auth required), we treat
+# the result as "unknown" and proceed — same fail-open pattern as the build
+# guard above.
+REIMAGE_STATUS=$(curl -s --max-time 5 "http://localhost:8080/api/v1/reimages" 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    reqs = data.get("requests", [])
+    non_terminal = {"pending", "triggered", "in_progress", "running"}
+    if any(r.get("status") in non_terminal for r in reqs):
+        print("active")
+    else:
+        print("idle")
+except Exception:
+    print("unknown")
+' 2>/dev/null || echo "unknown")
+
+if [ "${REIMAGE_STATUS}" = "active" ]; then
+    log "Reimage in progress — deferring restart to next cycle (binary staged, will deploy when idle)"
+    rm -f "${SERVERD_NEW}" "${CLI_STATIC_NEW}" "${CLIENTD_NEW}"
+    exit 0
+fi
+
+if [ "${REIMAGE_STATUS}" = "unknown" ]; then
+    log "Could not reach clustr-serverd API to check reimage status — proceeding with restart"
 fi
 
 # ---------------------------------------------------------------------------
