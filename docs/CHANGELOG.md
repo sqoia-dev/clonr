@@ -2,6 +2,32 @@
 
 ---
 
+## Fix: sidebar cluster strip showing 0/0 nodes (2026-04-25)
+
+### Bug
+
+The sidebar cluster strip always displayed `0/0 nodes` even when nodes were registered
+and clientd-connected. Two compounding bugs:
+
+1. **Wrong response unwrap** — `_updateClusterStrip()` called `API.nodes.list()` and
+   passed the result directly to `Array.isArray()`. `API.nodes.list()` returns a
+   `ListNodesResponse` object `{ nodes: [...], total: N }`, not a bare array. So
+   `Array.isArray(nodes)` was always `false`, and both `live` and `total` fell back to 0.
+
+2. **Non-existent status field** — the filter checked `n.status === 'deployed' ||
+   n.status === 'online'`. `NodeConfig` has no `status` field (state is derived via
+   `NodeConfig.State()` and never serialized to JSON). Every filter result was 0.
+
+### Fix
+
+- Unpack `resp.nodes` from the `ListNodesResponse` before operating on it.
+- Replace the bogus `n.status` check with `n.last_seen_at` within 2 minutes — the same
+  "Live" threshold used by the node detail page and `nodeBadge()`.
+- Populate the `cluster-name` span with `location.hostname` instead of the hardcoded
+  static string `"cluster"`, so the strip shows the actual server address.
+
+---
+
 ## Docs: user management guide (2026-04-25)
 
 Added `docs/user-management.md` covering the two-category split (system daemon users vs.

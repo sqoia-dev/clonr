@@ -122,16 +122,23 @@ const App = {
     },
 
     async _updateClusterStrip() {
+        // Populate the server label once from the browser's origin.
+        const nameEl = document.getElementById('cluster-name');
+        if (nameEl) nameEl.textContent = location.hostname;
+
         try {
-            const [nodes, images] = await Promise.all([
-                API.nodes.list().catch(() => []),
-                API.images.list().catch(() => [])
-            ]);
+            const resp = await API.nodes.list().catch(() => ({}));
+            // API.nodes.list() returns ListNodesResponse: { nodes: [...], total: N }.
+            // Not a plain array — must unpack .nodes before filtering.
+            const nodeList = (resp && Array.isArray(resp.nodes)) ? resp.nodes : [];
             const meta = document.getElementById('cluster-meta');
             if (meta) {
-                const online = Array.isArray(nodes) ? nodes.filter(n => n.status === 'deployed' || n.status === 'online').length : 0;
-                const total = Array.isArray(nodes) ? nodes.length : 0;
-                meta.textContent = `${online}/${total} nodes`;
+                // A node is "live" when clustr-clientd has sent a heartbeat in the
+                // last 2 minutes (same threshold used by the node detail page).
+                const twoMin = 2 * 60 * 1000;
+                const live  = nodeList.filter(n => n.last_seen_at && (Date.now() - new Date(n.last_seen_at).getTime()) < twoMin).length;
+                const total = nodeList.length;
+                meta.textContent = `${live}/${total} nodes`;
             }
         } catch (_) {}
     },
