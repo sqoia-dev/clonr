@@ -869,6 +869,12 @@ Binaries land in `bin/`:
 
 ---
 
+## Installation
+
+For a production install — covering Docker Compose (primary), bare-metal / Ansible (secondary), env var reference, bootstrap admin step, and first-deploy smoke test — see **[docs/install.md](docs/install.md)**.
+
+---
+
 ## Architecture Overview
 
 See [docs/architecture.md](docs/architecture.md) for the full design doc.

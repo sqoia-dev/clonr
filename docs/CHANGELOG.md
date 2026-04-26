@@ -302,4 +302,54 @@ priority security or reliability fixes.
 
 ---
 
-*Next sprint: Sprint 4 — Production-Readiness + Observability*
+---
+
+## Sprint 4 — Production Readiness (2026-06-08 → 2026-06-21)
+
+### Ops / Backup
+
+- **[S4-7] Backup: warn on captured images not backed up** (HA-4)
+  `clustr-backup.sh` now queries the freshly-written DB backup for all
+  `base_images` rows with `build_method = 'capture'` and status in
+  `(ready, building, interrupted)`. For each captured image found, it
+  emits an explicit WARNING to the journal:
+  - If `CLUSTR_BACKUP_REMOTE` is unset: "Captured image [...] is not
+    rebuildable from ISO cache and is NOT backed up off-site."
+  - If the blob is missing from disk: "Captured image [...] blob is NOT
+    found on disk — this image data may already be lost."
+  - If a remote is configured: acknowledgement that the blob is present
+    and being synced.
+  Captured images are the only image type that cannot be rebuilt from ISO
+  cache. Operators now learn of this risk at backup time, before data loss.
+
+- **[S4-8] Autodeploy restore test — `clustr-backup-verify.timer`** (HA-3)
+  New weekly systemd timer + service (`deploy/systemd/clustr-backup-verify.*`)
+  that verifies backup integrity by performing an actual restore test:
+  1. Finds the most recent `clustr-*.db` in `CLUSTR_BACKUP_DIR`.
+  2. Copies it to a temp directory.
+  3. Starts an ephemeral `clustr-serverd` instance (`CLUSTR_AUTH_DEV_MODE=1`,
+     port `CLUSTR_BACKUP_VERIFY_PORT`, default 18080) against the temp DB.
+  4. Hits `GET /api/v1/healthz/ready` (S1-10 readiness endpoint) and waits
+     up to `CLUSTR_BACKUP_VERIFY_WAIT` seconds (default 30).
+  5. Shuts down the instance and removes the temp dir.
+  Pass/fail logged to journal via `logger -t clustr-backup-verify`.
+  On failure: WARNING-priority journal entry emitted via both `logger -p
+  daemon.warning` and `systemd-cat -p warning` — surfaces in
+  `journalctl -p warning` monitoring queries.
+  Timer fires every Sunday at 03:00 (1 hour after the daily backup at 02:00).
+  Script lives at `scripts/ops/clustr-backup-verify.sh`; installed to
+  `/usr/local/sbin/` by operators following `docs/install.md`.
+
+### Documentation
+
+- **[S4-14] `docs/install.md`** — full installation guide for first external operators.
+  Covers 7 sections: prerequisites, network setup, Docker Compose path (primary),
+  bare-metal/Ansible path (secondary), complete env var reference (all `CLUSTR_*`
+  variables with defaults and override guidance), bootstrap admin account
+  (default `clustr/clustr` credential + one-time API key capture), and a
+  first-deploy smoke test (build image → register node → trigger reimage →
+  PXE boot → verify `verified_booted` status). Includes troubleshooting table
+  for the 5 most common first-deploy failure modes. Linked from `README.md`
+  Installation section.
+
+*Next sprint: Sprint 4 (continued) — Prometheus metrics, webhooks, and remaining production-hardening items*
