@@ -272,9 +272,14 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Preserve the existing group assignment unless explicitly changed in the request.
-	groupID := existing.GroupID
-	if req.GroupID != "" || req.GroupID == "" && existing.GroupID != "" {
+	// An empty GroupID in the request means "leave as-is", not "clear the group".
+	// To unassign a node from its group, the caller must use the dedicated
+	// group-membership endpoint rather than sending an empty group_id here.
+	var groupID string
+	if req.GroupID != "" {
 		groupID = req.GroupID
+	} else {
+		groupID = existing.GroupID
 	}
 
 	cfg := api.NodeConfig{
