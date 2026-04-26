@@ -2,6 +2,99 @@
 
 ---
 
+## Turnkey verification Round 6 — Munge key injection (2026-04-26)
+
+### Problem: munge key never delivered to nodes — munged fails on first boot
+
+After Round 5 both nodes reached `verified_booted` with Slurm binaries present and
+`slurmctld`/`slurmd` running. SSH confirmed `/etc/munge/munge.key` was absent on every node.
+Tracing the code:
+
+- `SlurmNodeConfig` in `pkg/api/types.go` had no `MungeKey` field
+- `Manager.NodeConfig()` in `internal/slurm/manager.go` built the deploy payload but never
+  called `GetMungeKey()`, so the munge key was never included
+- `writeSlurmConfig()` in `internal/deploy/finalize.go` created `/etc/munge/` and chowned it
+  to `munge:munge` but never wrote a key file — the docstring claimed it did, which was wrong
+
+As a result, `munged` failed to start on every deployed node since the Slurm module was
+introduced. Without munge, Slurm auth is broken and `srun` fails unconditionally.
+
+Additionally, the role-mapping switch in `writeSlurmConfig` matched `"compute"` for the worker
+role, but the API stores `"worker"` — so compute nodes never got `slurmd` enabled at deploy time
+(they fell back to the config-file inference path via `gres.conf`).
+
+### Fixes
+
+1. **`pkg/api/types.go`**: Added `MungeKey string \`json:"munge_key,omitempty"\`` to
+   `SlurmNodeConfig`. The field carries raw munge key bytes as base64 (standard encoding).
+
+2. **`internal/slurm/manager.go`**: `NodeConfig()` now calls `m.GetMungeKey(ctx)` after
+   building configs/scripts. On success it base64-encodes the key into `MungeKey`. On failure
+   (key not yet generated) it logs a warning and leaves `MungeKey` empty — the node boots but
+   munge fails; operator runs `POST /api/v1/slurm/munge-key/generate` then reimages.
+
+3. **`internal/deploy/finalize.go`**:
+   - Added `encoding/base64` import
+   - After writing scripts, new block: decode `slurmCfg.MungeKey` from base64 and write to
+     `<mountRoot>/etc/munge/munge.key` with mode `0400`. The existing chown loop below
+     handles `munge:munge` ownership. Non-fatal: logs warning if key absent or decode fails.
+   - Fixed role switch: added `"worker"` alongside `"compute"` so nodes with the canonical
+     API role value get `slurmd` enabled.
+
+### Gaps identified and resolved
+
+- **NEW-GAP-17** (P1 — blocker): Munge key never delivered to nodes. Fixed above.
+- Role string mismatch (`"compute"` vs `"worker"`): Fixed in same PR.
+
+---
+
+## Turnkey verification Round 5 — DHCP DNS option + gold image path (2026-04-26)
+
+### Problem: DHCP server omits DNS option — PXE nodes have no resolver
+
+Root cause of `installSlurmInChroot` still failing after `ef14ff6`: the PXE DHCP server
+(`internal/pxe/dhcp.go`) did not advertise a DNS resolver via DHCP option 6. udhcpc (BusyBox
+DHCP client used in the PXE initramfs) only writes `/etc/resolv.conf` when the DHCP response
+carries a DNS server address. Without that option, `/etc/resolv.conf` in the PXE initramfs is
+absent or stale, so copying it into the chroot (ef14ff6's fix) still results in no working DNS.
+
+The `installSlurmInChroot` comment in ef14ff6 said "the initramfs resolv.conf points at 10.99.0.1
+which runs dnsmasq" — that assumption was wrong because the DHCP lease never delivered a DNS option
+to make that happen.
+
+### Fix: add OptDNS to DHCP populateBootOptions
+
+`populateBootOptions` in `internal/pxe/dhcp.go` now calls `resp.UpdateOption(dhcpv4.OptDNS(d.serverIP))`
+so every PXE DHCP ACK carries the server IP as the DNS nameserver. udhcpc writes
+`nameserver 10.99.0.1` into the initramfs's `/etc/resolv.conf`. ef14ff6's copy-into-chroot step
+then propagates that working nameserver into the image rootfs, giving dnf a valid resolver.
+
+### Gaps found
+
+- **NEW-GAP-16** (P1): DHCP server missing OptDNS — caused the auto-install path to fail silently
+  on every deploy since the Slurm module was added. The ef14ff6 fix was logically correct but
+  depended on a precondition (initramfs has /etc/resolv.conf) that was never true.
+
+### Gold image workaround (used for Round 5 verification)
+
+While waiting for the DHCP DNS fix to propagate via autodeploy, Slurm packages were pre-installed
+directly into the rocky9 image rootfs on the clustr server via chroot with working DNS from the
+server's own /etc/resolv.conf:
+
+```bash
+mount --bind /proc /var/lib/clustr/images/bc6d3923-.../rootfs/proc
+mount --bind /sys  /var/lib/clustr/images/bc6d3923-.../rootfs/sys
+mount --bind /dev  /var/lib/clustr/images/bc6d3923-.../rootfs/dev
+cp /etc/resolv.conf /var/lib/clustr/images/bc6d3923-.../rootfs/etc/resolv.conf
+chroot /var/lib/clustr/images/bc6d3923-.../rootfs dnf install -y \
+  slurm-ohpc slurm-slurmd-ohpc slurm-slurmctld-ohpc munge munge-libs
+```
+
+At reimage time clustr detects the pre-installed binaries, skips the dnf step, and injects the
+munge key + slurm.conf directly.
+
+---
+
 ## Turnkey verification Round 4 cont. — Slurm chroot DNS fix (2026-04-26)
 
 ### Problem: installSlurmInChroot missing bind-mounts and resolv.conf injection

@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -2184,8 +2185,12 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 		for _, r := range slurmCfg.Roles {
 			switch r {
 			case "controller":
+				// hasSlurmdbd gates slurmctld installation/enable (confusingly named,
+				// but kept for backward compat — see installSlurmInChroot comment).
 				hasSlurmdbd = true
-			case "compute":
+			case "worker", "compute":
+				// "worker" is the canonical API role value; "compute" accepted for
+				// backward compatibility with payloads written before the rename.
 				hasGres = true
 			}
 		}
@@ -2289,6 +2294,31 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 		}
 		log.Info().Str("script_type", sf.ScriptType).Str("dest_path", sf.DestPath).
 			Msg("finalize slurm: wrote script")
+	}
+
+	// ── Write munge key ───────────────────────────────────────────────────────
+	// NEW-GAP-17: The munge key was never included in the deploy payload, so
+	// munged could not start — leaving the node in a degraded state where Slurm
+	// auth fails on every srun/scontrol call.
+	//
+	// The key is delivered as base64-encoded bytes in SlurmNodeConfig.MungeKey.
+	// We decode it and write it to /etc/munge/munge.key with mode 0400 here.
+	// The existing chown loop below handles munge:munge ownership.
+	if slurmCfg.MungeKey != "" {
+		rawMungeKey, mkDecErr := base64.StdEncoding.DecodeString(slurmCfg.MungeKey)
+		if mkDecErr != nil {
+			log.Warn().Err(mkDecErr).Msg("finalize slurm: munge key base64 decode failed (non-fatal) — munge will not start")
+		} else {
+			mungeKeyPath := filepath.Join(mountRoot, "etc", "munge", "munge.key")
+			if mkWriteErr := os.WriteFile(mungeKeyPath, rawMungeKey, 0o400); mkWriteErr != nil {
+				log.Warn().Err(mkWriteErr).Msg("finalize slurm: write munge.key (non-fatal) — munge will not start")
+			} else {
+				log.Info().Str("path", mungeKeyPath).Int("bytes", len(rawMungeKey)).
+					Msg("finalize slurm: wrote munge.key")
+			}
+		}
+	} else {
+		log.Warn().Msg("finalize slurm: no munge key in deploy payload — /etc/munge/munge.key not written; munge will fail to start (run POST /slurm/munge-key/generate if key is missing)")
 	}
 
 	// ── Fix ownership of slurm directories ───────────────────────────────────
@@ -2545,11 +2575,20 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	// Step 2: Copy the deploy environment's /etc/resolv.conf into the chroot so
 	// dnf can reach the OpenHPC repo on the public internet.
 	//
-	// In the PXE initramfs environment the node's /etc/resolv.conf points at
-	// the clustr server (10.99.0.1) which runs dnsmasq and forwards queries
-	// upstream. The chroot's own resolv.conf (from the captured base image) may
-	// be empty or point at a stale address, causing "Couldn't resolve host name"
-	// errors for the OpenHPC repo URL.
+	// In the PXE initramfs environment the DHCP server (pxe/dhcp.go) now
+	// advertises the clustr server IP as the DNS resolver via DHCP option 6
+	// (OptDNS). udhcpc writes the received nameserver into /etc/resolv.conf so
+	// the initramfs environment has a working resolver pointing at the server.
+	// Copying that file into the chroot gives dnf the same DNS path.
+	//
+	// Without the DHCP DNS option, udhcpc does not write /etc/resolv.conf and
+	// the initramfs environment has no resolver, causing:
+	//   Curl error (6): Couldn't resolve host name for repos.openhpc.community
+	//
+	// The chroot's own resolv.conf (from the captured base image) may
+	// be empty or point at a stale address (e.g. 10.0.2.3 from QEMU NAT).
+	// Overwriting it with the initramfs /etc/resolv.conf ensures dnf uses the
+	// correct nameserver during the deploy finalize phase.
 	//
 	// The file is overwritten; the original is restored by the subsequent reboot
 	// — on first boot NetworkManager writes its own resolv.conf based on the NM

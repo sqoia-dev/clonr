@@ -1428,6 +1428,11 @@ type SlurmNodeConfig struct {
 	Scripts      []SlurmScriptFile `json:"scripts,omitempty"`
 	// SlurmRepoURL is the dnf repo URL for auto-install.  Empty = skip auto-install.
 	SlurmRepoURL string            `json:"slurm_repo_url,omitempty"`
+	// MungeKey is the raw munge key bytes, base64-encoded (standard encoding).
+	// finalize.go decodes this and writes it to /etc/munge/munge.key (mode 0400,
+	// owner munge:munge) so munged can start on first boot.
+	// Empty means no key was available — munge will fail to start (degraded node).
+	MungeKey     string            `json:"munge_key,omitempty"`
 }
 
 // SlurmConfigFile is a rendered config file, ready for delivery to a node.

@@ -263,6 +263,18 @@ func (d *DHCPServer) populateBootOptions(resp *dhcpv4.DHCPv4, req *dhcpv4.DHCPv4
 	resp.UpdateOption(dhcpv4.OptIPAddressLeaseTime(d.leaseDur))
 	resp.UpdateOption(dhcpv4.OptServerIdentifier(d.serverIP))
 
+	// Advertise the clustr server as the DNS resolver for PXE clients.
+	//
+	// Without this option the PXE initramfs has no /etc/resolv.conf (udhcpc
+	// does not write one when the DHCP response carries no DNS option), so any
+	// outbound name lookup during the deploy finalize phase — notably the dnf
+	// call in installSlurmInChroot — fails with "Couldn't resolve host name".
+	//
+	// The clustr server already runs dnsmasq (or the host's resolver) and has
+	// outbound internet access, so pointing PXE clients at the server IP gives
+	// them a working resolver for the duration of the deploy.
+	resp.UpdateOption(dhcpv4.OptDNS(d.serverIP))
+
 	// Next-server (siaddr) always points to self.
 	resp.ServerIPAddr = d.serverIP
 

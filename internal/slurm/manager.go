@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -465,12 +466,25 @@ func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNode
 		})
 	}
 
+	// Fetch and encode the munge key so finalize.go can write it to
+	// /etc/munge/munge.key on the node.  A missing key is non-fatal here —
+	// NodeConfig() still returns valid slurm config; the node will log a warning
+	// and munge will fail to start.  The correct fix is POST /slurm/munge-key/generate.
+	var mungeKeyB64 string
+	if rawKey, mkErr := m.GetMungeKey(ctx); mkErr != nil {
+		log.Warn().Err(mkErr).Str("node_id", nodeID).
+			Msg("slurm: NodeConfig: munge key unavailable — node will boot without /etc/munge/munge.key (run POST /slurm/munge-key/generate)")
+	} else {
+		mungeKeyB64 = base64.StdEncoding.EncodeToString(rawKey)
+	}
+
 	return &api.SlurmNodeConfig{
 		ClusterName:  cfg.ClusterName,
 		Roles:        roles,
 		Configs:      configs,
 		Scripts:      scripts,
 		SlurmRepoURL: cfg.SlurmRepoURL,
+		MungeKey:     mungeKeyB64,
 	}, nil
 }
 
