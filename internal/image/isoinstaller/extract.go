@@ -303,19 +303,36 @@ var grubEFICandidates = []string{
 	"EFI/BOOT/BOOTX64.EFI", // removable fallback, last resort
 }
 
+// BuildStandaloneGrubEFI is the exported form of buildStandaloneGrubEFI.
+// It is called both at image-creation time (extract.go copyGrubEFI) and at
+// deploy finalization time (deploy/rsync.go Finalize) so that the server-side
+// grub.efi is always the standalone HTTP-chain-boot binary, never the distro
+// RPM grubx64.efi (which has a hardcoded ESP prefix and cannot chain over HTTP).
+func BuildStandaloneGrubEFI(rootMnt, destPath string) error {
+	return buildStandaloneGrubEFI(rootMnt, destPath)
+}
+
 // buildStandaloneGrubEFI uses grub2-mkimage to build a standalone EFI binary
-// with all required modules compiled in and a disk-search config embedded.
-// This is the binary served by the clustr server for UEFI iPXE chain-boot.
+// suitable for UEFI iPXE chain-boot over HTTP. The binary is built with:
 //
-// rootMnt is the mounted rootfs of the extracted image (for accessing its
-// /usr/lib/grub/x86_64-efi/ module directory — using the image's own modules
-// guarantees compatibility with the deployed OS).
+//   - All required modules compiled in (part_gpt, xfs, ext2, fat, http, efinet,
+//     tftp, net, search, configfile, linux, linuxefi, etc.)
+//   - An embedded grub.cfg that chains back to the clustr server's HTTP grub.cfg
+//     endpoint so GRUB immediately fetches the disk-search stub from the server.
+//   - Empty prefix (-p '') so GRUB does not attempt to load modules from disk or
+//     a path that doesn't exist when chain-loaded over HTTP.
+//
+// rootMnt is the mounted rootfs of the extracted image. Its
+// /usr/lib/grub/x86_64-efi/ module directory is used as the module source so
+// the compiled-in modules are version-matched to the deployed OS's GRUB.
 //
 // destPath is the full path where grub.efi should be written.
 //
-// Returns nil on success. On failure (grub2-mkimage missing, modules absent,
-// build error), returns an error so the caller can fall back to copying the
-// stock binary.
+// Returns nil on success. Fails loudly if critical modules (especially xfs.mod)
+// are absent from the module directory, or if the resulting binary does not
+// contain XFS support. On any failure the caller falls back to copying the stock
+// distro binary (which will not work for HTTP chain-boot but is better than
+// nothing for local-disk boot).
 func buildStandaloneGrubEFI(rootMnt, destPath string) error {
 	// Check that grub2-mkimage is available on the host.
 	grubMkimage, err := exec.LookPath("grub2-mkimage")
@@ -324,37 +341,52 @@ func buildStandaloneGrubEFI(rootMnt, destPath string) error {
 		if alt, err2 := exec.LookPath("grub-mkimage"); err2 == nil {
 			grubMkimage = alt
 		} else {
-			return fmt.Errorf("grub2-mkimage not found on host: %w", err)
+			return fmt.Errorf("grub2-mkimage not found on host (install grub2-efi-x64-modules or grub-efi-amd64-bin): %w", err)
 		}
 	}
 
-	// Check that the image's GRUB module directory exists.
+	// Use the image's own GRUB module directory so compiled-in modules are
+	// version-matched to the deployed OS's GRUB binary.
 	modDir := filepath.Join(rootMnt, "usr", "lib", "grub", "x86_64-efi")
 	if _, err := os.Stat(modDir); err != nil {
-		return fmt.Errorf("grub modules not found at %s: %w", modDir, err)
+		return fmt.Errorf("grub x86_64-efi module directory not found at %s (image may be missing grub2-efi-x64-modules RPM): %w", modDir, err)
 	}
 
-	// Embedded grub.cfg — searches local disks for the OS-installed grub.cfg
-	// and loads it via configfile. No HTTP/network modules needed because the
-	// search logic is built into the binary. No hardcoded partition fallbacks:
-	// with XFS and ext4 compiled in, search --file scans all GPT partitions and
-	// finds the right one regardless of layout.
+	// Hard-require xfs.mod in the module directory. grub2-mkimage silently
+	// produces a binary without XFS if the .mod file is absent — failing loudly
+	// here is preferable to a binary that drops to rescue on XFS nodes.
+	xfsMod := filepath.Join(modDir, "xfs.mod")
+	if _, err := os.Stat(xfsMod); err != nil {
+		return fmt.Errorf("xfs.mod not found at %s — image is missing grub2-efi-x64-modules RPM; rebuild image with grub2-efi-x64-modules in %%packages", xfsMod)
+	}
+
+	// Embedded grub.cfg: chains back to the clustr server's HTTP grub.cfg
+	// endpoint. When iPXE chain-loads grub.efi over HTTP, GRUB sets $prefix to
+	// the directory portion of the URL (i.e. (http,server)/api/v1/boot) and
+	// automatically attempts to read ($prefix)/grub.cfg. With -p '' the binary
+	// has no hardcoded prefix, so GRUB derives the prefix from the HTTP URL it
+	// was chain-loaded from and fetches grub.cfg over HTTP.
+	//
+	// The explicit configfile command below is a belt-and-suspenders fallback in
+	// case GRUB's auto-prefix logic does not fire (e.g. when net_default_server
+	// is set but prefix resolution differs across GRUB versions). It targets the
+	// same endpoint that auto-loading would fetch.
 	embeddedCfg := `# Embedded by clustr at image build time.
-# Searches local disks for the OS-installed grub.cfg and loads it.
-# XFS, ext4, and fat modules are compiled in — search scans all partitions.
-search --file --set=root /grub2/grub.cfg
-if [ -f ($root)/grub2/grub.cfg ]; then
-    configfile ($root)/grub2/grub.cfg
+# HTTP + network modules are compiled in. When chain-loaded via iPXE over HTTP,
+# GRUB derives $prefix from the HTTP URL and auto-fetches ($prefix)/grub.cfg.
+# The explicit configfile below is a belt-and-suspenders fallback.
+insmod http
+insmod efinet
+insmod net
+if [ -n "${net_default_server}" ]; then
+    configfile (http,${net_default_server})/api/v1/boot/grub.cfg
 fi
-
-search --file --set=root /EFI/rocky/grub.cfg
-if [ -f ($root)/EFI/rocky/grub.cfg ]; then
-    configfile ($root)/EFI/rocky/grub.cfg
+if [ -n "${pxe_default_server}" ]; then
+    configfile (http,${pxe_default_server})/api/v1/boot/grub.cfg
 fi
-
-echo "FATAL: clustr could not locate grub.cfg on any local partition"
-echo "Expected /grub2/grub.cfg or /EFI/rocky/grub.cfg on a GPT partition."
-echo "Check that the disk image deployed correctly and grub2-install ran."
+echo "FATAL: clustr standalone grub.efi: could not determine server address"
+echo "net_default_server and pxe_default_server are both unset."
+echo "Ensure grub.efi was chain-loaded by iPXE over HTTP, not TFTP or disk."
 sleep 30
 `
 
@@ -370,15 +402,23 @@ sleep 30
 	}
 	cfgFile.Close()
 
-	// Modules to compile in. This list covers reading GPT/MBR partitions on
-	// both XFS and ext-family filesystems, searching by file path, and loading
-	// a Linux kernel via configfile.
+	// Full module list for HTTP chain-boot. Covers:
+	//   - Partition tables: part_gpt, part_msdos
+	//   - Filesystems: xfs (required for /boot XFS), ext2, fat (ESP)
+	//   - Disk search: search, search_fs_uuid, search_fs_file, search_label
+	//   - Network/HTTP chain-boot: http, efinet, tftp, net
+	//   - Boot: normal, linux, linuxefi, configfile
+	//   - UI/shell: echo, test, minicmd, all_video, font, gfxterm
+	//   - Control: halt, reboot
 	modules := []string{
 		"part_gpt", "part_msdos",
 		"xfs", "ext2", "fat",
 		"search", "search_fs_uuid", "search_fs_file", "search_label",
-		"normal", "linux", "configfile",
+		"http", "efinet", "tftp", "net",
+		"normal", "linux", "linuxefi", "configfile",
 		"echo", "test", "minicmd",
+		"all_video", "font", "gfxterm",
+		"halt", "reboot",
 	}
 
 	args := []string{
@@ -386,7 +426,7 @@ sleep 30
 		"-o", destPath,
 		"-c", cfgPath,
 		"-d", modDir,
-		"-p", "", // no default prefix; embedded config handles everything
+		"-p", "", // empty prefix: GRUB derives prefix from HTTP chain-load URL
 	}
 	args = append(args, modules...)
 
@@ -395,6 +435,23 @@ sleep 30
 	if err != nil {
 		return fmt.Errorf("grub2-mkimage: %w\noutput: %s", err, string(out))
 	}
+
+	// Post-build verification: confirm the resulting binary contains XFS support.
+	// grub2-mkimage exits 0 even when a module is silently omitted due to a
+	// missing dependency; checking the binary content catches this before the
+	// binary is served to nodes.
+	builtData, readErr := os.ReadFile(destPath)
+	if readErr != nil {
+		return fmt.Errorf("post-build read of %s: %w", destPath, readErr)
+	}
+	// "XFSB" is the XFS superblock magic that appears in the compiled-in xfs module.
+	if !bytes.Contains(builtData, []byte("XFSB")) {
+		// Secondary check: the string "xfs" appears in GRUB module metadata.
+		if !bytes.Contains(builtData, []byte("\x00xfs\x00")) {
+			return fmt.Errorf("post-build verification failed: grub.efi at %s does not appear to contain XFS support (XFSB magic not found) — xfs.mod may have a missing dependency; check grub2-mkimage output above", destPath)
+		}
+	}
+
 	return nil
 }
 

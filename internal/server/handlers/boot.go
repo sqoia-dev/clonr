@@ -439,18 +439,18 @@ func (h *BootHandler) ServeGrubEFI(w http.ResponseWriter, r *http.Request) {
 // that config via configfile. This works regardless of the disk layout because
 // search scans all partitions rather than relying on a hardcoded device path.
 //
-// Module availability: the server-side grub.efi is the distribution RPM binary
-// (grubx64.efi from the image's /boot/efi/EFI/<distro>/ — saved before
-// grub2-install runs during deploy finalization). This binary is the full
-// RPM-packaged build (~3.8 MB) with all filesystem modules compiled in (XFS,
-// ext4, fat, part_gpt, search, etc.). The grub2-install --removable stripped
-// output (~912 KB) lacks XFS and cannot search 4-partition XFS layouts.
-// No insmod is needed; modules cannot be loaded over HTTP anyway.
+// Module availability: the server-side grub.efi is a standalone binary built by
+// grub2-mkimage at image-creation/finalization time with the deployed OS's own
+// modules from /usr/lib/grub/x86_64-efi/. It has http + efinet + net + xfs +
+// ext2 + fat + part_gpt + search compiled in and an empty prefix (-p '') so
+// GRUB derives the HTTP base URL from the chain-load URL. The distro RPM
+// grubx64.efi is NOT used (it has a hardcoded ESP prefix and drops to rescue
+// when loaded over HTTP). No insmod is needed; all modules are compiled in.
 func (h *BootHandler) ServeGrubCfg(w http.ResponseWriter, r *http.Request) {
 	const cfg = `# grub.cfg stub served by clustr — redirects to local disk config.
-# No insmod needed: grub.efi is the distribution RPM binary (full module set
-# including XFS, ext4, fat compiled in). Modules cannot be loaded over HTTP
-# so insmod is a no-op here.
+# No insmod needed: grub.efi is a standalone grub2-mkimage binary with all
+# required modules compiled in (http, efinet, xfs, ext2, fat, search, etc.).
+# Modules cannot be loaded over HTTP anyway.
 
 search --file --set=root /grub2/grub.cfg
 if [ -f ($root)/grub2/grub.cfg ]; then

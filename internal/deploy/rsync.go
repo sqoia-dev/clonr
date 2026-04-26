@@ -22,6 +22,7 @@ import (
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 	"golang.org/x/sys/unix"
 )
 
@@ -72,15 +73,15 @@ type FilesystemDeployer struct {
 	ClientdBinPath string
 
 	// ImageDir is the server-side base directory where image subdirectories live
-	// (e.g. /var/lib/clustr/images). When set together with ImageID, the
-	// grub2-install-built grubx64.efi is copied back to
-	// <ImageDir>/<ImageID>/grub.efi after UEFI bootloader installation so the
-	// server serves the module-compiled binary for future UEFI chain-boots.
-	// Leave empty to skip the copy-back (the default for remote node deploys).
+	// (e.g. /var/lib/clustr/images). When set together with ImageID, a standalone
+	// grub.efi is rebuilt (via grub2-mkimage with the deployed OS's own modules)
+	// and written to <ImageDir>/<ImageID>/grub.efi after UEFI bootloader
+	// installation. The standalone binary is built for HTTP chain-boot (http +
+	// efinet + xfs modules compiled in, empty prefix). Leave empty to skip.
 	ImageDir string
 
 	// ImageID is the ID of the base image being deployed. Used together with
-	// ImageDir to construct the destination path for the grub.efi copy-back.
+	// ImageDir to construct the destination path for the standalone grub.efi.
 	ImageID string
 
 	// Progress is an optional messenger that receives human-readable sub-step
@@ -874,22 +875,6 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		log.Info().Str("path", grubx64Path).
 			Msg("finalize: grubx64.efi present on ESP — proceeding with grub2-install")
 
-		// Save the distribution grubx64.efi (the full RPM-packaged binary with all
-		// filesystem modules, ~3.8 MB) BEFORE grub2-install runs. grub2-install
-		// --removable overwrites EFI/rocky/grubx64.efi with its own stripped output
-		// (~912 KB, missing XFS and ext4 modules). The distro binary is what the
-		// server must serve for UEFI chain-boot so that GRUB can search all partition
-		// types (XFS /boot, XFS /, ext4, etc.) without falling to a rescue prompt.
-		var distroGrubEFI []byte
-		if data, readErr := os.ReadFile(grubx64Path); readErr == nil {
-			distroGrubEFI = data
-			log.Info().Str("path", grubx64Path).Int("size", len(data)).
-				Msg("finalize: saved distro grubx64.efi before grub2-install (will use for server chain-boot)")
-		} else {
-			log.Warn().Err(readErr).Str("path", grubx64Path).
-				Msg("finalize: could not read distro grubx64.efi before grub2-install — server binary will use post-install copy")
-		}
-
 		// Step 3: run grub2-install --target=x86_64-efi inside the deployed chroot.
 		// Running inside the chroot is essential: grub2-install reads GRUB modules
 		// from /usr/lib/grub/x86_64-efi/ inside the chroot (the deployed OS's own
@@ -926,43 +911,40 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 		log.Info().Str("path", grubx64Path).Msg("  ✓ grubx64.efi verified post-install")
 
-		// Copy the distribution grubx64.efi (saved before grub2-install ran) to the
-		// image directory so the server serves it for future UEFI chain-boots.
+		// Rebuild the server-side standalone grub.efi using grub2-mkimage with the
+		// deployed OS's own modules (from mountRoot/usr/lib/grub/x86_64-efi/).
 		//
-		// We prefer the pre-install distro binary (~3.8 MB, RPM-packaged) over the
-		// post-install grub2-install output (~912 KB, stripped --removable build)
-		// because the distro binary includes all filesystem modules (XFS, ext4, fat)
-		// compiled in. The stripped binary lacks these modules, so GRUB cannot search
-		// XFS partitions and falls to a bare rescue prompt on the 4-partition node
-		// layout (ESP + /boot XFS + swap + / XFS). See fix: use distro grubx64.efi.
+		// We rebuild here (post grub2-install) rather than relying solely on the
+		// binary built at image-creation time because:
+		//   1. grub2-install may have updated the module set on the deployed disk.
+		//   2. The module directory is now definitely present and version-matched.
+		//
+		// The standalone binary is built with:
+		//   - http + efinet + net modules compiled in (HTTP chain-boot capable)
+		//   - xfs + ext2 + fat compiled in (can search XFS /boot and / partitions)
+		//   - Empty prefix (-p '') so GRUB derives prefix from the HTTP URL it was
+		//     chain-loaded from; it then fetches ($prefix)/grub.cfg automatically.
+		//   - An embedded config that falls back to explicit HTTP configfile if
+		//     auto-prefix resolution does not fire.
+		//
+		// The distro RPM grubx64.efi is NOT used here: it has a hardcoded prefix
+		// pointing at the ESP (e.g. (,gpt1)/EFI/rocky) and drops straight to the
+		// grub> rescue prompt when chain-loaded over HTTP because the ESP is not
+		// visible and no grub.cfg path can be resolved.
 		reportStep("Updating server boot binary")
-		log.Info().Msg("  → Updating server-side grub.efi for chain-boot...")
+		log.Info().Msg("  → Rebuilding standalone grub.efi for HTTP chain-boot...")
 		if d.ImageDir != "" && d.ImageID != "" {
 			serverGrubPath := filepath.Join(d.ImageDir, d.ImageID, "grub.efi")
-			// Prefer distro binary (saved pre-grub2-install). Fall back to post-install
-			// copy only if the pre-install read failed (should not happen in practice).
-			var src []byte
-			var srcDesc string
-			if len(distroGrubEFI) > 0 {
-				src = distroGrubEFI
-				srcDesc = "distro RPM binary (pre-grub2-install)"
+			if buildErr := isoinstaller.BuildStandaloneGrubEFI(mountRoot, serverGrubPath); buildErr != nil {
+				log.Warn().Err(buildErr).Str("dst", serverGrubPath).
+					Msg("finalize: standalone grub.efi build failed — server chain-boot binary not updated (non-fatal; next re-finalize will retry)")
 			} else {
-				var readErr error
-				src, readErr = os.ReadFile(grubx64Path)
-				if readErr != nil {
-					log.Warn().Err(readErr).Str("path", grubx64Path).
-						Msg("finalize: could not read post-install grubx64.efi — server grub.efi not updated (non-fatal)")
-					src = nil
-				}
-				srcDesc = "post-install grub2-install binary (fallback)"
-			}
-			if src != nil {
-				if writeErr := os.WriteFile(serverGrubPath, src, 0o644); writeErr != nil {
-					log.Warn().Err(writeErr).Str("dst", serverGrubPath).
-						Msg("finalize: could not update server grub.efi (non-fatal)")
+				if fi, statErr := os.Stat(serverGrubPath); statErr == nil {
+					log.Info().Str("dst", serverGrubPath).Int64("size", fi.Size()).
+						Msg("finalize: rebuilt standalone grub.efi for HTTP chain-boot")
 				} else {
-					log.Info().Str("dst", serverGrubPath).Str("source", srcDesc).Int("size", len(src)).
-						Msg("finalize: updated server grub.efi")
+					log.Info().Str("dst", serverGrubPath).
+						Msg("finalize: rebuilt standalone grub.efi for HTTP chain-boot")
 				}
 			}
 		}
