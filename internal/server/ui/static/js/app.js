@@ -2931,6 +2931,12 @@ const Pages = {
                                         <input type="password" name="pp_password"
                                             placeholder="${isEdit && node.power_provider && node.power_provider.fields && node.power_provider.fields.password === '****' ? '(saved — leave blank to keep)' : 'Enter password'}">
                                     </div>
+                                    <div class="form-group">
+                                        <label>TLS CA Cert Path <span style="font-size:11px;color:var(--text-secondary)">(optional — overrides insecure)</span></label>
+                                        <input type="text" name="pp_tls_ca_cert_path"
+                                            value="${isEdit && node.power_provider && node.power_provider.fields ? escHtml(node.power_provider.fields.tls_ca_cert_path || '') : ''}"
+                                            placeholder="/etc/clustr/pki/proxmox-ca.pem">
+                                    </div>
                                     <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:22px">
                                         <input type="checkbox" name="pp_insecure" id="pp-insecure"
                                             ${isEdit && node.power_provider && node.power_provider.fields && node.power_provider.fields.insecure === 'true' ? 'checked' : ''}>
@@ -3186,11 +3192,12 @@ const Pages = {
         let powerProvider = null;
         if (ppType === 'proxmox') {
             const fields = {
-                api_url:  data.get('pp_api_url') || '',
-                node:     data.get('pp_node') || '',
-                vmid:     data.get('pp_vmid') || '',
-                username: data.get('pp_username') || '',
-                insecure: document.getElementById('pp-insecure') && document.getElementById('pp-insecure').checked ? 'true' : 'false',
+                api_url:           data.get('pp_api_url') || '',
+                node:              data.get('pp_node') || '',
+                vmid:              data.get('pp_vmid') || '',
+                username:          data.get('pp_username') || '',
+                tls_ca_cert_path:  (data.get('pp_tls_ca_cert_path') || '').trim(),
+                insecure:          document.getElementById('pp-insecure') && document.getElementById('pp-insecure').checked ? 'true' : 'false',
             };
             // Only include password if the user typed something; blank means keep existing.
             const pw = data.get('pp_password');
@@ -3459,7 +3466,6 @@ const Pages = {
                                 <button class="actions-dropdown-item danger" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}');Pages._toggleActionsDropdown()">Delete node</button>` : ''}
                             </div>
                         </div>
-                        ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}')">Delete</button>` : ''}
                         `}
                     </div>
                 </div>
@@ -3864,6 +3870,12 @@ const Pages = {
                                     <div class="form-group">
                                         <label>Password <span style="font-size:11px;color:var(--text-secondary)">(blank = keep existing)</span></label>
                                         <input type="password" id="pp-pve-password" placeholder="••••••••" oninput="Pages._tabMarkDirty('bmc')" autocomplete="new-password">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>TLS CA Cert Path <span style="font-size:11px;color:var(--text-secondary)">(optional)</span></label>
+                                        <input type="text" id="pp-pve-ca-cert-path"
+                                            value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.tls_ca_cert_path || '' : '')}"
+                                            placeholder="/etc/clustr/pki/proxmox-ca.pem" oninput="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:22px">
                                         <input type="checkbox" id="pp-pve-insecure" ${node.power_provider && node.power_provider.fields && node.power_provider.fields.insecure === 'true' ? 'checked' : ''}
@@ -4519,11 +4531,12 @@ const Pages = {
         } else if (ppType === 'proxmox') {
             const insecureEl = document.getElementById('pp-pve-insecure');
             const fields = {
-                api_url:  (document.getElementById('pp-pve-url')?.value || '').trim(),
-                node:     (document.getElementById('pp-pve-node')?.value || '').trim(),
-                vmid:     (document.getElementById('pp-pve-vmid')?.value || '').trim(),
-                username: (document.getElementById('pp-pve-username')?.value || '').trim(),
-                insecure: (insecureEl && insecureEl.checked) ? 'true' : 'false',
+                api_url:          (document.getElementById('pp-pve-url')?.value || '').trim(),
+                node:             (document.getElementById('pp-pve-node')?.value || '').trim(),
+                vmid:             (document.getElementById('pp-pve-vmid')?.value || '').trim(),
+                username:         (document.getElementById('pp-pve-username')?.value || '').trim(),
+                tls_ca_cert_path: (document.getElementById('pp-pve-ca-cert-path')?.value || '').trim(),
+                insecure:         (insecureEl && insecureEl.checked) ? 'true' : 'false',
             };
             const pw = document.getElementById('pp-pve-password')?.value || '';
             if (pw) fields.password = pw;
@@ -7778,7 +7791,8 @@ const Pages = {
         } else if (tab === 'users') {
             body = await Pages._settingsUsersTab();
         } else if (tab === 'server-info') {
-            body = `<div class="card"><div class="card-header"><h2 class="card-title">Server Info</h2></div><p class="text-secondary" style="padding:16px">Server information will appear here in a future update.</p></div>
+            body = await Pages._settingsServerInfoTab();
+            body += `
             <div class="card" style="margin-top:20px;" id="app-logs-card">
                 <div class="card-header" style="justify-content:space-between;">
                     <h2 class="card-title">Application Logs</h2>
@@ -8112,6 +8126,47 @@ const Pages = {
             btn.disabled = false;
             btn.textContent = 'Save';
             if (errEl) { errEl.textContent = e.message; errEl.style.display = ''; }
+        }
+    },
+
+    async _settingsServerInfoTab() {
+        try {
+            const [info, nodesResp] = await Promise.allSettled([
+                API.health.get(),
+                API.nodes.list(),
+            ]);
+            const health     = info.status === 'fulfilled'      ? info.value      : null;
+            const nodes      = nodesResp.status === 'fulfilled' ? nodesResp.value : null;
+            const version    = health?.version    || 'dev';
+            const commit     = health?.commit     || 'unknown';
+            const buildTime  = health?.build_time || 'unknown';
+            const flipFails  = health?.flip_back_failures != null ? String(health.flip_back_failures) : '—';
+            const nodeTotal  = nodes?.total != null ? String(nodes.total) : '—';
+
+            const row = (label, value) => `
+                <tr>
+                    <td style="padding:7px 20px 7px 0;color:var(--text-secondary);white-space:nowrap;font-size:13px;vertical-align:top;">${escHtml(label)}</td>
+                    <td style="padding:7px 0;font-family:monospace;font-size:13px;">${escHtml(value)}</td>
+                </tr>`;
+
+            return `<div class="card">
+                <div class="card-header"><h2 class="card-title">Server Info</h2></div>
+                <div style="padding:16px 20px;">
+                    <table style="border-collapse:collapse;width:100%;max-width:560px;">
+                        <tbody>
+                            ${row('Version', version)}
+                            ${row('Commit', commit)}
+                            ${row('Built', buildTime)}
+                            ${row('Registered nodes', nodeTotal)}
+                            ${row('Flip-back failures', flipFails)}
+                            ${row('Metrics endpoint', window.location.origin + '/metrics')}
+                        </tbody>
+                    </table>
+                    ${health?.flip_back_failures > 0 ? `<div style="margin-top:12px;" class="alert alert-warn">One or more verify-boot flip-back failures detected. Check logs — Proxmox persistent boot order may still be PXE-first on affected nodes.</div>` : ''}
+                </div>
+            </div>`;
+        } catch (err) {
+            return `<div class="card"><div class="card-header"><h2 class="card-title">Server Info</h2></div><div style="padding:16px 20px;">${alertBox('Could not load server info: ' + err.message)}</div></div>`;
         }
     },
 
