@@ -726,7 +726,11 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.DB.RecordVerifyBooted(r.Context(), id); err != nil {
+	// firstTime is true only on the first phone-home for this deploy cycle
+	// (deploy_verified_booted_at was NULL and is now set). Subsequent phone-homes
+	// from clientd return firstTime=false so we can gate one-shot side effects.
+	firstTime, err := h.DB.RecordVerifyBooted(r.Context(), id)
+	if err != nil {
 		log.Error().Err(err).Str("node_id", id).Msg("verify-boot: db update failed")
 		writeError(w, err)
 		return
@@ -742,16 +746,18 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 		Msgf("verify-boot: node %s (%s) verified booted: kernel=%s, systemctl=%s",
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
 
-	// Flip the persistent boot order back to disk-first now that the node has
-	// verified. This is a no-op on IPMI (override was already one-shot) but is
+	// Flip the persistent boot order back to disk-first on the FIRST verify-boot
+	// only. This is a no-op on IPMI (override was already one-shot) but is
 	// critical on Proxmox where SetNextBoot wrote a persistent PXE-first config.
-	// Best-effort: errors are logged but do not fail the 204 response — the node
+	// Gating on firstTime prevents the Proxmox stop+start from firing on every
+	// subsequent clientd phone-home, which would cause an infinite stop/start loop.
+	// Best-effort: errors are logged but do not fail the 204 response -- the node
 	// is already deployed and the worst case is it PXE-boots cleanly on next cycle.
 	// See docs/boot-architecture.md §10.
-	if h.FlipToDiskFirst != nil {
+	if firstTime && h.FlipToDiskFirst != nil {
 		if err := h.FlipToDiskFirst(r.Context(), id); err != nil {
 			log.Warn().Err(err).Str("node_id", id).
-				Msg("verify-boot: FlipToDiskFirst failed (non-fatal — node is deployed; persistent boot order may still be PXE-first)")
+				Msg("verify-boot: FlipToDiskFirst failed (non-fatal -- node is deployed; persistent boot order may still be PXE-first)")
 		} else {
 			log.Info().Str("node_id", id).
 				Msg("verify-boot: persistent boot order flipped to disk-first")

@@ -828,25 +828,56 @@ func (db *DB) RecordDeploySucceeded(ctx context.Context, nodeID string) error {
 // RecordVerifyBooted marks a node as verified-booted after the deployed OS phones
 // home via POST /api/v1/nodes/{id}/verify-boot. ADR-0008.
 //
-// Sets deploy_verified_booted_at = now() only if it is not already set (idempotent
-// on first call — subsequent boots only update last_seen_at).
-// Always updates last_seen_at = now() (heartbeat semantic).
-func (db *DB) RecordVerifyBooted(ctx context.Context, nodeID string) error {
+// Returns firstTime=true only when deploy_verified_booted_at was NULL and has just
+// been set -- i.e. this is the first successful verify-boot for this deploy cycle.
+// Subsequent calls (clientd phones home repeatedly) return firstTime=false and only
+// update last_seen_at (heartbeat semantic). This lets callers gate one-shot side
+// effects (e.g. flipping the Proxmox persistent boot order) on the state transition
+// rather than on every phone-home.
+func (db *DB) RecordVerifyBooted(ctx context.Context, nodeID string) (firstTime bool, err error) {
+	// Step 1: check whether deploy_verified_booted_at is already set.
+	// Two-step approach avoids the SQLite CASE-expression RowsAffected ambiguity
+	// (SQLite counts a row as affected even when the CASE branch leaves the value
+	// unchanged, so RowsAffected() cannot distinguish first-call from subsequent).
+	var existingVerifiedAt *int64
+	err = db.sql.QueryRowContext(ctx,
+		`SELECT deploy_verified_booted_at FROM node_configs WHERE id = ?`, nodeID,
+	).Scan(&existingVerifiedAt)
+	if err != nil {
+		return false, fmt.Errorf("db: record verify booted: check existing: %w", err)
+	}
+
 	now := time.Now().Unix()
+
+	if existingVerifiedAt != nil {
+		// Already verified -- just update the heartbeat, do not fire side effects.
+		_, err = db.sql.ExecContext(ctx, `
+			UPDATE node_configs
+			SET last_seen_at = ?,
+			    updated_at   = ?
+			WHERE id = ?
+		`, now, now, nodeID)
+		if err != nil {
+			return false, fmt.Errorf("db: record verify booted: update heartbeat: %w", err)
+		}
+		return false, nil
+	}
+
+	// Step 2: first verify-boot -- set deploy_verified_booted_at.
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
-		SET deploy_verified_booted_at = CASE
-		        WHEN deploy_verified_booted_at IS NULL THEN ?
-		        ELSE deploy_verified_booted_at
-		    END,
-		    last_seen_at = ?,
-		    updated_at   = ?
+		SET deploy_verified_booted_at = ?,
+		    last_seen_at              = ?,
+		    updated_at                = ?
 		WHERE id = ?
 	`, now, now, now, nodeID)
 	if err != nil {
-		return fmt.Errorf("db: record verify booted: %w", err)
+		return false, fmt.Errorf("db: record verify booted: %w", err)
 	}
-	return requireOneRow(res, "node_configs", nodeID)
+	if err := requireOneRow(res, "node_configs", nodeID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RecordVerifyTimeout sets deploy_verify_timeout_at = now() for nodes that did
