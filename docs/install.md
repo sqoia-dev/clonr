@@ -226,12 +226,10 @@ docker compose logs -f clustr
 ### 3.6 Verify the server is running
 
 ```bash
-# Replace <your-api-key> with the bootstrap key from §6, or any valid admin key.
-curl -s http://10.99.0.1:8080/api/v1/healthz/ready \
-  -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
 # Expected: { "status": "ok", "checks": { "db": "ok", "boot_dir": "ok", "initramfs": ... } }
 # A 503 response means one or more checks failed — the "checks" map identifies which.
-# Note: /api/v1/healthz/ready requires a valid Bearer token.
+# /api/v1/healthz/ready is unauthenticated (no token required).
 ```
 
 ---
@@ -487,11 +485,9 @@ This procedure verifies a working end-to-end deployment: image created, node reg
 ### Step 1: Verify the server is healthy
 
 ```bash
-# Replace <your-api-key> with the bootstrap key printed at first startup (see §6).
-curl -s http://10.99.0.1:8080/api/v1/healthz/ready \
-  -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
+curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
 # All checks must be "ok" or "warn" — a single "fail" means the server cannot serve PXE.
-# Note: this endpoint requires authentication. A 401 response means the key is wrong or missing.
+# /api/v1/healthz/ready is unauthenticated — no token required.
 ```
 
 ### Step 2: Build a test image

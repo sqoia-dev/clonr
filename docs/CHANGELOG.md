@@ -133,11 +133,10 @@ and will be removed in **v1.1**. All endpoints returning `NodeConfig` now emit a
   reference, and troubleshooting table. Linked from `README.md` and
   `docs/install.md` See Also section.
 
-- **[GAP-2] `docs/install.md` §3.6 and §7 Step 1 — healthz auth documented**
-  Both healthz/ready examples now include the `Authorization: Bearer` header
-  and a note that the endpoint requires authentication. This reflects the
-  current server behaviour while Dinesh's code fix (make healthz unauthenticated)
-  is in progress. Docs will be updated once that fix lands.
+- **[GAP-2] `docs/install.md` §3.6 and §7 Step 1 — healthz unauthenticated documented**
+  Both healthz/ready examples updated to reflect the code fix (GAP-2 above):
+  the endpoint is unauthenticated, no Bearer token required. Examples restored
+  to the original no-auth form with a clarifying comment.
 
 - **[GAP-1] `docs/install.md` §5 — `CLUSTR_SECRET_MASTER_KEY_PATH` documented**
   Added entry to the Security env var table explaining this optional path-based
