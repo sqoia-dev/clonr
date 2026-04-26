@@ -2,6 +2,60 @@
 
 ---
 
+## Turnkey verification Round 3 — slurm-module.md API corrections + README Quick Start (2026-04-26)
+
+### Slurm API path and body format corrections
+
+Three API errors found during live verification (all silent or returning misleading errors):
+
+- **`/api/v1/modules/slurm/{enable,status}` paths do not exist.** Correct paths are
+  `/api/v1/slurm/{enable,status}`. The old `/modules/slurm/` prefix was never registered.
+  `slurm-module.md §3` and `§9` updated with correct paths.
+
+- **Role assignment body format was wrong.** `PUT /api/v1/nodes/{id}/slurm/role` requires
+  `{"roles": ["controller"]}` (plural array). The doc said `{"role": "controller"}` (singular
+  string). Sending the wrong format returned HTTP 200 with `{"status":"ok"}` but silently set
+  an empty roles array — a quiet no-op with a success response. `slurm-module.md §4` corrected.
+  Role assignment path was also wrong: `/api/v1/slurm/roles/{id}` → 404; correct path is
+  `/api/v1/nodes/{id}/slurm/role`.
+
+- **Config save endpoint expects JSON, not text/plain.** `PUT /api/v1/slurm/configs/{name}`
+  requires JSON body `{"content":"<full-conf-text>","message":"<optional>"}`. The doc said
+  `text/plain`. Updated `slurm-module.md §6` and `§9`.
+
+### slurm.conf default value issue (operator action required)
+
+The default `slurm.conf` rendered on first module enable sets `SlurmctldHost` to the clustr
+server's own hostname and `AccountingStorageType=accounting_storage/slurmdbd`. Both values are
+wrong for a basic 2-node cluster with no slurmdbd. Operators must update `slurm.conf` via
+`PUT /api/v1/slurm/configs/slurm.conf` after module enable. Added to `slurm-module.md §6` and
+the new README Quick Start section.
+
+### OpenHPC EL10 availability confirmed absent
+
+Live test confirmed `https://repos.openhpc.community/OpenHPC/3/EL_10/repodata/repomd.xml` returns
+HTTP 404. The recommended path for Slurm clusters is Rocky Linux 9 + OpenHPC EL9 repo until
+OpenHPC publishes EL10 packages. `slurm-module.md §2.1` updated with explicit warning.
+
+### README Quick Start: 2-Node Slurm Cluster
+
+Added a new end-to-end Quick Start section to `README.md` with:
+- Step-by-step numbered instructions from "clustr installed" to `srun -N2 hostname`
+- Exact curl commands with placeholder variables
+- Call-out that OpenHPC EL10 does not exist yet (use Rocky 9)
+- Warning about correct `roles` body format (plural array)
+- slurm.conf operator requirements (SlurmctldHost + AccountingStorageType)
+- Troubleshooting table for common smoke test failures
+- Link to `docs/slurm-module.md` for advanced topics
+
+### Onboarding walkthrough: Round 3 section added
+
+`docs/onboarding-walkthrough.md` updated with "Final Turnkey Verification — 2026-04-26 (Round 3)"
+documenting: EL10 repo 404, Rocky 9 image build kickoff, all API bugs found, slurm.conf correction,
+and new gaps NEW-GAP-7 through NEW-GAP-10 (all doc/surface fixes, no architectural blockers).
+
+---
+
 ## Turnkey gap-fill — DNS injection, build pipeline, audit visibility (2026-04-25)
 
 ### NEW-GAP-5 — Inject DNS into NetworkManager profiles

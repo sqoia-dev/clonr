@@ -56,18 +56,22 @@ func depDownloadURL(name, version string) (string, error) {
 	case "ucx":
 		return fmt.Sprintf("https://github.com/openucx/ucx/releases/download/v%s/ucx-%s.tar.gz", version, version), nil
 	case "libjwt":
-		return fmt.Sprintf("https://github.com/benmcollins/libjwt/releases/download/v%s/libjwt-%s.tar.gz", version, version), nil
+		// libjwt v2.x+ releases use .tar.xz; v1.x used .tar.gz (now removed from GitHub).
+		return fmt.Sprintf("https://github.com/benmcollins/libjwt/releases/download/v%s/libjwt-%s.tar.xz", version, version), nil
 	default:
 		return "", fmt.Errorf("deps: unknown dependency %q", name)
 	}
 }
 
-// depArchiveExt returns "xz" for munge, "gz" for all others.
+// depArchiveExt returns the file extension for the source tarball of a dependency.
+// munge and libjwt (v2.x+) use .tar.xz; all others use .tar.gz.
 func depArchiveExt(name string) string {
-	if name == "munge" {
+	switch name {
+	case "munge", "libjwt":
 		return "xz"
+	default:
+		return "gz"
 	}
-	return "gz"
 }
 
 // buildDependencies builds all required Slurm dependencies for the given Slurm version.

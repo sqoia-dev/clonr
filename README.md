@@ -126,6 +126,294 @@ clustr deploy \
 
 ---
 
+## Quick Start: 2-Node Slurm Cluster
+
+This section walks a new operator from "clustr is installed" to `srun -N2 hostname` printing both node hostnames. Target time: under 30 minutes on a provisioned server with decent internet.
+
+**Prerequisites:** clustr-serverd running with `--pxe`, two bare-metal or VM nodes on the provisioning network, your admin API token. See [docs/install.md](docs/install.md) for server setup.
+
+**Variable conventions used below:**
+
+```
+CLUSTR_URL   = http://<your-clustr-server-ip>:8080
+TOKEN        = <your-admin-api-token>
+ROCKY9_IMAGE = <image-id returned in step 1>
+CTRL_NODE_ID = <node-id of your controller node>
+WORK_NODE_ID = <node-id of your worker node>
+```
+
+---
+
+### Step 1 — Build or pull a Rocky Linux 9 base image
+
+OpenHPC (the recommended Slurm package source) publishes packages for EL9. OpenHPC EL10 packages are not yet available as of 2026-04-26, so **use Rocky Linux 9 for Slurm deployments** until OpenHPC releases EL10 support.
+
+```bash
+# Kick off a build from the Rocky 9 minimal ISO.
+# Returns immediately; the build runs async (download + QEMU install takes 20-35 min).
+curl -s -X POST $CLUSTR_URL/api/v1/factory/build-from-iso \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url":  "https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso",
+    "name": "rocky9",
+    "version": "9.5",
+    "disk_size_gb": 20,
+    "memory_mb": 4096,
+    "cpus": 4
+  }'
+# Save the "id" field — that is ROCKY9_IMAGE.
+
+# Poll until status is "ready":
+watch -n 10 "curl -s $CLUSTR_URL/api/v1/images/\$ROCKY9_IMAGE \
+  -H 'Authorization: Bearer $TOKEN' | python3 -m json.tool | grep status"
+```
+
+**Server requirements for build-from-iso:** `/usr/libexec/qemu-kvm` (RHEL/Rocky) or `qemu-system-x86_64` (Ubuntu), plus `xorriso` or `genisoimage`. These are present after `dnf install qemu-kvm xorriso` on Rocky Linux 9.
+
+**Alternative — build once, reuse:** Once built, the rocky9 image persists across reboots and cluster resets. You do not need to rebuild it for every verification run.
+
+---
+
+### Step 2 — Register two nodes
+
+Both nodes must PXE-boot into the clustr initramfs for self-registration. Set the Proxmox/IPMI boot order to **disk first, then network** (`scsi0;net0` in Proxmox) and trigger a PXE reimage from the API — the iPXE menu routes PXE-booted nodes into the deploy flow, not into an infinite PXE loop.
+
+```bash
+# Register node 1 (controller)
+curl -s -X POST $CLUSTR_URL/api/v1/nodes \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hostname": "slurm-controller",
+    "primary_mac": "<controller-mac>",
+    "base_image_id": "'$ROCKY9_IMAGE'",
+    "interfaces": [{
+      "mac_address": "<controller-mac>",
+      "name": "eth0",
+      "ip_address": "10.99.0.100/24",
+      "gateway": "10.99.0.1"
+    }],
+    "ssh_keys": ["<your-ssh-public-key>"]
+  }'
+# Save the "id" field — that is CTRL_NODE_ID.
+
+# Register node 2 (worker)
+curl -s -X POST $CLUSTR_URL/api/v1/nodes \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hostname": "slurm-compute",
+    "primary_mac": "<compute-mac>",
+    "base_image_id": "'$ROCKY9_IMAGE'",
+    "interfaces": [{
+      "mac_address": "<compute-mac>",
+      "name": "eth0",
+      "ip_address": "10.99.0.101/24",
+      "gateway": "10.99.0.1"
+    }],
+    "ssh_keys": ["<your-ssh-public-key>"]
+  }'
+# Save the "id" field — that is WORK_NODE_ID.
+```
+
+---
+
+### Step 3 — Enable the Slurm module
+
+```bash
+curl -s -X POST $CLUSTR_URL/api/v1/slurm/enable \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cluster_name":   "my-hpc",
+    "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9"
+  }'
+# Expected: {"status":"ready"}
+
+# Verify the munge key was generated:
+curl -s $CLUSTR_URL/api/v1/slurm/status \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+# Look for: "munge_key_present": true
+```
+
+**Verify the repo URL is reachable from the server before enabling:**
+
+```bash
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml
+# Expected: HTTP 200. If 404, check the EL version in the URL.
+```
+
+---
+
+### Step 4 — Assign Slurm roles
+
+```bash
+# Controller role
+curl -s -X PUT $CLUSTR_URL/api/v1/nodes/$CTRL_NODE_ID/slurm/role \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["controller"]}'
+# Expected: {"status":"ok"}
+
+# Worker role
+curl -s -X PUT $CLUSTR_URL/api/v1/nodes/$WORK_NODE_ID/slurm/role \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["worker"]}'
+# Expected: {"status":"ok"}
+
+# Verify:
+curl -s $CLUSTR_URL/api/v1/slurm/nodes \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+```
+
+**Note:** The body field is `roles` (plural array), not `role` (singular string). Sending `{"role":"controller"}` silently sets an empty role list.
+
+---
+
+### Step 5 — Update slurm.conf
+
+The default rendered `slurm.conf` uses the clustr server hostname as `SlurmctldHost`. You must update it to match the hostname registered in step 2, and set `AccountingStorageType=accounting_storage/none` unless you have slurmdbd set up.
+
+```bash
+# Write your corrected slurm.conf
+cat > /tmp/my-slurm.conf << 'EOF'
+ClusterName=my-hpc
+SlurmctldHost=slurm-controller
+
+MpiDefault=pmix
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup,task/affinity
+
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmdPidFile=/var/run/slurmd.pid
+SlurmdSpoolDir=/var/spool/slurmd
+StateSaveLocation=/var/spool/slurmctld
+
+SlurmUser=slurm
+AuthType=auth/munge
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+
+# No slurmdbd for a basic cluster — change to slurmdbd if you add accounting
+AccountingStorageType=accounting_storage/none
+JobAcctGatherType=jobacct_gather/cgroup
+
+ReturnToService=2
+SlurmctldTimeout=120
+SlurmdTimeout=300
+InactiveLimit=0
+MinJobAge=300
+MaxJobCount=50000
+
+# List each worker node. CPUs = vcpu count. RealMemory = MB of RAM.
+NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN
+PartitionName=batch Nodes=slurm-compute Default=YES MaxTime=INFINITE State=UP
+EOF
+
+# Upload via the API (body is JSON with a "content" field)
+python3 -c "
+import json
+with open('/tmp/my-slurm.conf') as f:
+    content = f.read()
+print(json.dumps({'content': content, 'message': 'initial slurm.conf for 2-node cluster'}))
+" > /tmp/slurm-payload.json
+
+curl -s -X PUT $CLUSTR_URL/api/v1/slurm/configs/slurm.conf \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @/tmp/slurm-payload.json
+# Expected: {"filename":"slurm.conf","version":2}
+```
+
+---
+
+### Step 6 — Reimage both nodes
+
+Both nodes must be reimaged after the Slurm module is enabled. The reimage injects the munge key, writes `slurm.conf`, installs Slurm packages from the repo, and enables the appropriate systemd units.
+
+```bash
+# Trigger reimage on controller
+curl -s -X POST $CLUSTR_URL/api/v1/nodes/$CTRL_NODE_ID/reimage \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image_id": "'$ROCKY9_IMAGE'"}'
+
+# Trigger reimage on worker
+curl -s -X POST $CLUSTR_URL/api/v1/nodes/$WORK_NODE_ID/reimage \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image_id": "'$ROCKY9_IMAGE'"}'
+
+# Poll for verified_booted on both (takes 5-15 min per node):
+watch -n 15 "curl -s $CLUSTR_URL/api/v1/nodes \
+  -H 'Authorization: Bearer $TOKEN' | python3 -m json.tool | grep -E '(hostname|deploy_verified)'"
+```
+
+---
+
+### Step 7 — Verify Slurm is running
+
+SSH into the controller:
+
+```bash
+ssh root@10.99.0.100  # or your controller IP
+
+# Munge must be running and able to authenticate:
+systemctl status munge
+munge -n | unmunge   # Expected: STATUS: Success (0)
+
+# slurmctld must be active:
+systemctl status slurmctld
+
+# Check cluster health:
+scontrol ping        # Expected: Slurmctld(primary) at slurm-controller is UP
+sinfo                # Expected: batch partition with slurm-compute in idle state
+```
+
+---
+
+### Step 8 — Submit the smoke test job
+
+```bash
+# From the controller node:
+
+# Single-node job:
+srun --nodes=1 --ntasks=1 hostname
+# Expected output: slurm-compute
+
+# 2-node job (requires 2 nodes in the cluster):
+srun --nodes=1 --ntasks=2 hostname
+# Expected output (one line per task):
+# slurm-compute
+# slurm-compute
+```
+
+**Expected `sinfo` output (healthy cluster):**
+
+```
+PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
+batch*       up   infinite      1   idle slurm-compute
+```
+
+---
+
+### Troubleshooting the smoke test
+
+| Symptom | Check | Fix |
+|---|---|---|
+| `slurmctld` not found after reimage | Slurm packages not installed | Verify `slurm_repo_url` is correct and reachable. Check that image is Rocky 9 (not Rocky 10 — OpenHPC EL10 does not exist yet). Reimage. |
+| `munge -n \| unmunge` fails | Key mismatch or munge not running | Reimage both nodes so they get the same munge key from clustr. |
+| `sinfo` shows `down` | `slurmd` not reaching controller | Check `SlurmctldHost` in `/etc/slurm/slurm.conf` matches the actual controller hostname. Open port 6817-6818/tcp on any firewall. |
+| `srun` hangs | Controller unreachable from worker | `ping slurm-controller` from the worker. Verify both nodes are on the same provisioning network. |
+
+For full Slurm operator docs, see [docs/slurm-module.md](docs/slurm-module.md).
+
+---
+
 ## Full Workflow Example
 
 ```bash

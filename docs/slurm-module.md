@@ -186,7 +186,7 @@ not include Slurm. Set it to the correct repo for your distro regardless.
 ### API call to enable
 
 ```bash
-curl -s -X POST http://10.99.0.1:8080/api/v1/modules/slurm/enable \
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"cluster_name":"my-hpc","slurm_repo_url":"https://repos.openhpc.community/OpenHPC/3/EL_9"}' \
@@ -220,14 +220,17 @@ the full auto-install flow.
 ### Verify the module is enabled
 
 ```bash
-curl -s http://10.99.0.1:8080/api/v1/modules/slurm/status \
+curl -s http://10.99.0.1:8080/api/v1/slurm/status \
   -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
 # Expected:
 # {
 #   "enabled": true,
+#   "status": "ready",
 #   "munge_key_present": true,
 #   "cluster_name": "my-hpc",
-#   "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9"
+#   "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9",
+#   "managed_files": ["slurm.conf", "gres.conf", "cgroup.conf", "topology.conf", "plugstack.conf", "slurmdbd.conf"],
+#   "connected_nodes": []
 # }
 ```
 
@@ -235,6 +238,8 @@ The `munge_key_present` field is `true` once the key has been generated (on
 first enable). It becomes `false` only if the `slurm_secrets` table is
 manually cleared — under normal operation it stays `true` permanently after
 first enable.
+
+**Note on paths:** All Slurm API routes use the `/api/v1/slurm/` prefix. The older `/api/v1/modules/slurm/` prefix documented in earlier builds does not exist and returns 404. Use `POST /api/v1/slurm/disable` to disable the module.
 
 ---
 
@@ -258,22 +263,41 @@ runs `slurmctld`. Alternatively, any compute node can be the controller.
 # Assign a node as the Slurm controller
 NODE_ID="<node-id>"
 
-curl -s -X PUT http://10.99.0.1:8080/api/v1/slurm/roles/${NODE_ID} \
+curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/slurm/role \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
-  -d '{"role": "controller"}' | python3 -m json.tool
+  -d '{"roles": ["controller"]}' | python3 -m json.tool
+# Expected: { "status": "ok" }
 ```
 
 Or in the web UI: **Nodes > select node > Slurm tab > Role > Controller**.
 
+**Important:** The body field is `roles` (plural, array), not `role` (singular string).
+The API accepts multiple roles per node (e.g., `["controller", "dbd"]`), though a single
+`controller` or `worker` role is the standard topology.
+
 ### Assigning workers
 
 ```bash
-# Assign multiple nodes as workers (repeat for each)
-curl -s -X PUT http://10.99.0.1:8080/api/v1/slurm/roles/${NODE_ID} \
+# Assign a node as a Slurm worker (repeat for each compute node)
+curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/slurm/role \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
-  -d '{"role": "worker"}' | python3 -m json.tool
+  -d '{"roles": ["worker"]}' | python3 -m json.tool
+# Expected: { "status": "ok" }
+```
+
+### Verify role assignments
+
+```bash
+# Get role for a specific node
+curl -s http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/slurm/role \
+  -H "Authorization: Bearer <your-api-key>"
+# Expected: { "node_id": "...", "roles": ["controller"] }
+
+# List all nodes with Slurm roles
+curl -s http://10.99.0.1:8080/api/v1/slurm/nodes \
+  -H "Authorization: Bearer <your-api-key>"
 ```
 
 ### Topology options
@@ -350,7 +374,7 @@ To rotate the munge key across the cluster:
 
 ```bash
 # Generate a new key (server side)
-curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/munge/rotate \
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/munge-key/rotate \
   -H "Authorization: Bearer <your-api-key>" | python3 -m json.tool
 
 # Then reimage all nodes — the new key is injected at finalize time
@@ -565,44 +589,58 @@ All Slurm API routes require an admin-scoped Bearer token.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/modules/slurm/status` | Returns module enabled state, munge key presence, `cluster_name`, `slurm_repo_url`, and config summary |
-| `POST` | `/api/v1/modules/slurm/enable` | Enable the module. Body: `{"cluster_name":"…","slurm_repo_url":"…"}`. Generates munge key if absent. Returns `{"status":"ready"}`. |
-| `POST` | `/api/v1/modules/slurm/disable` | Disable the module. Stops munge key injection, Slurm config writes, and auto-install at finalize. Does not delete existing keys or configs. |
+| `GET` | `/api/v1/slurm/status` | Returns module enabled state, munge key presence, `cluster_name`, `slurm_repo_url`, managed files, and connected nodes |
+| `POST` | `/api/v1/slurm/enable` | Enable the module. Body: `{"cluster_name":"…","slurm_repo_url":"…"}`. Generates munge key if absent. Returns `{"status":"ready"}`. |
+| `POST` | `/api/v1/slurm/disable` | Disable the module. Stops munge key injection, Slurm config writes, and auto-install at finalize. Does not delete existing keys or configs. |
 
 ### Config management
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/slurm/configs` | List all config files stored in the DB (name, last modified) |
-| `GET` | `/api/v1/slurm/configs/{name}` | Get a specific config file content (`slurm.conf`, `cgroup.conf`, etc.) |
-| `PUT` | `/api/v1/slurm/configs/{name}` | Replace a config file with new content. Takes `text/plain` body. |
+| `GET` | `/api/v1/slurm/configs/{name}` | Get a specific config file content (`slurm.conf`, `cgroup.conf`, etc.). Returns JSON with `content` field. |
+| `PUT` | `/api/v1/slurm/configs/{name}` | Save a new version of a config file. Body: `{"content": "<full file content>", "message": "<optional commit message>"}`. Returns `{"filename":"…","version":<n>}`. |
+| `GET` | `/api/v1/slurm/configs/{name}/history` | List all saved versions of a config file. |
+| `GET` | `/api/v1/slurm/configs/{name}/render/{node_id}` | Preview rendered config for a specific node. |
 
 ### Node roles
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/slurm/nodes` | List all nodes with their Slurm role assignments |
-| `GET` | `/api/v1/slurm/roles` | List all role assignments (node ID → role mapping) |
-| `PUT` | `/api/v1/slurm/roles/{node_id}` | Set the Slurm role for a node. Body: `{"role": "controller"/"worker"/"none"}` |
+| `GET` | `/api/v1/slurm/nodes` | List all nodes with their Slurm role assignments and connection state |
+| `GET` | `/api/v1/slurm/roles` | List the available Slurm role strings (`controller`, `worker`, `dbd`, `login`) |
+| `GET` | `/api/v1/nodes/{node_id}/slurm/role` | Get the Slurm role for a specific node. Returns `{"node_id":"…","roles":[…]}` |
+| `PUT` | `/api/v1/nodes/{node_id}/slurm/role` | Set the Slurm role for a node. Body: `{"roles": ["controller"]}` or `{"roles": ["worker"]}`. Note: `roles` is a plural array, not a singular string. |
 
 ### Config sync
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/slurm/sync` | Push current Slurm configs to running nodes via `clustr-clientd`. Body: `{"node_ids": [...]}`. If `node_ids` is empty, syncs all connected nodes. |
+| `POST` | `/api/v1/slurm/push` | Push current Slurm configs to running nodes via `clustr-clientd`. Body: `{"node_ids": [...]}`. If `node_ids` is empty, pushes to all connected nodes. |
+| `GET` | `/api/v1/slurm/sync-status` | Get the current sync state across all nodes. |
+| `GET` | `/api/v1/nodes/{node_id}/slurm/sync-status` | Get the Slurm sync state for a specific node. |
+
+### Config overrides
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/nodes/{node_id}/slurm/overrides` | Get per-node Slurm config overrides |
+| `PUT` | `/api/v1/nodes/{node_id}/slurm/overrides` | Set per-node Slurm config overrides |
 
 ### Builds and upgrades
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/slurm/builds` | List available Slurm build definitions (for the build-from-source pipeline) |
+| `POST` | `/api/v1/slurm/builds` | Start a new Slurm build |
 | `GET` | `/api/v1/slurm/upgrades` | List pending or completed Slurm upgrade jobs |
 
 ### Secrets
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/slurm/munge/rotate` | Generate a new munge key and store it. The old key is discarded. Nodes must be reimaged to pick up the new key. |
+| `POST` | `/api/v1/slurm/munge-key/generate` | Generate a new munge key and store it (idempotent if key already exists). |
+| `POST` | `/api/v1/slurm/munge-key/rotate` | Rotate the munge key — generates a new key, discarding the old one. Nodes must be reimaged to pick up the new key. |
 
 ---
 
@@ -617,6 +655,6 @@ All Slurm API routes require an admin-scoped Bearer token.
 | `munge -n \| unmunge` fails with `STATUS: Invalid credential` | munge key mismatch — node has a different key than the server | Reimage the node. The correct key will be injected at finalize time. |
 | `sinfo` shows all nodes as `down` | slurmctld not reachable, or node hostnames do not match `slurm.conf` | Check `slurmctld` is running on the controller. Verify `NodeName` lines in `slurm.conf` match actual node hostnames. |
 | `srun` hangs indefinitely | Port 6817 (slurmctld) or 6818 (slurmd) blocked by firewall | Open the Slurm ports on the provisioning network: `firewall-cmd --add-port=6817-6818/tcp --permanent && firewall-cmd --reload`. |
-| `POST /api/v1/modules/slurm/enable` returns 500 | `CLUSTR_SECRET_KEY` not set — munge key cannot be encrypted | Set `CLUSTR_SECRET_KEY` in `secrets.env` and restart the server. |
-| Slurm configs not written to `/etc/slurm/` after reimage | Module was not enabled before the reimage was triggered | Enable the module (`POST /api/v1/modules/slurm/enable`), then reimage the nodes. |
-| `GET /api/v1/slurm/nodes` returns 404 | Routes not yet implemented in this build | Check the server version. This route is planned for Sprint 4+ builds. In the interim, use `GET /api/v1/slurm/roles` to see role assignments. |
+| `POST /api/v1/slurm/enable` returns 500 | `CLUSTR_SECRET_KEY` not set — munge key cannot be encrypted | Set `CLUSTR_SECRET_KEY` in `secrets.env` and restart the server. |
+| Slurm configs not written to `/etc/slurm/` after reimage | Module was not enabled before the reimage was triggered | Enable the module (`POST /api/v1/slurm/enable`), then reimage the nodes. |
+| Role assignment with `{"role":"controller"}` returns `{"status":"ok"}` but `GET /api/v1/nodes/{id}/slurm/role` shows empty `roles` | Wrong body format — singular `role` key is silently ignored | Use `{"roles": ["controller"]}` (plural array). The `PUT /api/v1/nodes/{id}/slurm/role` endpoint requires an array, not a string. |

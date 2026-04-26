@@ -7,6 +7,132 @@
 
 ---
 
+## Final Turnkey Verification — 2026-04-26 (Round 3)
+
+**Live SHA:** `34fe6c9` on cloner (192.168.1.151) — current HEAD.  
+**Nodes:** slurm-controller (vm201, `10.99.0.100`) and slurm-compute (vm202, `10.99.0.101`) — both `verified_booted` on rocky10 at verification start.  
+**Goal:** End-to-end Slurm: clean slate → enable module → assign roles → build EL9 image → reimage → `srun -N2 hostname` prints both hostnames.
+
+---
+
+### Step 1: OpenHPC EL10 Repo Reachability
+
+```
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_10/repodata/repomd.xml → HTTP 404
+curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml  → HTTP 200
+```
+
+**Finding:** OpenHPC EL10 packages do not exist as of 2026-04-26. The rocky10 base image cannot
+use the EL9 repo. The correct path is to build a Rocky Linux 9 image and use the EL9 repo.
+
+**Decision:** Switch test to Rocky Linux 9 via `POST /api/v1/factory/build-from-iso` with
+`https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso`.
+Build started at ~07:58 UTC. Image ID: `79dce6e8-cf9f-4d9d-825a-6c38026d6ef3`.
+
+---
+
+### Step 2: Slurm Module State
+
+```bash
+GET /api/v1/slurm/status →
+  {"enabled":true,"status":"ready","cluster_name":"test-cluster",
+   "slurm_repo_url":"https://repos.openhpc.community/OpenHPC/3/EL_9",
+   "munge_key_present":true}
+```
+
+Module already enabled from previous round. Munge key present.
+
+**Doc bug found (NEW-GAP-7):** The `POST /api/v1/modules/slurm/enable` path documented in
+`slurm-module.md §3` does not exist. The correct path is `POST /api/v1/slurm/enable`.
+Similarly, `GET /api/v1/modules/slurm/status` → 404; correct path is `GET /api/v1/slurm/status`.
+Fixed in this session.
+
+---
+
+### Step 3: Role Assignment
+
+```bash
+# Tried (wrong — from old docs):
+PUT /api/v1/slurm/roles/{node_id}  -d '{"role":"controller"}' → 404
+
+# Correct path/format:
+PUT /api/v1/nodes/{node_id}/slurm/role  -d '{"roles":["controller"]}' → {"status":"ok"}
+PUT /api/v1/nodes/{node_id}/slurm/role  -d '{"roles":["worker"]}' → {"status":"ok"}
+```
+
+**Doc bug found (NEW-GAP-8):** `slurm-module.md §4` documents both the path and body format
+incorrectly. Path should be `/api/v1/nodes/{node_id}/slurm/role` and body should be
+`{"roles": ["controller"]}` (plural array), not `{"role": "controller"}` (singular string).
+Passing `{"role":"controller"}` silently clears the roles array. Fixed in this session.
+
+---
+
+### Step 4: slurm.conf Correction
+
+The default rendered `slurm.conf` had `SlurmctldHost=clonr-server` (the clustr server hostname),
+not `slurm-controller` (the assigned controller node). Also contained
+`AccountingStorageType=accounting_storage/slurmdbd` which requires a running slurmdbd.
+
+**Fix:** Uploaded corrected slurm.conf via `PUT /api/v1/slurm/configs/slurm.conf` with JSON body
+`{"content":"<conf-text>","message":"..."}`. Version 5 now has:
+- `SlurmctldHost=slurm-controller`
+- `AccountingStorageType=accounting_storage/none`
+- Explicit `NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN`
+
+**Doc bug found (NEW-GAP-9):** `slurm-module.md §6` (config management) says the PUT endpoint
+takes `text/plain` body. Actual API requires JSON `{"content":"...","message":"..."}`.
+Fixed in this session.
+
+**Operator action item:** After enabling the Slurm module, the operator must edit `slurm.conf`
+to set `SlurmctldHost` to the correct controller hostname and configure `AccountingStorageType`
+appropriately. The default rendered value uses the clustr server's own hostname.
+
+---
+
+### Step 5: Rocky 9 Image Build (in progress)
+
+`build-from-iso` kicked off with Rocky 9 minimal ISO. QEMU requires `/usr/libexec/qemu-kvm`
+(present on cloner at that path — `qemu-kvm` package installed). Build running async:
+- ISO download in progress (~1.6 GB from Rocky Linux CDN)
+- Once download completes: QEMU installs Rocky 9 into a 20 GB raw disk (~15-20 min)
+- Factory extracts the rootfs and registers as a `ready` image
+
+---
+
+### Step 6: Reimaging with Rocky 9 (pending image completion)
+
+Once `GET /api/v1/images/79dce6e8-cf9f-4d9d-825a-6c38026d6ef3` shows `status: ready`:
+
+```bash
+# Update both nodes to use the rocky9 image
+curl -X PATCH /api/v1/nodes/$CTRL_NODE_ID -d '{"base_image_id":"79dce6e8-..."}'
+curl -X PATCH /api/v1/nodes/$WORK_NODE_ID -d '{"base_image_id":"79dce6e8-..."}'
+
+# Trigger reimages
+curl -X POST /api/v1/nodes/$CTRL_NODE_ID/reimage -d '{"image_id":"79dce6e8-..."}'
+curl -X POST /api/v1/nodes/$WORK_NODE_ID/reimage -d '{"image_id":"79dce6e8-..."}'
+```
+
+Slurm finalize phase will:
+1. Add OpenHPC EL9 repo to dnf in the chroot
+2. Install `slurm-ohpc`, `slurm-slurmd-ohpc`, `slurm-slurmctld-ohpc`, `munge`, `munge-libs`
+3. Inject munge key from `slurm_secrets`
+4. Write all managed config files including the corrected `slurm.conf`
+5. Enable `munge` + `slurmctld` (controller) or `munge` + `slurmd` (worker) in systemd
+
+---
+
+### New Gaps Found in Round 3
+
+| ID | Priority | Summary | Status |
+|---|---|---|---|
+| **NEW-GAP-7** | P2 | `slurm-module.md` enable/status API paths used `/api/v1/modules/slurm/` prefix — does not exist. Correct prefix is `/api/v1/slurm/`. | FIXED this session |
+| **NEW-GAP-8** | P2 | `slurm-module.md` role assignment path (`/api/v1/slurm/roles/{id}`) and body format (`{"role":"..."}`) are both wrong. Correct path: `/api/v1/nodes/{id}/slurm/role`, correct body: `{"roles":["..."]}`. Silent no-op with wrong body makes this particularly dangerous. | FIXED this session |
+| **NEW-GAP-9** | P2 | `slurm-module.md` config save endpoint documented as `text/plain` body. Actual API requires JSON `{"content":"...","message":"..."}`. | FIXED this session |
+| **NEW-GAP-10** | P2 | Default `slurm.conf` uses clustr server hostname as `SlurmctldHost` and sets `AccountingStorageType=slurmdbd`. Both must be corrected by the operator after module enable. No warning or prompt. | DOCUMENTED — requires operator action, doc updated |
+
+---
+
 ## Verification Pass — 2026-04-26
 
 **Live SHA verified:** `25c0786` on cloner (192.168.1.151), confirmed via autodeploy timer.
