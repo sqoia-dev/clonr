@@ -1194,14 +1194,22 @@ func (db *DB) SlurmSeedDepMatrix(ctx context.Context, entries []SlurmDepMatrixRo
 }
 
 // SlurmResolveDepVersions returns the compatible dependency version ranges for a given Slurm version.
-// The query returns one row per dep_name where slurm_version is within [min, max).
+// When multiple rows exist for the same dep_name (e.g. after re-seeding with a newer bundled version),
+// the most recently inserted row wins (MAX(created_at)), so that updated defaults take effect.
 func (db *DB) SlurmResolveDepVersions(ctx context.Context, slurmVersion string) (map[string]SlurmDepRange, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT dep_name, dep_version_min, dep_version_max
 		FROM slurm_dep_matrix
 		WHERE slurm_version_min <= ? AND slurm_version_max > ?
-		ORDER BY source DESC
-	`, slurmVersion, slurmVersion)
+		  AND created_at = (
+		    SELECT MAX(m2.created_at)
+		    FROM slurm_dep_matrix m2
+		    WHERE m2.dep_name = slurm_dep_matrix.dep_name
+		      AND m2.slurm_version_min <= ?
+		      AND m2.slurm_version_max > ?
+		  )
+		GROUP BY dep_name
+	`, slurmVersion, slurmVersion, slurmVersion, slurmVersion)
 	if err != nil {
 		return nil, fmt.Errorf("db: SlurmResolveDepVersions: %w", err)
 	}

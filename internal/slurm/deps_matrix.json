@@ -31,7 +31,7 @@
     "slurm_version_min": "24.05.0",
     "slurm_version_max": "25.00.0",
     "dep_name": "libjwt",
-    "dep_version_min": "1.15.0",
-    "dep_version_max": "2.0.0"
+    "dep_version_min": "2.1.3",
+    "dep_version_max": "3.0.0"
   }
 ]
