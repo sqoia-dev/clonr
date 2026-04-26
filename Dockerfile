@@ -5,7 +5,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o clustr-serverd ./cmd/clustr-serverd
 
-FROM alpine:3.19
+FROM alpine:3.21
 # ca-certificates: TLS; rsync/parted/sgdisk/e2fsprogs/xfsprogs/dosfstools: disk imaging utilities
 RUN apk add --no-cache ca-certificates rsync parted sgdisk e2fsprogs xfsprogs dosfstools
 COPY --from=builder /build/clustr-serverd /usr/local/bin/clustr-serverd

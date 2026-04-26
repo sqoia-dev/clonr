@@ -233,11 +233,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Trivy is run against the built container image in CI.  Base image is
-# alpine:3.19 (as of Dockerfile at time of this commit).  Any HIGH/CRITICAL
-# findings surfaced after the first CI green run will be triaged here.
-# The --ignore-unfixed flag is set in CI so findings with no available fix
-# do not block the build.
-#
-# No pre-populated allowlist entries at Sprint 3 baseline; trivy results will
-# be added here on first CI green run if any unfixed findings require
-# documentation.
+# alpine:3.21 (bumped from 3.19 in this commit).  The --ignore-unfixed flag
+# is set in CI so findings with no available fix do not block the build.
+
+- scanner: trivy
+  id: CVE-2026-40200
+  disposition: fixed
+  component: musl, musl-utils
+  base_image: alpine:3.19 (vulnerable) → alpine:3.21 (fixed)
+  rationale: >
+    musl libc arbitrary code execution and DoS via stack-based buffer overflow.
+    Installed version 1.2.4_git20230717-r5 is vulnerable; fixed in r6.
+    The fix is available in alpine:3.20+ / alpine:3.21.  Dockerfile base image
+    bumped from alpine:3.19 to alpine:3.21 in this commit to resolve both
+    musl and musl-utils findings.  Severity: HIGH (2 findings, same CVE).
