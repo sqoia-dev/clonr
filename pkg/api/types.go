@@ -397,6 +397,13 @@ type NodeConfig struct {
 	Interfaces      []InterfaceConfig    `json:"interfaces"`
 	SSHKeys         []string             `json:"ssh_keys"`
 	KernelArgs      string               `json:"kernel_args"`
+	// Tags holds unstructured node labels used for filtering and Slurm role assignment.
+	// Renamed from Groups in S2-4; the JSON field "groups" is also emitted for one
+	// release (v0.x) for backward compatibility with existing CLI versions.
+	Tags            []string             `json:"tags"`
+	// Groups is deprecated — use Tags. Kept for JSON backward compatibility through v1.0.
+	// Removed in v1.1. Callers should read Tags; Groups mirrors Tags during the
+	// dual-emit window.
 	Groups          []string             `json:"groups"`
 	CustomVars      map[string]string    `json:"custom_vars"`
 	BaseImageID     string               `json:"base_image_id,omitempty"`
@@ -680,6 +687,9 @@ type CreateNodeConfigRequest struct {
 	Interfaces  []InterfaceConfig `json:"interfaces"`
 	SSHKeys     []string          `json:"ssh_keys"`
 	KernelArgs  string            `json:"kernel_args"`
+	// Tags holds unstructured node labels for filtering and Slurm role assignment.
+	Tags        []string          `json:"tags"`
+	// Groups is a deprecated alias for Tags, accepted for backward compatibility through v1.0.
 	Groups      []string          `json:"groups"`
 	CustomVars  map[string]string `json:"custom_vars"`
 	BaseImageID string            `json:"base_image_id"`
@@ -693,6 +703,9 @@ type UpdateNodeConfigRequest struct {
 	Interfaces         []InterfaceConfig    `json:"interfaces"`
 	SSHKeys            []string             `json:"ssh_keys"`
 	KernelArgs         string               `json:"kernel_args"`
+	// Tags holds unstructured node labels for filtering and Slurm role assignment.
+	Tags               []string             `json:"tags"`
+	// Groups is a deprecated alias for Tags, accepted for backward compatibility through v1.0.
 	Groups             []string             `json:"groups"`
 	CustomVars         map[string]string    `json:"custom_vars"`
 	BaseImageID        string               `json:"base_image_id"`

@@ -70,9 +70,10 @@ func (h *ImagesHandler) blobSemaphore() chan struct{} {
 // When pagination params are absent the full list is returned (backward compatible).
 func (h *ImagesHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	tag := r.URL.Query().Get("tag")
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
-	images, err := h.DB.ListBaseImages(r.Context(), status)
+	images, err := h.DB.ListBaseImages(r.Context(), status, tag)
 	if err != nil {
 		log.Error().Err(err).Msg("list images")
 		writeError(w, err)
@@ -325,6 +326,30 @@ func (h *ImagesHandler) GetImageStatus(w http.ResponseWriter, r *http.Request) {
 		"status":        img.Status,
 		"error_message": img.ErrorMessage,
 	})
+}
+
+// UpdateImageTags handles PUT /api/v1/images/:id/tags (S2-3).
+// Body: {"tags": ["tag1", "tag2"]}
+// Replaces the entire tags array for the image atomically.
+func (h *ImagesHandler) UpdateImageTags(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if err := h.DB.UpdateImageTags(r.Context(), id, req.Tags); err != nil {
+		writeError(w, err)
+		return
+	}
+	img, err := h.DB.GetBaseImage(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, img)
 }
 
 // GetDiskLayout handles GET /api/v1/images/:id/disklayout

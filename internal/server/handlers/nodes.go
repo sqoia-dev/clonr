@@ -176,6 +176,19 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	req.PrimaryMAC = strings.ToLower(req.PrimaryMAC)
 
+	// S2-9: Validate BaseImageID exists before INSERT to surface a clear 400 rather
+	// than letting the SQLite FK constraint produce an opaque 500.
+	if _, err := h.DB.GetBaseImage(r.Context(), req.BaseImageID); err != nil {
+		writeValidationError(w, "image not found: base_image_id does not exist")
+		return
+	}
+
+	// S2-4: accept both "tags" and deprecated "groups" from the request body.
+	reqTags := req.Tags
+	if len(reqTags) == 0 && len(req.Groups) > 0 {
+		reqTags = req.Groups
+	}
+
 	now := time.Now().UTC()
 	cfg := api.NodeConfig{
 		ID:          uuid.New().String(),
@@ -185,7 +198,8 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		Interfaces:  req.Interfaces,
 		SSHKeys:     req.SSHKeys,
 		KernelArgs:  req.KernelArgs,
-		Groups:      req.Groups,
+		Tags:        reqTags,
+		Groups:      reqTags, // dual-emit: mirror tags into deprecated field
 		CustomVars:  req.CustomVars,
 		BaseImageID: req.BaseImageID,
 		CreatedAt:   now,
@@ -197,7 +211,8 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 	if cfg.SSHKeys == nil {
 		cfg.SSHKeys = []string{}
 	}
-	if cfg.Groups == nil {
+	if cfg.Tags == nil {
+		cfg.Tags = []string{}
 		cfg.Groups = []string{}
 	}
 	if cfg.CustomVars == nil {
@@ -301,6 +316,12 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		groupID = existing.GroupID
 	}
 
+	// S2-4: accept both "tags" and deprecated "groups" from the request body.
+	updReqTags := req.Tags
+	if len(updReqTags) == 0 && len(req.Groups) > 0 {
+		updReqTags = req.Groups
+	}
+
 	cfg := api.NodeConfig{
 		ID:                 id,
 		Hostname:           req.Hostname,
@@ -310,7 +331,8 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		Interfaces:         req.Interfaces,
 		SSHKeys:            req.SSHKeys,
 		KernelArgs:         req.KernelArgs,
-		Groups:             req.Groups,
+		Tags:               updReqTags,
+		Groups:             updReqTags, // dual-emit: mirror tags into deprecated field
 		CustomVars:         req.CustomVars,
 		BaseImageID:        req.BaseImageID,
 		PowerProvider:      powerProvider,
@@ -326,7 +348,8 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	if cfg.SSHKeys == nil {
 		cfg.SSHKeys = []string{}
 	}
-	if cfg.Groups == nil {
+	if cfg.Tags == nil {
+		cfg.Tags = []string{}
 		cfg.Groups = []string{}
 	}
 	if cfg.CustomVars == nil {
@@ -436,7 +459,8 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 		PrimaryMAC:       primaryMAC,
 		Interfaces:       []api.InterfaceConfig{},
 		SSHKeys:          []string{},
-		Groups:           []string{},
+		Tags:             []string{},
+		Groups:           []string{}, // deprecated alias
 		CustomVars:       map[string]string{},
 		HardwareProfile:  req.HardwareProfile,
 		DetectedFirmware: req.DetectedFirmware,

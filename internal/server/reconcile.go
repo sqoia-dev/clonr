@@ -27,7 +27,7 @@ import (
 //
 // Call this once at startup, after db.Open() and before ListenAndServe().
 func (s *Server) ReconcileStuckBuilds(ctx context.Context) error {
-	images, err := s.db.ListBaseImages(ctx, string(api.ImageStatusBuilding))
+	images, err := s.db.ListBaseImages(ctx, string(api.ImageStatusBuilding), "")
 	if err != nil {
 		return err
 	}

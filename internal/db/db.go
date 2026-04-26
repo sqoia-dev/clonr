@@ -319,26 +319,38 @@ func (db *DB) SetBlobPath(ctx context.Context, id, blobPath string) error {
 	return requireOneRow(res, "base_images", id)
 }
 
-// ListBaseImages returns all BaseImages. If status is non-empty, it filters by that status.
-func (db *DB) ListBaseImages(ctx context.Context, status string) ([]api.BaseImage, error) {
-	var rows *sql.Rows
-	var err error
+// ListBaseImages returns all BaseImages.
+// status: if non-empty, filters by that status.
+// tag: if non-empty, filters to images whose JSON tags array contains that value (S2-3).
+func (db *DB) ListBaseImages(ctx context.Context, status, tag string) ([]api.BaseImage, error) {
+	// Build query dynamically based on filters.
+	// SQLite JSON1: json_each(tags) lets us filter on individual array elements.
+	baseQ := `
+		SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
+		       blob_path, disk_layout, tags, source_url, notes, error_message,
+		       built_for_roles, build_method, created_at, finalized_at
+		FROM base_images`
+
+	args := []any{}
+	where := []string{}
 
 	if status != "" {
-		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
-			       blob_path, disk_layout, tags, source_url, notes, error_message,
-			       built_for_roles, build_method, created_at, finalized_at
-			FROM base_images WHERE status = ? ORDER BY created_at DESC
-		`, status)
-	} else {
-		rows, err = db.sql.QueryContext(ctx, `
-			SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
-			       blob_path, disk_layout, tags, source_url, notes, error_message,
-			       built_for_roles, build_method, created_at, finalized_at
-			FROM base_images ORDER BY created_at DESC
-		`)
+		where = append(where, "status = ?")
+		args = append(args, status)
 	}
+	if tag != "" {
+		// EXISTS subquery against json_each is the cleanest SQLite pattern for
+		// checking membership in a JSON array column.
+		where = append(where, "EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)")
+		args = append(args, tag)
+	}
+
+	if len(where) > 0 {
+		baseQ += " WHERE " + strings.Join(where, " AND ")
+	}
+	baseQ += " ORDER BY created_at DESC"
+
+	rows, err := db.sql.QueryContext(ctx, baseQ, args...)
 	if err != nil {
 		return nil, fmt.Errorf("db: list base images: %w", err)
 	}
@@ -355,8 +367,21 @@ func (db *DB) ListBaseImages(ctx context.Context, status string) ([]api.BaseImag
 	return images, rows.Err()
 }
 
+// validImageStatuses is the set of allowed base_images.status values (S2-10).
+var validImageStatuses = map[api.ImageStatus]struct{}{
+	api.ImageStatusBuilding:    {},
+	api.ImageStatusInterrupted: {},
+	api.ImageStatusReady:       {},
+	api.ImageStatusArchived:    {},
+	api.ImageStatusError:       {},
+}
+
 // UpdateBaseImageStatus updates the status and error_message for an image.
+// Returns an error if status is not one of the defined ImageStatus constants (S2-10).
 func (db *DB) UpdateBaseImageStatus(ctx context.Context, id string, status api.ImageStatus, errMsg string) error {
+	if _, ok := validImageStatuses[status]; !ok {
+		return fmt.Errorf("db: invalid image status %q", status)
+	}
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE base_images SET status = ?, error_message = ? WHERE id = ?
 	`, string(status), errMsg, id)
@@ -413,6 +438,22 @@ func (db *DB) DeleteBaseImage(ctx context.Context, id string) error {
 	return requireOneRow(res, "base_images", id)
 }
 
+// UpdateImageTags replaces the tags JSON array for the given image (S2-3).
+func (db *DB) UpdateImageTags(ctx context.Context, id string, tags []string) error {
+	if tags == nil {
+		tags = []string{}
+	}
+	encoded, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("db: marshal image tags: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx, `UPDATE base_images SET tags = ? WHERE id = ?`, string(encoded), id)
+	if err != nil {
+		return fmt.Errorf("db: update image tags: %w", err)
+	}
+	return requireOneRow(res, "base_images", id)
+}
+
 // ListNodesByBaseImageID returns all NodeConfigs that reference the given image.
 func (db *DB) ListNodesByBaseImageID(ctx context.Context, imageID string) ([]api.NodeConfig, error) {
 	return db.ListNodeConfigs(ctx, imageID)
@@ -457,9 +498,15 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ssh_keys: %w", err)
 	}
-	groups, err := json.Marshal(cfg.Groups)
+	// S2-4: Tags is the canonical field; Groups mirrors it for backward compat.
+	// When writing, prefer Tags if set, fall back to Groups for old callers.
+	tagsToWrite := cfg.Tags
+	if len(tagsToWrite) == 0 && len(cfg.Groups) > 0 {
+		tagsToWrite = cfg.Groups
+	}
+	tags, err := json.Marshal(tagsToWrite)
 	if err != nil {
-		return fmt.Errorf("db: marshal groups: %w", err)
+		return fmt.Errorf("db: marshal tags: %w", err)
 	}
 	customVars, err := json.Marshal(cfg.CustomVars)
 	if err != nil {
@@ -498,14 +545,14 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-			 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
+			 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
 			 detected_firmware, bmc_config_encrypted, power_provider_encrypted)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
-		string(groups), string(customVars), nullableString(cfg.BaseImageID),
+		string(tags), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
@@ -598,7 +645,11 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 	// Marshal new-node fields upfront (needed only on INSERT, but harmless to do early).
 	interfaces, _ := json.Marshal(cfg.Interfaces)
 	sshKeys, _ := json.Marshal(cfg.SSHKeys)
-	groups, _ := json.Marshal(cfg.Groups)
+	upsertTags := cfg.Tags
+	if len(upsertTags) == 0 && len(cfg.Groups) > 0 {
+		upsertTags = cfg.Groups
+	}
+	upsertTagsJSON, _ := json.Marshal(upsertTags)
 	customVars, _ := json.Marshal(cfg.CustomVars)
 
 	// BEGIN IMMEDIATE acquires a write lock before any reads, preventing TOCTOU
@@ -647,14 +698,14 @@ func (db *DB) UpsertNodeByMAC(ctx context.Context, cfg api.NodeConfig) (api.Node
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO node_configs
 				(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-				 groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
+				 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 				 power_provider, created_at, updated_at, group_id, disk_layout_override, extra_mounts,
 				 detected_firmware)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '{}', '[]', '{}', ?, ?, NULL, '{}', '[]', ?)
 		`,
 			cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 			string(interfaces), string(sshKeys), cfg.KernelArgs,
-			string(groups), string(customVars),
+			string(upsertTagsJSON), string(customVars),
 			string(hwProfile),
 			cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 			cfg.DetectedFirmware,
@@ -691,8 +742,9 @@ func nullableString(s string) interface{} {
 //           deploy_verify_timeout_at, and last_seen_at added in migration 022.
 // Migration 026: detected_firmware added.
 // Migration 039: bmc_config_encrypted, power_provider_encrypted added (S1-16).
+// nodeConfigCols references the tags column (renamed from groups in migration 041).
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
-	       groups, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
+	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_succeeded_at, last_deploy_failed_at,
 	       created_at, updated_at, group_id, disk_layout_override, extra_mounts,
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
@@ -706,7 +758,7 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 // JOINs node_group_memberships m ON m.node_id = nc.id.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
-	       nc.groups, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
+	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
 	       nc.power_provider, nc.reimage_pending, nc.last_deploy_succeeded_at, nc.last_deploy_failed_at,
 	       nc.created_at, nc.updated_at,
 	       COALESCE(m.group_id, nc.group_id) AS group_id,
@@ -807,9 +859,14 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	if err != nil {
 		return fmt.Errorf("db: marshal ssh_keys: %w", err)
 	}
-	groups, err := json.Marshal(cfg.Groups)
+	// S2-4: Tags is canonical; fall back to Groups for callers that haven't been updated.
+	updTags := cfg.Tags
+	if len(updTags) == 0 && len(cfg.Groups) > 0 {
+		updTags = cfg.Groups
+	}
+	tags, err := json.Marshal(updTags)
 	if err != nil {
-		return fmt.Errorf("db: marshal groups: %w", err)
+		return fmt.Errorf("db: marshal tags: %w", err)
 	}
 	customVars, err := json.Marshal(cfg.CustomVars)
 	if err != nil {
@@ -848,7 +905,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
-		    kernel_args = ?, groups = ?, custom_vars = ?, base_image_id = ?,
+		    kernel_args = ?, tags = ?, custom_vars = ?, base_image_id = ?,
 		    hardware_profile = ?, bmc_config = ?, ib_config = ?, power_provider = ?,
 		    group_id = ?, disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
 		    detected_firmware = ?,
@@ -857,7 +914,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
-		string(groups), string(customVars), nullableString(cfg.BaseImageID),
+		string(tags), string(customVars), nullableString(cfg.BaseImageID),
 		string(hwProfile), bmcConfig, ibConfig, powerProvider,
 		nullableString(cfg.GroupID), diskLayoutOverride, extraMounts,
 		time.Now().Unix(), cfg.DetectedFirmware,
@@ -1540,9 +1597,13 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	if err := json.Unmarshal([]byte(sshKeysJSON), &cfg.SSHKeys); err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: unmarshal ssh_keys: %w", err)
 	}
-	if err := json.Unmarshal([]byte(groupsJSON), &cfg.Groups); err != nil {
-		return api.NodeConfig{}, fmt.Errorf("db: unmarshal groups: %w", err)
+	// S2-4: tags column (renamed from groups in migration 041).
+	// Dual-emit: populate both Tags and the deprecated Groups field so that
+	// existing CLI versions that read "groups" continue to work through v1.0.
+	if err := json.Unmarshal([]byte(groupsJSON), &cfg.Tags); err != nil {
+		return api.NodeConfig{}, fmt.Errorf("db: unmarshal tags: %w", err)
 	}
+	cfg.Groups = cfg.Tags // deprecated alias: mirrors Tags for backward compat
 	if err := json.Unmarshal([]byte(customVarsJSON), &cfg.CustomVars); err != nil {
 		return api.NodeConfig{}, fmt.Errorf("db: unmarshal custom_vars: %w", err)
 	}
@@ -1581,6 +1642,9 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	}
 	if cfg.SSHKeys == nil {
 		cfg.SSHKeys = []string{}
+	}
+	if cfg.Tags == nil {
+		cfg.Tags = []string{}
 	}
 	if cfg.Groups == nil {
 		cfg.Groups = []string{}
@@ -2007,6 +2071,7 @@ func scanNodeGroup(s scanner) (api.NodeGroup, error) {
 
 // AddGroupMember inserts a node_group_memberships row. Idempotent via INSERT OR IGNORE.
 // Also updates node_configs.group_id to this group (last-write wins for single-group display).
+// If this is the node's first group membership, marks it is_primary=1 automatically (S2-5).
 func (db *DB) AddGroupMember(ctx context.Context, groupID, nodeID string) error {
 	_, err := db.sql.ExecContext(ctx,
 		`INSERT OR IGNORE INTO node_group_memberships (node_id, group_id) VALUES (?, ?)`,
@@ -2014,11 +2079,52 @@ func (db *DB) AddGroupMember(ctx context.Context, groupID, nodeID string) error 
 	if err != nil {
 		return fmt.Errorf("db: add group member: %w", err)
 	}
+	// S2-5: If this is the node's only membership (just inserted), mark it primary.
+	// Uses a single-row UPDATE so we don't violate the partial unique index on
+	// concurrent inserts.
+	_, _ = db.sql.ExecContext(ctx, `
+		UPDATE node_group_memberships SET is_primary = 1
+		WHERE node_id = ? AND group_id = ?
+		  AND (SELECT COUNT(*) FROM node_group_memberships WHERE node_id = ? AND is_primary = 1) = 0
+	`, nodeID, groupID, nodeID)
+
 	// Update the fast-path group_id on node_configs for display / layout resolution.
 	_, _ = db.sql.ExecContext(ctx,
 		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
 		groupID, time.Now().Unix(), nodeID)
 	return nil
+}
+
+// SetPrimaryGroupMember marks the given group as the primary group for a node (S2-5).
+// Clears is_primary on all other memberships for this node, then sets it on groupID.
+// Returns ErrNotFound if the membership does not exist.
+func (db *DB) SetPrimaryGroupMember(ctx context.Context, nodeID, groupID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("db: set primary group: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Clear current primary.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE node_group_memberships SET is_primary = 0 WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("db: set primary group: clear: %w", err)
+	}
+	// Set new primary.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE node_group_memberships SET is_primary = 1 WHERE node_id = ? AND group_id = ?`,
+		nodeID, groupID)
+	if err != nil {
+		return fmt.Errorf("db: set primary group: set: %w", err)
+	}
+	if err := requireOneRow(res, "node_group_memberships", nodeID+"/"+groupID); err != nil {
+		return err
+	}
+	// Sync fast-path column.
+	_, _ = tx.ExecContext(ctx,
+		`UPDATE node_configs SET group_id = ?, updated_at = ? WHERE id = ?`,
+		groupID, time.Now().Unix(), nodeID)
+	return tx.Commit()
 }
 
 // RemoveGroupMember deletes a node_group_memberships row. No-op if absent.

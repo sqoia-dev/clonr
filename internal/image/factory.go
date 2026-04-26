@@ -240,28 +240,10 @@ func (f *Factory) pullAsync(imageID, url string) {
 		return
 	}
 
-	imageRoot := filepath.Join(f.ImageDir, imageID)
-	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
-	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", tarSize).
-		Str("checksum", tarChecksum).Msg("factory: pull complete")
+	_ = f.finalizeImageFromRootfs(ctx, imageID, rootfs, finalizeSourceMetadata{
+		BuildMethod: "pull",
+		Scrub:       false,
+	})
 }
 
 // pullAndExtract downloads url, detects its format, extracts the root
@@ -456,27 +438,10 @@ func (f *Factory) importISOAsync(imageID, isoPath string) {
 		return
 	}
 
-	imageRoot := filepath.Join(f.ImageDir, imageID)
-	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
-	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize ISO failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	f.Logger.Info().Str("image_id", imageID).Int64("size_bytes", tarSize).Msg("factory: import ISO complete")
+	_ = f.finalizeImageFromRootfs(ctx, imageID, rootfs, finalizeSourceMetadata{
+		BuildMethod: "import",
+		Scrub:       false,
+	})
 }
 
 func (f *Factory) extractISO(ctx context.Context, imageID, isoPath string) (rootfsPath string, sizeBytes int64, checksum string, err error) {
@@ -781,45 +746,16 @@ func (f *Factory) captureAsync(imageID string, req CaptureRequest, sshUser strin
 		Int("file_lines", len(lines)).
 		Msg("factory: rsync complete")
 
-	// Auto-detect disk layout from the captured rootfs before scrubbing (EFI check).
-	// Capture paths don't carry a declared firmware, so pass "" to fall back to
-	// the rootfs heuristic (presence of /boot/efi content → UEFI).
-	diskLayout := f.detectDiskLayout(rootfs, "")
-	if err := f.Store.UpdateDiskLayout(ctx, imageID, diskLayout); err != nil {
-		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: set disk layout (non-fatal)")
+	// Finalize: disk layout detection, scrub, tar, DB record, metadata sidecar.
+	// Scrub is applied inside finalizeImageFromRootfs (Scrub: true).
+	// Disk layout is detected from the rootfs heuristic (firmware="").
+	if err := f.finalizeImageFromRootfs(ctx, imageID, rootfs, finalizeSourceMetadata{
+		BuildMethod: "capture",
+		Firmware:    "", // fall back to rootfs heuristic
+		Scrub:       true,
+	}); err == nil {
+		success = true
 	}
-
-	// Scrub identity AFTER rsync completes — never during, or we remove files mid-transfer.
-	f.Logger.Info().Str("image_id", imageID).Msg("factory: scrubbing node identity")
-	if err := ScrubNodeIdentity(rootfs); err != nil {
-		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
-	}
-
-	imageRoot := filepath.Join(f.ImageDir, imageID)
-	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfs)
-	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
-		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, err.Error())
-		return
-	}
-
-	success = true
-	f.Logger.Info().
-		Str("image_id", imageID).
-		Int64("size_bytes", tarSize).
-		Msg("factory: capture complete -- image is ready")
 }
 
 // detectDiskLayout inspects the captured rootfs and the image's declared firmware
@@ -1722,56 +1658,22 @@ func (f *Factory) buildISOAsync(imageID string, req api.BuildFromISORequest, dis
 		return
 	}
 
-	// ── Detect disk layout from extracted rootfs ──────────────────────────
-	// Use req.Firmware to override rootfs heuristics: BIOS images may contain
-	// /boot/efi from the installer even though they target legacy BIOS mode.
-	diskLayout := f.detectDiskLayout(rootfsPath, req.Firmware)
-	if err := f.Store.UpdateDiskLayout(ctx, imageID, diskLayout); err != nil {
-		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: update disk layout (non-fatal)")
-	}
+	// ── Finalize: disk layout + scrub + tar + DB + metadata sidecar + manifest ──
+	_ = f.finalizeImageFromRootfs(ctx, imageID, rootfsPath, finalizeSourceMetadata{
+		Name:        req.Name,
+		CreatedAt:   time.Now().UTC(),
+		Distro:      string(distro),
+		BuildMethod: "iso",
+		Firmware:    req.Firmware,
+		RoleIDs:     req.RoleIDs,
+		ElapsedTime: result.ElapsedTime,
+		Scrub:       true,
+		Progress:    ph,
+		FailBuild:   failBuild,
+	})
 
-	// ── Scrub identity ────────────────────────────────────────────────────
-	ph.SetPhase("scrubbing")
-	f.Logger.Info().Str("image_id", imageID).Msg("factory: scrubbing node identity")
-	if err := ScrubNodeIdentity(rootfsPath); err != nil {
-		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
-	}
-
-	// ── Bake deterministic tar + checksum ────────────────────────────────
-	ph.SetPhase("finalizing")
-	f.Logger.Info().Str("image_id", imageID).Msg("factory: baking deterministic rootfs tar")
-	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfsPath)
-	if err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: bake tar failed")
-		failBuild("bake tar", err)
-		return
-	}
-
-	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: set blob path")
-		failBuild("set blob path", err)
-		return
-	}
-
-	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
-		f.Logger.Error().Err(err).Str("image_id", imageID).Msg("factory: finalize failed")
-		failBuild("finalize image", err)
-		return
-	}
-
-	// ── Write image metadata sidecar (ADR-0009 content-only schema) ─────────
-	// Written AFTER FinalizeBaseImage so the sidecar content_sha256 is always
-	// consistent with the sealed rootfs state stored in the DB. Non-fatal.
-	f.writeImageMetadataSidecar(ctx, imageID, req.Name, time.Now().UTC(), rootfsPath, string(distro), tarChecksum, tarSize, "iso")
-
-	// ── Persist build manifest ────────────────────────────────────────────
-	_ = writeBuildManifest(imageRoot, imageID, string(distro), req.RoleIDs, tarSize, tarChecksum, result.ElapsedTime)
-
-	ph.Complete()
 	f.Logger.Info().
 		Str("image_id", imageID).
-		Int64("size_bytes", tarSize).
-		Str("checksum", tarChecksum).
 		Str("distro", string(distro)).
 		Dur("install_time", result.ElapsedTime.Round(time.Second)).
 		Msg("factory: ISO build complete — image is ready")
@@ -2063,39 +1965,139 @@ func (f *Factory) ResumeFromPhase(imageID string, img api.BaseImage, phase strin
 	}
 }
 
-// resumeFinalize performs scrub → checksum → finalize, shared between resume paths.
-// firmware is string(img.Firmware) from the in-progress image record; pass ""
-// to fall back to rootfs heuristics (capture paths).
-func (f *Factory) resumeFinalize(ctx context.Context, imageID, imageRoot, rootfsPath, firmware string, ph BuildHandle, failBuild func(string, error)) {
-	diskLayout := f.detectDiskLayout(rootfsPath, firmware)
+// finalizeSourceMetadata carries optional context that post-finalization steps
+// (metadata sidecar, build manifest) use. All fields are optional — callers
+// leave fields zero when the information is not available.
+type finalizeSourceMetadata struct {
+	// Name is the human-readable image name (for metadata sidecar).
+	Name string
+	// CreatedAt is when the image record was created (for metadata sidecar).
+	CreatedAt time.Time
+	// Distro is the detected OS distro string (e.g. "rocky", "ubuntu").
+	Distro string
+	// BuildMethod is one of "pull", "import", "capture", "iso".
+	BuildMethod string
+	// Firmware is the image's declared firmware interface ("bios"/"uefi"/""=detect).
+	Firmware string
+	// RoleIDs are the HPC role preset IDs selected at build time (ISO path only).
+	RoleIDs []string
+	// ElapsedTime is the total build duration (ISO path only; 0 = unknown).
+	ElapsedTime time.Duration
+	// Progress is the build progress handle for phase reporting. When nil, phase
+	// updates are silently skipped. The caller must already have called SetPhase
+	// for any phases before "scrubbing"; finalizeImageFromRootfs takes over at scrub.
+	Progress BuildHandle
+	// FailBuild is the caller's error-reporting closure. When nil, errors are
+	// returned as a Go error value instead (callers that manage their own fail path).
+	FailBuild func(string, error)
+	// Scrub controls whether ScrubNodeIdentity is applied before tar baking.
+	// Set false for pull/import paths where the source is already a clean rootfs.
+	// Set true for capture and ISO paths where the image was extracted from a live node.
+	Scrub bool
+}
+
+// finalizeImageFromRootfs is the single post-extraction finalization pipeline shared
+// by all five async build paths: pullAsync, importISOAsync, captureAsync,
+// buildISOAsync, and resumeFinalize. All post-finalization steps land here.
+//
+// Steps (in order):
+//  1. Detect and persist disk layout (from rootfs heuristics or firmware field).
+//  2. Optional identity scrub (controlled by meta.Scrub).
+//  3. Bake deterministic tar + compute sha256.
+//  4. Persist blob path and finalize the DB record (status → ready).
+//  5. Write image metadata sidecar (non-fatal).
+//  6. Write build manifest (non-fatal).
+//
+// On success, marks ph.Complete() when a progress handle is present.
+// On error, calls meta.FailBuild(msg, err) when provided; otherwise returns the error.
+func (f *Factory) finalizeImageFromRootfs(
+	ctx context.Context,
+	imageID string,
+	rootfsPath string,
+	meta finalizeSourceMetadata,
+) error {
+	imageRoot := filepath.Join(f.ImageDir, imageID)
+
+	ph := meta.Progress
+	if ph == nil {
+		ph = noopBuildHandle{}
+	}
+
+	fail := func(msg string, err error) error {
+		fullMsg := msg
+		if err != nil {
+			fullMsg = fmt.Sprintf("%s: %v", msg, err)
+		}
+		if meta.FailBuild != nil {
+			meta.FailBuild(msg, err)
+			return nil // caller owns reporting; don't double-report
+		}
+		_ = f.Store.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, fullMsg)
+		return fmt.Errorf("%s", fullMsg)
+	}
+
+	// ── 1. Disk layout detection ─────────────────────────────────────────────
+	diskLayout := f.detectDiskLayout(rootfsPath, meta.Firmware)
 	if err := f.Store.UpdateDiskLayout(ctx, imageID, diskLayout); err != nil {
 		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: update disk layout (non-fatal)")
 	}
 
-	ph.SetPhase("scrubbing")
-	if err := ScrubNodeIdentity(rootfsPath); err != nil {
-		f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
+	// ── 2. Identity scrub (capture + ISO paths only) ─────────────────────────
+	if meta.Scrub {
+		ph.SetPhase("scrubbing")
+		if err := ScrubNodeIdentity(rootfsPath); err != nil {
+			f.Logger.Warn().Err(err).Str("image_id", imageID).Msg("factory: scrub had warnings (continuing)")
+		}
 	}
 
+	// ── 3. Bake deterministic tar ─────────────────────────────────────────────
 	ph.SetPhase("finalizing")
 	tarPath, tarChecksum, tarSize, err := f.bakeDeterministicTar(ctx, imageID, imageRoot, rootfsPath)
 	if err != nil {
-		failBuild("bake tar", err)
-		return
+		return fail("bake tar", err)
 	}
+
+	// ── 4. Persist blob path + finalize DB record ────────────────────────────
 	if err := f.Store.SetBlobPath(ctx, imageID, tarPath); err != nil {
-		failBuild("set blob path", err)
-		return
+		return fail("set blob path", err)
 	}
 	if err := f.Store.FinalizeBaseImage(ctx, imageID, tarSize, tarChecksum); err != nil {
-		failBuild("finalize image", err)
-		return
+		return fail("finalize image", err)
 	}
-	_ = writeBuildManifest(imageRoot, imageID, "", nil, tarSize, tarChecksum, 0)
+
+	// ── 5. Metadata sidecar (non-fatal) ─────────────────────────────────────
+	createdAt := meta.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	f.writeImageMetadataSidecar(ctx, imageID, meta.Name, createdAt, rootfsPath,
+		meta.Distro, tarChecksum, tarSize, meta.BuildMethod)
+
+	// ── 6. Build manifest (non-fatal) ────────────────────────────────────────
+	_ = writeBuildManifest(imageRoot, imageID, meta.Distro, meta.RoleIDs, tarSize, tarChecksum, meta.ElapsedTime)
+
 	ph.Complete()
 	f.Logger.Info().
-		Str("image_id", imageID).Int64("size_bytes", tarSize).Str("checksum", tarChecksum).
-		Msg("factory: resume finalize complete — image is ready")
+		Str("image_id", imageID).
+		Int64("size_bytes", tarSize).
+		Str("checksum", tarChecksum).
+		Msg("factory: finalize complete — image is ready")
+
+	return nil
+}
+
+// resumeFinalize performs scrub → checksum → finalize, shared between resume paths.
+// firmware is string(img.Firmware) from the in-progress image record; pass ""
+// to fall back to rootfs heuristics (capture paths).
+func (f *Factory) resumeFinalize(ctx context.Context, imageID, imageRoot, rootfsPath, firmware string, ph BuildHandle, failBuild func(string, error)) {
+	// Delegate to the unified finalize path.
+	_ = imageRoot // imageRoot is computed internally from f.ImageDir + imageID
+	_ = f.finalizeImageFromRootfs(ctx, imageID, rootfsPath, finalizeSourceMetadata{
+		Firmware:  firmware,
+		Scrub:     true,
+		Progress:  ph,
+		FailBuild: failBuild,
+	})
 }
 
 // ─── Metadata sidecar helpers ─────────────────────────────────────────────────

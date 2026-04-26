@@ -366,7 +366,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// default_layout — e.g. firmware=bios with an ESP partition (the symptom that
 	// caused VM207's grub2-install failure).  These are advisory only; the server
 	// continues to start normally.
-	if imgs, auditErr := database.ListBaseImages(ctx, ""); auditErr == nil {
+	if imgs, auditErr := database.ListBaseImages(ctx, "", ""); auditErr == nil {
 		for _, img := range imgs {
 			if warn := imageFirmwareLayoutMismatch(img); warn != "" {
 				log.Error().

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -325,6 +326,14 @@ func (h *FactoryHandler) Capture(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Version == "" {
 		req.Version = "1.0.0"
+	}
+
+	// S2-8: sshpass pre-flight — reject before accepting if the binary is missing.
+	if req.SSHPassword != "" {
+		if _, err := exec.LookPath("sshpass"); err != nil {
+			writeValidationError(w, "sshpass is not installed on the server host; install it to use ssh_password (e.g. dnf install sshpass or apt install sshpass)")
+			return
+		}
 	}
 
 	captureReq := image.CaptureRequest{
