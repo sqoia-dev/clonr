@@ -508,6 +508,10 @@ func createTarGz(src, dst string) error {
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
+	// filepath.Walk uses os.Lstat so symlinks appear as-is (not followed).
+	// We must resolve the symlink target ourselves for tar.FileInfoHeader,
+	// which takes the link target as its second argument. Passing "" produces
+	// a symlink entry with an empty target, which tar refuses to extract.
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -519,7 +523,17 @@ func createTarGz(src, dst string) error {
 		if relPath == "." {
 			return nil
 		}
-		hdr, err := tar.FileInfoHeader(info, "")
+
+		// Resolve symlink target before building the tar header.
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+		}
+
+		hdr, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return err
 		}
@@ -527,6 +541,7 @@ func createTarGz(src, dst string) error {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
+		// Only copy data for regular files; symlinks and directories have no body.
 		if !info.Mode().IsRegular() {
 			return nil
 		}
