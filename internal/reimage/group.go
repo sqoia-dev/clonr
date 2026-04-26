@@ -253,6 +253,66 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 		Msg("group reimage: complete")
 }
 
+// ResumeGroupReimageJob re-dispatches the goroutine for a running group reimage
+// job that was orphaned by a prior process crash (S4-4). It loads the job and
+// its group members, filters out nodes that already have a non-terminal reimage
+// request, and re-dispatches only the remaining nodes. If the job is in paused
+// status it is first transitioned back to running.
+func (o *Orchestrator) ResumeGroupReimageJob(ctx context.Context, jobID string) error {
+	job, err := o.DB.GetGroupReimageJob(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("ResumeGroupReimageJob: load job %s: %w", jobID, err)
+	}
+
+	// For paused jobs, transition back to running.
+	if job.Status == "paused" {
+		if err := o.DB.ResumeGroupReimageJob(ctx, jobID); err != nil {
+			return fmt.Errorf("ResumeGroupReimageJob: transition to running: %w", err)
+		}
+		job.Status = "running"
+	}
+
+	if job.Status != "running" {
+		// Already terminal — nothing to do.
+		o.Logger.Info().Str("job_id", jobID).Str("status", job.Status).
+			Msg("group reimage resume: job is already in terminal state — skipping")
+		return nil
+	}
+
+	members, err := o.DB.ListGroupMembers(ctx, job.GroupID)
+	if err != nil {
+		return fmt.Errorf("ResumeGroupReimageJob: list members for group %s: %w", job.GroupID, err)
+	}
+
+	// Filter to nodes that do not yet have a non-terminal reimage request so we
+	// don't double-reimage nodes already triggered by the prior process.
+	var remaining []api.NodeConfig
+	for _, m := range members {
+		active, aErr := o.DB.GetActiveReimageForNode(ctx, m.ID)
+		if aErr != nil {
+			o.Logger.Warn().Err(aErr).Str("node_id", m.ID).
+				Msg("group reimage resume: GetActiveReimageForNode failed — skipping node")
+			continue
+		}
+		if active == nil {
+			remaining = append(remaining, m)
+		}
+	}
+
+	if len(remaining) == 0 {
+		o.Logger.Info().Str("job_id", jobID).Msg("group reimage resume: all nodes already triggered — no work to do")
+		return nil
+	}
+
+	o.Logger.Info().
+		Str("job_id", jobID).
+		Int("remaining_nodes", len(remaining)).
+		Msg("group reimage resume: re-dispatching remaining nodes")
+
+	go o.runGroupReimage(context.Background(), job, remaining)
+	return nil
+}
+
 // createReimageRequest inserts a reimage_requests row for one node and returns its ID.
 func (o *Orchestrator) createReimageRequest(ctx context.Context, nodeID, imageID string) (string, error) {
 	now := time.Now().UTC()

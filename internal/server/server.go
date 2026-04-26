@@ -12,7 +12,11 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +31,7 @@ import (
 	ldapmodule "github.com/sqoia-dev/clustr/internal/ldap"
 	networkmodule "github.com/sqoia-dev/clustr/internal/network"
 	slurmmodule "github.com/sqoia-dev/clustr/internal/slurm"
+	"github.com/sqoia-dev/clustr/internal/metrics"
 	"github.com/sqoia-dev/clustr/internal/power"
 	"github.com/sqoia-dev/clustr/internal/sysaccounts"
 	ipmipower "github.com/sqoia-dev/clustr/internal/power/ipmi"
@@ -34,6 +39,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/reimage"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	"github.com/sqoia-dev/clustr/internal/server/ui"
+	"github.com/sqoia-dev/clustr/internal/webhook"
 )
 
 // BuildInfo holds build-time metadata injected via -ldflags.
@@ -60,12 +66,18 @@ type Server struct {
 	networkMgr          *networkmodule.Manager
 	slurmMgr            *slurmmodule.Manager
 	clientdHub          *ClientdHub
+	webhookDispatcher   *webhook.Dispatcher
 	sessionSecret       []byte // HMAC key for browser session tokens
 	router              chi.Router
 	http                *http.Server
 	logsHandler         *handlers.LogsHandler
 	imgFactory          *image.Factory
 	buildInfo           BuildInfo
+
+	// flipBackFailureCount tracks verify-boot flipNodeToDiskFirst failures for
+	// the /health endpoint (S4-9). Incremented atomically; read without lock for
+	// health response since occasional skew is acceptable.
+	flipBackFailureCount int64
 
 	// dhcpLeaseLookup is set after construction by SetDHCPServer when the PXE
 	// server is available. The NodesHandler captures it via a closure so it picks
@@ -147,6 +159,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		networkMgr:          networkMgr,
 		slurmMgr:            slurmMgr,
 		clientdHub:          hub,
+		webhookDispatcher:   webhook.New(database, log.Logger),
 		sessionSecret:       secret,
 		buildInfo:           info,
 	}
@@ -203,10 +216,34 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	go s.runDiskSpaceMonitor(ctx)
 	// ADR-0008: Post-reboot verification timeout scanner.
 	go s.runVerifyTimeoutScanner(ctx)
+	// S4-1: Prometheus gauge collector.
+	go s.runMetricsCollector(ctx)
+	// S4-3: Reimage-pending reaper — clears orphaned reimage_pending flags.
+	go s.runReimagePendingReaper(ctx)
+	// S4-4: Resume any group reimage jobs that were running before this process started.
+	s.resumeRunningGroupReimageJobs(ctx)
 	// LDAP module health checker.
 	s.ldapMgr.StartBackgroundWorkers(ctx)
 	// Slurm module health checker.
 	s.slurmMgr.StartBackgroundWorkers(ctx)
+}
+
+// defaultFlipSemCap is the default max concurrent flipNodeToDiskFirst goroutines
+// in the verify-boot timeout scanner (S4-6). Override with CLUSTR_FLIP_CONCURRENCY.
+const defaultFlipSemCap = 5
+
+// scannerFlipSemaphore returns a buffered channel used as a semaphore to bound
+// the number of concurrent flipNodeToDiskFirst calls in the verify-boot scanner.
+// A new channel is created on each tick cycle — cheap (just scanner goroutines,
+// not a hot path) and avoids shared state between tick cycles.
+func scannerFlipSemaphore() chan struct{} {
+	cap := defaultFlipSemCap
+	if v := os.Getenv("CLUSTR_FLIP_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cap = n
+		}
+	}
+	return make(chan struct{}, cap)
 }
 
 // runVerifyTimeoutScanner ticks every 60 seconds and marks as timed-out any node
@@ -234,30 +271,53 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 				log.Error().Err(err).Msg("verify-boot scanner: ListNodesAwaitingVerification failed")
 				continue
 			}
+			// S4-6: Fan out flipNodeToDiskFirst calls via goroutines with a bounded
+			// semaphore (default 5 concurrent) to prevent the scanner from blocking
+			// sequentially on simultaneous timeouts at 200-node clusters.
+			flipSem := scannerFlipSemaphore()
+			var wg sync.WaitGroup
 			for _, n := range nodes {
-				if err := s.db.RecordVerifyTimeout(ctx, n.ID); err != nil {
-					log.Error().Err(err).Str("node_id", n.ID).Str("hostname", n.Hostname).
-						Msg("verify-boot scanner: RecordVerifyTimeout failed")
-					continue
-				}
-				log.Warn().
-					Str("node_id", n.ID).
-					Str("hostname", n.Hostname).
-					Str("timeout", timeout.String()).
-					Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clustr/node-token not written correctly",
-						n.ID, n.Hostname, timeout)
-				// Flip persistent boot order back to disk-first on deploy-timeout.
-				// Prevents Proxmox VMs from being stuck PXE-first forever when the
-				// deploy completes but the node never calls verify-boot.
-				// Best-effort: errors are logged, not fatal. See docs/boot-architecture.md §10.
-				if err := s.flipNodeToDiskFirst(ctx, n.ID); err != nil {
-					log.Warn().Err(err).Str("node_id", n.ID).Str("hostname", n.Hostname).
-						Msg("verify-boot scanner: FlipToDiskFirst failed on deploy-timeout (non-fatal)")
-				} else {
-					log.Info().Str("node_id", n.ID).Str("hostname", n.Hostname).
-						Msg("verify-boot scanner: persistent boot order flipped to disk-first after deploy-timeout")
-				}
+				n := n // capture
+				wg.Add(1)
+				flipSem <- struct{}{} // acquire slot
+				go func() {
+					defer func() { <-flipSem; wg.Done() }()
+
+					if err := s.db.RecordVerifyTimeout(ctx, n.ID); err != nil {
+						log.Error().Err(err).Str("node_id", n.ID).Str("hostname", n.Hostname).
+							Msg("verify-boot scanner: RecordVerifyTimeout failed")
+						return
+					}
+					// S4-2: fire verify_boot.timeout webhook.
+					if s.webhookDispatcher != nil {
+						s.webhookDispatcher.Dispatch(ctx, webhook.EventVerifyBootTimeout, webhook.Payload{
+							NodeID:  n.ID,
+							ImageID: n.BaseImageID,
+						})
+					}
+					log.Warn().
+						Str("node_id", n.ID).
+						Str("hostname", n.Hostname).
+						Str("timeout", timeout.String()).
+						Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clustr/node-token not written correctly",
+							n.ID, n.Hostname, timeout)
+					// Flip persistent boot order back to disk-first on deploy-timeout.
+					// Prevents Proxmox VMs from being stuck PXE-first forever when the
+					// deploy completes but the node never calls verify-boot.
+					// Best-effort: errors are logged, not fatal. See docs/boot-architecture.md §10.
+					if err := s.flipNodeToDiskFirst(ctx, n.ID); err != nil {
+						log.Warn().Err(err).Str("node_id", n.ID).Str("hostname", n.Hostname).
+							Msg("verify-boot scanner: FlipToDiskFirst failed on deploy-timeout (non-fatal)")
+						// S4-9: track flip-back failures in Prometheus and health endpoint.
+						metrics.FlipBackFailures.Inc()
+						atomic.AddInt64(&s.flipBackFailureCount, 1)
+					} else {
+						log.Info().Str("node_id", n.ID).Str("hostname", n.Hostname).
+							Msg("verify-boot scanner: persistent boot order flipped to disk-first after deploy-timeout")
+					}
+				}()
 			}
+			wg.Wait()
 		}
 	}
 }
@@ -533,12 +593,13 @@ func (s *Server) buildRouter() chi.Router {
 	// Audit service and actor-info closure are wired after getActorInfo is defined below.
 
 	health := &handlers.HealthHandler{
-		Version:       s.buildInfo.Version,
-		CommitSHA:     s.buildInfo.CommitSHA,
-		BuildTime:     s.buildInfo.BuildTime,
-		DB:            s.db,
-		BootDir:       s.cfg.PXE.BootDir,
-		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clustr.img",
+		Version:          s.buildInfo.Version,
+		CommitSHA:        s.buildInfo.CommitSHA,
+		BuildTime:        s.buildInfo.BuildTime,
+		DB:               s.db,
+		BootDir:          s.cfg.PXE.BootDir,
+		InitramfsPath:    s.cfg.PXE.BootDir + "/initramfs-clustr.img",
+		FlipBackFailures: &s.flipBackFailureCount,
 	}
 	// getActorInfo extracts (actorID, actorLabel) from a request context.
 	// actorID is users.id for session auth, api_keys.id for Bearer auth, or "".
@@ -561,17 +622,19 @@ func (s *Server) buildRouter() chi.Router {
 	usersH.GetActorInfo = getActorInfo
 
 	images := &handlers.ImagesHandler{
-		DB:           s.db,
-		ImageDir:     s.cfg.ImageDir,
-		Progress:     s.progress,
-		Audit:        s.audit,
-		GetActorInfo: getActorInfo,
+		DB:                s.db,
+		ImageDir:          s.cfg.ImageDir,
+		Progress:          s.progress,
+		Audit:             s.audit,
+		GetActorInfo:      getActorInfo,
+		WebhookDispatcher: s.webhookDispatcher,
 	}
 	nodes := &handlers.NodesHandler{
-		DB:           s.db,
-		Audit:        s.audit,
-		GetActorInfo: getActorInfo,
-		FlipToDiskFirst: s.flipNodeToDiskFirst,
+		DB:                s.db,
+		Audit:             s.audit,
+		GetActorInfo:      getActorInfo,
+		FlipToDiskFirst:   s.flipNodeToDiskFirst,
+		WebhookDispatcher: s.webhookDispatcher,
 		LDAPNodeConfig: func(ctx context.Context) (*api.LDAPNodeConfig, error) {
 			return s.ldapMgr.NodeConfig(ctx)
 		},
@@ -664,6 +727,10 @@ func (s *Server) buildRouter() chi.Router {
 			return CreateNodeScopedKey(context.Background(), s.db, nodeID)
 		},
 	}
+
+	// S4-1: Prometheus metrics endpoint — unauthenticated so scrapers can reach it
+	// without managing API keys. Restrict at the network/reverse-proxy level if needed.
+	r.Get("/metrics", (&handlers.MetricsHandler{}).ServeHTTP)
 
 	// Embedded web UI — served without bearer auth.
 	// The UI JavaScript talks to /api/v1 which enforces auth when a token is set.
@@ -762,6 +829,15 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Post("/admin/api-keys", apiKeysH.HandleCreate)
 			r.With(requireRole("admin")).Delete("/admin/api-keys/{id}", apiKeysH.HandleRevoke)
 			r.With(requireRole("admin")).Post("/admin/api-keys/{id}/rotate", apiKeysH.HandleRotate)
+
+			// S4-2: Webhook subscription management — admin role only.
+			webhooksH := &handlers.WebhooksHandler{DB: s.db}
+			r.With(requireRole("admin")).Get("/admin/webhooks", webhooksH.HandleList)
+			r.With(requireRole("admin")).Post("/admin/webhooks", webhooksH.HandleCreate)
+			r.With(requireRole("admin")).Get("/admin/webhooks/{id}", webhooksH.HandleGet)
+			r.With(requireRole("admin")).Put("/admin/webhooks/{id}", webhooksH.HandleUpdate)
+			r.With(requireRole("admin")).Delete("/admin/webhooks/{id}", webhooksH.HandleDelete)
+			r.With(requireRole("admin")).Get("/admin/webhooks/{id}/deliveries", webhooksH.HandleListDeliveries)
 
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
 			// GET /admin/users includes group_ids for each user (S3-3).
@@ -889,6 +965,8 @@ func (s *Server) buildRouter() chi.Router {
 			// Reimage — queue, track and retry node reimages via the power provider.
 			// Create requires group-scoped operator access.
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/reimage", reimageH.Create)
+			// S4-10: Cancel in-flight reimage by node ID (not reimage UUID).
+			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}/reimage/active", reimageH.CancelActiveForNode)
 			r.Get("/nodes/{id}/reimage", reimageH.ListForNode)
 			r.Get("/reimage/{id}", reimageH.Get)
 			r.Delete("/reimage/{id}", reimageH.Cancel)
