@@ -916,6 +916,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireGroupAccess("id", s.db)).Put("/nodes/{id}", nodes.UpdateNode)
 			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}", nodes.DeleteNode)
 
+			// S5-12: Node config change history (admin-only audit trail).
+			configHistoryH := &handlers.NodeConfigHistoryHandler{DB: s.db}
+			r.With(requireRole("admin")).Get("/nodes/{id}/config-history", configHistoryH.HandleList)
+
 			// clientd heartbeat — admin read of latest heartbeat data.
 			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
 
