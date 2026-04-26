@@ -2,6 +2,57 @@
 
 ---
 
+## Gap-fill Sprint — Slurm + UX hardening (2026-04-25)
+
+Ten code-side findings from the end-to-end new-user walkthrough (Task #62)
+resolved before external-user release.
+
+### P1 fixes (must-fix before external users)
+
+- **GAP-2** `GET /api/v1/healthz/ready` is now unauthenticated. Docker Compose
+  healthchecks, `install.md` smoke tests, and the README Quick Start all expect
+  200 without credentials. The `/health` liveness probe is unchanged.
+
+- **GAP-14** Slurm/munge service enable now guarded by binary existence check.
+  `writeSlurmConfig` no longer calls `systemctl enable slurmd` (or `munge`,
+  `slurmctld`, `slurmdbd`) when the corresponding binary is absent from the
+  deployed rootfs. The previous behaviour created broken systemd symlinks that
+  put the unit in degraded state on first boot, causing PAM to terminate SSH
+  sessions immediately after key acceptance — making every deployed node
+  unreachable via SSH.
+
+- **GAP-17** Three flat Slurm API routes added:
+  `GET /api/v1/slurm/nodes`, `GET /api/v1/slurm/roles`,
+  `POST /api/v1/slurm/sync` (triggers push, returns op ID for polling).
+
+- **GAP-19** Munge key auto-generated on first `POST /slurm/enable`. Idempotent —
+  if a key already exists in `slurm_secrets` it is not overwritten.
+
+- **GAP-20** Audit log wired into previously-missing handlers:
+  API key create/revoke/rotate (`api_key.*` actions) and
+  Slurm module enable + config file save (`slurm_config.update`).
+
+- **GAP-21** `/api/v1/users` CRUD alias routes added (list, create, GET {id},
+  update, delete) — admin-only, same handlers as `/admin/users`. Sprint 3 docs
+  and the walkthrough expected these paths.
+
+### P2 fixes (important for usable experience)
+
+- **GAP-15** Reimage preflight blocks reimaging a node with no `ssh_keys`
+  configured (HTTP 400, code `no_ssh_keys`). Pass `force=true` to override.
+  Prevents deploying a permanently SSH-inaccessible node.
+
+- **GAP-11** `GET /api/v1/nodes/{id}/reimage/active` added. Previously only
+  DELETE existed; GET returned an empty body, breaking JSON parsers. Now returns
+  the active `ReimageRequest` when one exists, or
+  `{"status":"no_active_reimage"}` otherwise.
+
+- **GAP-23** On startup, if `/var/lib/clustr/clonr.db` exists alongside the
+  current `clustr.db`, log WARN so operators know it is safe to delete.
+  No auto-deletion.
+
+---
+
 ## v1.0.0 — Release Notes (target: 2026-07-25)
 
 ### What is clustr?
