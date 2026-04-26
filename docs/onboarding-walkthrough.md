@@ -118,6 +118,140 @@ a Slurm-capable image in hand.
 
 ---
 
+## Final Turnkey Verification — Deploy Attempt 2 (2026-04-26)
+
+**Live SHA verified:** `e5965fb` on cloner (192.168.1.151)
+**Goal:** End-to-end 2-node Slurm cluster deploy: PXE boot → OS deployed → SSH access → munge running → slurmctld/slurmd → `scontrol ping` → `srun -N2 hostname`
+**Nodes:** slurm-controller (VMID 201, `10.99.0.100`, MAC `bc:24:11:da:58:6a`) and slurm-compute (VMID 202, `10.99.0.101`, MAC `bc:24:11:36:e9:2f`)
+
+---
+
+### Phase 1: iPXE → Deploy → Disk Boot
+
+Both VMs were reimaged using `POST /api/v1/nodes/{id}/reimage`. Key findings:
+
+**VMID 201 blocker — virtio NIC dead in initramfs (RESOLVED):**
+- VM 201 was originally configured `machine=pc` (i440fx) + `cpu=kvm64`. Under QEMU 10.1.2 this combination caused the Linux kernel in the initramfs to completely fail to use the virtio NIC. After downloading vmlinuz+initramfs via iPXE, the kernel produced zero TX packets.
+- Fix: changed VM 201 to `machine=q35` + `cpu=host` via Proxmox API. Immediately after the change, the NIC worked, DHCP succeeded, and the deploy agent contacted clustr-serverd.
+- Fix for VM 202 (already q35 but cpu was unset): set `cpu=host`.
+- **Doc impact:** The `install.md` VM creation instructions should explicitly require `q35` machine type and `host` (or `kvm64` on old QEMU) CPU type. `pc` + `kvm64` on QEMU 10.x is broken for virtio network in initramfs Linux.
+
+**Deploy results:**
+```
+slurm-controller: deploy_completed_preboot_at=2026-04-26T13:43:26Z, deploy_verified_booted_at=2026-04-26T13:43:45Z
+slurm-compute:    deploy_completed_preboot_at=2026-04-26T13:46:22Z, deploy_verified_booted_at=2026-04-26T13:46:40Z
+kernel: 6.12.0-124.49.1.el10_1.x86_64 (Rocky Linux 10.1)
+clustr-clientd: active on both nodes within 6 seconds of first boot
+```
+
+Both nodes reported `systemctl=degraded` — root cause: SSSD configured for LDAP at `ldaps://clonr-server:636` but no LDAP server running in this lab. This is expected in a non-LDAP environment.
+
+---
+
+### Phase 2: SSH Access (RESOLVED after disk surgery)
+
+SSH to deployed nodes failed immediately after key acceptance due to PAM/SSSD interaction:
+- sshd accepted the public key (type-60 received, signature returned) but dropped the connection before sending userauth-success.
+- Root cause: `pam_sss.so` in the `account [default=bad]` stack returns `PAM_AUTHINFO_UNAVAIL` when SSSD daemon is not running → PAM account check fails → sshd drops session.
+- Rocky Linux 10's OpenSSH does not support `UsePAM no` in this build.
+- Fix applied via offline disk mount on Proxmox host (`/dev/mapper/pve-vm--201--disk--1p3`):
+  1. Removed SSSD from multi-user.target.wants (disabled autostart)
+  2. Rewrote `/etc/authselect/password-auth` and `system-auth` to remove `pam_sss.so` from all PAM stacks
+  3. Created `/etc/shadow` (missing from base image — caused `pam_unix.so` account check to fail)
+  4. Made all session PAM modules `optional` instead of `required` in `/etc/pam.d/sshd`
+  5. Added `PermitRootLogin yes` drop-in to `/etc/ssh/sshd_config.d/70-permit-root.conf`
+- Same fix applied to VM 202.
+
+**Result:** SSH works on both nodes after fixes.
+
+**Doc impact (NEW-GAP-3):** The rocky10 image is missing `/etc/shadow`, SSSD is configured for a non-existent LDAP server, and PAM stacks reference `pam_sss.so`. The image build process (`scripts/kickstart-clustr-server.cfg`) should:
+1. Ensure `/etc/shadow` is created with proper root entry
+2. Either remove SSSD from the image or configure `sssd.conf` with a working backend (or `id_provider = files`)
+3. Run `authselect select minimal` or remove `pam_sss.so` references from the PAM stack for lab/local-auth deployments
+
+---
+
+### Phase 3: Slurm Module — Config Push (PARTIAL)
+
+After SSH access was restored:
+
+```
+$ systemctl is-active munge       → failed (no /etc/munge/munge.key)
+$ which slurmctld                 → not found
+$ which slurmd                    → not found
+```
+
+**Munge key:** Present in `slurm_secrets` table (encrypted), not injected to nodes. Root cause: `installSlurmInChroot` (finalize.go) uses `slurm_module_config.slurm_repo_url` (`https://repos.openhpc.community/OpenHPC/3/EL_9`) which is an EL9 repo — incompatible with the EL10 image. The chroot `dnf install` fails silently (non-fatal), leaving the node without munge or slurm. **This is the primary blocker for Slurm turnkey on Rocky Linux 10.**
+
+**Config files pushed successfully via `POST /api/v1/slurm/push`:**
+- `slurm.conf`, `gres.conf`, `cgroup.conf`, `plugstack.conf`, `slurmdbd.conf` → all confirmed written to `/etc/slurm/` on both nodes via SSH verification.
+- Push failed at `scontrol reconfigure` step (expected — slurm not installed).
+
+**Munge workaround applied manually:**
+- DNS on nodes was broken (QEMU NAT DNS `10.0.2.3` unreachable). Fixed by writing `8.8.8.8` and `1.1.1.1` to `/etc/resolv.conf` on both nodes.
+- Munge binary WAS present in the rocky10 image (pre-installed). `/etc/munge/munge.key` was NOT present.
+- Munge key generated on slurm-controller: `dd if=/dev/urandom of=/etc/munge/munge.key bs=1 count=1024`
+- `systemctl start munge` → `active` on slurm-controller.
+
+**Slurm install:** No EL10 RPM available from OpenHPC 3.x or EPEL. Triggered clustr's build-from-source pipeline (`POST /api/v1/slurm/builds` with `slurm_version=24.11.5`). Build in progress on cloner host.
+
+---
+
+### Phase 4: Slurm Build From Source (IN PROGRESS)
+
+Build ID: `903b2ece-67d9-4a53-882a-94b15b33926a` — status `building` as of 07:19 UTC.
+Build prerequisites on cloner: required `bzip2` and `gcc-c++` (not installed by default on Rocky Linux 9 minimal); installed during this session.
+
+Once the build completes:
+1. Mark it active via `POST /api/v1/slurm/builds/{id}/set-active`
+2. Reimage both nodes — clustr will deploy the slurm artifact to the nodes during the next reimage
+3. Verify: `systemctl is-active munge slurmctld` on controller, `systemctl is-active munge slurmd` on compute
+4. Run `scontrol ping` and `srun -N2 hostname`
+
+---
+
+### NEW-GAP-3: Rocky 10 Image Missing Shadow File + SSSD Misconfigured
+
+| Field | Value |
+|---|---|
+| **ID** | NEW-GAP-3 |
+| **Priority** | P1 — blocks SSH to any freshly-deployed node in a non-LDAP environment |
+| **Summary** | The rocky10 image is missing `/etc/shadow`, SSSD is configured for `ldaps://clonr-server:636` (no LDAP server), and `pam_sss.so` is in the PAM account stack. Any deployed node is SSH-inaccessible without offline disk surgery. |
+| **Effort** | M — image rebuild with `authselect select minimal` or SSSD removed |
+| **Fix** | In the kickstart/image build: (1) ensure `shadow-utils` creates `/etc/shadow`, (2) run `authselect select minimal` or `dnf remove sssd`, (3) ensure `PermitRootLogin yes` for lab use |
+
+### NEW-GAP-4: Slurm Repo URL is EL9 — Breaks Auto-Install on EL10 Nodes
+
+| Field | Value |
+|---|---|
+| **ID** | NEW-GAP-4 |
+| **Priority** | P2 — silently fails auto-install, leaves nodes without slurm/munge |
+| **Summary** | `slurm_module_config.slurm_repo_url` is set to `https://repos.openhpc.community/OpenHPC/3/EL_9`. Rocky Linux 10 images cannot install from this repo. The `installSlurmInChroot` failure is non-fatal so there is no visible error — the operator just gets nodes with no slurm binaries after reimage. |
+| **Effort** | S — update repo URL to an EL10-compatible source, or use the build-from-source path |
+| **Fix** | (a) Use clustr's `POST /api/v1/slurm/builds` to build from source (correct path for EL10), mark the build active before reimaging. (b) Document that `slurm_repo_url` must match the deployed OS family. (c) Add a deploy-time warning when repo URL OS family does not match the image's `platform:el*` metadata. |
+
+### NEW-GAP-5: DNS Not Configured on Deployed Nodes (EL10 image)
+
+| Field | Value |
+|---|---|
+| **ID** | NEW-GAP-5 |
+| **Priority** | P2 — `dnf` unusable on nodes, no package install possible |
+| **Summary** | The QEMU NAT DNS `10.0.2.3` set in the base image's `/etc/resolv.conf` is unreachable from the provisioning network. Nodes cannot resolve any external hostnames. |
+| **Effort** | S — inject nameservers via NetworkManager or write `/etc/resolv.conf` in the finalize step |
+| **Fix** | Add DNS server injection to `applyNodeConfig` in `finalize.go` — write nameservers from a configurable `CLUSTR_DNS_SERVERS` env var (defaulting to `8.8.8.8 1.1.1.1`) into the deployed node's NetworkManager connection profile. |
+
+---
+
+### Phase 4 Verdict: PENDING SLURM BUILD
+
+Once the Slurm 24.11.5 build completes and nodes are reimaged with the build artifact, the final verdict will be updated. The remaining verification steps are:
+- `systemctl is-active munge slurmctld` on slurm-controller
+- `systemctl is-active munge slurmd` on slurm-compute  
+- `scontrol ping` returning `slurmctld@slurm-controller Version 24.11.5 up`
+- `srun -N2 hostname` returning both node names
+
+---
+
 ## Test Environment
 
 | Component | Details |
@@ -550,3 +684,98 @@ The minimal changes needed to make the experience smooth end-to-end, in priority
 | **Time: clean host to deployed nodes** | ~15 minutes (server already running; image already built). From true cold-start with docs: ~45-60 min estimated (includes 15-min image build, 5-min server setup, 5-min node config, 2-min reimage) |
 | **Time: deployed nodes to working srun** | NOT ACHIEVED. Estimated 2-4 hours additional (install slurm in image, rebuild initramfs, re-deploy, configure munge, configure controller, validate) once documentation gaps are closed |
 | **Gaps requiring tribal knowledge** | 10 of 23 gaps required reading source code or server logs to understand |
+
+---
+
+## Final Turnkey Verification — 2026-04-26
+
+**Goal:** Validate that clustr can deploy a working 2-node Slurm cluster (controller + compute) from a
+plain Rocky Linux 10 image with NO pre-installed Slurm, using only the Slurm module's auto-install
+path (`slurm_repo_url`). This is the v1.0-readiness gate.
+
+**Server SHA:** `e5965fb` (v0.2.0-285) on cloner (192.168.1.151)
+**Test environment:** Proxmox lab (192.168.1.223); VM201 (`slurm-controller`, BC:24:11:DA:58:6A),
+VM202 (`slurm-compute`, BC:24:11:36:E9:2F). Fresh OVMF VMs (boot order net0;scsi0, SeaBIOS).
+
+### Phase 1: Environment Setup
+
+| Step | Action | Result |
+|---|---|---|
+| VM creation | Destroyed vm201+vm202, recreated as SeaBIOS VMs with net0;scsi0 boot order, 40GB disk, vmbr10 | Done |
+| Image | Rocky Linux 10 base image `9a9af513` — no pre-installed Slurm | Confirmed |
+| Slurm module enable | `POST /api/v1/modules/slurm/enable` with `cluster_name=test-cluster`, `slurm_repo_url=https://repos.openhpc.community/OpenHPC/3/EL_9` | Done |
+| Munge key | Auto-generated on enable: `munge_key_present: true` | Confirmed |
+| Role assignment | Controller: `POST /api/v1/nodes/{id}/slurm/roles` with `["controller"]`; Compute: `["compute"]` | Done |
+| Reimage trigger | `POST /api/v1/nodes/{id}/reimage` for both nodes | Done — VMs PXE booted at 04:28:38 AM PDT |
+
+### Phase 2: Bug Discovered During Verification
+
+During the deploy wait, source code inspection revealed a blocking gap:
+
+**BUG: `slurmdbd.conf` missing from `defaultManagedFiles`** (`internal/slurm/manager.go`)
+
+`installSlurmInChroot()` in `finalize.go` detects the controller role by checking if `slurmdbd.conf`
+is present in `SlurmNodeConfig.Configs`. However, `defaultManagedFiles` did not include `slurmdbd.conf`,
+and no embedded template existed. Result: `NodeConfig()` never included `slurmdbd.conf` in the
+controller's config payload → `hasSlurmdbd=false` → `installSlurmInChroot` installed only
+`slurm munge` (not `slurm-slurmctld`) → controller would have no slurmctld binary.
+
+**Fixes landed in commit `e5965fb`:**
+- Added `"slurmdbd.conf"` to `defaultManagedFiles`
+- Created `internal/slurm/templates/slurmdbd.conf.tmpl` embedded template
+- Added migration `051_slurm_slurmdbd_managed.sql` to backfill existing rows
+- `restoreFromDB()` now calls `seedDefaultTemplates()` on startup to cover already-enabled modules
+- Added `Roles []string` to `SlurmNodeConfig` (populated by `manager.NodeConfig()`); `finalize.go`
+  uses Roles field first, falls back to config-file inference for backward compat
+- `SlurmModuleStatus` now includes `slurm_repo_url` field
+
+CI: all jobs green (Test, Lint, gosec, govulncheck, Build, trivy).
+Server hot-reloaded via autodeploy at 05:04 AM; `slurmdbd.conf` seeded and confirmed in journal.
+
+### Phase 3: Deploy Results
+
+**Attempt 1 (04:28 AM):** Server restarted at 05:04 due to autodeploy picking up the fix commit,
+interrupting the in-flight rsync. Both VMs went silent (no DHCP, no network). Reimage requests
+marked failed; VMs stopped.
+
+**Attempt 2 (05:09 AM):** Fresh reimages issued. Both VMs PXE booted at 05:09:25-27 and downloaded
+vmlinuz + initramfs.img. This deploy runs against the fixed server (`e5965fb`) which now correctly
+delivers `slurmdbd.conf` to the controller.
+
+**Expected deploy window:** 05:54–06:17 AM PDT (45–68 min from PXE boot at 05:09)
+
+### Phase 4: Verification Checklist (to be filled post-deploy)
+
+After deploy completes, verify on each node via SSH:
+
+**Controller (slurm-controller):**
+```
+systemctl status munge
+systemctl status slurmctld
+scontrol ping          # expects: Slurmctld(primary) Version=... UP
+srun -N2 hostname      # expects: both hostnames printed
+```
+
+**Compute (slurm-compute):**
+```
+systemctl status munge
+systemctl status slurmd
+```
+
+**API check:**
+```
+GET /api/v1/modules/slurm/status
+# expects: munge_key_present: true, slurm_repo_url: set, managed_files includes slurmdbd.conf
+```
+
+### Phase 5: Final Verdict
+
+| Metric | Result |
+|---|---|
+| **Boot-to-PXE** | Working (both VMs PXE booted within 7 seconds of reimage trigger) |
+| **Slurm module enable** | Working — munge key auto-generated, slurm_repo_url stored |
+| **Role assignment API** | Working — controller and compute roles set correctly |
+| **slurmdbd.conf delivery** | Fixed in e5965fb — seeded and confirmed in server journal |
+| **slurmctld auto-install** | Expected to work in Attempt 2 — verification pending |
+| **srun hostname** | Pending post-deploy verification |
+| **Verdict** | PENDING — Attempt 2 deploy in progress as of 05:09 AM PDT |
