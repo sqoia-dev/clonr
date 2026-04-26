@@ -153,35 +153,49 @@ type ExtractOptions struct {
 // locates the root partition, and rsyncs its contents into RootfsDestDir.
 //
 // Partition discovery strategy:
-//  1. Loop-attach the raw disk with --partscan.
-//  2. Use lsblk to enumerate partitions.
-//  3. Skip the biosboot / ESP partition (no filesystem or vfat).
-//  4. The largest ext4/xfs partition is treated as root.
-//  5. The first xfs/ext4 partition before root (if present) is treated as /boot.
+//  1. Loop-attach the raw disk with losetup (no --partscan; kpartx creates mappings).
+//  2. Run kpartx to create /dev/mapper/loopNpM device mapper devices.
+//  3. Use lsblk to enumerate partitions via the mapper devices.
+//  4. Skip the biosboot / ESP partition (biosboot GUID or no filesystem / vfat).
+//  5. The partition containing /etc/os-release is treated as root.
+//  6. The partition containing /boot/vmlinuz* or /grub2/ is treated as /boot.
+//
+// kpartx is used instead of losetup --partscan because on some kernels (Rocky
+// Linux 9 with XFS data volume) the kernel's loop partition scanning creates
+// device nodes in /dev but they cannot be opened ("Can't open blockdev").
+// kpartx creates device-mapper aliases (/dev/mapper/loopNpM) which work
+// reliably regardless of kernel loop configuration.
 //
 // This is intentionally simple — the kickstart template uses a fixed layout
 // (biosboot + /boot + /) so the heuristic is reliable for clustr-generated images.
 // Admins using custom kickstarts with unusual layouts should use CaptureNode instead.
 func ExtractRootfs(opts ExtractOptions) error {
-	// ── Loop-attach the raw disk ─────────────────────────────────────────
-	loopOut, err := exec.Command("losetup", "--find", "--partscan", "--show", opts.RawDiskPath).CombinedOutput()
+	// ── Loop-attach the raw disk (no --partscan; kpartx handles partitions) ─
+	loopOut, err := exec.Command("losetup", "--find", "--show", opts.RawDiskPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("losetup: %w\noutput: %s", err, string(loopOut))
 	}
 	loopDev := strings.TrimSpace(string(loopOut))
 	defer func() {
+		// Remove kpartx mappings before releasing the loop device.
+		_ = exec.Command("kpartx", "-d", loopDev).Run()
 		_ = exec.Command("losetup", "-d", loopDev).Run()
 	}()
 
-	// Allow udev to create partition devices.
+	// ── Create partition device-mapper mappings via kpartx ──────────────
+	// kpartx -av creates /dev/mapper/loopNp1, /dev/mapper/loopNp2, ...
+	// These devices work reliably on kernels where losetup --partscan
+	// creates device nodes that cannot be opened.
+	if kpartxOut, kpartxErr := exec.Command("kpartx", "-av", loopDev).CombinedOutput(); kpartxErr != nil {
+		return fmt.Errorf("kpartx: %w\noutput: %s", kpartxErr, string(kpartxOut))
+	}
+
+	// Allow udev to process the new device-mapper devices.
 	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
 
-	// ── Enumerate partitions ─────────────────────────────────────────────
+	// ── Enumerate partitions via lsblk on the loop device ──────────────
 	// Use --pairs output so that empty fields (e.g. FSTYPE on a biosboot
 	// partition) are emitted as KEY="" rather than being collapsed away.
-	// Without --pairs, lsblk compresses empty columns and field[1] becomes
-	// SIZE instead of FSTYPE for biosboot partitions, causing the code to
-	// attempt mounting an unformatted biosboot partition (exit 32 / "wrong fs type").
 	partOut, err := exec.Command("lsblk", "--pairs", "-o", "NAME,FSTYPE,PARTTYPE", loopDev).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("lsblk: %w\noutput: %s", err, partOut)
@@ -206,8 +220,18 @@ func ExtractRootfs(opts ExtractOptions) error {
 	// biosboot GUID (GPT partition type for GRUB BIOS boot area).
 	const biosbootGUID = "21686148-6449-6e6f-744e-656564454649"
 
-	var rootDev, bootDev, espDev string
+	// loopBase is e.g. "loop0". kpartx creates /dev/mapper/loop0p1, loop0p2, ...
 	loopBase := filepath.Base(loopDev)
+
+	// mapperDevForPartition returns the kpartx device-mapper path for a partition.
+	// lsblk returns NAME="loop0p1" for a partition on /dev/loop0.
+	// kpartx creates /dev/mapper/loop0p1 for that partition.
+	mapperDevForPartition := func(name string) string {
+		// name is e.g. "loop0p1". kpartx maps it to /dev/mapper/loop0p1.
+		return "/dev/mapper/" + name
+	}
+
+	var rootDev, bootDev, espDev string
 
 	for _, line := range strings.Split(strings.TrimSpace(string(partOut)), "\n") {
 		name := parsePairsField(line, "NAME")
@@ -218,7 +242,10 @@ func ExtractRootfs(opts ExtractOptions) error {
 			continue // skip header or the loop device itself
 		}
 
-		dev := "/dev/" + name
+		// Use the kpartx device-mapper path, not /dev/loopNpM.
+		// The kpartx mapper devices are reliably mountable even on kernels
+		// where /dev/loopNpM cannot be opened.
+		dev := mapperDevForPartition(name)
 		if _, statErr := os.Stat(dev); statErr != nil {
 			continue
 		}
