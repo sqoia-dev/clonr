@@ -32,24 +32,11 @@ name: iPXE reproducible build
 #   deploy/pxe/ipxe.efi.sha256    (authoritative hash)
 
 on:
-  # Run on every v* tag push so release artifacts are always verified.
-  # Also runs when the binary or sha256 change on main or in a PR.
-  # Path filters do not apply to tag pushes — tag events always run this workflow.
+  # On every release tag: build, verify SHA-256, and attach to the Release.
   push:
     tags:
       - "v*"
-    branches: [main]
-    paths:
-      - "deploy/pxe/ipxe.efi"
-      - "deploy/pxe/ipxe.efi.sha256"
-      - "internal/bootassets/ipxe.efi"
-      - ".github/workflows/ipxe-build.yml"
-  pull_request:
-    paths:
-      - "deploy/pxe/ipxe.efi"
-      - "deploy/pxe/ipxe.efi.sha256"
-      - "internal/bootassets/ipxe.efi"
-      - ".github/workflows/ipxe-build.yml"
+  # Manual trigger for ad-hoc verification (e.g. after updating the binary).
   workflow_dispatch:
 
 env:
@@ -62,7 +49,7 @@ env:
 
 jobs:
   build-and-verify:
-    name: Build iPXE ${{ env.IPXE_TAG }} and verify SHA-256
+    name: Build iPXE from source and verify SHA-256
     runs-on: ubuntu-22.04
 
     steps:
