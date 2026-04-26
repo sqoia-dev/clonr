@@ -28,7 +28,19 @@ CLIENTD_NEW="${CLIENTD_BIN}.autodeploy-new"
 INITRAMFS_BOOT="/var/lib/clustr/boot/initramfs.img"
 INITRAMFS_TFTP="/var/lib/clustr/tftpboot/clustr-initramfs.img"
 GOBIN="/usr/local/go/bin/go"
-HEALTH_URL="http://localhost:8080/api/v1/nodes"
+# Derive health-check URL from CLUSTR_LISTEN_ADDR so it works when the server
+# is bound to a non-loopback provisioning interface (e.g. 10.99.0.1:8080).
+# Source the systemd unit's EnvironmentFile or inline Environment values if present.
+_LISTEN_ADDR="${CLUSTR_LISTEN_ADDR:-}"
+if [[ -z "${_LISTEN_ADDR}" ]]; then
+    # Try to extract from the systemd unit directly (covers the production setup where
+    # Environment=CLUSTR_LISTEN_ADDR=<ip>:<port> is set inline in the service file)
+    _LISTEN_ADDR=$(systemctl show clustr-serverd --property=Environment 2>/dev/null \
+        | tr ' ' '\n' | grep 'CLUSTR_LISTEN_ADDR=' | cut -d= -f2 || true)
+fi
+# Fallback to localhost if not found (covers dev environments with default binding)
+_HEALTH_HOST="${_LISTEN_ADDR:-localhost:8080}"
+HEALTH_URL="http://${_HEALTH_HOST}/api/v1/nodes"
 HEALTH_TIMEOUT=30
 SERVERD_PREV="${SERVERD_BIN}.prev"
 
