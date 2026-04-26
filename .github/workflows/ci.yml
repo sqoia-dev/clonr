@@ -182,7 +182,7 @@ jobs:
       # If a finding has a fix available and is HIGH/CRITICAL, the build fails.
       # Document any accepted findings in .github/security-allowlist.yaml.
       - name: Scan image with trivy
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: clustr-server:ci-scan
           exit-code: "1"
@@ -194,7 +194,7 @@ jobs:
       # Emit SARIF for GitHub Security tab — separate step so it runs even if scan fails.
       - name: Trivy SARIF output
         if: always()
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: clustr-server:ci-scan
           exit-code: "0"
