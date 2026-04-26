@@ -756,6 +756,11 @@ func (s *Server) buildRouter() chi.Router {
 		// set-password requires a valid session (even during forced-change flow).
 		r.Post("/auth/set-password", authH.HandleSetPassword)
 
+		// Readiness probe — unauthenticated so Docker Compose healthchecks, smoke tests,
+		// and the README Quick Start can all call it without credentials. Returns 200
+		// with JSON if healthy, 503 with reason map if not. (GAP-2)
+		r.Get("/healthz/ready", health.ServeReady)
+
 		// Fully public — no key required (PXE-booted nodes before any key is issued).
 		r.Get("/boot/ipxe", boot.ServeIPXEScript)
 		r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
@@ -855,9 +860,6 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
-			// Readiness probe: pings DB, checks boot dir, checks initramfs present.
-			// Returns 200 with JSON if healthy, 503 with reason map if not.
-			r.Get("/healthz/ready", health.ServeReady)
 
 			// Images — mutating operations are admin-only.
 			// GET /images/{id} and GET /images/{id}/blob are registered above with
