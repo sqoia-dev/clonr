@@ -57,7 +57,7 @@ func New(serverURL, tokenPath, version string) (*Client, error) {
 		return nil, fmt.Errorf("clientd: serverURL is required")
 	}
 	if tokenPath == "" {
-		tokenPath = "/etc/clustr/node-token"
+		tokenPath = "/etc/clustr/node-token" //#nosec G101 -- file path to token file, not an inline credential
 	}
 
 	// Extract node ID from the URL path: .../nodes/{id}/clientd/ws

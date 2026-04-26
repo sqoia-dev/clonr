@@ -14,7 +14,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.9"
           cache: true
 
       - name: go vet
@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.9"
           cache: true
 
       - name: go vet
@@ -49,7 +49,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.9"
           cache: true
 
       - name: Build clustr (static, linux/amd64)
@@ -60,3 +60,160 @@ jobs:
 
       - name: Verify static linking
         run: file bin/clustr | grep -q "statically linked"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Security scanning — S3-12
+  #
+  # Three scanners run in parallel after lint passes:
+  #   gosec       — Go static analysis for security issues
+  #   govulncheck — Go vulnerability database check (stdlib + deps)
+  #   trivy       — Container image vulnerability scan (HIGH/CRITICAL)
+  #
+  # Threshold: HIGH severity findings fail the build.
+  #
+  # False-positive suppressions and accepted-risk decisions are documented in
+  # .github/security-allowlist.yaml.  Do not suppress a finding without a
+  # corresponding entry in that file.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      # Install gosec.  Pin to a specific version for reproducibility.
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
+
+      # Excluded rules and rationale — all documented in .github/security-allowlist.yaml:
+      #   G115 — uint64→int64 disk-size conversions; int64 max is 9.2 EB, safe for HPC use
+      #   G118 — context.Background in goroutines that must outlive HTTP requests
+      #   G122 — WalkDir race-prone paths; admin-controlled directories, low actual risk
+      #   G702 — Command injection taint on hardcoded system binaries (systemctl, journalctl, slapcat)
+      #   G703 — Path traversal taint; paths originate from DB/config, UUID-validated at API layer
+      #   G704 — SSRF taint on CLI client calling operator-configured URL and on w.Write() responses
+      #
+      # Severity threshold: HIGH.  -severity high causes gosec to exit non-zero if any
+      # HIGH finding is present AFTER the exclusions above.
+      - name: Run gosec
+        run: |
+          gosec \
+            -exclude=G115,G118,G122,G702,G703,G704 \
+            -severity=high \
+            -confidence=medium \
+            -fmt=sarif \
+            -out=gosec-results.sarif \
+            ./... || (cat gosec-results.sarif && exit 1)
+
+      - name: Upload gosec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec-results.sarif
+          category: gosec
+        # Continue if SARIF upload fails (e.g. private repos without GHAS)
+        continue-on-error: true
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # govulncheck exits non-zero if any vulnerability is found in call paths
+      # reachable from the codebase.  All stdlib vulns are fixed by bumping
+      # go.mod to go 1.25.9.  If new findings appear, check whether go.mod needs
+      # a further patch bump, or document an acceptance in security-allowlist.yaml.
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image locally (linux/amd64 only for CI speed; multi-arch push
+      # happens only on tag via docker.yml).  Load into the local Docker daemon
+      # so trivy can scan it.
+      - name: Build container image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: clustr-server:ci-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.63.0
+
+      # Scan the locally-built image.
+      #   --exit-code 1   — non-zero exit if findings at or above threshold
+      #   --severity HIGH,CRITICAL — threshold: HIGH and above fail the build
+      #   --ignore-unfixed — do not fail on vulns with no fix available (they
+      #                      cannot be resolved by clustr maintainers)
+      #   --vuln-type os,library — scan both OS packages and language deps
+      #
+      # If a finding has a fix available and is HIGH/CRITICAL, the build fails.
+      # Document any accepted findings in .github/security-allowlist.yaml.
+      - name: Scan image with trivy
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --format table \
+            clustr-server:ci-scan
+
+      # Also emit SARIF for GitHub Security tab visibility.
+      - name: Trivy SARIF output
+        if: always()
+        run: |
+          trivy image \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --format sarif \
+            --output trivy-results.sarif \
+            clustr-server:ci-scan
+
+      - name: Upload trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+        continue-on-error: true

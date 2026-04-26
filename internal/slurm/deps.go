@@ -262,7 +262,7 @@ func (m *Manager) decryptSecret(ciphertextHex string) ([]byte, error) {
 // CLUSTR_SECRET_KEY was unset. It is checked at enable-time so deployments that
 // accidentally ship without an explicit key are refused rather than silently
 // using a publicly-known encryption key.
-const defaultSecretKey = "clustr-slurm-secrets-v1"
+const defaultSecretKey = "clustr-slurm-secrets-v1" //#nosec G101 -- intentional canary; validateSecretKey() hard-fails if CLUSTR_SECRET_KEY equals this well-known default.
 
 // validateSecretKey returns an error if CLUSTR_SECRET_KEY is unset or is the
 // well-known default. Call this before enabling the Slurm module.

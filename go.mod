@@ -1,6 +1,6 @@
 module github.com/sqoia-dev/clustr
 
-go 1.25.0
+go 1.25.9
 
 require (
 	github.com/GehirnInc/crypt v0.0.0-20230320061759-8cc1b52080c5

@@ -97,7 +97,7 @@ func New(cfg power.ProviderConfig) (power.Provider, error) {
 	transport := http.DefaultTransport
 	if insecure {
 		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //#nosec G402 -- Proxmox TLS CA cert path support is tracked as S4-5; InsecureSkipVerify is operator-opted-in via node config field "insecure":"true" and is therefore intentional.
 		}
 	}
 

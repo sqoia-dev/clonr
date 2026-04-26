@@ -34,7 +34,7 @@ func main() {
 		Msg("clustr-clientd starting")
 
 	// Read config files.
-	tokenPath := "/etc/clustr/node-token"
+	tokenPath := "/etc/clustr/node-token" //#nosec G101 -- file path to node token on disk, not an inline credential
 	clustrdURLPath := "/etc/clustr/clustrd-url"
 
 	serverURL, err := readFileTrimmed(clustrdURLPath)

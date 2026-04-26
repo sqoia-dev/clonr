@@ -23,7 +23,7 @@ import (
 // defaultSecretKey is a canary value. Any deployment using this key is insecure
 // because it is committed to the public repository. The server hard-fails if
 // CLUSTR_SECRET_KEY equals this string or is empty.
-const defaultSecretKey = "clustr-default-secret-v1"
+const defaultSecretKey = "clustr-default-secret-v1" //#nosec G101 -- intentional canary; server hard-fails at startup if CLUSTR_SECRET_KEY equals or is empty relative to this value (see ValidateKey below).
 
 // ErrKeyRequired is returned when CLUSTR_SECRET_KEY is unset or is the default.
 var ErrKeyRequired = fmt.Errorf(

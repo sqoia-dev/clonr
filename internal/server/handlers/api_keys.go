@@ -128,7 +128,7 @@ func (h *APIKeysHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		hashPrefix = hashPrefix[:12]
 	}
 
-	var bearerPrefix string
+	var bearerPrefix string //#nosec G101 -- bearerPrefix is a token format prefix ("clustr-admin-" / "clustr-node-"), not a credential value
 	if scope == api.KeyScopeAdmin {
 		bearerPrefix = "clustr-admin-"
 	} else {
@@ -253,7 +253,7 @@ func (h *APIKeysHandler) HandleRotate(w http.ResponseWriter, r *http.Request) {
 		hashPrefix = hashPrefix[:12]
 	}
 
-	var bearerPrefix string
+	var bearerPrefix string //#nosec G101 -- bearerPrefix is a token format prefix ("clustr-admin-" / "clustr-node-"), not a credential value
 	if old.Scope == api.KeyScopeAdmin {
 		bearerPrefix = "clustr-admin-"
 	} else {

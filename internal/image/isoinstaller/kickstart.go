@@ -52,7 +52,7 @@ type templateData struct {
 	DefaultPasswordHash string
 }
 
-const defaultRootPasswordHash = "$6$rounds=4096$clustr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1"
+const defaultRootPasswordHash = "$6$rounds=4096$clustr$oJJBrlGPtKS6kxQe7yLm.lXX/XKNEDXkJxhXbXONnR5Rb2FIWKijYcpg/0E1n3W6B9Ik8n3Zd7gH8kO35i3o1" //#nosec G101 -- sha-512 crypt hash used as kickstart template default; operators are expected to supply their own password via the API at image-build time.
 
 // hashPassword hashes a plaintext password with SHA-512 crypt using
 // openssl passwd -6, which is available on all modern Linux systems.
