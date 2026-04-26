@@ -772,12 +772,16 @@ func (m *Manager) handleDeleteBuild(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
 	buildID := chi.URLParam(r, "build_id")
-	token := r.URL.Query().Get("token")
+	// Read "sig" not "token": the apiKeyAuth middleware's extractBearerToken
+	// function falls back to ?token= for WebSocket compatibility, so using
+	// ?token= here would cause the HMAC value to be treated as a Bearer key,
+	// looked up in the DB, and rejected with 401 before reaching this handler.
+	token := r.URL.Query().Get("sig")
 	expires := r.URL.Query().Get("expires")
 
 	// Validate signed URL.
 	if token == "" || expires == "" {
-		jsonError(w, "missing token or expires parameter", http.StatusBadRequest)
+		jsonError(w, "missing sig or expires parameter", http.StatusBadRequest)
 		return
 	}
 	if !m.ValidateArtifactToken(buildID, token, expires) {

@@ -334,7 +334,11 @@ func (m *Manager) GenerateArtifactURL(buildID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("/api/v1/slurm/builds/%s/artifact?token=%s&expires=%d",
+	// Use "sig" instead of "token" to avoid conflict with extractBearerToken in
+	// the apiKeyAuth middleware, which falls back to ?token= for WebSocket auth.
+	// If we used ?token= the HMAC value would be treated as a Bearer key, looked
+	// up in the DB, and rejected with 401 before the handler even runs.
+	return fmt.Sprintf("/api/v1/slurm/builds/%s/artifact?sig=%s&expires=%d",
 		buildID, token, expires.Unix()), nil
 }
 
