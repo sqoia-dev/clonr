@@ -836,6 +836,34 @@ The server only allows ISO imports from paths under `CLUSTR_ISO_DIR` (default: `
 | `CLUSTR_PXE_SERVER_IP` | auto-detect | Server IP advertised to PXE clients |
 | `CLUSTR_BOOT_DIR` | `/var/lib/clustr/boot` | Kernel + initramfs location |
 | `CLUSTR_TFTP_DIR` | `/var/lib/clustr/tftpboot` | TFTP root directory |
+| `CLUSTR_FLIP_CONCURRENCY` | `5` | Max concurrent Proxmox boot-order flip operations |
+
+---
+
+## Prometheus Metrics
+
+clustr-serverd exposes a Prometheus-compatible metrics endpoint at `GET /metrics` (no authentication required).
+
+```yaml
+# prometheus.yml scrape config
+scrape_configs:
+  - job_name: clustr
+    static_configs:
+      - targets: ['<clustr-server-ip>:8080']
+```
+
+**Available metrics:**
+
+| Metric | Type | Description |
+|---|---|---|
+| `clustr_active_deploys` | Gauge | Reimage requests in a non-terminal state |
+| `clustr_deploy_total{status}` | Counter | Completed deploys by status (`complete`, `failed`, `canceled`) |
+| `clustr_api_requests_total{endpoint,status,method}` | Counter | API requests served, by coarsened endpoint path |
+| `clustr_db_size_bytes` | Gauge | SQLite database file size in bytes |
+| `clustr_image_disk_bytes` | Gauge | Total image blob storage consumed in bytes |
+| `clustr_nodes{state}` | Gauge | Node count by state (`new`, `deployed`, `failed`, `verified_booted`, etc.) |
+| `clustr_flip_back_failures` | Counter | Proxmox boot-order reset failures since process start |
+| `clustr_webhook_deliveries_total{event,status}` | Counter | Outbound webhook delivery attempts by event and status |
 
 ---
 

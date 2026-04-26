@@ -352,4 +352,98 @@ priority security or reliability fixes.
   for the 5 most common first-deploy failure modes. Linked from `README.md`
   Installation section.
 
-*Next sprint: Sprint 4 (continued) — Prometheus metrics, webhooks, and remaining production-hardening items*
+### Observability
+
+- **[S4-1] Prometheus metrics endpoint: `GET /metrics`**
+  New `internal/metrics` package registers 8 Prometheus metrics via `promauto`:
+  `clustr_active_deploys` (gauge), `clustr_deploy_total{status}` (counter vec),
+  `clustr_api_requests_total{endpoint,status,method}` (counter vec),
+  `clustr_db_size_bytes` (gauge), `clustr_image_disk_bytes` (gauge),
+  `clustr_nodes{state}` (gauge vec), `clustr_flip_back_failures` (counter),
+  `clustr_webhook_deliveries_total{event,status}` (counter vec).
+  `GET /metrics` served by `promhttp.Handler()` without authentication.
+  `runMetricsCollector` goroutine ticks every 30 s to update gauges (node
+  counts by state, active deploys, DB file size, image dir total bytes).
+  `endpointLabel()` in middleware coarsens path labels to prevent cardinality
+  explosion from node/image IDs. All node states pre-seeded to 0 at startup.
+  `go.mod` adds `github.com/prometheus/client_golang v1.23.2`.
+
+- **[S4-9] Flip-back failure counter in health endpoint**
+  `GET /api/v1/health` now includes `flip_back_failures` (omitted when 0).
+  Incremented atomically each time `flipNodeToDiskFirst` returns an error in
+  the verify-boot scanner goroutine. Wired to `metrics.FlipBackFailures` (S4-1)
+  and to a local `int64` counter on the server struct for the health response.
+
+### Integrations
+
+- **[S4-2] Outbound webhooks: delivery pipeline**
+  New `internal/webhook` package: `Dispatcher.Dispatch(ctx, event, payload)`
+  fans out to all active subscriptions for the event in separate goroutines.
+  `deliver()` retries up to 3 times with exponential backoff (1 s → 2 s → 4 s).
+  Each delivery attempt recorded in `webhook_deliveries` table.
+  `post()` signs request bodies with HMAC-SHA256 (`X-Clustr-Signature: sha256=…`).
+  Events: `deploy.complete`, `deploy.failed`, `verify_boot.timeout`, `image.ready`.
+  Migration 045: `webhook_subscriptions` + `webhook_deliveries` tables.
+  Admin CRUD: `GET/POST /admin/webhooks`, `GET/PUT/DELETE /admin/webhooks/{id}`,
+  `GET /admin/webhooks/{id}/deliveries`.
+
+### Background Workers / Reliability
+
+- **[S4-3] Orphan reimage_pending reaper**
+  `runReimagePendingReaper` goroutine runs at startup then hourly. Finds all
+  nodes with `reimage_pending = 1` that have no active (non-terminal) reimage
+  request. Clears `reimage_pending` to prevent nodes getting stuck in a PXE
+  boot loop after a server crash between `SetNextBoot(PXE)` and the DB write.
+
+- **[S4-4] Crash-recovery: resume running group reimage jobs on startup**
+  `resumeRunningGroupReimageJobs` runs at startup. Finds all
+  `group_reimage_jobs` with `status = 'running'` from before the last process
+  exit. Re-dispatches remaining (not-yet-triggered) nodes via the orchestrator.
+  New `Orchestrator.ResumeGroupReimageJob(ctx, jobID)` method.
+
+- **[S4-6] Bounded-concurrency verify-boot scanner**
+  `runVerifyTimeoutScanner` now fans out `flipNodeToDiskFirst` calls via a
+  bounded semaphore (buffered channel). Default concurrency: 5, configurable
+  via `CLUSTR_FLIP_CONCURRENCY`. Prevents a large batch of simultaneous
+  verify-boot timeouts from creating O(n) concurrent Proxmox API calls.
+  Fires `verify_boot.timeout` webhook on each timeout detection (S4-2).
+
+- **[S4-10] `DELETE /api/v1/nodes/{id}/reimage/active`**
+  Cancels the active (non-terminal) reimage for a node by node ID without
+  requiring the reimage request ID. Returns the cancelled record or 404 if
+  no active reimage exists.
+
+### Deploy UX
+
+- **[S4-5] Proxmox custom CA cert support**
+  `power_provider.proxmox` config accepts new optional field `tls_ca_cert_path`.
+  When set, the Proxmox HTTP client builds a cert pool from the PEM file and
+  uses it as the TLS root of trust. When `insecure = true` (and no CA path),
+  the client logs a WARN and uses `InsecureSkipVerify`. Default: system pool.
+  Eliminates the `insecure = true` footgun for orgs with private PKI.
+  UI: `tls_ca_cert_path` input added to both the node create/edit modal and
+  the inline BMC tab Proxmox fields section.
+
+- **[S4-11] Per-deployment `inject_vars` custom_vars override**
+  `POST /api/v1/nodes/{id}/reimage` accepts optional `inject_vars: {k: v}`.
+  Migration 046: `reimage_requests.inject_vars TEXT NOT NULL DEFAULT '{}'`.
+  At `POST /api/v1/nodes/register`, when `action = deploy` and
+  `reimage_pending = true`, `GetInjectVarsForActiveReimage` merges the stored
+  inject_vars into `NodeConfig.CustomVars` before returning to the deploy agent.
+  inject_vars keys win on collision. Not persisted to `node_configs` — ephemeral
+  for this deployment only. Allows per-job parameter injection without editing
+  the node's persistent config.
+
+### UI
+
+- **[S4-12] Remove duplicate Delete button from node detail header**
+  The standalone `<button class="btn btn-danger btn-sm">Delete</button>` in the
+  node detail page header has been removed. Delete node is available exclusively
+  from the Actions dropdown ("Delete node" in the danger zone), eliminating
+  the redundant and potentially confusing second button.
+
+- **[S4-13] Server Info tab: live data replaces placeholder**
+  Settings → Server Info now shows: version, commit SHA, build time, total
+  registered node count, flip-back failure count, and the `/metrics` endpoint
+  URL. Data fetched from `GET /api/v1/health` + `GET /api/v1/nodes` in
+  parallel. A warning banner appears if `flip_back_failures > 0`.
