@@ -30,6 +30,7 @@ INITRAMFS_TFTP="/var/lib/clustr/tftpboot/clustr-initramfs.img"
 GOBIN="/usr/local/go/bin/go"
 HEALTH_URL="http://localhost:8080/api/v1/nodes"
 HEALTH_TIMEOUT=30
+SERVERD_PREV="${SERVERD_BIN}.prev"
 
 # build-initramfs.sh uses sshpass+scp to pull binaries/libs from the clustr-server.
 # When autodeploy runs ON the clustr-server itself we create a sshpass shim in
@@ -213,6 +214,19 @@ if [ "${BUILD_STATUS}" = "unknown" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Snapshot current binary for rollback (overwrite any older .prev)
+# ---------------------------------------------------------------------------
+# Capture the short SHA embedded in the running binary before we replace it.
+# Used in journal message if rollback fires.
+_PREV_SHA="unknown"
+if [[ -f "${SERVERD_BIN}" ]]; then
+    cp -f "${SERVERD_BIN}" "${SERVERD_PREV}"
+    # Best-effort: read version string from binary metadata if available
+    _PREV_SHA=$(strings "${SERVERD_BIN}" 2>/dev/null | grep -E '^[0-9a-f]{7,12}$' | tail -1 || echo "unknown")
+    log "Snapshotted current binary to ${SERVERD_PREV} (prev SHA hint: ${_PREV_SHA})"
+fi
+
+# ---------------------------------------------------------------------------
 # Atomic replace: server binary + restart service
 # ---------------------------------------------------------------------------
 log "Replacing clustr-serverd, clustr-static, and clustr-clientd binaries..."
@@ -267,8 +281,39 @@ done
 
 if [[ "${HEALTHY}" -eq 0 ]]; then
     log "ERROR: clustr-serverd did not become healthy within ${HEALTH_TIMEOUT}s (last HTTP code: ${HTTP_CODE:-none})"
-    log "       The new binary is in place and the service was restarted — check 'journalctl -u clustr-serverd'"
-    log "       The NEXT timer cycle will attempt another sync."
+    # ---------------------------------------------------------------------------
+    # Rollback: restore previous binary and restart
+    # ---------------------------------------------------------------------------
+    if [[ -f "${SERVERD_PREV}" ]]; then
+        log "Rollback: restoring ${SERVERD_PREV} → ${SERVERD_BIN}"
+        cp -f "${SERVERD_PREV}" "${SERVERD_BIN}"
+        systemctl restart clustr-serverd
+        # Brief wait to confirm rollback came up
+        _RB_HEALTHY=0
+        _RB_DEADLINE=$(( $(date +%s) + 20 ))
+        while [[ $(date +%s) -lt ${_RB_DEADLINE} ]]; do
+            _RB_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "${HEALTH_URL}" 2>/dev/null || true)
+            if [[ "${_RB_CODE}" == "401" || "${_RB_CODE}" == "200" ]]; then
+                _RB_HEALTHY=1
+                break
+            fi
+            sleep 2
+        done
+        if [[ "${_RB_HEALTHY}" -eq 1 ]]; then
+            # Use journalctl-visible systemd-cat for structured journal entry
+            echo "clustr-autodeploy: rollback applied — health check failed on SHA ${REMOTE_SHA}, restored SHA ${_PREV_SHA}" \
+                | systemd-cat -t clustr-autodeploy -p warning 2>/dev/null || true
+            log "Rollback SUCCEEDED — previous binary is running (prev SHA: ${_PREV_SHA}, failed SHA: ${REMOTE_SHA})"
+        else
+            echo "clustr-autodeploy: rollback FAILED — service did not come up on prev SHA ${_PREV_SHA} either" \
+                | systemd-cat -t clustr-autodeploy -p err 2>/dev/null || true
+            log "ERROR: Rollback FAILED — service did not come up on previous binary either"
+            log "       Manual intervention required: check 'journalctl -u clustr-serverd'"
+        fi
+    else
+        log "WARNING: No previous binary at ${SERVERD_PREV} — rollback not possible"
+        log "         This is expected on the first deployment. Check 'journalctl -u clustr-serverd' for startup errors."
+    fi
     exit 1
 fi
 
