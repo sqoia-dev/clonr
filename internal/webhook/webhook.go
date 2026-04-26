@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -61,12 +62,20 @@ type Dispatcher struct {
 	Client *http.Client
 }
 
-// New constructs a Dispatcher with a default HTTP client (30s timeout).
+// New constructs a Dispatcher with a secure HTTP client (TLS 1.2+, 15s timeout).
 func New(database *db.DB, logger zerolog.Logger) *Dispatcher {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12, // #nosec G402 — explicitly set, not too low
+		},
+	}
 	return &Dispatcher{
 		DB:     database,
 		Logger: logger.With().Str("component", "webhook").Logger(),
-		Client: &http.Client{Timeout: 15 * time.Second},
+		Client: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: transport,
+		},
 	}
 }
 

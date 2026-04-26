@@ -119,7 +119,7 @@ func New(cfg power.ProviderConfig) (power.Provider, error) {
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return nil, fmt.Errorf("proxmox provider: tls_ca_cert_path %q contains no valid PEM certificates", caPath)
 		}
-		tlsCfg = &tls.Config{RootCAs: pool}
+		tlsCfg = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	case insecure:
 		log.Warn().
 			Str("api_url", apiURL).
