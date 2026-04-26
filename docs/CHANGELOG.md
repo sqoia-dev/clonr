@@ -51,6 +51,25 @@
   docs side of NEW-GAP-2 (Dinesh's code side: add `munge_key_present` field
   to the status response struct).
 
+- **[Item 2] `docs/slurm-module.md` — auto-install turnkey path documented**
+  §1 Overview updated: module now described as auto-installing Slurm at deploy
+  time. The previous statement "the module does not install Slurm binaries" is
+  removed. §2 restructured into two paths: Recommended (any base image,
+  auto-install from `slurm_repo_url` at finalize) and Advanced (gold image with
+  Slurm pre-baked, for air-gapped or speed-critical deployments). Auto-install
+  finalize sequence documented (repo add → package install → munge key inject →
+  slurm.conf write → systemd enable). Non-fatal behavior documented (WARN + continue
+  if repo unreachable). §3 "What happens automatically on enable" updated with
+  step 3 (`cluster_name` and `slurm_repo_url` stored) and step 4 (auto-install
+  gated on Slurm role). §7 smoke test intro updated: fresh Rocky 9/10 image now
+  works end-to-end without pre-baking. Prerequisites checklist updated to include
+  `slurm_repo_url` reachability check. §8 "Upgrading Slurm" now documents the
+  auto-install upgrade path (update `slurm_repo_url`, reimage — no image rebuild
+  required) alongside the gold image upgrade path. §10 troubleshooting: replaced
+  "install slurm in the image" row with "check slurm_repo_url reachability" row,
+  updated to reflect non-fatal WARN behavior. Old degraded-state row retained for
+  the gold-image advanced path.
+
 ---
 
 ## Gap-fill Sprint — Slurm + UX hardening (2026-04-25)
