@@ -33,7 +33,12 @@ const (
 	AuditActionGroupMemberRemove = "node_group.member_remove"
 	AuditActionUserGroupMemberships = "user.group_memberships_update"
 	AuditActionLDAPConfigChange = "ldap_config.update"
-	AuditActionSlurmConfigChange = "slurm_config.update"
+	AuditActionSlurmConfigChange    = "slurm_config.update"
+	// AuditActionSlurmInstallFailed is recorded when the in-chroot dnf Slurm
+	// install step fails during a node deploy. Query with:
+	//   GET /api/v1/audit?action=slurm.install.failed
+	// The new_value JSON contains "repo_url" and "detail" (last 2KB of dnf output).
+	AuditActionSlurmInstallFailed = "slurm.install.failed"
 )
 
 // AuditRecord is one row in audit_log.

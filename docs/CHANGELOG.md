@@ -2,6 +2,67 @@
 
 ---
 
+## Turnkey gap-fill — DNS injection, build pipeline, audit visibility (2026-04-25)
+
+### NEW-GAP-5 — Inject DNS into NetworkManager profiles
+
+- **Root cause:** Deployed nodes received NM profiles without a `dns=` line,
+  causing systemd-resolved to fall back to the QEMU NAT default `10.0.2.3`
+  which is unreachable from the provisioning network (10.99.0.0/24). Every
+  outbound network call (`dnf`, `curl`, systemd-resolved) on the node silently
+  timed out.
+- **Fix:** Added `clusterDNSServers()` in `internal/deploy/finalize.go` that
+  reads `CLUSTR_DNS_SERVERS` env var (comma-separated IPs). Default is
+  `1.1.1.1,8.8.8.8`. Operators running a local forwarder should set
+  `CLUSTR_DNS_SERVERS=10.99.0.1`.
+- **Applied to all three NM profile writers:**
+  - `writeNMKeyfile()` — static/DHCP per-interface profiles (per-interface DNS
+    takes precedence; falls back to cluster defaults when `iface.DNS` is empty)
+  - `writeClustrDHCPProfile()` — the clustr-dhcp DHCP fallback profile
+  - `writeNetworkConfig()` fallback — the wired-dhcp wildcard profile
+
+### NEW-GAP-4 partial — dnf install failure visibility + repo URL validation
+
+- **Audit action `slurm.install.failed`:** When `dnf install` inside the chroot
+  fails, the full combined stdout+stderr (last 2 KB) is now captured and emitted
+  as a structured zerolog WARN event with `dnf_output`, `node_id`, and `repo_url`
+  fields. Operators can grep or stream server logs to see the exact dnf error.
+- **`SlurmInstallAuditFn` callback type** exposed from `internal/deploy` package
+  so server-level code can wire the `db.AuditService` to write
+  `slurm.install.failed` audit records — query with
+  `GET /api/v1/audit?action=slurm.install.failed`.
+- **EL9/EL10 mismatch detection** in `installSlurmInChroot()`: reads
+  `VERSION_ID` from `/etc/os-release` in the chroot and compares it against the
+  EL version encoded in the repo URL (`EL_9` / `EL_10` / `EL9` substrings).
+  Logs a WARN with the correct URL template if a mismatch is found — runs before
+  `dnf install` so the operator sees it immediately.
+- **URL reachability check at enable time:** `POST /api/v1/modules/slurm/enable`
+  now issues a HEAD request (5s timeout) to `slurm_repo_url` and logs INFO on
+  success or WARN on failure/unexpected status. Non-fatal — enable always
+  succeeds regardless of URL reachability.
+- **`db.AuditActionSlurmInstallFailed = "slurm.install.failed"`** added to
+  `internal/db/audit.go` audit action constant set.
+
+### NEW-GAP-6 — Build-from-source pipeline configure flags
+
+- **Root cause:** `buildOneDep()` only ever passed `--prefix` to `./configure`.
+  PMIx requires `--with-hwloc=<hwloc-install-path>` to locate hwloc headers;
+  without it, PMIx builds without hwloc support, and the resulting Slurm binary
+  fails to detect topology.
+- **Fix:** Added `depConfigureFlags(name, installPaths)` in `deps.go` that
+  returns per-dep cross-dep configure flags. PMIx receives
+  `--with-hwloc=<hwloc-install>`. Other deps (hwloc, ucx, munge, libjwt) use
+  only `--prefix`.
+- **`buildOneDep()` signature changed:** now accepts `installPaths map[string]string`
+  (populated progressively as each dep finishes). The caller (`buildDependencies`)
+  passes the accumulating map so each dep sees the previous deps' install paths.
+- **`buildSlurmConfigureArgs()` in `builder.go` improved:** all dep paths now use
+  explicit `--with-<dep>=<path>` when available (previously `--with-munge` had no
+  path). Added `--with-munge=<path>`, `--with-jwt=<path>`, fall-back to flag-only
+  form when a dep was skipped.
+
+---
+
 ## Turnkey gap-fill round 3 — rocky10 image SSH fix + Slurm EL-version docs (2026-04-26)
 
 ### NEW-GAP-3 (image) — rocky10 image: add PermitRootLogin yes to sshd drop-in

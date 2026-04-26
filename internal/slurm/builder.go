@@ -209,23 +209,46 @@ func (m *Manager) failBuild(ctx context.Context, buildID string, cause error) er
 }
 
 // buildSlurmConfigureArgs constructs the ./configure args for Slurm.
+//
+// Dependency wiring (all with explicit install paths so configure finds the
+// headers/libs we just built rather than system-installed versions):
+//
+//   - --with-munge=<path>  — link against our built libmunge, not system munge
+//   - --with-hwloc=<path>  — topology-aware scheduling
+//   - --with-ucx=<path>    — MPI high-speed network transport
+//   - --with-pmix=<path>   — PMI-2/PMIx for MPI process management (needs hwloc)
+//
+// Extra caller-supplied flags from BuildConfig.ConfigureFlags are appended last
+// so operators can override defaults (e.g. --with-json=<path> for libjwt).
 func buildSlurmConfigureArgs(cfg BuildConfig, depPaths map[string]string) []string {
 	args := []string{
 		"--prefix=/usr/local",
 		"--sysconfdir=/etc/slurm",
-		"--with-munge",
 		"--enable-pam",
-		"--with-jwt",
 	}
-	if p, ok := depPaths["pmix"]; ok {
-		args = append(args, "--with-pmix="+p)
+
+	// Wire each dependency with an explicit path when available.
+	// Fall back to --with-<dep> (no path) only when dep was skipped (not built).
+	if p, ok := depPaths["munge"]; ok && p != "" {
+		args = append(args, "--with-munge="+p)
+	} else {
+		args = append(args, "--with-munge")
 	}
-	if p, ok := depPaths["hwloc"]; ok {
+	if p, ok := depPaths["hwloc"]; ok && p != "" {
 		args = append(args, "--with-hwloc="+p)
 	}
-	if p, ok := depPaths["ucx"]; ok {
+	if p, ok := depPaths["ucx"]; ok && p != "" {
 		args = append(args, "--with-ucx="+p)
 	}
+	if p, ok := depPaths["pmix"]; ok && p != "" {
+		args = append(args, "--with-pmix="+p)
+	}
+	if p, ok := depPaths["libjwt"]; ok && p != "" {
+		args = append(args, "--with-jwt="+p)
+	} else {
+		args = append(args, "--with-jwt")
+	}
+
 	return append(args, cfg.ConfigureFlags...)
 }
 

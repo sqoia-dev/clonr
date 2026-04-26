@@ -94,7 +94,9 @@ func (m *Manager) buildDependencies(ctx context.Context, buildID, slurmVersion, 
 
 		m.logBuildLine(buildID, fmt.Sprintf("[deps] building %s %s", depName, version))
 
-		installPrefix, err := m.buildOneDep(ctx, buildID, depName, version, arch, depsDir, workspace)
+		// Pass installPaths accumulated so far so that deps can reference earlier
+		// build outputs via --with-<dep>=<path> configure flags.
+		installPrefix, err := m.buildOneDep(ctx, buildID, depName, version, arch, depsDir, workspace, installPaths)
 		if err != nil {
 			return nil, fmt.Errorf("deps: build %s %s: %w", depName, version, err)
 		}
@@ -120,8 +122,37 @@ func (m *Manager) buildDependencies(ctx context.Context, buildID, slurmVersion, 
 	return installPaths, nil
 }
 
+// depConfigureFlags returns extra ./configure arguments for a dependency, given
+// the install paths of already-built dependencies.
+//
+// Build order is: munge → hwloc → ucx → pmix → libjwt (see depBuildOrder).
+// Later deps reference earlier install paths via --with-<dep>=<path>.
+//
+//   - pmix: needs hwloc headers/libs → --with-hwloc=<hwloc-install>
+//   - slurm (main binary, not a dep): wired in builder.go; listed here for
+//     documentation only — slurm configure flags come from BuildConfig.ConfigureFlags
+//     plus auto-wiring in builder.go.
+//
+// hwloc, ucx, munge, libjwt: no cross-dep configure flags needed beyond --prefix.
+func depConfigureFlags(name string, installPaths map[string]string) []string {
+	switch name {
+	case "pmix":
+		var flags []string
+		if p, ok := installPaths["hwloc"]; ok && p != "" {
+			flags = append(flags, "--with-hwloc="+p)
+		}
+		return flags
+	default:
+		return nil
+	}
+}
+
 // buildOneDep builds a single dependency or reuses an existing install.
-func (m *Manager) buildOneDep(ctx context.Context, buildID, name, version, arch, depsDir, workspace string) (string, error) {
+//
+// installPaths holds the install prefixes of previously built dependencies.
+// Each dep may reference earlier dep outputs via depConfigureFlags (e.g. PMIx
+// needs --with-hwloc=<hwloc-install-path> to find hwloc headers/libs).
+func (m *Manager) buildOneDep(ctx context.Context, buildID, name, version, arch, depsDir, workspace string, installPaths map[string]string) (string, error) {
 	installPrefix := filepath.Join(depsDir, name+"-install")
 
 	// Reuse if already installed (idempotent on retry).
@@ -162,7 +193,9 @@ func (m *Manager) buildOneDep(ctx context.Context, buildID, name, version, arch,
 		return "", fmt.Errorf("mkdir install prefix: %w", err)
 	}
 
+	// Build configure args: start with --prefix, add per-dep cross-dep flags.
 	configureArgs := []string{"--prefix=" + installPrefix}
+	configureArgs = append(configureArgs, depConfigureFlags(name, installPaths)...)
 	m.logBuildLine(buildID, fmt.Sprintf("[deps] %s: ./configure %s", name, strings.Join(configureArgs, " ")))
 	if err := runCmd(ctx, topDir, "./configure", configureArgs...); err != nil {
 		return "", fmt.Errorf("configure %s: %w", name, err)

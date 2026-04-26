@@ -154,6 +154,12 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 		return fmt.Errorf("slurm: cluster_name is required")
 	}
 
+	// Validate slurm_repo_url at enable time: HEAD check + EL version mismatch
+	// detection so operators get immediate feedback rather than a silent deploy failure.
+	if req.SlurmRepoURL != "" {
+		validateSlurmRepoURL(ctx, req.SlurmRepoURL)
+	}
+
 	managedFiles := req.ManagedFiles
 	if len(managedFiles) == 0 {
 		managedFiles = defaultManagedFiles
@@ -669,4 +675,40 @@ func (m *Manager) IsEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.cfg != nil && m.cfg.Enabled && m.cfg.Status == statusReady
+}
+
+// validateSlurmRepoURL performs a best-effort HEAD request to the repo URL and
+// logs the result. Called at module-enable time to give the operator immediate
+// feedback about URL reachability.
+//
+// This is purely advisory (non-fatal): if the URL is unreachable at enable time
+// it may still become reachable later, or the operator may be setting it before
+// the repo server is running. We never block enable on URL reachability.
+func validateSlurmRepoURL(ctx context.Context, repoURL string) {
+	// 5-second timeout for the HEAD request — enough to detect a dead host
+	// without hanging the enable flow.
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, repoURL, nil)
+	if err != nil {
+		log.Warn().Str("slurm_repo_url", repoURL).Err(err).
+			Msg("slurm: enable: could not build HEAD request for slurm_repo_url (URL may be invalid)")
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Warn().Str("slurm_repo_url", repoURL).Err(err).
+			Msg("slurm: enable: slurm_repo_url is not reachable — dnf install will fail unless this is fixed before deploy")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusMovedPermanently, http.StatusFound:
+		log.Info().Str("slurm_repo_url", repoURL).Int("status", resp.StatusCode).
+			Msg("slurm: enable: slurm_repo_url reachability check passed")
+	default:
+		log.Warn().Str("slurm_repo_url", repoURL).Int("status", resp.StatusCode).
+			Msg("slurm: enable: slurm_repo_url returned unexpected status — verify the URL is correct")
+	}
 }

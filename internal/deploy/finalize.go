@@ -257,7 +257,10 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		log.Info().Str("cluster", cfg.SlurmConfig.ClusterName).
 			Int("configs", len(cfg.SlurmConfig.Configs)).
 			Msg("finalize: writing Slurm configuration")
-		if err := writeSlurmConfig(ctx, mountRoot, cfg.SlurmConfig); err != nil {
+		// auditFn is nil here — applyNodeConfig is a low-level deploy function
+		// that does not have direct access to the audit service. Callers that
+		// want audit logging should use WriteSlurmConfigWithAudit instead.
+		if err := writeSlurmConfig(ctx, mountRoot, cfg.ID, cfg.SlurmConfig, nil); err != nil {
 			// Non-fatal: Slurm config failure should not abort a deployment.
 			// The node will boot without Slurm; operator can re-image to add Slurm.
 			log.Warn().Err(err).Msg("WARNING: finalize: Slurm config failed (non-fatal)")
@@ -627,20 +630,25 @@ func writeNetworkConfig(mountRoot string, interfaces []api.InterfaceConfig) erro
 
 	if len(interfaces) == 0 {
 		// Write a wildcard DHCP profile so the first wired interface comes up.
-		fallback := `[connection]
-id=wired-dhcp
-type=ethernet
-autoconnect=true
-autoconnect-priority=-100
-
-[ethernet]
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=ignore
-`
+		// Inject DNS so the node can resolve external hostnames (e.g. dnf repos)
+		// without falling back to the QEMU NAT default (10.0.2.3) which is
+		// unreachable from the provisioning network.
+		dnsServers := clusterDNSServers()
+		dnsLine := fmt.Sprintf("dns=%s;\n", strings.Join(dnsServers, ";"))
+		fallback := "[connection]\n" +
+			"id=wired-dhcp\n" +
+			"type=ethernet\n" +
+			"autoconnect=true\n" +
+			"autoconnect-priority=-100\n" +
+			"\n" +
+			"[ethernet]\n" +
+			"\n" +
+			"[ipv4]\n" +
+			"method=auto\n" +
+			dnsLine +
+			"\n" +
+			"[ipv6]\n" +
+			"method=ignore\n"
 		path := filepath.Join(nmDir, "wired-dhcp.nmconnection")
 		return os.WriteFile(path, []byte(fallback), 0o600)
 	}
@@ -653,6 +661,35 @@ method=ignore
 	return nil
 }
 
+// clusterDNSServers returns the DNS resolver list for deployed nodes.
+//
+// Source priority:
+//  1. CLUSTR_DNS_SERVERS env var (comma-separated IPs, e.g. "10.99.0.1,1.1.1.1")
+//  2. Hard default: "1.1.1.1,8.8.8.8"
+//
+// The QEMU NAT default (10.0.2.3) is intentionally NOT used here — it is
+// unreachable from the provisioning network (10.99.0.0/24) and causes every
+// outbound network call (dnf, systemd-resolved, etc.) on the deployed node to
+// time out silently.  Operators running a local DNS forwarder (e.g. dnsmasq on
+// 10.99.0.1) should set CLUSTR_DNS_SERVERS=10.99.0.1.
+func clusterDNSServers() []string {
+	raw := os.Getenv("CLUSTR_DNS_SERVERS")
+	if raw == "" {
+		return []string{"1.1.1.1", "8.8.8.8"}
+	}
+	var servers []string
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			servers = append(servers, s)
+		}
+	}
+	if len(servers) == 0 {
+		return []string{"1.1.1.1", "8.8.8.8"}
+	}
+	return servers
+}
+
 // writeClustrDHCPProfile writes a minimal NetworkManager connection profile that
 // auto-connects via DHCP on the first available ethernet interface. This ensures
 // clustr-verify-boot.service can reach the server after reboot even when all other
@@ -662,23 +699,32 @@ method=ignore
 // connection files. The high autoconnect-priority (100) means this profile is
 // preferred over NM's built-in defaults but yields to operator-created profiles
 // (which should specify interface-name= to pin to a specific NIC).
+//
+// DNS servers from clusterDNSServers() are injected so the node can resolve
+// external hostnames (e.g. for dnf package installs) immediately after boot.
 func writeClustrDHCPProfile(mountRoot string) error {
 	nmDir := filepath.Join(mountRoot, "etc", "NetworkManager", "system-connections")
 	if err := os.MkdirAll(nmDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir NM connections: %w", err)
 	}
-	profile := `[connection]
-id=clustr-dhcp
-type=ethernet
-autoconnect=true
-autoconnect-priority=100
 
-[ipv4]
-method=auto
+	dnsServers := clusterDNSServers()
+	// NM keyfile dns= uses semicolon-separated IPs with a trailing semicolon.
+	dnsLine := fmt.Sprintf("dns=%s;\n", strings.Join(dnsServers, ";"))
 
-[ipv6]
-method=auto
-`
+	profile := "[connection]\n" +
+		"id=clustr-dhcp\n" +
+		"type=ethernet\n" +
+		"autoconnect=true\n" +
+		"autoconnect-priority=100\n" +
+		"\n" +
+		"[ipv4]\n" +
+		"method=auto\n" +
+		dnsLine +
+		"\n" +
+		"[ipv6]\n" +
+		"method=auto\n"
+
 	profilePath := filepath.Join(nmDir, "clustr-dhcp.nmconnection")
 	return os.WriteFile(profilePath, []byte(profile), 0o600)
 }
@@ -715,6 +761,13 @@ func writeNMKeyfile(nmDir string, iface api.InterfaceConfig) error {
 	sb.WriteString("\n")
 
 	sb.WriteString("[ipv4]\n")
+	// DNS: prefer per-interface override; fall back to cluster-wide servers so
+	// the node can reach external repos (e.g. dnf) without QEMU NAT DNS (10.0.2.3)
+	// which is unreachable from the provisioning network (10.99.0.0/24).
+	dnsServers := iface.DNS
+	if len(dnsServers) == 0 {
+		dnsServers = clusterDNSServers()
+	}
 	if ip != "" {
 		sb.WriteString("method=manual\n")
 		fmt.Fprintf(&sb, "address1=%s/%s", ip, prefix)
@@ -722,11 +775,10 @@ func writeNMKeyfile(nmDir string, iface api.InterfaceConfig) error {
 			fmt.Fprintf(&sb, ",%s", iface.Gateway)
 		}
 		sb.WriteString("\n")
-		if len(iface.DNS) > 0 {
-			fmt.Fprintf(&sb, "dns=%s;\n", strings.Join(iface.DNS, ";"))
-		}
+		fmt.Fprintf(&sb, "dns=%s;\n", strings.Join(dnsServers, ";"))
 	} else {
 		sb.WriteString("method=auto\n")
+		fmt.Fprintf(&sb, "dns=%s;\n", strings.Join(dnsServers, ";"))
 	}
 	sb.WriteString("\n")
 
@@ -2109,7 +2161,11 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 //   - Writes each script from SlurmNodeConfig.Scripts (mode 0755)
 //   - Writes munge.key if present (mode 0400, owner munge:munge)
 //   - Enables role-appropriate systemd services via chroot systemctl enable
-func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.SlurmNodeConfig) error {
+//
+// nodeID identifies the target node (used for audit log entries on install failure).
+// auditFn is optional; when non-nil it is called on dnf install failure with the
+// full error detail so the server can write an audit_log record.
+func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *api.SlurmNodeConfig, auditFn SlurmInstallAuditFn) error {
 	if slurmCfg == nil {
 		return nil
 	}
@@ -2161,7 +2217,7 @@ func writeSlurmConfig(ctx context.Context, mountRoot string, slurmCfg *api.Slurm
 	//   compute (gres)   → slurm slurm-slurmd munge
 	//   neither (fallback)→ slurm munge
 	if slurmCfg.SlurmRepoURL != "" {
-		installSlurmInChroot(ctx, mountRoot, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres)
+		installSlurmInChroot(ctx, mountRoot, nodeID, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres, auditFn)
 	}
 
 	// ── Create directories ────────────────────────────────────────────────────
@@ -2398,6 +2454,15 @@ func ldapDomainFromBaseDN(baseDN string) string {
 	return "cluster"
 }
 
+// SlurmInstallAuditFn is a callback invoked by installSlurmInChroot when the
+// dnf install step fails. The caller (writeSlurmConfig → applyNodeConfig) wires
+// this to the server audit service so operators can query the audit log for
+// failure details without grepping server logs.
+//
+// action is always db.AuditActionSlurmInstallFailed ("slurm.install.failed").
+// detail contains the last 2 KB of combined dnf stdout+stderr.
+type SlurmInstallAuditFn func(ctx context.Context, nodeID, action, detail string)
+
 // writeSudoersDropin writes a sudoers drop-in file to
 // <mountRoot>/etc/sudoers.d/<group_cn> granting sudo access to the named LDAP group.
 // The file is written with mode 0440 as required by sudo.
@@ -2410,8 +2475,31 @@ func ldapDomainFromBaseDN(baseDN string) string {
 //   - controller / dbd node (hasSlurmdbd): slurm slurm-slurmctld munge
 //   - compute node (hasGres): slurm slurm-slurmd munge
 //   - fallback (no role yet): slurm munge  (minimal; enables munge at least)
-func installSlurmInChroot(ctx context.Context, mountRoot, repoURL string, hasSlurmdbd, hasGres bool) {
+//
+// EL9/EL10 mismatch detection: reads /etc/os-release from the chroot to
+// determine the deployed OS version. If the URL contains "EL_9" or "EL_10"
+// and the image's version doesn't match, the mismatch is logged (non-fatal) so
+// the operator can correct the repo URL without waiting for a failed dnf run.
+func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string, hasSlurmdbd, hasGres bool, auditFn SlurmInstallAuditFn) {
 	log := logger()
+
+	// EL9 / EL10 mismatch detection — read VERSION_ID from the chroot's os-release.
+	// This runs before dnf so the operator sees the mismatch warning early in the log.
+	osReleasePath := filepath.Join(mountRoot, "etc", "os-release")
+	if raw, err := os.ReadFile(osReleasePath); err == nil {
+		imageEL := extractELVersion(string(raw))
+		urlEL := elVersionFromURL(repoURL)
+		if imageEL != "" && urlEL != "" && imageEL != urlEL {
+			log.Warn().
+				Str("repo_url", repoURL).
+				Str("url_el_version", urlEL).
+				Str("image_el_version", imageEL).
+				Str("node_id", nodeID).
+				Msgf("finalize slurm: auto-install: EL version mismatch — repo is for EL%s but image is EL%s. "+
+					"Update slurm_repo_url via POST /api/v1/modules/slurm/enable to use the correct EL%s repo.",
+					urlEL, imageEL, imageEL)
+		}
+	}
 
 	// Build package list for this role.
 	pkgs := []string{"slurm", "munge"}
@@ -2444,11 +2532,66 @@ func installSlurmInChroot(ctx context.Context, mountRoot, repoURL string, hasSlu
 	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False"}, pkgs...)
 	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
 	if err != nil {
-		log.Warn().Err(err).Str("output", string(out)).
+		// Truncate dnf output to last 2 KB for the audit record.
+		dnfOut := string(out)
+		if len(dnfOut) > 2048 {
+			dnfOut = "...(truncated)...\n" + dnfOut[len(dnfOut)-2048:]
+		}
+
+		log.Warn().Err(err).
+			Str("node_id", nodeID).
+			Str("repo_url", repoURL).
+			Str("dnf_output", dnfOut).
 			Msg("finalize slurm: auto-install: dnf install failed (non-fatal) — check repo URL and image network access during deploy")
+
+		// Notify audit service so operators can query the audit log.
+		if auditFn != nil {
+			auditFn(ctx, nodeID, AuditActionSlurmInstallFailed,
+				fmt.Sprintf("dnf install failed for repo %s: %v\n\nOutput (last 2KB):\n%s", repoURL, err, dnfOut))
+		}
 		return
 	}
 	log.Info().Strs("packages", pkgs).Msg("finalize slurm: auto-install: packages installed successfully")
+}
+
+// AuditActionSlurmInstallFailed is the audit log action recorded when the
+// in-chroot dnf Slurm install step fails during a node deploy.
+// Operators can query: GET /api/v1/audit?action=slurm.install.failed
+const AuditActionSlurmInstallFailed = "slurm.install.failed"
+
+// extractELVersion returns "9" or "10" (or "") by parsing VERSION_ID from
+// /etc/os-release content.  Handles VERSION_ID="9" and VERSION_ID="10.x".
+func extractELVersion(osReleaseContent string) string {
+	for _, line := range strings.Split(osReleaseContent, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "VERSION_ID=") {
+			continue
+		}
+		val := strings.TrimPrefix(line, "VERSION_ID=")
+		val = strings.Trim(val, `"'`)
+		// Take major version only: "9", "9.5", "10", "10.1" → "9" or "10"
+		if idx := strings.Index(val, "."); idx >= 0 {
+			val = val[:idx]
+		}
+		if val == "9" || val == "10" {
+			return val
+		}
+	}
+	return ""
+}
+
+// elVersionFromURL returns "9" or "10" (or "") by scanning a repo URL for
+// the EL_9 or EL_10 substrings used by OpenHPC and SchedMD repos.
+// Example: "https://repos.openhpc.community/OpenHPC/3/EL_9" → "9"
+func elVersionFromURL(repoURL string) string {
+	upper := strings.ToUpper(repoURL)
+	if strings.Contains(upper, "EL_10") {
+		return "10"
+	}
+	if strings.Contains(upper, "EL_9") || strings.Contains(upper, "EL9") {
+		return "9"
+	}
+	return ""
 }
 
 // When cfg.NoPasswd is true, the rule uses NOPASSWD:ALL.
