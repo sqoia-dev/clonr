@@ -34,6 +34,9 @@ type SystemInfo struct {
 	// Firmware is the detected boot firmware type: "uefi" or "bios".
 	// Detected by checking for the presence of /sys/firmware/efi.
 	Firmware  string
+	// GPUs is the list of PCI-enumerated GPU devices. Empty on CPU-only nodes.
+	// S5-2: populated via /sys/bus/pci/devices; no dependency on lspci.
+	GPUs      []GPU
 }
 
 // DetectFirmware detects the node's boot firmware type by checking for the
@@ -89,6 +92,12 @@ func Discover() (*SystemInfo, error) {
 	mdArrays, err := DiscoverMDArrays()
 	if err == nil {
 		info.MDArrays = mdArrays
+	}
+
+	// S5-2: GPU detection via PCI sysfs. Best-effort — nil GPUs means CPU-only node.
+	gpus, _ := DiscoverGPUs()
+	if len(gpus) > 0 {
+		info.GPUs = gpus
 	}
 
 	info.Firmware = DetectFirmware()
