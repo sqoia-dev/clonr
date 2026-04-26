@@ -238,9 +238,76 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 					Str("timeout", timeout.String()).
 					Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clustr/node-token not written correctly",
 						n.ID, n.Hostname, timeout)
+				// Flip persistent boot order back to disk-first on deploy-timeout.
+				// Prevents Proxmox VMs from being stuck PXE-first forever when the
+				// deploy completes but the node never calls verify-boot.
+				// Best-effort: errors are logged, not fatal. See docs/boot-architecture.md §10.
+				if err := s.flipNodeToDiskFirst(ctx, n.ID); err != nil {
+					log.Warn().Err(err).Str("node_id", n.ID).Str("hostname", n.Hostname).
+						Msg("verify-boot scanner: FlipToDiskFirst failed on deploy-timeout (non-fatal)")
+				} else {
+					log.Info().Str("node_id", n.ID).Str("hostname", n.Hostname).
+						Msg("verify-boot scanner: persistent boot order flipped to disk-first after deploy-timeout")
+				}
 			}
 		}
 	}
+}
+
+// flipNodeToDiskFirst resolves the power provider for nodeID and calls
+// SetPersistentBootOrder([BootDisk, BootPXE]) to restore the disk-first
+// persistent boot order after a successful deploy or deploy-timeout.
+//
+// On Proxmox this triggers an explicit stop+start (via the provider's
+// SetPersistentBootOrder implementation) so the config change is committed.
+// On IPMI this is a best-effort harmless reaffirmation of the one-shot
+// override that was already consumed on the previous boot.
+//
+// Returns an error if the provider cannot be resolved or the call fails.
+// Callers should treat errors as non-fatal warnings, not hard failures.
+//
+// See docs/boot-architecture.md §10.
+func (s *Server) flipNodeToDiskFirst(ctx context.Context, nodeID string) error {
+	node, err := s.db.GetNodeConfig(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("flipNodeToDiskFirst: load node %s: %w", nodeID, err)
+	}
+
+	var provCfg power.ProviderConfig
+	switch {
+	case node.PowerProvider != nil && node.PowerProvider.Type != "":
+		provCfg = power.ProviderConfig{
+			Type:   node.PowerProvider.Type,
+			Fields: node.PowerProvider.Fields,
+		}
+	case node.BMC != nil && node.BMC.IPAddress != "":
+		provCfg = power.ProviderConfig{
+			Type: "ipmi",
+			Fields: map[string]string{
+				"host":     node.BMC.IPAddress,
+				"username": node.BMC.Username,
+				"password": node.BMC.Password,
+			},
+		}
+	default:
+		// No provider configured — nothing to flip. Bare-metal nodes with no
+		// power provider use operator-managed BMC boot order; no clustr action needed.
+		return nil
+	}
+
+	provider, err := s.powerRegistry.Create(provCfg)
+	if err != nil {
+		return fmt.Errorf("flipNodeToDiskFirst: resolve provider for node %s: %w", nodeID, err)
+	}
+
+	if err := provider.SetPersistentBootOrder(ctx, []power.BootDevice{power.BootDisk, power.BootPXE}); err != nil {
+		if errors.Is(err, power.ErrNotSupported) {
+			// Provider has no persistent-order concept — that's fine.
+			return nil
+		}
+		return fmt.Errorf("flipNodeToDiskFirst: SetPersistentBootOrder for node %s: %w", nodeID, err)
+	}
+	return nil
 }
 
 // runLogPurger ticks every hour and deletes log entries older than the
@@ -325,6 +392,7 @@ func (s *Server) buildRouter() chi.Router {
 	images := &handlers.ImagesHandler{DB: s.db, ImageDir: s.cfg.ImageDir, Progress: s.progress}
 	nodes := &handlers.NodesHandler{
 		DB: s.db,
+		FlipToDiskFirst: s.flipNodeToDiskFirst,
 		LDAPNodeConfig: func(ctx context.Context) (*api.LDAPNodeConfig, error) {
 			return s.ldapMgr.NodeConfig(ctx)
 		},

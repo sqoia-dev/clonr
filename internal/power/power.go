@@ -2,6 +2,10 @@
 // management. Each backend (IPMI, Proxmox, vSphere, …) implements Provider.
 // The Registry maps provider type names to factory functions so the server can
 // instantiate the right backend from a node's stored PowerProviderConfig.
+//
+// See docs/boot-architecture.md §10 for the contract semantics across IPMI and
+// Proxmox, and for why SetNextBoot and SetPersistentBootOrder behave differently
+// on each backend while preserving the same observable one-shot guarantee.
 package power
 
 import (
@@ -54,14 +58,45 @@ type Provider interface {
 	// Reset warm-resets the node without cycling power.
 	Reset(ctx context.Context) error
 
-	// SetNextBoot sets the one-time next boot device.
-	// For IPMI this is `chassis bootdev <dev>`.
-	// For Proxmox it modifies the VM boot order configuration.
+	// SetNextBoot sets the boot target for the NEXT boot of this node, after
+	// which the node returns to its persistent default boot order.
+	//
+	// Semantics MUST be observable as one-shot from the orchestrator's
+	// perspective. Implementations MAY achieve this differently:
+	//
+	//   - IPMI: issues a non-persistent chassis bootdev override; consumed on
+	//     next boot per IPMI spec §28. Pair with PowerCycle to actually boot.
+	//
+	//   - Proxmox: writes the persistent VM boot order to put dev first,
+	//     because Proxmox has no one-shot concept. If the VM is running it
+	//     performs an explicit stop → config-write → start so the new order
+	//     takes effect immediately. The caller is responsible for restoring
+	//     disk-first order after deploy via SetPersistentBootOrder.
+	//
+	// Callers MUST NOT assume SetNextBoot implies a power cycle — issue
+	// PowerCycle separately after this call if needed. Callers MUST issue
+	// SetPersistentBootOrder([BootDisk, BootPXE]) after a successful deploy
+	// when SetNextBoot(BootPXE) was used (the Proxmox provider requires this
+	// to restore disk-first order; the IPMI provider ignores it harmlessly).
+	//
+	// See docs/boot-architecture.md §10.
 	SetNextBoot(ctx context.Context, dev BootDevice) error
 
-	// SetPersistentBootOrder sets the default boot order persistently.
-	// Callers use this after a successful deploy to flip from PXE → disk.
-	// Returns ErrNotSupported when the backend cannot set a persistent order.
+	// SetPersistentBootOrder sets the persistent boot order for this node.
+	//
+	// On Proxmox: writes the VM config boot order. If the VM is currently
+	// running it performs a stop → config-write → start so the new order is
+	// committed and takes effect on the next boot. This is CRITICAL for the
+	// post-deploy flip-back to disk-first: Proxmox only commits pending VM
+	// config on a full stop+start, not on /status/reset (warm reset).
+	// Returns once the new order is live in the running config.
+	//
+	// On IPMI: best-effort; the standard chassis bootdev call is one-shot by
+	// spec so this is effectively a reaffirmation. Returns ErrNotSupported
+	// when the backend has no meaningful persistent-order concept beyond the
+	// operator-owned BMC boot sequence set at commissioning time.
+	//
+	// See docs/boot-architecture.md §10.
 	SetPersistentBootOrder(ctx context.Context, order []BootDevice) error
 }
 

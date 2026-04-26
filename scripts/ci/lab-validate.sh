@@ -159,7 +159,11 @@ reimage_vm() {
     # Boot order: net0;scsi0 — PXE first, then disk via UEFI removable-media
     # discovery of \EFI\BOOT\BOOTX64.EFI. Both entries are required: net0 for
     # the deploy-routing decision, scsi0 for the post-deploy OS boot.
-    # See docs/boot-architecture.md §8.
+    # NOTE: in normal operation the orchestrator calls SetNextBoot(BootPXE)
+    # which does this stop+config-write+start sequence automatically. This
+    # script does it manually because lab-validate runs outside the orchestrator.
+    # After deploy, SetPersistentBootOrder([disk,pxe]) flips back to scsi0;net0.
+    # See docs/boot-architecture.md §10.
     ssh_proxmox "qm set ${vmid} --boot order=net0;scsi0 2>/dev/null; qm stop ${vmid} --skiplock 2>/dev/null; sleep 2; qm start ${vmid}" >> "$deploy_log" 2>&1 \
         || { log "VM${vmid}: failed to power cycle"; return 1; }
 

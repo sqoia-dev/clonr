@@ -7,6 +7,15 @@
 //
 // API token auth (tokenID + tokenSecret) is also supported; when both are
 // present the token path is used and the cookie cache is bypassed entirely.
+//
+// Boot-order semantics: Proxmox persists VM config changes ONLY on stop+start.
+// /status/reset (warm reset) does NOT commit pending boot config changes.
+// Therefore SetNextBoot and SetPersistentBootOrder on a running VM perform an
+// explicit stop → config-write → start sequence so the new order takes effect
+// on the next boot. This is the Proxmox-specific implementation of the one-shot
+// SetNextBoot semantic documented in internal/power/power.go.
+//
+// See docs/boot-architecture.md §10.
 package proxmox
 
 import (
@@ -181,23 +190,100 @@ func (p *Provider) Reset(ctx context.Context) error {
 	return nil
 }
 
-// SetNextBoot sets the boot order for the VM.
-// Proxmox does not have a separate "next boot only" concept; this updates the
-// persistent VM config. The order is expressed as a Proxmox boot order string
-// (e.g. "order=net0;scsi0" for PXE first, "order=scsi0;net0" for disk first).
+// SetNextBoot sets the boot order so that dev is first on the next boot.
+//
+// Proxmox has no native one-shot boot-override concept. This implementation
+// writes the persistent VM boot config and, if the VM is currently running,
+// performs an explicit stop → config-write → start so the new order is
+// committed and takes effect immediately. A subsequent PowerCycle (warm reset)
+// will therefore boot into the new order rather than the stale running config.
+//
+// If the VM is already stopped, only the config write is performed; the caller's
+// subsequent PowerOn/PowerCycle will boot into the new order.
+//
+// See docs/boot-architecture.md §10.
 func (p *Provider) SetNextBoot(ctx context.Context, dev power.BootDevice) error {
-	return p.setBootOrder(ctx, dev)
+	status, err := p.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("proxmox: SetNextBoot: pre-check status: %w", err)
+	}
+	if err := p.setBootOrder(ctx, dev); err != nil {
+		return err
+	}
+	if status == power.PowerOn {
+		// Proxmox commits pending VM config only on stop+start, not on
+		// /status/reset (warm reset). Stop the VM, then start it so the
+		// new boot order is in the running config before we return.
+		// See docs/boot-architecture.md §10.7.
+		if err := p.PowerOff(ctx); err != nil {
+			return fmt.Errorf("proxmox: SetNextBoot: stop to commit pending config: %w", err)
+		}
+		if err := p.waitForStatus(ctx, power.PowerOff, 60*time.Second); err != nil {
+			return fmt.Errorf("proxmox: SetNextBoot: wait for stop: %w", err)
+		}
+		if err := p.PowerOn(ctx); err != nil {
+			return fmt.Errorf("proxmox: SetNextBoot: start after config commit: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetPersistentBootOrder sets the persistent boot order for the VM.
-// For Proxmox, SetNextBoot and SetPersistentBootOrder are identical — both
-// write the VM config — so this delegates directly.
+//
+// Writes the VM boot config and, if the VM is currently running, performs an
+// explicit stop → config-write → start so the new order is committed. This is
+// critical for the post-deploy flip-back to disk-first: Proxmox only commits
+// pending VM config on a full stop+start, not on /status/reset (warm reset).
+//
+// See docs/boot-architecture.md §10.
 func (p *Provider) SetPersistentBootOrder(ctx context.Context, order []power.BootDevice) error {
 	if len(order) == 0 {
 		return fmt.Errorf("proxmox: SetPersistentBootOrder: order must not be empty")
 	}
+	status, err := p.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("proxmox: SetPersistentBootOrder: pre-check status: %w", err)
+	}
 	// Use the first device as the primary boot device.
-	return p.setBootOrder(ctx, order[0])
+	if err := p.setBootOrder(ctx, order[0]); err != nil {
+		return err
+	}
+	if status == power.PowerOn {
+		// Commit pending config via stop+start. See docs/boot-architecture.md §10.7.
+		if err := p.PowerOff(ctx); err != nil {
+			return fmt.Errorf("proxmox: SetPersistentBootOrder: stop to commit pending config: %w", err)
+		}
+		if err := p.waitForStatus(ctx, power.PowerOff, 60*time.Second); err != nil {
+			return fmt.Errorf("proxmox: SetPersistentBootOrder: wait for stop: %w", err)
+		}
+		if err := p.PowerOn(ctx); err != nil {
+			return fmt.Errorf("proxmox: SetPersistentBootOrder: start after config commit: %w", err)
+		}
+	}
+	return nil
+}
+
+// waitForStatus polls the VM status every 500ms until it matches want or the
+// timeout elapses. Returns an error if the status does not match within timeout.
+func (p *Provider) waitForStatus(ctx context.Context, want power.PowerStatus, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		got, err := p.Status(ctx)
+		if err != nil {
+			return fmt.Errorf("proxmox: waitForStatus: poll: %w", err)
+		}
+		if got == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("proxmox: waitForStatus: timed out after %s waiting for status %q (last: %q)", timeout, want, got)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("proxmox: waitForStatus: context cancelled: %w", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // setBootOrder updates the Proxmox VM config with the appropriate boot order

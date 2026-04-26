@@ -4,9 +4,15 @@
 //
 // Production bare-metal behaviour:
 //
-//   - SetNextBoot uses persistent boot overrides by default so the setting
-//     survives across power cycles and is not consumed if the node reboots
-//     mid-deploy.
+//   - SetNextBoot uses IPMI's "persistent flag" on the bootdev override.
+//     This is IPMI-spec terminology for "the override survives a mid-boot
+//     crash or power flap until the node successfully boots once" — it is
+//     NOT the same as setting a persistent BootOrder via the BMC's UEFI
+//     settings. After the node boots once, the override is consumed and the
+//     BMC's persistent BootOrder (set by the operator at commissioning time)
+//     takes over. This matches the one-shot semantics documented in
+//     internal/power/power.go SetNextBoot.
+//     See docs/boot-architecture.md §10.
 //
 //   - BMC vendor is auto-detected on the first SetNextBoot call; known quirks
 //     (Dell iDRAC, HPE iLO, Supermicro X9/X10, Lenovo XCC) are applied

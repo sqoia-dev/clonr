@@ -55,6 +55,15 @@ func autoHostname(mac string) string {
 // NodesHandler handles all /api/v1/nodes routes.
 type NodesHandler struct {
 	DB *db.DB
+	// FlipToDiskFirst, when non-nil, is called by VerifyBoot after recording the
+	// deployed_verified state transition. It should call
+	// SetPersistentBootOrder([BootDisk, BootPXE]) on the node's power provider.
+	// This flips the Proxmox VM boot order back to disk-first after a successful
+	// deploy (the reimage path set it to PXE-first via SetNextBoot). On IPMI
+	// providers this is a harmless no-op. Best-effort: errors are logged but do
+	// not fail the verify-boot response — the node is already deployed.
+	// See docs/boot-architecture.md §10.
+	FlipToDiskFirst func(ctx context.Context, nodeID string) error
 	// LDAPNodeConfig, when non-nil, is called during RegisterNode to inject the
 	// current LDAP client config into the NodeConfig returned to the deploy agent.
 	// Returns nil if the LDAP module is disabled or not ready.
@@ -732,6 +741,22 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 		Float64("uptime_seconds", payload.UptimeSeconds).
 		Msgf("verify-boot: node %s (%s) verified booted: kernel=%s, systemctl=%s",
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
+
+	// Flip the persistent boot order back to disk-first now that the node has
+	// verified. This is a no-op on IPMI (override was already one-shot) but is
+	// critical on Proxmox where SetNextBoot wrote a persistent PXE-first config.
+	// Best-effort: errors are logged but do not fail the 204 response — the node
+	// is already deployed and the worst case is it PXE-boots cleanly on next cycle.
+	// See docs/boot-architecture.md §10.
+	if h.FlipToDiskFirst != nil {
+		if err := h.FlipToDiskFirst(r.Context(), id); err != nil {
+			log.Warn().Err(err).Str("node_id", id).
+				Msg("verify-boot: FlipToDiskFirst failed (non-fatal — node is deployed; persistent boot order may still be PXE-first)")
+		} else {
+			log.Info().Str("node_id", id).
+				Msg("verify-boot: persistent boot order flipped to disk-first")
+		}
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
