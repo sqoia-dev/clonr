@@ -70,9 +70,12 @@ func setupRBACTestDB(t *testing.T) (*db.DB, string, string, string, string, stri
 		Hostname:    "node-01",
 		PrimaryMAC:  "aa:bb:cc:dd:ee:01",
 		BaseImageID: imgID,
-		GroupID:     groupID,
 	}); err != nil {
 		t.Fatalf("create grouped node: %v", err)
+	}
+	// S6-6: group_id is no longer on node_configs; membership must be set explicitly.
+	if err := database.AddGroupMember(context.Background(), groupID, groupedNodeID); err != nil {
+		t.Fatalf("add group member: %v", err)
 	}
 
 	// Create ungrouped node.
@@ -177,9 +180,13 @@ func TestRequireGroupAccess_OperatorNotInGroupDenied(t *testing.T) {
 	otherNodeID := uuid.New().String()
 	if err := database.CreateNodeConfig(context.Background(), api.NodeConfig{
 		ID: otherNodeID, Hostname: "node-03", PrimaryMAC: "aa:bb:cc:dd:ee:03",
-		BaseImageID: imgID, GroupID: otherGroupID,
+		BaseImageID: imgID,
 	}); err != nil {
 		t.Fatalf("create other node: %v", err)
+	}
+	// S6-6: group_id is no longer on node_configs; membership must be set explicitly.
+	if err := database.AddGroupMember(context.Background(), otherGroupID, otherNodeID); err != nil {
+		t.Fatalf("add other group member: %v", err)
 	}
 
 	mw := requireGroupAccess("id", database)
