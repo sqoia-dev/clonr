@@ -3018,14 +3018,6 @@ func scanWebhookSubscription(row webhookScanner) (WebhookSubscription, error) {
 	return sub, nil
 }
 
-// boolToInt converts a bool to 0/1 for SQLite storage.
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 // ListRunningGroupReimageJobs returns all group_reimage_jobs with status='running'.
 // Used by the startup hook (S4-4) to resume jobs orphaned by a prior process crash.
 func (db *DB) ListRunningGroupReimageJobs(ctx context.Context) ([]GroupReimageJob, error) {
