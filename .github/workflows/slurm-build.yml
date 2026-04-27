@@ -214,16 +214,14 @@ jobs:
           echo "Both SHA256 checks passed."
 
       # ── Import clustr RPM signing key ─────────────────────────────────────
-      # Strategy: import the key into a temp GNUPGHOME, then re-export it
-      # without a passphrase into a second GNUPGHOME that rpm --addsign will
-      # use.  Stripping the passphrase within the ephemeral CI runner is safe
-      # because: (a) the runner is isolated and ephemeral, (b) the original
-      # passphrase-protected key remains only in the GitHub secret, (c) the
-      # unprotected copy never leaves the runner.  This avoids the complexity
-      # of gpg-agent pinentry setup, which varies across gpg versions.
+      # Non-interactive RPM signing strategy for EL9 (RPM 4.17+):
+      #   1. Import key into temp GNUPGHOME
+      #   2. Start gpg-agent with allow-loopback-pinentry + allow-preset-passphrase
+      #   3. Get the keygrip and preset passphrase into the agent cache via
+      #      gpg-connect-agent (using the loopback mechanism)
+      #   4. rpm --addsign queries the agent; passphrase served from cache
       #
-      # GNUPGHOME is exported via GITHUB_ENV so it persists across all
-      # subsequent steps in this job.
+      # GNUPGHOME is exported via GITHUB_ENV so it persists across all steps.
       - name: Import clustr RPM signing key
         shell: bash
         env:
@@ -232,63 +230,73 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Step 1: Import into a staging keyring with the original passphrase
-          STAGING_HOME=$(mktemp -d)
-          chmod 700 "$STAGING_HOME"
+          # Install gnupg2-utils which provides gpg-preset-passphrase on EL9
+          # (it's in the gnupg2 package on EL9, but the binary path may vary)
+          dnf install -y gnupg2 gnupg2-smime 2>/dev/null || true
+
+          GPG_HOME=$(mktemp -d)
+          chmod 700 "$GPG_HOME"
 
           PASS_FILE=$(mktemp)
           chmod 600 "$PASS_FILE"
           printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
 
+          # Import the key
           printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
-            gpg --homedir "${STAGING_HOME}" \
+            gpg --homedir "${GPG_HOME}" \
                 --batch \
                 --pinentry-mode loopback \
                 --passphrase-file "${PASS_FILE}" \
                 --import
 
-          # Step 2: Re-export to a signing keyring WITHOUT passphrase.
-          # gpg --change-passphrase with empty passphrase strips it.
-          SIGN_HOME=$(mktemp -d)
-          chmod 700 "$SIGN_HOME"
+          # Configure agent
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n' \
+            > "${GPG_HOME}/gpg-agent.conf"
 
-          # Export the secret key from staging
-          gpg --homedir "${STAGING_HOME}" \
-              --batch \
-              --pinentry-mode loopback \
-              --passphrase-file "${PASS_FILE}" \
-              --export-secret-keys "41E51A6653BBA540" | \
-            gpg --homedir "${SIGN_HOME}" \
-                --batch \
-                --import
+          # Start agent and export environment
+          eval "$(gpg-agent --homedir "${GPG_HOME}" --daemon --sh)"
+          echo "GPG_AGENT_INFO=${GPG_AGENT_INFO:-}" >> "$GITHUB_ENV"
 
-          # Strip passphrase: change it to empty
-          printf '%s\n\n\n' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" | \
-            gpg --homedir "${SIGN_HOME}" \
-                --batch \
-                --pinentry-mode loopback \
-                --passphrase-fd 0 \
-                --passwd "41E51A6653BBA540" 2>/dev/null || true
+          # Get keygrip(s) for all secret keys and preset the passphrase.
+          # Use pure-bash hex encoding to avoid a dependency on xxd/vim-common.
+          PASSPHRASE=$(cat "$PASS_FILE")
+          hex_encode() {
+            local s="$1" out="" i byte
+            for (( i=0; i<${#s}; i++ )); do
+              printf -v byte '%02X' "'${s:$i:1}"
+              out+="$byte"
+            done
+            printf '%s' "$out"
+          }
+          PASSPHRASE_HEX=$(hex_encode "${PASSPHRASE}")
+          gpg --homedir "${GPG_HOME}" \
+              --with-keygrip \
+              --list-secret-keys "41E51A6653BBA540" \
+            | grep "Keygrip" | awk '{print $3}' \
+            | while read -r GRIP; do
+                echo "Presetting passphrase for keygrip ${GRIP}"
+                printf 'PRESET_PASSPHRASE %s -1 %s\n' "${GRIP}" "${PASSPHRASE_HEX}" \
+                | gpg-connect-agent --homedir "${GPG_HOME}" || true
+              done
 
-          # Verify: sign a test message without passphrase prompt
+          # Verify signing works without interactive passphrase
           echo "ci-test" | \
-            gpg --homedir "${SIGN_HOME}" \
+            gpg --homedir "${GPG_HOME}" \
                 --batch \
-                --pinentry-mode loopback \
-                --passphrase "" \
+                --no-tty \
                 --clearsign \
                 --local-user "41E51A6653BBA540" \
                 -o /dev/null
 
-          echo "GNUPGHOME=${SIGN_HOME}" >> "$GITHUB_ENV"
-          rm -rf "${STAGING_HOME}" "${PASS_FILE}"
+          rm -f "${PASS_FILE}"
+          echo "GNUPGHOME=${GPG_HOME}" >> "$GITHUB_ENV"
 
           # Write minimal rpmmacros
           printf '%%_signature gpg\n' > ~/.rpmmacros
           printf '%%_gpg_name 41E51A6653BBA540\n' >> ~/.rpmmacros
           printf '%%__gpg /usr/bin/gpg\n' >> ~/.rpmmacros
 
-          gpg --homedir "${SIGN_HOME}" --list-secret-keys
+          gpg --homedir "${GPG_HOME}" --list-secret-keys
           echo "rpmmacros:"
           cat ~/.rpmmacros
 
