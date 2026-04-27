@@ -303,6 +303,13 @@ func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) err
 }
 
 // runBundleRollback swaps the most recent .previous-* back into place.
+//
+// Layout after atomic swap:
+//   <repoDir>/.previous-<ts>  — the old <distro>-<arch> directory content (renamed wholesale)
+//   <repoDir>/<distro>-<arch> — the live directory
+//
+// Rollback reads .installed-version inside the .previous-* dir to learn the
+// distro-arch, then swaps live → trash and .previous-* → live.
 func runBundleRollback(repoDir string) error {
 	entries, err := os.ReadDir(repoDir)
 	if err != nil {
@@ -321,26 +328,24 @@ func runBundleRollback(repoDir string) error {
 	sort.Strings(prevDirs)
 	mostRecent := prevDirs[len(prevDirs)-1]
 
-	// Determine the live subdir name from the .installed-version in .previous-*.
+	// Read .installed-version from inside the .previous-* dir to learn distro+arch.
 	prevPath := filepath.Join(repoDir, mostRecent)
-	prevEntries, err := os.ReadDir(prevPath)
+	ivData, err := os.ReadFile(filepath.Join(prevPath, ".installed-version"))
 	if err != nil {
-		return fmt.Errorf("read previous bundle dir: %w", err)
+		return fmt.Errorf("read .installed-version from previous bundle: %w", err)
 	}
-	var subDir string
-	for _, e := range prevEntries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			subDir = e.Name()
-			break
-		}
+	var iv installedVersion
+	if err := json.Unmarshal(ivData, &iv); err != nil {
+		return fmt.Errorf("parse .installed-version from previous bundle: %w", err)
 	}
-	if subDir == "" {
-		return fmt.Errorf("cannot determine distro-arch subdir in %s", prevPath)
+	subDir := iv.Distro + "-" + iv.Arch
+	if subDir == "-" || iv.Distro == "" {
+		return fmt.Errorf("cannot determine distro-arch from previous bundle .installed-version")
 	}
 
 	livePath := filepath.Join(repoDir, subDir)
 
-	// Move live → .trash-<ts>, then .previous → live.
+	// Move live → .trash-<ts>, then .previous-* → live.
 	trashPath := filepath.Join(repoDir, ".trash-"+time.Now().UTC().Format("20060102T150405Z"))
 	if _, err := os.Stat(livePath); err == nil {
 		if err := os.Rename(livePath, trashPath); err != nil {
