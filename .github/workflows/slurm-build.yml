@@ -87,14 +87,35 @@ jobs:
           echo "  clustr_release : ${CLUSTR_RELEASE}"
 
       # ── Install EPEL + build dependencies ────────────────────────────────
-      # EPEL is required for: munge-devel, http-parser-devel, libjwt-devel,
-      # libyaml-devel, freeipmi-devel, rrdtool-devel, createrepo_c.
-      # See docs/slurm-build-pipeline.md §4.3 and §10.
+      # Repo setup required before the main install:
+      #   1. epel-release: provides munge-devel, libjwt-devel, createrepo_c, etc.
+      #   2. CRB (CodeReady Builder): provides json-c-devel, libyaml-devel and
+      #      other devel headers that EPEL depends on but ships in CRB on EL9.
+      #   3. mariadb module: mariadb-devel is in the AppStream mariadb module
+      #      and requires explicit module enable to be visible.
+      #
+      # Optional packages (freeipmi-devel, rrdtool-devel, http-parser-devel):
+      # These enable optional Slurm features (IPMI, rrd, REST). They may not
+      # be available in EPEL+CRB for all EL9 snapshots. Install with
+      # --skip-unavailable so a missing optional dep doesn't abort the build.
+      # If missing, the corresponding Slurm feature is simply disabled by the
+      # spec's conditional %if checks. See docs/slurm-build-pipeline.md §4.3.
       - name: Enable EPEL and install build dependencies
         shell: bash
         run: |
           set -euo pipefail
+
+          # 1. EPEL
           dnf install -y epel-release
+
+          # 2. CRB (CodeReady Builder) — needed by EPEL packages on EL9
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled crb
+
+          # 3. Enable mariadb AppStream module so mariadb-devel is visible
+          dnf module enable -y mariadb
+
+          # 4. Mandatory build deps — hard fail if any are missing
           dnf install -y \
             gcc gcc-c++ make \
             automake autoconf libtool \
@@ -107,14 +128,11 @@ jobs:
             readline-devel \
             hwloc-devel \
             libcurl-devel \
-            http-parser-devel \
             json-c-devel \
             libyaml-devel \
             libjwt-devel \
             lz4-devel \
             zlib-devel \
-            freeipmi-devel \
-            rrdtool-devel \
             numactl-devel \
             dbus-devel \
             openssl-devel \
@@ -122,6 +140,16 @@ jobs:
             perl-ExtUtils-MakeMaker \
             python3 \
             curl
+
+          # 5. Optional build deps — skip if unavailable on this snapshot.
+          # Missing deps disable the corresponding Slurm plugin at build time.
+          dnf install -y --skip-unavailable \
+            http-parser-devel \
+            freeipmi-devel \
+            rrdtool-devel || true
+
+          echo "--- Installed build dependencies ---"
+          rpm -qa gcc rpm-build munge-devel mariadb-devel | sort
 
       # ── Download tarball ──────────────────────────────────────────────────
       - name: Download Slurm tarball
