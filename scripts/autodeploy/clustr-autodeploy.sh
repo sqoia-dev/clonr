@@ -25,6 +25,12 @@ CLI_STATIC_BIN="/usr/local/bin/clustr-static"
 CLI_STATIC_NEW="${CLI_STATIC_BIN}.autodeploy-new"
 CLIENTD_BIN="/usr/local/bin/clustr-clientd"
 CLIENTD_NEW="${CLIENTD_BIN}.autodeploy-new"
+
+# Bundle-sync circuit-breaker state file.
+# Stores the number of consecutive bundle-install failures.  After
+# BUNDLE_FAIL_LIMIT failures the autodeploy stops retrying and logs a warning.
+BUNDLE_FAIL_COUNTER="/var/lib/clustr/bundle-install-failures"
+BUNDLE_FAIL_LIMIT=3
 INITRAMFS_BOOT="/var/lib/clustr/boot/initramfs.img"
 INITRAMFS_TFTP="/var/lib/clustr/tftpboot/clustr-initramfs.img"
 GOBIN="/usr/local/go/bin/go"
@@ -141,19 +147,37 @@ log "Tree reset to ${REMOTE_SHA}"
 # Build clustr-serverd
 # ---------------------------------------------------------------------------
 log "Building clustr-serverd..."
-# Write to a staging path so the running binary is never replaced mid-build.
-# Capture build output to a temp file to avoid pipefail masking errors from sed.
+# Build with explicit bundle ldflags read from build/slurm/versions.yml and the
+# Makefile's pinned BUNDLE_SHA256.  This ensures the binary embeds the correct
+# builtinSlurmBundleVersion + builtinSlurmBundleSHA256 so the bundle-sync step
+# below can compare them against the currently installed bundle without a
+# separate subcommand or strings extraction.
 _BUILD_LOG=$(mktemp /tmp/clustr-build.XXXXXXXX)
 _VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 _COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 _BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-log "ldflags: -X main.version=${_VERSION} -X main.commitSHA=${_COMMIT} -X main.buildTime=${_BUILD_TIME}"
+_SLURM_VERSION=$(awk '/^slurm:/{in_slurm=1} in_slurm && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' \
+    "${REPO_DIR}/build/slurm/versions.yml")
+_CLUSTR_RELEASE=$(awk '/^clustr_release:/{gsub(/[" ]/, "", $2); print $2; exit}' \
+    "${REPO_DIR}/build/slurm/versions.yml")
+_BUNDLE_VERSION="v${_SLURM_VERSION}-clustr${_CLUSTR_RELEASE}"
+# Read pinned SHA256 from the Makefile (same source the Makefile uses at build time).
+# Line format: BUNDLE_SHA256  ?= <hex>
+_BUNDLE_SHA256=$(awk '/^BUNDLE_SHA256[[:space:]]*\?=/{gsub(/[[:space:]]/, "", $0); sub(/.*\?=/, ""); print; exit}' \
+    "${REPO_DIR}/Makefile")
+log "bundle ldflags: builtinSlurmBundleVersion=${_BUNDLE_VERSION} sha256=${_BUNDLE_SHA256:0:12}..."
 GOTOOLCHAIN=auto "${GOBIN}" build \
-    -ldflags="-X main.version=${_VERSION} -X main.commitSHA=${_COMMIT} -X main.buildTime=${_BUILD_TIME} -s -w" \
+    -ldflags="-X main.version=${_VERSION} \
+              -X main.commitSHA=${_COMMIT} \
+              -X main.buildTime=${_BUILD_TIME} \
+              -X main.builtinSlurmVersion=${_SLURM_VERSION} \
+              -X main.builtinSlurmBundleVersion=${_BUNDLE_VERSION} \
+              -X main.builtinSlurmBundleSHA256=${_BUNDLE_SHA256} \
+              -s -w" \
     -o "${SERVERD_NEW}" ./cmd/clustr-serverd > "${_BUILD_LOG}" 2>&1 \
     || { sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"; log "ERROR: clustr-serverd build failed"; exit 1; }
 sed 's/^/  [go] /' "${_BUILD_LOG}"; rm -f "${_BUILD_LOG}"
-log "clustr-serverd build OK ($(du -h "${SERVERD_NEW}" | cut -f1))"
+log "clustr-serverd build OK ($(du -h "${SERVERD_NEW}" | cut -f1)) bundle=${_BUNDLE_VERSION}"
 
 # ---------------------------------------------------------------------------
 # Build static CLI binary (embeds into initramfs)
@@ -289,6 +313,94 @@ _BUILD_LOG2=$(mktemp /tmp/clustr-build.XXXXXXXX)
 GOTOOLCHAIN=auto "${GOBIN}" build -o /usr/local/bin/clustr ./cmd/clustr > "${_BUILD_LOG2}" 2>&1 \
     || { sed 's/^/  [go-clustr] /' "${_BUILD_LOG2}"; rm -f "${_BUILD_LOG2}"; log "WARNING: dynamic clustr CLI build failed (non-fatal)"; }
 sed 's/^/  [go-clustr] /' "${_BUILD_LOG2}"; rm -f "${_BUILD_LOG2}"
+
+# ---------------------------------------------------------------------------
+# Bundle-sync: ensure the installed Slurm bundle matches the version embedded
+# in the new clustr-serverd binary before restarting the service.
+#
+# Why here (after binary replacement, before restart):
+#   The new binary serves /repo/ from /var/lib/clustr/repo/.  If the bundle
+#   version it expects differs from what is installed, deployed nodes will get
+#   a repo whose metadata does not match the binary's expectations.  Install
+#   the correct bundle first so the server comes up in a consistent state.
+#
+# Version detection strategy:
+#   We already computed _BUNDLE_VERSION and _BUNDLE_SHA256 from versions.yml
+#   during the build step above.  The installed version is in the JSON at
+#   /var/lib/clustr/repo/el9-x86_64/.installed-version (keyed on bundle_sha256).
+#   Compare SHA256 values — if they match, skip.  If not, install.
+#
+# Circuit breaker:
+#   A counter at ${BUNDLE_FAIL_COUNTER} tracks consecutive failures.
+#   After ${BUNDLE_FAIL_LIMIT} failures in a row we stop retrying for this
+#   cycle and log a warning, but still restart clustr-serverd so the existing
+#   repo (if any) continues to serve.
+# ---------------------------------------------------------------------------
+_BUNDLE_INSTALL_NEEDED=0
+_INSTALLED_BUNDLE_SHA=""
+_REPO_VERSION_FILE="/var/lib/clustr/repo/el9-x86_64/.installed-version"
+
+if [[ -f "${_REPO_VERSION_FILE}" ]]; then
+    _INSTALLED_BUNDLE_SHA=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('${_REPO_VERSION_FILE}'))
+    print(d.get('bundle_sha256', ''))
+except Exception:
+    print('')
+" 2>/dev/null || true)
+fi
+
+if [[ -z "${_INSTALLED_BUNDLE_SHA}" ]]; then
+    log "bundle-sync: no installed bundle found — install required"
+    _BUNDLE_INSTALL_NEEDED=1
+elif [[ "${_INSTALLED_BUNDLE_SHA}" != "${_BUNDLE_SHA256}" ]]; then
+    log "bundle-sync: installed SHA ${_INSTALLED_BUNDLE_SHA:0:12}... != builtin SHA ${_BUNDLE_SHA256:0:12}... — upgrade required"
+    _BUNDLE_INSTALL_NEEDED=1
+else
+    log "bundle-sync: bundle ${_BUNDLE_VERSION} already current (SHA ${_BUNDLE_SHA256:0:12}...) — skipping"
+    # Reset failure counter on confirmed match
+    echo "0" > "${BUNDLE_FAIL_COUNTER}" 2>/dev/null || true
+fi
+
+if [[ "${_BUNDLE_INSTALL_NEEDED}" -eq 1 ]]; then
+    # Check circuit breaker
+    _FAIL_COUNT=0
+    if [[ -f "${BUNDLE_FAIL_COUNTER}" ]]; then
+        _RAW=$(cat "${BUNDLE_FAIL_COUNTER}" 2>/dev/null || true)
+        # Accept only a bare integer; treat anything else as 0 (corrupt/empty file)
+        if [[ "${_RAW}" =~ ^[0-9]+$ ]]; then
+            _FAIL_COUNT="${_RAW}"
+        fi
+    fi
+
+    if [[ "${_FAIL_COUNT}" -ge "${BUNDLE_FAIL_LIMIT}" ]]; then
+        log "WARNING: bundle-sync: circuit breaker open after ${_FAIL_COUNT} consecutive failures"
+        log "         Target bundle: slurm-${_BUNDLE_VERSION} (SHA ${_BUNDLE_SHA256:0:12}...)"
+        log "         Manual fix: run 'clustr-serverd bundle install' on this host, then reset"
+        log "         counter with: echo 0 > ${BUNDLE_FAIL_COUNTER}"
+        echo "clustr-autodeploy: bundle-sync circuit breaker open — ${_FAIL_COUNT} consecutive failures; manual intervention required" \
+            | systemd-cat -t clustr-autodeploy -p warning 2>/dev/null || true
+    else
+        log "bundle-sync: installing bundle slurm-${_BUNDLE_VERSION}..."
+        _BUNDLE_LOG=$(mktemp /tmp/clustr-bundle.XXXXXXXX)
+        if "${SERVERD_BIN}" bundle install > "${_BUNDLE_LOG}" 2>&1; then
+            sed 's/^/  [bundle] /' "${_BUNDLE_LOG}"; rm -f "${_BUNDLE_LOG}"
+            log "bundle-sync: install complete — bundle ${_BUNDLE_VERSION} is live"
+            echo "0" > "${BUNDLE_FAIL_COUNTER}"
+        else
+            sed 's/^/  [bundle] /' "${_BUNDLE_LOG}"; rm -f "${_BUNDLE_LOG}"
+            _FAIL_COUNT=$(( _FAIL_COUNT + 1 ))
+            echo "${_FAIL_COUNT}" > "${BUNDLE_FAIL_COUNTER}"
+            log "WARNING: bundle-sync: install failed (attempt ${_FAIL_COUNT}/${BUNDLE_FAIL_LIMIT})"
+            log "         The existing bundle (if any) remains in place."
+            log "         clustr-serverd will restart with whatever bundle is currently installed."
+            echo "clustr-autodeploy: bundle install failed (attempt ${_FAIL_COUNT}/${BUNDLE_FAIL_LIMIT}) for ${_BUNDLE_VERSION}" \
+                | systemd-cat -t clustr-autodeploy -p warning 2>/dev/null || true
+            # Do NOT exit — restart clustr-serverd regardless so other changes take effect.
+        fi
+    fi
+fi
 
 systemctl restart clustr-serverd
 log "clustr-serverd restarted"

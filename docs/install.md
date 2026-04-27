@@ -923,7 +923,15 @@ See **[docs/user-management.md](user-management.md)** for the full operator guid
 
 ---
 
-## 8. Slurm bundle install (post-server-install)
+## 8. Slurm bundle management
+
+clustr ships Slurm as a versioned RPM bundle built from upstream source and
+signed with the clustr release GPG key.  The bundle is fetched once at
+server install time and served locally by `clustr-serverd` at
+`/repo/el9-x86_64/`.  Deployed nodes pull Slurm RPMs from the clustr-server
+directly — no external network access is required at deploy time.
+
+### Initial bundle install
 
 After placing the `clustr-serverd` binary, install the bundled Slurm RPM
 repository.  The binary embeds the correct version and SHA256 — just run:
@@ -933,25 +941,81 @@ clustr-serverd bundle install
 ```
 
 This fetches `clustr-slurm-bundle-v24.11.4-clustr1-el9-x86_64.tar.gz` from
-the GitHub Release, verifies its SHA256 and RPM signatures, and unpacks it to
-`/var/lib/clustr/repo/`.
+the GitHub Release, verifies its SHA256 and RPM GPG signatures, and unpacks
+it to `/var/lib/clustr/repo/el9-x86_64/`.
 
-For air-gapped environments, side-load the bundle first:
+### Verify the install
 
 ```bash
-# Transfer the bundle tarball to the server manually, then:
-clustr-serverd bundle install --from-file /path/to/clustr-slurm-bundle-*.tar.gz
+# List installed bundles
+clustr-serverd bundle list
+# Expected:
+# DISTRO-ARCH   SLURM VERSION  CLUSTR RELEASE  INSTALLED AT          SHA256 (short)
+# el9-x86_64    24.11.4        1               2026-04-27T...        d5e397e19bb4...
+
+# Confirm the repo is reachable (no auth required)
+curl -I http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
+# Expected: HTTP/1.1 200 OK
 ```
 
-Verify the install succeeded:
+### Air-gapped install
+
+For servers that cannot reach GitHub at install time, side-load the bundle
+tarball from a workstation that has internet access:
 
 ```bash
-clustr-serverd bundle list
-curl -I http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
+# On a workstation with internet access — download the bundle:
+curl -fLO https://github.com/sqoia-dev/clustr/releases/download/slurm-v24.11.4-clustr1/clustr-slurm-bundle-v24.11.4-clustr1-el9-x86_64.tar.gz
+
+# Transfer to the air-gapped server (adjust to your transport):
+scp clustr-slurm-bundle-*.tar.gz root@<clustr-server>:/tmp/
+
+# On the clustr-server — install from the local file:
+clustr-serverd bundle install --from-file /tmp/clustr-slurm-bundle-v24.11.4-clustr1-el9-x86_64.tar.gz
+```
+
+### Rollback to the previous bundle
+
+Each install keeps the previous bundle in a `.previous-<timestamp>` directory
+under `/var/lib/clustr/repo/`.  To roll back:
+
+```bash
+clustr-serverd bundle install --rollback
+```
+
+The previous bundle is swapped back into place atomically.  Only the most
+recent previous bundle is retained.  After rollback, restart the server:
+
+```bash
+systemctl restart clustr-serverd
+```
+
+### Autodeploy and bundle upgrades
+
+When the `clustr-autodeploy` timer detects a new server commit, it
+rebuilds `clustr-serverd` with the updated `builtinSlurmBundleVersion`
+embedded via ldflags.  Before restarting the service, it compares the
+embedded bundle SHA256 against `/var/lib/clustr/repo/el9-x86_64/.installed-version`.
+If they differ, it runs `clustr-serverd bundle install` automatically to
+fetch and install the new bundle.
+
+This means: **upgrading the clustr-server binary via autodeploy also upgrades
+the Slurm bundle automatically**, with no manual intervention required.
+
+If the bundle install fails (network issue, GitHub temporarily unreachable),
+autodeploy logs a warning and continues the restart with the previously
+installed bundle.  It retries on the next cycle.  After 3 consecutive failures,
+the circuit breaker opens and autodeploy stops retrying until an operator
+manually runs `clustr-serverd bundle install` and resets the counter:
+
+```bash
+# Manually fix the bundle, then reset the circuit breaker:
+clustr-serverd bundle install
+echo 0 > /var/lib/clustr/bundle-install-failures
 ```
 
 See [docs/server-repo.md](server-repo.md) for full bundle management
-documentation including rollback.
+documentation including the `/repo/*` HTTP surface and supply-chain details.
 
 ---
 
