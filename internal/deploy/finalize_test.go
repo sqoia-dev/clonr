@@ -158,8 +158,10 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 		t.Errorf(".repo file missing 'gpgcheck=1' (GAP-17 hardening requires gpgcheck=1 on both stanzas)\nfull content:\n%s", repoContent)
 	}
 
-	// gpgcheck=0 must NOT appear — the GAP-17 single-stanza gpgcheck=0 path is removed.
-	if strings.Contains(repoContent, "gpgcheck=0") {
+	// gpgcheck=0 must NOT appear as a standalone directive — the GAP-17 single-stanza
+	// gpgcheck=0 path is removed.  We check for "\ngpgcheck=0" to avoid false-positive
+	// matches on "repo_gpgcheck=0", which is a separate (allowed) directive.
+	if strings.Contains(repoContent, "\ngpgcheck=0") {
 		t.Errorf(".repo file contains 'gpgcheck=0' but GAP-17 hardening requires gpgcheck=1 on all stanzas\nfull content:\n%s", repoContent)
 	}
 }
