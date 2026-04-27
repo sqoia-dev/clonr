@@ -2359,6 +2359,40 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 			Msg("finalize slurm: wrote script")
 	}
 
+	// ── Write slurmctld systemd drop-in (cgroup v2 delegation) ──────────────
+	// R2-G2: On systemd + cgroup v2, a service running as a non-root user
+	// (User=slurm in the upstream slurmctld.service) cannot manage its own
+	// cgroup subtree unless systemd has delegated that subtree to it.  Without
+	// Delegate=yes, slurmscriptd (fork+exec'd by slurmctld via /proc/self/exe)
+	// crashes immediately at init with:
+	//   slurmscriptd failed to send return code: No such file or directory
+	// because the cgroup.controllers write is refused by the kernel.
+	//
+	// Fix: write a drop-in that adds Delegate=yes while keeping User=slurm
+	// (principle of least privilege preserved).  The drop-in is written to
+	// /etc/systemd/system/slurmctld.service.d/clustr.conf so it survives
+	// package updates that might overwrite the base unit file.
+	//
+	// This only applies to controller nodes (hasSlurmdbd).  Compute nodes run
+	// slurmd which does not fork slurmscriptd and is not affected.
+	if hasSlurmdbd {
+		dropInDir := filepath.Join(mountRoot, "etc", "systemd", "system", "slurmctld.service.d")
+		if err := os.MkdirAll(dropInDir, 0o755); err != nil {
+			log.Warn().Err(err).Str("path", dropInDir).
+				Msg("finalize slurm: mkdir slurmctld drop-in dir (non-fatal)")
+		} else {
+			const slurmctldDropIn = "[Service]\n# clustr: delegate cgroup v2 subtree to the slurm user so that\n# slurmscriptd (fork+exec'd by slurmctld) can manage task/cgroup and\n# proctrack/cgroup plugins without running slurmctld as root.\nDelegate=yes\n"
+			dropInPath := filepath.Join(dropInDir, "clustr.conf")
+			if err := os.WriteFile(dropInPath, []byte(slurmctldDropIn), 0o644); err != nil {
+				log.Warn().Err(err).Str("path", dropInPath).
+					Msg("finalize slurm: write slurmctld drop-in (non-fatal) — slurmctld may fail to start on cgroup v2 systems")
+			} else {
+				log.Info().Str("path", dropInPath).
+					Msg("finalize slurm: wrote slurmctld Delegate=yes drop-in for cgroup v2 compatibility")
+			}
+		}
+	}
+
 	// ── Write munge key ───────────────────────────────────────────────────────
 	// NEW-GAP-17: The munge key was never included in the deploy payload, so
 	// munged could not start — leaving the node in a degraded state where Slurm

@@ -1,8 +1,9 @@
-# clonr-managed cgroup.conf — {{.ClusterName}}
+# clustr-managed cgroup.conf — {{.ClusterName}}
 # Generated: {{.Timestamp}}
-# DO NOT EDIT MANUALLY — managed by clonr-serverd Slurm module.
-
-CgroupAutomount=no
+# DO NOT EDIT MANUALLY — managed by clustr-serverd Slurm module.
+#
+# NOTE: CgroupAutomount was removed in Slurm 24.11 and must not appear here.
+# If present it causes a fatal "Invalid cgroup.conf" error on daemon startup.
 ConstrainCores=yes
 ConstrainRAMSpace=yes
 ConstrainSwapSpace=yes
