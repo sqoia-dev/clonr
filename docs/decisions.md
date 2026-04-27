@@ -34,6 +34,8 @@ Reversibility legend:
 | D14 | Initramfs auto-rebuild | NOT automated in v1.0. Stale-initramfs warning surfaced in dashboard + WARN at PXE serve. Manual rebuild remains the trigger. | cheap |
 | D15 | Hiring trigger | First paying design partner with >50 nodes signs an LOI. Until then, no hires. | cheap |
 | D16 | Show HN timing | Independent from tunnl. Post-v1.0 ship (Sprint 6 + 1 week buffer). No pre-launch beta announcement. | cheap |
+| D17 | Slurm controller dual-role default | Controller runs slurmd by default (dual-role `["controller","compute"]`). Operator opts out by editing role list. Documented as small-cluster-friendly default. | cheap |
+| D18 | Template -> DB sync mechanism | `is_clustr_default` boolean on `slurm_config_files` (default true for seed-time rows, false for API writes). Admin endpoint `POST /api/v1/slurm/configs/reseed-defaults` re-seeds only rows where current version is still flagged default. Operator-edited rows never touched. | cheap |
 
 ---
 
@@ -603,6 +605,165 @@ docs/
 **Sprint plan changes required:** None. Sprint 5 founder decision point already includes "Show HN timing." Confirmed: 2026-07-27 target.
 
 **Reversibility:** **cheap**. Announce when ready.
+
+---
+
+## D17 — Slurm Controller Dual-Role (Default Topology)
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** Gilfoyle's REG-2 forensics (`docs/lab-validation-pr5.md` §"REGRESSION FORENSICS", commit `369afeb`) showed that after Dinesh's GAP-NEW-3 fix (`b614091`), slurmctld is correctly scoped to controllers only. But this means the canonical 2-VM lab (1 controller + 1 compute) cannot satisfy `srun -N2` because the controller no longer runs slurmd. Round 4's apparent pass was an artifact of pre-fix manual state.
+
+**Question:** For v1.0, what is the default Slurm role assignment for a node tagged "controller"?
+
+**Decision:** **Controller runs slurmd by default.** Default role assignment for a controller node is `["controller", "compute"]` (dual-role). Operator opts out (production hygiene) by removing `compute`/`worker` from the role list via the API or webui.
+
+**Why Option B (default dual-role with opt-out) over A and C:**
+- **Option A (controller-only)**: forces 3-VM minimum for a working `srun -N2` demo. Worst possible Show HN first-impression; the `examples/2-vm-lab` that ships with v1.0 stops being end-to-end demo-able.
+- **Option C (auto-detect by cluster size)**: clever but unpredictable. Adding the second compute node would silently flip the controller from compute-on to compute-off, breaking jobs already scheduled on the controller. Surprise behavior changes are the worst class of bug for sysadmins.
+- **Option B (default dual-role)**: explicit, predictable, opt-out-able. The 200-node operator who cares about controller hygiene already knows to drop `compute` from the controller role; the homelabber gets a working `srun -N2` out of the box. Same default works for both audiences with one knob to turn.
+
+**What "default" means concretely:**
+- The webui "Add Slurm Role" workflow for a controller node defaults the role multi-select to `["controller", "compute"]` (both checkboxes pre-checked).
+- The API `PUT /api/v1/slurm/nodes/{id}/roles` continues to accept any role list — no server-side override of operator intent. The default lives in the UI and in the bootstrap path only.
+- Existing role assignments are NOT auto-migrated. The current cloner dev cluster (controller has `["controller"]`, compute has `["worker"]`) gets fixed by the operator running the API call once. Documented in `docs/upgrade.md` for v1.0.
+
+**Renderer fix (orthogonal but required for either option):**
+- `internal/slurm/render.go:173` must accept `"worker"` as an alias for `RoleCompute`. Currently the renderer silently drops worker-tagged nodes from the NodeName block. This is a bug regardless of D17 — fix it.
+- See spec block below for the exact change.
+
+**Rationale:** Small-cluster ergonomics is the load-bearing first-impression for clustr. The 2-VM lab is the demo we ship in `examples/`, the demo we screenshot for Show HN, the demo Persona D (homelabber) tries first. Forcing a 3-VM minimum for `srun -N2` to work is an unforced own-goal. Production hygiene is a real concern but easily handled by the operator who cares.
+
+**Reversibility:** **cheap**. The default lives in the webui form's pre-checked state and in the bootstrap example. Changing the default later is a single-line change in the webui plus a docs note in CHANGELOG. No data migration.
+
+**Re-decision triggers:**
+- A design partner reports controller resource contention from running slurmd (then: change the default for new clusters, leave existing clusters alone)
+- Multiple design partners ask for a CLI flag to disable the default (then: add `--controller-only` to whatever bootstrap CLI we ship in v1.1)
+
+**Implementation spec for Dinesh (D17):**
+```
+1. internal/slurm/render.go:173 — add "worker" alias to the role check:
+     if !hasRole(entry.Roles, RoleController) &&
+        !hasRole(entry.Roles, RoleCompute) &&
+        !hasRole(entry.Roles, "worker") { continue }
+   (Or add `RoleWorker = "worker"` constant in roles.go and use it.)
+2. webui/static/app.js — Slurm node-role assignment modal: when the
+   selected node is being assigned the "controller" role, pre-check the
+   "worker" checkbox as well. Operator can uncheck. No server-side override.
+3. examples/2-vm-lab/README.md (create if missing) — document that
+   slurm-controller has roles ["controller", "worker"] for this lab topology.
+4. docs/slurm-module.md — add a "Role assignment" section describing the
+   dual-role default and the production opt-out.
+5. docs/upgrade.md — add a one-liner: "If your existing cluster has a
+   controller-only Slurm controller and you want srun -N2 to work in a
+   1+1 topology, add the 'worker' role: PUT /api/v1/slurm/nodes/{controller_id}/roles
+   with body {\"roles\": [\"controller\", \"worker\"]}".
+6. internal/slurm/render_test.go — add a test case asserting that a node
+   with roles ["worker"] appears in the NodeName block. (Currently it
+   would be dropped.)
+```
+
+Estimated effort: ~1.5 hours (render.go + test ~30min, webui pre-check ~30min, three docs touch-ups ~30min).
+
+---
+
+## D18 — Template → DB Sync Mechanism
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** Gilfoyle's REG-1 forensics surfaced a structural gap. `seedDefaultTemplates()` only runs once — after that, every commit to `internal/slurm/templates/*.tmpl` is dead weight. The template fix in `5995c75` (MpiDefault pmix→none) never reached the deployed cluster because the DB rows were authored before the fix and `seedDefaultTemplates()` is gated on "no row exists." This shape will recur for every future template fix.
+
+Compounding issue: `SlurmSaveConfigVersion` hardcodes `is_template=0` on all writes (`internal/db/slurm.go:347`). `seedDefaultTemplates` also stores rendered output with `is_template=0` rather than storing the template source with `is_template=1`. Result: the renderer's template-rendering path is effectively dead for cluster-default config. This was a latent design bug; D18 doesn't fix the latent bug (that's a separate v1.1 cleanup), but it does fix the immediate problem.
+
+**Question:** How do template fixes in code reach already-seeded clusters without auto-pushing to live nodes?
+
+**Decision:** **Option D-lite** — `is_clustr_default` boolean column + admin re-seed endpoint. NOT auto-reseed-on-startup. Operator-controlled, surgical, reversible.
+
+**Concrete shape:**
+- Migration `052_slurm_config_files_clustr_default.sql`:
+  ```sql
+  ALTER TABLE slurm_config_files ADD COLUMN is_clustr_default INTEGER NOT NULL DEFAULT 0;
+  ```
+- Backfill rule for existing rows: leave `is_clustr_default=0` for ALL existing rows. Existing clusters opt into the new flow by hitting the re-seed endpoint explicitly. (Safer than trying to retro-detect "was this seeded by clustr or hand-authored.")
+- `seedDefaultTemplates` flow: when seeding version 1, set `is_clustr_default=1`. Subsequent operator API writes (via `SlurmSaveConfigVersion`) set `is_clustr_default=0` — that row is now sacred.
+- New endpoint `POST /api/v1/slurm/configs/reseed-defaults` (admin-only):
+  - Iterates `cfg.ManagedFiles`. For each filename:
+    - Read current version. If `is_clustr_default=1` (i.e., never operator-edited since seed), render the embedded template and call `SlurmSaveConfigVersion` to bump to a new version with `is_clustr_default=1`.
+    - If `is_clustr_default=0` (operator-edited), skip with a per-file note in the response: `{"filename":"slurm.conf","action":"skipped","reason":"operator-customized"}`.
+  - Returns a JSON summary: `{"reseeded":["cgroup.conf"],"skipped":["slurm.conf"],"missing_template":[...]}`.
+  - Does NOT push to nodes. Operator triggers a separate `POST /api/v1/slurm/sync` to deploy the new versions. Two-step is intentional — no surprises.
+- `SlurmSaveConfigVersion` signature gets a new bool param `isClustrDefault bool`; operator-API write path passes `false` (safe default), `seedDefaultTemplates` passes `true`.
+
+**Why Option D-lite (manual + flagged) over A/C (auto-reseed) or pure B (manual without flag):**
+- **A and C (auto-reseed)**: silently overwriting deployed config on operator clusters mid-upgrade is a class-of-bug we never want to ship. Per-template SHA versioning (C) is just A with more rigorous detection — same blast radius.
+- **Pure B (admin endpoint, no flag)**: re-seeds ALL files including operator-customized ones. Wipes operator work. Wrong default.
+- **D-lite (flag + endpoint)**: operator chooses the moment, only un-customized rows get touched, two-step deploy keeps the operator in the driver's seat. Reversible — every reseed creates a new version, operator can roll back to any prior version via existing version-history API.
+
+**Migration story for the cloner dev cluster (and any existing v5 cluster):**
+- After 052 lands, all existing rows have `is_clustr_default=0` (sacred).
+- For the cloner dev cluster specifically, REG-1 fix is a one-shot: operator runs `POST /api/v1/slurm/configs/{filename}/reseed-from-template?force=true` (or hand-authors version 6 via the existing API, which is what Gilfoyle's "Alternate 1-line mitigation" suggested).
+- Document in `docs/upgrade.md` v1.0 release notes: "REG-1 one-time fix: PUT a corrected slurm.conf via the API after upgrade. Future template-shipped fixes will be applied via the new /reseed-defaults endpoint."
+- Greenfield clusters post-v1.0 get `is_clustr_default=1` from the start; future template commits propagate by operator running `/reseed-defaults` once per release.
+
+**Why not fix the latent `is_template=0` bug now:** That requires changing `SlurmSaveConfigVersion` to accept `is_template`, changing all callers, changing the seed path to store template source rather than rendered output, and validating that the renderer correctly handles every existing template under all override permutations. ~1 day of work and a real regression risk on an already-shaky module. Defer to v1.1 as "templates: store source, render at deploy" cleanup. D18 ships the operator-facing fix without rewriting the rendering layer.
+
+**Rationale:** Operator-controlled re-seed is the smallest blast-radius shape that solves the structural problem. Auto-anything is too dangerous given the current "DB row content is verbatim deployed" pattern. The `is_clustr_default` flag is the minimum DB schema change needed to safely distinguish "clustr seeded this" from "operator wrote this."
+
+**Reversibility:** **cheap**. The column is additive. The endpoint can be removed in v1.1 if a better mechanism (e.g., the proper template-source-stored-in-DB rewrite) lands. No wire-contract impact.
+
+**Re-decision triggers:**
+- Operators report the two-step (reseed → sync) is too cumbersome and want a one-step "reseed and deploy" → add a `?deploy=true` query param to the reseed endpoint
+- The latent `is_template=0` bug bites a customer — bumps the v1.1 "store template source" cleanup priority
+
+**Implementation spec for Dinesh (D18):**
+```
+1. internal/db/migrations/052_slurm_config_files_clustr_default.sql:
+     ALTER TABLE slurm_config_files
+       ADD COLUMN is_clustr_default INTEGER NOT NULL DEFAULT 0;
+2. internal/db/slurm.go:
+   - Add field IsClustrDefault bool to SlurmConfigFileRow.
+   - Update all SELECT queries (lines 285, 297, 307, 322) to include the column.
+   - Update scanSlurmConfigFile (line 365) to scan it.
+   - Change SlurmSaveConfigVersion signature: add `isClustrDefault bool` param;
+     update the INSERT to set the column from the param (replacing hardcoded 0).
+3. internal/slurm/manager.go seedDefaultTemplates (line 276):
+     pass `true` for the new isClustrDefault arg.
+4. internal/slurm/routes.go (and any other call site of SlurmSaveConfigVersion):
+     pass `false` for operator API writes.
+5. internal/slurm/routes.go: add new handler handleSlurmReseedDefaults:
+   - Path: POST /api/v1/slurm/configs/reseed-defaults
+   - Admin-only (use existing admin auth middleware)
+   - Iterate cfg.ManagedFiles. For each: read current version via
+     SlurmGetCurrentConfig. If row.IsClustrDefault is true, re-render
+     the embedded template and call SlurmSaveConfigVersion(..., true).
+     Else, append to "skipped" list with reason="operator-customized".
+   - Return JSON summary: {"reseeded":[...],"skipped":[...],"missing":[...]}.
+   - No node push — explicit operator follow-up via /slurm/sync.
+6. internal/slurm/manager_test.go: add tests for reseed flow:
+   - reseed when row.IsClustrDefault=true bumps version
+   - reseed when row.IsClustrDefault=false leaves row untouched
+7. docs/slurm-module.md: add "Re-seeding default templates" section
+   documenting the endpoint, the flag semantics, and the two-step
+   reseed→sync pattern.
+8. docs/upgrade.md: add v1.0 release note about REG-1 one-time fix
+   and the new endpoint for future template propagation.
+```
+
+Estimated effort: ~2 hours (migration + DB changes ~30min, route handler ~45min, tests ~30min, docs ~15min).
+
+---
+
+## v1.0 Ship Implications (D17 + D18)
+
+Both calls are **non-blocking for v1.0 once specs above are executed**. They are additive (no breaking changes to existing API contracts, no destructive migrations). Both can land in a single Dinesh sprint window before tagging v1.0.
+
+**Sequencing:**
+1. D17 render.go alias fix lands first (single-file change, ~30min, unblocks Round 5 srun -N2 validation).
+2. D18 migration + endpoint lands second (~2h, larger change but fully isolated).
+3. Round 5 e2e validation (Task #82) runs against a fresh reimage with both fixes present. If srun -N2 PASSES on a 1+1 cluster after the operator assigns dual-role to the controller, both REGs are closed.
+4. v1.0 tag.
+
+**One latent debt acknowledged:** The `is_template=0` rendering shortcut is a known v1.1 cleanup. Documented here so future-Richard doesn't rediscover it. Tracking implicitly via the D18 "Re-decision triggers" above.
 
 ---
 
