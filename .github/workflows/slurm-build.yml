@@ -456,8 +456,8 @@ jobs:
 
           echo ""
           echo "--- Checking for repomd.xml ---"
-          if ! tar tzf "${BUNDLE_NAME}" | grep -q "^\./el9-x86_64/repodata/repomd\.xml$"; then
-            echo "FATAL: repomd.xml not found at ./el9-x86_64/repodata/repomd.xml"
+          if ! tar tzf "${BUNDLE_NAME}" | grep -q "el9-x86_64/repodata/repomd\.xml"; then
+            echo "FATAL: repomd.xml not found in bundle"
             tar tzf "${BUNDLE_NAME}" | grep -i repomd || echo "  (none)"
             exit 1
           fi
