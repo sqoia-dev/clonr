@@ -115,8 +115,13 @@ jobs:
           # 3. Enable mariadb AppStream module so mariadb-devel is visible
           dnf module enable -y mariadb
 
-          # 4. Mandatory build deps — hard fail if any are missing
-          dnf install -y \
+          # 4. Mandatory build deps — hard fail if any are missing.
+          # Note: the Rocky 9 base container ships curl-minimal which conflicts
+          # with the full curl package. Use --allowerasing to allow DNF to
+          # replace curl-minimal with curl. The full curl binary is only needed
+          # at workflow script level for tarball download; libcurl-devel is the
+          # actual Slurm build dep.
+          dnf install -y --allowerasing \
             gcc gcc-c++ make \
             automake autoconf libtool \
             rpm-build rpm-sign \
