@@ -825,3 +825,211 @@ end-to-end:
 confirm the two-stanza repo is emitted on live nodes and that `rpm -K` against
 Rocky/EPEL-signed dep RPMs returns `digests signatures OK`. This is a separate
 task blocked on autodeploy picking up the `clustr5` binary.
+
+---
+
+## REGRESSION FORENSICS (2026-04-27)
+
+**Analyst:** Gilfoyle  
+**Scope:** Read-only investigation. No code changes committed. Dinesh is in-flight on GAP-17 hardening; all code fixes deferred to post-GAP-17 or fold into his sprint.
+
+---
+
+### REG-1: MpiDefault=pmix in Deployed slurm.conf
+
+#### Symptom
+
+After the most recent reimage of slurm-controller (vm201), `/etc/slurm/slurm.conf` contains `MpiDefault=pmix`. Commit `5995c75` (R4-GAP-2) was supposed to have fixed this.
+
+#### Root Cause
+
+The `5995c75` fix changed `internal/slurm/templates/slurm.conf.tmpl` from `MpiDefault=pmix` to `MpiDefault=none`. That change is correct and is present at HEAD:
+
+```
+$ grep -i mpi internal/slurm/templates/slurm.conf.tmpl
+MpiDefault=none
+```
+
+However, the fix **only corrected the on-disk template file**. It did not update the `slurm_config_files` table in the clustr-server SQLite database. The database is the authoritative source for what gets deployed: `RenderAllForNode()` in `internal/slurm/render.go` reads from `slurm_config_files` via `SlurmGetCurrentConfig()`, not from the on-disk template files.
+
+The DB currently contains 5 versions of `slurm.conf`, all with `MpiDefault=pmix`:
+
+```
+version | is_template | authored_by                              | message
+--------|-------------|------------------------------------------|------------------------------------------
+5       | 0           | key:fe5a9ae4-41d9-49b1-94e0-aae7159d0805 | Round 3: fix SlurmctldHost to slurm-controller, remove slurmdbd
+4       | 0           | key:audit-test                           | (empty)
+3       | 0           | key:audit-test                           | (empty)
+2       | 0           | unknown                                  | (empty)
+1       | 0           | clonr-system                             | Initial default template
+```
+
+Every version has `is_template=0`, meaning the content is used verbatim — no Go template rendering, no substitution from the on-disk `.tmpl` file. Version 5 is the one deployed to both nodes (confirmed by `slurm_node_config_state`):
+
+```
+node: slurm-controller (cbf2c958) → slurm.conf v5, hash be808269...
+node: slurm-compute    (ac7fb8e3) → slurm.conf v5, hash be808269...
+```
+
+Version 5 was authored during Round 3 verification via the API (the `message` field says "Round 3: fix SlurmctldHost to slurm-controller"). At that time the DB row was hand-written with `MpiDefault=pmix` still present. The `5995c75` template fix was committed **after** that row existed, and the row was never superseded by a corrected version.
+
+The on-disk template is currently a dead letter for this cluster: because all DB rows have `is_template=0`, the renderer never touches them. The template file on disk only matters for `seedDefaultTemplates()` (initial DB seeding when the Slurm module is first configured). Once the DB has a row, the file is not re-read.
+
+#### Evidence
+
+- `git show 5995c75 -- internal/slurm/templates/slurm.conf.tmpl` — confirms template changed to `none`
+- `sqlite3 clustr.db "SELECT version, is_template, substr(content,1,200) FROM slurm_config_files WHERE filename='slurm.conf' ORDER BY version DESC"` — all 5 rows contain `MpiDefault=pmix`; `is_template=0` on all
+- `sqlite3 clustr.db "SELECT node_id, filename, deployed_version FROM slurm_node_config_state WHERE filename='slurm.conf'"` — both nodes at version 5
+- Template HEAD: `internal/slurm/templates/slurm.conf.tmpl` line 10, `MpiDefault=none`
+- DB version 5 content: `MpiDefault=pmix` (verbatim, no template markers)
+
+#### Why Round 4 Reported a Fix That Wasn't Actually Deployed
+
+Round 4 ran `srun --mpi=none -N1 hostname` (section R2-G1-H). The `--mpi=none` flag overrides `MpiDefault` at invocation time, so even with `MpiDefault=pmix` in the deployed slurm.conf the job succeeded. The R4 report section header "GAP-NEW-4 (MpiDefault=pmix, plugin absent) FIXED" in the R4-F gap table is inaccurate: the template was fixed, but the running cluster never received the corrected value. The srun test passed for an incidental reason, not because the root fix reached the deployed config.
+
+#### Fix Recommendation
+
+This is a **data migration**, not a code change. The fix is a new `slurm.conf` row in the DB with:
+- `MpiDefault=none`
+- `is_template=0` (to remain consistent with the current static-content pattern, OR set `is_template=1` and let the renderer use the template — see note below)
+- A push operation to deploy version 6 to both nodes
+
+The cleanest implementation: after Dinesh's GAP-17 sprint lands, create DB version 6 via the clustr API (or a migration helper in the server startup code), then push to both nodes. The fix should also address `AccountingStorageType=accounting_storage/slurmdbd` in the template (line present in the template) vs `AccountingStorageType=accounting_storage/none` in the DB version 5 (correct for this lab cluster without slurmdbd) — these differ and the template's `slurmdbd` default is wrong for the no-dbd case.
+
+**Owner:** Dinesh (data migration + possibly add a DB migration step in `seedDefaultTemplates` to detect and update stale pmix rows). This can fold into post-GAP-17 Round 5 prep.
+
+**Alternate 1-line mitigation:** If the intent is for the DB to drive the content (current pattern), the quickest operator fix is:
+```sql
+INSERT INTO slurm_config_files (id, filename, version, content, is_template, checksum, authored_by, message, created_at)
+SELECT hex(randomblob(16)), 'slurm.conf', 6,
+  replace(content, 'MpiDefault=pmix', 'MpiDefault=none'),
+  0, 'updated-checksum', 'gilfoyle-migration', 'REG-1 fix: MpiDefault pmix→none',
+  unixepoch()
+FROM slurm_config_files WHERE filename='slurm.conf' AND version=5;
+```
+Then push version 6 to both nodes. Do not run this manually — fold it into a server-side migration with proper checksum recompute. Flagging for Dinesh.
+
+---
+
+### REG-2: srun -N2 Topology (Only 1 Node in Partition)
+
+#### Symptom
+
+Current `slurm_config_files` version 5 contains:
+```
+NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN
+PartitionName=batch Nodes=slurm-compute Default=YES MaxTime=INFINITE State=UP
+```
+
+Only `slurm-compute` is in the `batch` partition. `slurm-controller` runs `slurmctld` only (no `slurmd`), so `-N2` is unsatisfiable in the current deployed state.
+
+#### Root Cause: Two Compounding Issues
+
+**Issue A — The "worker" role is not recognized by the renderer**
+
+The compute node (ac7fb8e3, `slurm-compute`) has role `["worker"]` in `slurm_node_roles`:
+
+```
+node: slurm-controller → roles: ["controller"]
+node: slurm-compute    → roles: ["worker"]
+node: (unnamed, e8586224) → roles: []
+```
+
+`internal/slurm/render.go:173` filters for `NodeName` entries:
+```go
+if !hasRole(entry.Roles, RoleController) && !hasRole(entry.Roles, RoleCompute) {
+    continue
+}
+```
+
+`RoleCompute = "compute"` (defined in `internal/slurm/roles.go:7`). The string `"worker"` does not match. `slurm-compute` is therefore **excluded from the NodeName block** when the renderer builds slurm.conf from the template.
+
+`finalize.go:2361` accepts both `"worker"` and `"compute"` as equivalent:
+```go
+case "worker", "compute":
+    // "worker" is the canonical API role value; "compute" accepted for back-compat
+```
+
+But `render.go` was never updated to match. This is a role-string inconsistency between the deploy path and the render path. The deploy path is correct (it uses `"worker"`); the render path is missing the alias.
+
+**Issue B — DB version 5 is static content, not template-rendered**
+
+Even if the renderer were fixed, it would not help the current cluster: all DB rows have `is_template=0`. The renderer is never called for `slurm.conf` pushes to these nodes. The deployed content is whatever was hand-authored in the DB row.
+
+The correct `NodeName` and `PartitionName` lines would only appear from the renderer if: (a) the renderer is invoked, AND (b) the role string bug is fixed.
+
+#### Why Round 4 Showed srun -N2 Working
+
+Round 4 section R2-F (Round 2, not Round 4 — note the heading confusion in the doc) explicitly states:
+
+> "slurm.conf updated to add slurm-controller as a second compute node (NodeAddr=10.99.0.100) for the 2-node test. Partition updated to Nodes=slurm-controller,slurm-compute."
+
+This was a **manual edit** pushed to the DB during Round 2 validation. That manually authored row became DB version 5 (the Round 3 edit). The R4-B `sinfo -N -l` output showing both nodes in `batch*` is consistent with this: the deployed slurm.conf from that session had both nodes listed because a human put them there. slurmd was running on both nodes at that point because both VMs had it enabled (per R2-E, slurmd was active on vm201 `slurm-controller` as well — it was running dual-role in Round 2/3/4).
+
+The Round 4 2-node `srun -N2` result was **real** — the cluster was genuinely 2-node compute in that session. But it was achieved through manual slurm.conf editing and dual-role configuration of the controller VM, not through the clustr Slurm module's automatic config generation. After the most recent reimage (which deploys DB version 5 as-is), the controller no longer runs slurmd (per `R4-C` — slurmd is not shown as enabled on slurm-controller in Round 4's controller validation, only slurmctld). The partition reverts to 1-compute-only.
+
+#### Did Round 4 Overstate Success?
+
+Partially. The R4-D srun tests are accurate for the cluster state at that moment. The cluster genuinely had 2-node compute during Round 4 validation. However:
+
+1. The R4-F gap table marks "GAP-NEW-4 (MpiDefault=pmix) FIXED" — this is inaccurate. The template was patched; the deployed cluster never received the fix.
+
+2. The R4-G verdict "CLUSTER STATUS: TURNKEY" is accurate for the manually-configured cluster state at Round 4, but overstates what clustr's automatic provisioning would produce on a fresh reimage. A fresh reimage today produces: 1-node compute partition, `MpiDefault=pmix` in the deployed config, and a render path that would silently omit the compute node from the NodeName block even if the renderer were used.
+
+3. The R2-G1-H section (post base-image rebuild srun test) used `srun --mpi=none -N1 hostname`. The `-N1` means only one node was tested and the partition topology regression was already present at that point but not exercised. The `--mpi=none` flag masked the `MpiDefault=pmix` issue. Both regressions were latent from that point forward.
+
+#### Evidence
+
+- `sqlite3 clustr.db "SELECT nr.node_id, nc.hostname, nr.roles FROM slurm_node_roles nr LEFT JOIN node_configs nc ON nr.node_id=nc.id"` → `slurm-compute` has `["worker"]`
+- `internal/slurm/roles.go:7` → `RoleCompute = "compute"`
+- `internal/slurm/render.go:173` → `hasRole(entry.Roles, RoleCompute)` — no "worker" alias
+- `internal/deploy/finalize.go:2361` → `case "worker", "compute":` — has the alias
+- DB version 5 content → `NodeName=slurm-compute ... PartitionName=batch Nodes=slurm-compute` (1-node partition, no controller)
+- R2-F note: "slurm.conf updated to add slurm-controller as second compute node" — confirms the 2-node state was manual
+
+#### Fix Recommendation
+
+**Fix A (code, required):** In `internal/slurm/render.go:173`, add `"worker"` to the role check:
+```go
+if !hasRole(entry.Roles, RoleController) &&
+   !hasRole(entry.Roles, RoleCompute) &&
+   !hasRole(entry.Roles, "worker") {
+    continue
+}
+```
+
+Better: canonicalize `"worker"` → `"compute"` in `roles.go` or add a `RoleWorker = "worker"` constant and add it as an alias in both `FilesForRoles`, `ServicesForRoles`, `ScriptTypesForRoles`, and `render.go`. The cleanest long-term fix is a migration in the API layer that normalizes `"worker"` to `"compute"` on write.
+
+**Fix B (data + design decision):** Decide whether the controller should run dual-role (controller + compute) in this lab topology. If yes: assign role `["controller", "compute"]` to slurm-controller in `slurm_node_roles` and enable slurmd on the controller node. The template `PartitionName=batch Nodes=ALL` will then correctly include both nodes. If no (controller-only): update the partition template to `Nodes={{range .Nodes}}{{.NodeName}} {{end}}` to only include nodes with a compute role, which is currently just slurm-compute.
+
+**Fix C (data):** Same DB migration as REG-1 — push a new version 6 of slurm.conf to both nodes that reflects the intended topology, with `MpiDefault=none`.
+
+**Owner:** Dinesh for code fixes A and the DB migration. Design decision on dual-role topology belongs to Richard.
+
+**Fold into GAP-17 sprint?** Fix A (role string normalization in render.go) is a small isolated change in `internal/slurm/render.go` with no conflict risk against Dinesh's current GAP-17 work (`build/slurm/`, `bundle.go`, `finalize.go`, `keys.go`). It can fold into GAP-17 or ship immediately after as a standalone fix. Fix B (topology decision) requires Richard input before code change. Fix C (DB migration for MpiDefault) should ship with the first post-GAP-17 reimage cycle.
+
+---
+
+### REG-1 + REG-2: Cross-Cutting Process Gap
+
+Both regressions share a structural gap: **the DB-stored config content is decoupled from the template file, and there is no mechanism to detect or prevent DB rows from diverging from the template after a template commit.** The `seedDefaultTemplates()` path only runs once on module initialization (idempotent check prevents re-seeding). A template commit has zero effect on an already-seeded cluster.
+
+This is acceptable design for intentional overrides (operators pushing custom configs via the API). But for the default case — where the DB row was seeded from the template and should track template changes — the system has no reconciliation path.
+
+Recommendation for Richard: consider a `is_clustr_default` flag or a "reseed from template" admin endpoint, so that template fixes in code actually reach running clusters on the next deploy cycle. Without this, every template fix requires a separate data migration.
+
+---
+
+### Round 4 Accuracy Assessment
+
+| Claim | Accurate? | Notes |
+|---|---|---|
+| GAP-NEW-1/1b/1c FIXED | YES | SSH access works, shadow file present, confirmed end-to-end |
+| GAP-NEW-2 (slurm/munge users) FIXED | YES | `getent passwd slurm munge` confirmed on both nodes |
+| GAP-NEW-3 (slurmctld on compute) FIXED | YES | `systemctl is-enabled slurmctld` returns "No such file" on compute |
+| GAP-NEW-4 (MpiDefault=pmix) FIXED | NO | Template patched, DB never updated, deployed config still has pmix |
+| srun -N1 PASS | YES (conditional) | Worked because `--mpi=none` was used; would fail without the flag or with a fresh reimage today |
+| srun -N2 PASS | YES (conditional) | Cluster was genuinely 2-node at Round 4 due to manual slurm.conf edit + dual-role controller. Fresh reimage today produces 1-node partition only |
+| CLUSTER STATUS: TURNKEY | OVERSTATED | Accurate for the hand-configured Round 4 state. Not accurate for what clustr automated provisioning delivers on a clean reimage today |
+
+**Bottom line:** Round 4 was real validation on a real cluster, but the cluster state depended on accumulated manual edits that a fresh reimage does not reproduce. The two regressions are re-exposed on every new reimage because the fixes never made it into the data path that matters (the DB) or the code path that maps "worker" to a compute node.
