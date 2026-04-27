@@ -277,6 +277,15 @@ jobs:
           cp "${TARBALL}" libjwt-rpmbuild/SOURCES/
           cp libjwt.spec libjwt-rpmbuild/SPECS/
 
+          # Install libjwt build dependencies.  These are listed in the spec's
+          # BuildRequires but may not be in the container yet.
+          # - doxygen: required for `make doxygen-doc` in the %build section
+          # - check / check-devel: required for `make check` in the %check section
+          #   (the spec conditionally runs check on RHEL >= 8)
+          # These are in EPEL (already enabled) on EL9.
+          echo "--- Installing libjwt build dependencies ---"
+          dnf install -y check check-devel doxygen
+
           echo "--- Building libjwt RPMs ---"
           rpmbuild -bb \
             --define "_topdir $(pwd)/libjwt-rpmbuild" \
