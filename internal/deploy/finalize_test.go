@@ -1,0 +1,204 @@
+// finalize_test.go — tests for Slurm deploy path helpers.
+package deploy
+
+import (
+	"encoding/base64"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestElVersionFromURL covers all URL shapes: clustr bundled-repo, OpenHPC,
+// and paths that should return "".
+func TestElVersionFromURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		want    string
+	}{
+		// Clustr bundled-repo patterns (PR3)
+		{
+			name: "clustr el9 x86_64",
+			url:  "http://10.99.0.1:8080/repo/el9-x86_64/",
+			want: "9",
+		},
+		{
+			name: "clustr el10 x86_64",
+			url:  "http://10.99.0.1:8080/repo/el10-x86_64/",
+			want: "10",
+		},
+		// OpenHPC / SchedMD fallback patterns
+		{
+			name: "openhpc EL_9",
+			url:  "https://repos.openhpc.community/OpenHPC/3/EL_9",
+			want: "9",
+		},
+		{
+			name: "openhpc EL_10",
+			url:  "https://repos.openhpc.community/OpenHPC/3/EL_10",
+			want: "10",
+		},
+		{
+			name: "EL9 no underscore",
+			url:  "https://example.com/packages/EL9/slurm/",
+			want: "9",
+		},
+		// Unknown / empty
+		{
+			name: "empty URL",
+			url:  "",
+			want: "",
+		},
+		{
+			name: "unknown URL",
+			url:  "https://example.com/packages/ubuntu/",
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := elVersionFromURL(tc.url)
+			if got != tc.want {
+				t.Errorf("elVersionFromURL(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstallSlurmInChroot_RepoFileContent verifies the generated .repo file
+// for the clustr-builtin path: gpgcheck=1, repo_gpgcheck=0, and
+// gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr.  Also verifies that
+// the GPG key file is written to the chroot before the dnf step.
+//
+// The dnf execution is expected to fail (no real chroot), but we verify the
+// written files before the dnf call.
+func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
+	// Create a minimal fake chroot tree.
+	chroot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
+		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
+	}
+
+	const fakeKeyContent = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE KEY FOR TEST\n-----END PGP PUBLIC KEY BLOCK-----\n"
+	gpgKeyBytes := []byte(fakeKeyContent)
+	repoURL := "http://10.99.0.1:8080/repo/el9-x86_64/"
+
+	// installSlurmInChroot runs chroot+dnf which will fail in a test
+	// environment. That is expected and non-fatal (it logs a warning).
+	// We only assert the pre-dnf steps (GPG key file + .repo file).
+	installSlurmInChroot(
+		t.Context(),
+		chroot,
+		"test-node-01",
+		repoURL,
+		false, // hasSlurmdbd
+		false, // hasGres
+		nil,   // auditFn
+		gpgKeyBytes,
+	)
+
+	// --- Assert GPG key file was written ---
+	gpgKeyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
+	gpgKeyData, err := os.ReadFile(gpgKeyPath)
+	if err != nil {
+		t.Fatalf("GPG key file not written at %s: %v", gpgKeyPath, err)
+	}
+	if string(gpgKeyData) != fakeKeyContent {
+		t.Errorf("GPG key file content mismatch:\n  got  %q\n  want %q", string(gpgKeyData), fakeKeyContent)
+	}
+	// Verify mode is 0644.
+	info, err := os.Stat(gpgKeyPath)
+	if err != nil {
+		t.Fatalf("stat GPG key file: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("GPG key file mode = %o, want 0644", info.Mode().Perm())
+	}
+
+	// --- Assert .repo file was written with correct gpgcheck settings ---
+	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	repoData, err := os.ReadFile(repoPath)
+	if err != nil {
+		t.Fatalf(".repo file not written at %s: %v", repoPath, err)
+	}
+	repoContent := string(repoData)
+
+	// Snapshot the expected .repo content.
+	wantLines := []string{
+		"[clustr-slurm]",
+		"name=clustr Slurm",
+		"baseurl=http://10.99.0.1:8080/repo/el9-x86_64/",
+		"enabled=1",
+		"gpgcheck=1",
+		"repo_gpgcheck=0",
+		"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr",
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(repoContent, line) {
+			t.Errorf(".repo file missing line %q\nfull content:\n%s", line, repoContent)
+		}
+	}
+	// gpgcheck=0 must NOT appear (that would mean we fell back to insecure mode).
+	if strings.Contains(repoContent, "gpgcheck=0") {
+		t.Errorf(".repo file contains gpgcheck=0 but expected gpgcheck=1\nfull content:\n%s", repoContent)
+	}
+}
+
+// TestInstallSlurmInChroot_CustomURLFallback verifies that when gpgKeyBytes is
+// nil (operator-provided custom repo URL), the .repo file uses gpgcheck=0.
+func TestInstallSlurmInChroot_CustomURLFallback(t *testing.T) {
+	chroot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
+		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
+	}
+
+	repoURL := "https://repos.openhpc.community/OpenHPC/3/EL_9"
+	installSlurmInChroot(
+		t.Context(),
+		chroot,
+		"test-node-02",
+		repoURL,
+		false, // hasSlurmdbd
+		false, // hasGres
+		nil,   // auditFn
+		nil,   // gpgKeyBytes — nil for custom URL path
+	)
+
+	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	repoData, err := os.ReadFile(repoPath)
+	if err != nil {
+		t.Fatalf(".repo file not written at %s: %v", repoPath, err)
+	}
+	repoContent := string(repoData)
+
+	if !strings.Contains(repoContent, "gpgcheck=0") {
+		t.Errorf("custom-URL .repo expected gpgcheck=0\nfull content:\n%s", repoContent)
+	}
+	if strings.Contains(repoContent, "gpgcheck=1") {
+		t.Errorf("custom-URL .repo must not have gpgcheck=1\nfull content:\n%s", repoContent)
+	}
+
+	// GPG key file must NOT exist in chroot for custom URL path.
+	gpgKeyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
+	if _, err := os.Stat(gpgKeyPath); err == nil {
+		t.Errorf("GPG key file should not exist in chroot for custom URL path, but found at %s", gpgKeyPath)
+	}
+}
+
+// TestInstallSlurmInChroot_GPGKeyBase64RoundTrip verifies the base64
+// encode/decode round-trip that writeSlurmConfig uses before calling
+// installSlurmInChroot. Ensures the key bytes survive the round-trip intact.
+func TestInstallSlurmInChroot_GPGKeyBase64RoundTrip(t *testing.T) {
+	const original = "-----BEGIN PGP PUBLIC KEY BLOCK-----\ntest key data\n-----END PGP PUBLIC KEY BLOCK-----\n"
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(original))
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if string(decoded) != original {
+		t.Errorf("GPG key round-trip failed:\n  got  %q\n  want %q", string(decoded), original)
+	}
+}

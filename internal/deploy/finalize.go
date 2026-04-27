@@ -2226,7 +2226,18 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 		// The munge and slurm RPM %pre scriptlets create the munge:munge and
 		// slurm:slurm system users — this is the primary path that ensures those
 		// accounts exist before the chown block below runs.
-		installSlurmInChroot(ctx, mountRoot, nodeID, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres, auditFn)
+		//
+		// Decode the GPG key from base64 if present (populated by the slurm manager
+		// for the clustr-builtin path; empty for operator-provided custom URLs).
+		var gpgKeyBytes []byte
+		if slurmCfg.GPGKey != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(slurmCfg.GPGKey); err == nil {
+				gpgKeyBytes = decoded
+			} else {
+				log.Warn().Err(err).Msg("finalize slurm: auto-install: failed to decode GPGKey (non-fatal, falling back to gpgcheck=0)")
+			}
+		}
+		installSlurmInChroot(ctx, mountRoot, nodeID, slurmCfg.SlurmRepoURL, hasSlurmdbd, hasGres, auditFn, gpgKeyBytes)
 	} else {
 		// No SlurmRepoURL — slurm + munge must already be installed in the base
 		// image. The chown steps below require slurm:slurm and munge:munge to
@@ -2559,10 +2570,16 @@ type SlurmInstallAuditFn func(ctx context.Context, nodeID, action, detail string
 //   - fallback (no role yet): slurm munge  (minimal; enables munge at least)
 //
 // EL9/EL10 mismatch detection: reads /etc/os-release from the chroot to
-// determine the deployed OS version. If the URL contains "EL_9" or "EL_10"
-// and the image's version doesn't match, the mismatch is logged (non-fatal) so
-// the operator can correct the repo URL without waiting for a failed dnf run.
-func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string, hasSlurmdbd, hasGres bool, auditFn SlurmInstallAuditFn) {
+// determine the deployed OS version. If the URL contains "EL_9", "EL_10", or
+// the clustr /repo/el9-x86_64/ pattern, and the image's version doesn't match,
+// the mismatch is logged (non-fatal) so the operator can correct the repo URL.
+//
+// gpgKeyBytes, when non-nil, is the clustr GPG release signing public key
+// (ASCII-armored). It is written to the chroot at
+// /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr before the dnf invocation so that
+// gpgcheck=1 can verify RPM signatures. When nil (legacy custom-URL path),
+// gpgcheck=0 is used as a fallback.
+func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string, hasSlurmdbd, hasGres bool, auditFn SlurmInstallAuditFn, gpgKeyBytes []byte) {
 	log := logger()
 
 	// EL9 / EL10 mismatch detection — read VERSION_ID from the chroot's os-release.
@@ -2658,9 +2675,40 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not read host /etc/resolv.conf (non-fatal)")
 	}
 
-	// Step 3: Write a .repo file directly rather than calling dnf config-manager,
+	// Step 3a: Write the clustr GPG public key into the chroot so dnf can
+	// verify RPM signatures with gpgcheck=1.  Only done when gpgKeyBytes is
+	// provided (i.e. the repo URL is the clustr-builtin path).  For custom
+	// operator-provided URLs, gpgKeyBytes is nil and we fall back to gpgcheck=0.
+	gpgKeyPath := filepath.Join(mountRoot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
+	useGPGCheck := false
+	if len(gpgKeyBytes) > 0 {
+		if err := os.MkdirAll(filepath.Dir(gpgKeyPath), 0o755); err != nil {
+			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create /etc/pki/rpm-gpg in chroot (non-fatal)")
+		} else if err := os.WriteFile(gpgKeyPath, gpgKeyBytes, 0o644); err != nil {
+			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write RPM-GPG-KEY-clustr into chroot (non-fatal)")
+		} else {
+			useGPGCheck = true
+			log.Info().Msg("finalize slurm: auto-install: wrote RPM-GPG-KEY-clustr into chroot at /etc/pki/rpm-gpg/")
+		}
+	}
+
+	// Step 3b: Write a .repo file directly rather than calling dnf config-manager,
 	// because config-manager may not be installed in the chroot image.
-	repoContent := "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL + "\nenabled=1\ngpgcheck=0\n"
+	//
+	// gpgcheck=1  → RPM signature check against the embedded clustr key.
+	// repo_gpgcheck=0 → repodata/ is not separately signed (createrepo_c output
+	//                   is not gpg-signed in the current bundle; only the RPMs are).
+	// gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr → key already on disk in
+	//   the chroot after step 3a; no extra HTTP round-trip needed.
+	var repoContent string
+	if useGPGCheck {
+		repoContent = "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL +
+			"\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr\n"
+	} else {
+		// Fallback for operator-provided custom repo URLs that don't carry the
+		// clustr signing key.  Keep gpgcheck=0 so custom repos still work.
+		repoContent = "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL + "\nenabled=1\ngpgcheck=0\n"
+	}
 	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
 	if err := os.MkdirAll(filepath.Join(mountRoot, "etc", "yum.repos.d"), 0o755); err != nil {
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create yum.repos.d (non-fatal)")
@@ -2670,7 +2718,9 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write repo file (non-fatal)")
 		return
 	}
-	log.Info().Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
+	log.Info().
+		Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
+		Bool("gpgcheck", useGPGCheck).
 		Msg("finalize slurm: auto-install: repo file written")
 
 	// Step 4: Check whether all required packages are already installed in the
@@ -2743,9 +2793,35 @@ func extractELVersion(osReleaseContent string) string {
 }
 
 // elVersionFromURL returns "9" or "10" (or "") by scanning a repo URL for
-// the EL_9 or EL_10 substrings used by OpenHPC and SchedMD repos.
-// Example: "https://repos.openhpc.community/OpenHPC/3/EL_9" → "9"
+// EL version indicators. Recognises two URL patterns:
+//
+//   1. clustr bundled-repo pattern (PR3): "/repo/el9-x86_64/" → "9"
+//      or "/repo/el10-x86_64/" → "10"
+//   2. OpenHPC / SchedMD pattern: "EL_9" or "EL_10" substrings (kept as
+//      fallback for operator-configured custom repo URLs).
+//
+// The clustr pattern is checked first. This function must not break when
+// given an OpenHPC URL — both patterns may legitimately appear in the URL
+// depending on whether the operator overrides slurm_repo_url.
+//
+// Examples:
+//
+//	"http://10.99.0.1:8080/repo/el9-x86_64/"  → "9"
+//	"http://10.99.0.1:8080/repo/el10-x86_64/" → "10"
+//	"https://repos.openhpc.community/OpenHPC/3/EL_9" → "9"
 func elVersionFromURL(repoURL string) string {
+	lower := strings.ToLower(repoURL)
+
+	// Clustr bundled-repo URL pattern: /repo/el9-x86_64/ or /repo/el10-x86_64/
+	// Check el10 before el9 to avoid el10 matching el9 prefix.
+	if strings.Contains(lower, "/repo/el10-") {
+		return "10"
+	}
+	if strings.Contains(lower, "/repo/el9-") {
+		return "9"
+	}
+
+	// OpenHPC / SchedMD URL pattern fallback.
 	upper := strings.ToUpper(repoURL)
 	if strings.Contains(upper, "EL_10") {
 		return "10"

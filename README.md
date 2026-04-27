@@ -167,7 +167,9 @@ WORK_NODE_ID = <node-id of your worker node>
 
 ### Step 1 — Build a Rocky Linux 9 base image
 
-OpenHPC (the recommended Slurm package source) publishes packages for EL9. **OpenHPC EL10 packages do not exist as of 2026-04-26** (`HTTP 404` at the EL10 repo URL). Use Rocky Linux 9 for all Slurm deployments until OpenHPC publishes EL10 support.
+clustr ships Slurm built-in — the bundled Slurm repo is served by the
+clustr-server itself. No external repo URL is needed. Use Rocky Linux 9 for EL9
+deployments (EL10 bundle coming in a future release).
 
 ```bash
 # Kick off a build from the Rocky 9 minimal ISO (BIOS/MBR layout for broad hardware compat).
@@ -196,11 +198,14 @@ watch -n 30 "curl -s $CLUSTR_URL/api/v1/images/\$ROCKY9_IMAGE \
 
 **Build once, reuse forever:** The ISO is cached in `/var/lib/clustr/iso-cache/`. Subsequent builds with the same URL skip the download entirely. Once the image is `ready`, it persists across restarts and does not need to be rebuilt.
 
-**Verify repo reachability before continuing** (prevents silent Slurm install failure later):
+**Verify the bundled Slurm repo is installed before continuing:**
 
 ```bash
-curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml
-# Expected: HTTP 200. If you get 404, the URL or EL version is wrong.
+clustr-serverd bundle list
+# Expected: installed: v24.11.4-clustr1  path: /var/lib/clustr/repo/el9-x86_64/
+
+curl http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
+# Expected: HTTP 200. If 404, run: clustr-serverd bundle install --from-release
 ```
 
 ---
@@ -255,23 +260,14 @@ curl -s -X POST $CLUSTR_URL/api/v1/nodes \
 curl -s -X POST $CLUSTR_URL/api/v1/slurm/enable \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "cluster_name":   "my-hpc",
-    "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9"
-  }'
+  -d '{"cluster_name":"my-hpc"}'
 # Expected: {"status":"ready"}
+# No slurm_repo_url needed — defaults to the clustr-server's own bundled repo.
 
 # Verify the munge key was generated:
 curl -s $CLUSTR_URL/api/v1/slurm/status \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 # Look for: "munge_key_present": true
-```
-
-**Verify the repo URL is reachable from the server before enabling:**
-
-```bash
-curl -I https://repos.openhpc.community/OpenHPC/3/EL_9/repodata/repomd.xml
-# Expected: HTTP 200. If 404, check the EL version in the URL.
 ```
 
 ---
@@ -446,7 +442,7 @@ batch*       up   infinite      1   idle slurm-compute
 
 | Symptom | Check | Fix |
 |---|---|---|
-| `slurmctld` not found after reimage | Slurm packages not installed | Verify `slurm_repo_url` is correct and reachable. Check that image is Rocky 9 (not Rocky 10 — OpenHPC EL10 does not exist yet). Reimage. |
+| `slurmctld` not found after reimage | Slurm packages not installed | Verify the bundled repo is installed: `clustr-serverd bundle list`. Check `curl http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml` returns 200. If not, run `clustr-serverd bundle install --from-release`. Reimage. |
 | `slurmctld` fails with "CLUSTER NAME MISMATCH" | Stale `clustername` file from prior image install | `rm -f /var/spool/slurmctld/clustername && systemctl restart slurmctld`. The clustr finalize phase will clean this automatically in a future release. |
 | `munge -n \| unmunge` fails | Key mismatch or munge not running | Reimage both nodes so they get the same munge key from clustr. |
 | `sinfo` shows `down` | `slurmd` not reaching controller | Check `SlurmctldHost` in `/etc/slurm/slurm.conf` matches the actual controller hostname. Open port 6817-6818/tcp on any firewall. |

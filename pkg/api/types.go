@@ -1432,7 +1432,13 @@ type SlurmNodeConfig struct {
 	// finalize.go decodes this and writes it to /etc/munge/munge.key (mode 0400,
 	// owner munge:munge) so munged can start on first boot.
 	// Empty means no key was available — munge will fail to start (degraded node).
-	MungeKey     string            `json:"munge_key,omitempty"`
+	MungeKey string `json:"munge_key,omitempty"`
+	// GPGKey is the ASCII-armored clustr release GPG public key. When non-empty,
+	// finalize.go writes it to /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr in the
+	// chroot and configures gpgcheck=1 in the generated .repo file. Populated
+	// by the slurm manager when SlurmRepoURL resolves to the clustr-builtin
+	// bundled repo path. Empty for operator-override custom repo URLs (gpgcheck=0).
+	GPGKey string `json:"gpg_key,omitempty"`
 }
 
 // SlurmConfigFile is a rendered config file, ready for delivery to a node.

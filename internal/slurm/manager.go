@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -33,6 +34,13 @@ const (
 	statusDisabled      = "disabled"
 	statusError         = "error"
 )
+
+// RepoSentinelBuiltin is the slurm_repo_url value that means "use this
+// clustr-server's own bundled package repository at /repo/<distro>-<arch>/".
+// It is the default for new installs. An empty string is treated equivalently
+// for backward-compatibility. This value is irreversible once shipped as a DB
+// value — do not rename without a migration.
+const RepoSentinelBuiltin = "clustr-builtin"
 
 // defaultManagedFiles is the list of files the module manages by default.
 // slurmdbd.conf is included so that controller nodes receive it and
@@ -74,6 +82,19 @@ type Manager struct {
 	// "user:<id>". Wired from server.go after getActorInfo is defined.
 	// Falls back to ("", "unknown") when nil.
 	GetActorInfo func(r *http.Request) (id, label string)
+
+	// ServerURL is the base URL of this clustr-server instance as reachable by
+	// deployed nodes (e.g. "http://10.99.0.1:8080"). Used to resolve the
+	// RepoSentinelBuiltin sentinel to a concrete /repo/<distro>-<arch>/ URL.
+	// Wired from server.go after the serverURL is computed from PXE config.
+	ServerURL string
+
+	// GPGKeyBytes is the ASCII-armored clustr release GPG public key, embedded
+	// from build/slurm/keys/clustr-release.asc.pub. Wired from server.go via
+	// server.GPGKeyBytes(). When set, it is carried through NodeConfig() into
+	// api.SlurmNodeConfig.GPGKey so deploy/finalize.go can write it into node
+	// chroots at /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr and enable gpgcheck=1.
+	GPGKeyBytes []byte
 
 	mu  sync.RWMutex
 	cfg *db.SlurmModuleConfigRow // in-memory cache, loaded from DB on New()
@@ -133,8 +154,15 @@ type EnableRequest struct {
 	// SlurmRepoURL is the dnf repo URL used for auto-install at deploy time.
 	// When set, finalize.go adds this repo to the node's dnf config inside the
 	// chroot and runs `dnf install -y slurm slurm-slurmctld slurm-slurmd munge`
-	// before writing Slurm config files.  Leave empty to manage packages manually.
-	// Example: "https://packages.schedmd.com/rhel/9/x86_64/slurm-el9.repo"
+	// before writing Slurm config files.
+	//
+	// Special values:
+	//   ""                 → same as "clustr-builtin" (back-compat, default)
+	//   "clustr-builtin"   → use this clustr-server's bundled /repo/el9-x86_64/
+	//                        (gpgcheck=1 with the embedded clustr key)
+	//   any other string   → operator-provided URL, used verbatim (gpgcheck=0)
+	//
+	// Leave empty (or set to "clustr-builtin") for the turnkey bundled-repo path.
 	SlurmRepoURL string `json:"slurm_repo_url,omitempty"`
 }
 
@@ -157,7 +185,9 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 
 	// Validate slurm_repo_url at enable time: HEAD check + EL version mismatch
 	// detection so operators get immediate feedback rather than a silent deploy failure.
-	if req.SlurmRepoURL != "" {
+	// The clustr-builtin sentinel and empty string do not need validation —
+	// the URL is resolved at deploy time from cfg.ServerURL, not stored.
+	if req.SlurmRepoURL != "" && req.SlurmRepoURL != RepoSentinelBuiltin {
 		validateSlurmRepoURL(ctx, req.SlurmRepoURL)
 	}
 
@@ -478,14 +508,59 @@ func (m *Manager) NodeConfig(ctx context.Context, nodeID string) (*api.SlurmNode
 		mungeKeyB64 = base64.StdEncoding.EncodeToString(rawKey)
 	}
 
+	// Resolve the SlurmRepoURL: empty string and the "clustr-builtin" sentinel
+	// both map to the clustr-server's own bundled repo.  An arbitrary URL is
+	// passed through unchanged so operators can override to a custom mirror.
+	isBuiltin := cfg.SlurmRepoURL == "" || cfg.SlurmRepoURL == RepoSentinelBuiltin
+	resolvedRepoURL := m.resolveRepoURL(cfg.SlurmRepoURL)
+
+	// Carry the GPG key through to finalize.go only for the builtin path.
+	// For operator-provided custom URLs, the operator owns GPG trust; we leave
+	// gpgKeyB64 empty so deploy/finalize.go uses gpgcheck=0 as before.
+	var gpgKeyB64 string
+	if isBuiltin && len(m.GPGKeyBytes) > 0 {
+		gpgKeyB64 = base64.StdEncoding.EncodeToString(m.GPGKeyBytes)
+	}
+
 	return &api.SlurmNodeConfig{
 		ClusterName:  cfg.ClusterName,
 		Roles:        roles,
 		Configs:      configs,
 		Scripts:      scripts,
-		SlurmRepoURL: cfg.SlurmRepoURL,
+		SlurmRepoURL: resolvedRepoURL,
 		MungeKey:     mungeKeyB64,
+		GPGKey:       gpgKeyB64,
 	}, nil
+}
+
+// resolveRepoURL resolves the stored slurm_repo_url to the URL that will be
+// written into the node's .repo file.
+//
+// Resolution rules:
+//   - "" (empty) → clustr-builtin (default for new installs, back-compat)
+//   - RepoSentinelBuiltin ("clustr-builtin") → ServerURL + "/repo/el9-x86_64/"
+//   - any other string → returned unchanged (operator override)
+//
+// The "/repo/el9-x86_64/" path is the PR3 URL structure served by the
+// bundled-repo HTTP handler. EL10 and other arches extend this naturally.
+// MVP is EL9 x86_64 only; extending requires a new distro/arch parameter
+// here once multi-target bundles land (see docs/slurm-build-pipeline.md §3).
+func (m *Manager) resolveRepoURL(stored string) string {
+	if stored == "" || stored == RepoSentinelBuiltin {
+		serverURL := strings.TrimRight(m.ServerURL, "/")
+		if serverURL == "" {
+			// ServerURL not wired yet (e.g. tests that don't set it).
+			// Fall back to a relative path that will at least be recognisable in logs.
+			serverURL = "http://localhost:8080"
+		}
+		resolved := serverURL + "/repo/el9-x86_64/"
+		log.Info().
+			Str("stored_value", stored).
+			Str("resolved_url", resolved).
+			Msg("slurm: NodeConfig: resolved clustr-builtin sentinel to bundled repo URL")
+		return resolved
+	}
+	return stored
 }
 
 // checksumString returns the hex-encoded SHA-256 of s.

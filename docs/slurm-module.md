@@ -39,152 +39,187 @@ cluster painful to maintain at scale:
 - Role assignment (controller vs. worker) stored per-node so a reimage
   automatically installs the right services (`slurmctld` vs. `slurmd`).
 
-When the module is enabled with a `slurm_repo_url`, clustr **auto-installs
-Slurm packages** at deploy finalize time on any node that has a Slurm role.
-No pre-baking of Slurm into the base image is required — a standard Rocky
-Linux 9/10 or Ubuntu image is sufficient. Operators who want faster deploys or
-air-gapped operation can still pre-install Slurm in a gold image; clustr
-detects the binaries and skips the install step automatically.
+clustr **ships Slurm built-in**. When a node is deployed with a Slurm role,
+clustr installs Slurm packages from the clustr-server's own bundled package
+repository at `http://<clustr-server>:<port>/repo/el9-x86_64/`. No external
+repo URL is needed, no internet access from deployed nodes is required, and
+every RPM is GPG-verified against the clustr release key before installation.
+
+Operators who want faster deploys can still pre-install Slurm in a gold image;
+clustr detects the binaries and skips the install step automatically.
+Operators who need a custom Slurm build can override the repo URL — see §2.1.
 
 ---
 
 ## 2. Image prerequisites
 
-### Recommended path — any base image, auto-install at deploy time
+### Recommended path — bundled repo, auto-install at deploy time
 
-As of the auto-install feature, **Slurm does not need to be in the base image**
-for the default turnkey path. When the Slurm module is enabled and a node has a
-Slurm role (`controller` or `worker`), clustr installs Slurm packages from
-`slurm_repo_url` automatically during the deploy finalize phase, before
-injecting the munge key and writing `slurm.conf`.
+**Slurm does not need to be in the base image.** When the Slurm module is
+enabled and a node has a Slurm role (`controller` or `worker`), clustr installs
+Slurm packages from its own bundled repository during the deploy finalize phase,
+before injecting the munge key and writing `slurm.conf`.
 
-You can start with any standard base image (Rocky Linux 9/10, AlmaLinux 9/10,
-or Ubuntu 22.04/24.04). The only requirement is that `dnf` (RPM-based) or
-`apt` (Debian-based) is available in the rootfs.
+The bundled repo is served by the clustr-server itself at
+`http://<clustr-server>:<port>/repo/el9-x86_64/`. Deployed nodes never reach
+GitHub, OpenHPC, or schedmd.com — they only talk to the clustr-server, which is
+already required for everything else. This means:
+
+- **Air-gap friendly by default.** No external internet required at deploy time.
+- **GPG-verified installs.** Every RPM is signed with the clustr release key.
+  `gpgcheck=1` is enforced in the generated `.repo` file; the key is injected
+  into the chroot at `/etc/pki/rpm-gpg/RPM-GPG-KEY-clustr` before `dnf` runs.
+- **Zero operator configuration.** Leave `slurm_repo_url` empty (or set to
+  `"clustr-builtin"`) to use the bundled repo. That is the default.
 
 **What auto-install does during finalize:**
 
-1. Adds the repository at `slurm_repo_url` to the node's rootfs package manager.
-2. Installs: `slurm`, `slurm-slurmd`, `slurm-slurmctld`, `munge`, `munge-libs`.
-3. Injects the munge key into `/etc/munge/munge.key`.
-4. Writes `/etc/slurm/slurm.conf` and companion config files.
-5. Enables `munge`, `slurmd` (workers) or `slurmctld` (controller) in systemd.
+1. Writes the clustr GPG key into the chroot at `/etc/pki/rpm-gpg/RPM-GPG-KEY-clustr`.
+2. Writes `/etc/yum.repos.d/clustr-slurm.repo` with `gpgcheck=1`, pointing at
+   `http://<clustr-server>:<port>/repo/el9-x86_64/`.
+3. Installs: `slurm`, `slurm-slurmd` or `slurm-slurmctld` (by role), `munge`.
+4. Injects the munge key into `/etc/munge/munge.key`.
+5. Writes `/etc/slurm/slurm.conf` and companion config files.
+6. Enables `munge`, `slurmd` (workers) or `slurmctld` (controller) in systemd.
 
-If `slurm_repo_url` is unreachable at finalize time, the install step logs a
-WARN and the deploy continues — the node boots without Slurm installed. Check
-the deploy logs and re-image once the repo is reachable.
+If the clustr-server's `/repo/` endpoint is unreachable at finalize time, the
+install step logs a WARN and the deploy continues — the node boots without Slurm
+installed. This should only happen if the management network is misconfigured.
 
-**Providing the repo URL:**
-
-Pass `slurm_repo_url` when enabling the module (see §3). See
-[§2.1 — Choosing `slurm_repo_url`](#21--choosing-slurm_repo_url) for the
-correct URL per base image EL version.
-
-### 2.1 — Choosing `slurm_repo_url`
-
-The repository URL must match the Enterprise Linux (EL) major version of your
-base image. A mismatch causes `dnf` to silently skip the install (no packages
-match), leaving the node without Slurm after deploy. Until server-side
-validation lands (see note below), this is a manual operator responsibility.
-
-#### OpenHPC community repositories (recommended)
-
-| Base image | EL version | `slurm_repo_url` |
-|---|---|---|
-| Rocky Linux 9, AlmaLinux 9, RHEL 9 | EL9 | `https://repos.openhpc.community/OpenHPC/3/EL_9` |
-| Rocky Linux 10, AlmaLinux 10, RHEL 10 | EL10 | Check [OpenHPC releases](https://github.com/openhpc/ohpc/releases) — EL10 support tracks upstream availability |
-
-For EL9, the OpenHPC 3.x repository is production-ready. Use the RPM release
-URL to add the repo:
-
-```
-https://github.com/openhpc/ohpc/releases/download/v3.0.GA/ohpc-release-3-1.el9.x86_64.rpm
-```
-
-Or set `slurm_repo_url` to the flat repository base URL (the URL clustr adds
-as a `.repo` file, not the release RPM):
-
-```
-https://repos.openhpc.community/OpenHPC/3/EL_9
-```
-
-For EL10, check [https://repos.openhpc.community/](https://repos.openhpc.community/)
-for availability. If EL10 packages are not yet published by OpenHPC, use the
-SchedMD or distro-native path below.
-
-#### SchedMD / distro-native Slurm
-
-SchedMD publishes RPMs for RHEL-family distributions at:
-
-```
-https://download.schedmd.com/slurm/
-```
-
-Browse to the correct subdirectory for your Slurm version and EL variant. The
-SchedMD path is useful when you need a specific Slurm version or when OpenHPC
-does not yet ship packages for your EL version.
-
-#### When to use each source
-
-| Source | Use when |
-|---|---|
-| OpenHPC | Default. Includes munge, PMIx, HWLOC, and Slurm in one cohesive repo. Easiest path for most HPC clusters. |
-| SchedMD | You need a specific Slurm version, or your EL version isn't in OpenHPC yet. |
-| Distro EPEL | Not recommended for Slurm — EPEL Slurm packages lag behind upstream and lack HPC-specific build options. |
-| Pre-baked gold image | Air-gapped clusters or production environments where deploy speed matters (see Advanced path below). |
-
-**Critical:** Verify the URL is reachable from the provisioning network before
-enabling the module. Test with:
+**Enabling the module (bundled repo — the default):**
 
 ```bash
-curl -I <slurm_repo_url>
-# Expected: HTTP 200 or 301. A 404 or connection failure means the URL is wrong or unreachable.
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_name":"my-hpc"}'
+# slurm_repo_url is omitted — defaults to "clustr-builtin"
 ```
 
-**Coordination note:** A future server-side change will validate that the EL
-version embedded in `slurm_repo_url` matches the base image's `distro_version`
-at module-enable time and reject mismatched URLs with HTTP 400. Until that
-lands, EL version matching is the operator's responsibility. Once server-side
-validation is live, this section will be updated to reflect that clustr
-enforces the match automatically.
+Or explicitly:
+
+```bash
+  -d '{"cluster_name":"my-hpc","slurm_repo_url":"clustr-builtin"}'
+```
+
+### 2.1 — `slurm_repo_url` — bundled repo vs. custom override
+
+| Value | Behaviour |
+|---|---|
+| `""` (empty) or `"clustr-builtin"` | **Default.** Use the clustr-server's own `/repo/el9-x86_64/`. gpgcheck=1 with the embedded clustr key. Requires the bundled repo to be installed (`clustr-serverd bundle install`). |
+| Any other URL | **Operator override.** Use the provided URL verbatim. gpgcheck=0. The operator owns GPG trust for custom repos. |
+
+The `"clustr-builtin"` sentinel value is stored in the database. It is
+**irreversible** — once a DB row contains this value, renaming it requires a
+migration. Do not rename the sentinel.
+
+**When to use a custom `slurm_repo_url`:**
+
+- You have a private internal yum mirror and want nodes to pull from it.
+- You are testing a specific Slurm build that is not yet in the clustr bundle.
+- You are running EL10 nodes before the clustr EL10 bundle is available.
+
+For a custom URL, set `gpgcheck` behaviour in your own repo definition, not via
+clustr (clustr uses `gpgcheck=0` for all non-builtin URLs).
+
+**Example — custom override:**
+
+```bash
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_name":"my-hpc","slurm_repo_url":"http://mirror.example.com/slurm/el9/"}'
+```
+
+**Switching an existing installation to the bundled repo:**
+
+If you previously enabled the module with an OpenHPC URL, you can switch to the
+bundled repo by re-enabling with the sentinel:
+
+```bash
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"cluster_name":"my-hpc","slurm_repo_url":"clustr-builtin"}'
+```
+
+This updates the stored value. The next node deploy will use the bundled repo.
+Previously-deployed nodes are unaffected until they are re-imaged.
+
+### The bundled Slurm repo — how it works
+
+The clustr-server binary includes a reference to the bundled Slurm version
+(e.g. `v24.11.4-clustr1`). At server install time, the installer fetches the
+signed bundle from GitHub Releases and unpacks it to `/var/lib/clustr/repo/`.
+The server then serves the directory at `/repo/*` — a standard `http.FileServer`
+mount. Deployed nodes see a yum repo at `http://<clustr-server>:<port>/repo/el9-x86_64/`
+that is entirely local to your management network.
+
+**To manually install or update the bundle (air-gap or first-time):**
+
+```bash
+# Fetch from GitHub automatically (requires outbound HTTPS on the clustr-server host):
+clustr-serverd bundle install --from-release
+
+# Or side-load from a local file (air-gap path):
+clustr-serverd bundle install --from-file /path/to/clustr-slurm-bundle-v24.11.4-clustr1-el9-x86_64.tar.gz
+```
+
+**To verify the bundle is installed:**
+
+```bash
+clustr-serverd bundle list
+# Expected output:
+# installed: v24.11.4-clustr1  path: /var/lib/clustr/repo/el9-x86_64/
+
+curl http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
+# Expected: 200 OK with XML content
+```
 
 ### Advanced path — pre-install Slurm in the image (gold image)
 
-For production clusters where deploy speed matters, or where the provisioning
-network cannot reach an external repo at finalize time, pre-installing Slurm
-in a gold image removes the network dependency and makes every reimage faster.
+For production clusters where deploy speed matters, pre-installing Slurm in a
+gold image skips the dnf install step at deploy time.
 
 **When to use this path:**
 
 - Large clusters (100+ nodes) where finalize time per node matters.
-- Air-gapped environments with no external repo access.
-- Operators who want a fully reproducible, pre-validated binary set.
+- You want a fully reproducible, pre-validated binary set.
 
-**How to build a gold image with Slurm pre-installed:**
+**How to build a gold image with Slurm pre-installed (using the bundled repo):**
 
 ```bash
-# On the clustr-serverd host — drop into an interactive chroot of your base image
+# On the clustr-serverd host — ensure the bundled repo is installed first
+clustr-serverd bundle list  # should show v24.11.4-clustr1
+
+# Drop into an interactive chroot of your base image
 clustr shell <image-id>
 
-# Inside the chroot — Rocky Linux 9 example using OpenHPC repo:
-dnf install -y https://github.com/openhpc/ohpc/releases/download/v3.0.GA/ohpc-release-3-1.el9.x86_64.rpm
-dnf install -y slurm-ohpc slurm-slurmd-ohpc slurm-slurmctld-ohpc munge munge-libs
+# Inside the chroot — configure the clustr repo and install Slurm:
+cat > /etc/yum.repos.d/clustr-slurm.repo <<EOF
+[clustr-slurm]
+name=clustr Slurm
+baseurl=http://10.99.0.1:8080/repo/el9-x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+EOF
+# The RPM-GPG-KEY-clustr file is injected automatically by clustr at deploy
+# time — for a manual gold-image build, copy it in yourself:
+# curl http://10.99.0.1:8080/repo/RPM-GPG-KEY-clustr -o /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
 
-# Verify the binaries are present
+dnf install -y slurm slurm-slurmd slurm-slurmctld munge
+
+# Verify
 which slurmd slurmctld munge
 
-# Exit the chroot — changes are committed to the image automatically
+# Exit the chroot
 exit
 ```
 
-After exiting, the image status returns to `ready`. When this pre-installed
-image is deployed, clustr detects that Slurm binaries are already present and
-skips the package install step — it proceeds directly to munge key injection
-and config file writes.
-
-**Note:** When using a gold image, `slurm_repo_url` is still required at
-module enable time but is used only as a fallback for nodes whose image does
-not include Slurm. Set it to the correct repo for your distro regardless.
+When this pre-installed image is deployed, clustr detects that Slurm binaries
+are already present and skips the package install step.
 
 ---
 
@@ -192,19 +227,28 @@ not include Slurm. Set it to the correct repo for your distro regardless.
 
 ### API call to enable
 
+**Default (bundled repo):**
+
 ```bash
 curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/enable \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
-  -d '{"cluster_name":"my-hpc","slurm_repo_url":"https://repos.openhpc.community/OpenHPC/3/EL_9"}' \
+  -d '{"cluster_name":"my-hpc"}' \
   | python3 -m json.tool
 # Expected: { "status": "ready" }
 ```
 
-The `cluster_name` is required and is used as the `ClusterName` directive in
-`slurm.conf`. The `slurm_repo_url` points to the DNF/YUM repository from which
-Slurm packages are installed automatically at node deploy time — see §2 for
-the full auto-install flow.
+Omitting `slurm_repo_url` (or setting it to `"clustr-builtin"`) uses the
+clustr-server's own bundled Slurm repo — no external URL needed. See §2 for
+what this means for the deploy flow.
+
+**Custom repo override (advanced):**
+
+```bash
+  -d '{"cluster_name":"my-hpc","slurm_repo_url":"http://mirror.example.com/slurm/el9/"}'
+```
+
+See §2.1 for the full override documentation.
 
 ### What happens automatically on enable
 
@@ -218,11 +262,12 @@ the full auto-install flow.
    web UI (Slurm > Configs) or the API.
 3. **`cluster_name` and `slurm_repo_url` stored.** The values from the request
    body are persisted in the module config. `cluster_name` is used as the
-   `ClusterName` directive in every rendered `slurm.conf`. `slurm_repo_url` is
-   used by the auto-install step at deploy finalize time.
+   `ClusterName` directive in every rendered `slurm.conf`. `slurm_repo_url`
+   (empty or `"clustr-builtin"`) is resolved at deploy time to the server's
+   `/repo/el9-x86_64/` URL.
 4. **Module status set to `enabled`.** The web UI Slurm section becomes active.
    From this point, every node deploy with a Slurm role will auto-install Slurm
-   from `slurm_repo_url` (unless binaries are already present in the image).
+   from the bundled repo (unless binaries are already present in the image).
 
 ### Verify the module is enabled
 
@@ -235,10 +280,12 @@ curl -s http://10.99.0.1:8080/api/v1/slurm/status \
 #   "status": "ready",
 #   "munge_key_present": true,
 #   "cluster_name": "my-hpc",
-#   "slurm_repo_url": "https://repos.openhpc.community/OpenHPC/3/EL_9",
+#   "slurm_repo_url": "",
 #   "managed_files": ["slurm.conf", "gres.conf", "cgroup.conf", "topology.conf", "plugstack.conf", "slurmdbd.conf"],
 #   "connected_nodes": []
 # }
+# Note: slurm_repo_url is "" or "clustr-builtin" for the default bundled-repo path.
+# The actual resolved URL (http://<server>/repo/el9-x86_64/) is computed at deploy time.
 ```
 
 The `munge_key_present` field is `true` once the key has been generated (on

@@ -630,6 +630,11 @@ func (s *Server) buildRouter() chi.Router {
 	// GAP-20: wire actor info into slurm manager so routes.go reads from the
 	// correct context key (server middleware's ctxKeyKeyLabel, not a local type).
 	s.slurmMgr.GetActorInfo = getActorInfo
+	// PR4: wire the server URL and GPG key into the slurm manager so it can
+	// resolve the "clustr-builtin" sentinel to a concrete /repo/<distro>-<arch>/
+	// URL and inject the GPG key into node chroots at deploy time.
+	s.slurmMgr.ServerURL = serverURL
+	s.slurmMgr.GPGKeyBytes = GPGKeyBytes()
 
 	images := &handlers.ImagesHandler{
 		DB:                s.db,
