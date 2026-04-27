@@ -140,9 +140,13 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 			t.Errorf(".repo file missing line %q\nfull content:\n%s", line, repoContent)
 		}
 	}
-	// gpgcheck=0 must NOT appear (that would mean we fell back to insecure mode).
-	if strings.Contains(repoContent, "gpgcheck=0") {
-		t.Errorf(".repo file contains gpgcheck=0 but expected gpgcheck=1\nfull content:\n%s", repoContent)
+	// "gpgcheck=0" (the bare line) must NOT appear — we should have gpgcheck=1.
+	// Note: repo_gpgcheck=0 is expected and contains "gpgcheck=0" as a substring,
+	// so we check for the exact line "gpgcheck=0\n" rather than a substring match.
+	for _, line := range strings.Split(repoContent, "\n") {
+		if strings.TrimSpace(line) == "gpgcheck=0" {
+			t.Errorf(".repo file contains line 'gpgcheck=0' but expected gpgcheck=1\nfull content:\n%s", repoContent)
+		}
 	}
 }
 
