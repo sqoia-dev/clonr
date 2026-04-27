@@ -29,10 +29,13 @@
 #   CLUSTR_DATA_LABEL — XFS volume label for the data disk (default: clustr-data)
 #   CLUSTR_DATA_MOUNT — Mount point for data disk (default: /var/lib/clustr)
 #   GO_VERSION        — Go toolchain version to install (default: go1.24.2)
-#   CLUSTR_MGMT_IP    — Stable IP alias for the management interface (default: derive
-#                       from eth0 primary IP by replacing the last octet with .254).
-#                       Caddy binds to this IP so operators can reach the web UI from
-#                       the management LAN without touching CLUSTR_LISTEN_ADDR.
+#   CLUSTR_MGMT_IP    — IP that Caddy binds to on the management interface. If set,
+#                       used directly (non-interactive override). If not set and the
+#                       script is running interactively, the operator is prompted to
+#                       choose (suggested default: <mgmt-network>.254). If not set
+#                       and non-interactive, the alias and Caddy steps are skipped.
+#                       This script NEVER silently changes network state on a host
+#                       that already has static addresses configured on eth0.
 #                       Example: CLUSTR_MGMT_IP=192.168.1.254
 
 set -euo pipefail
@@ -64,29 +67,115 @@ GO_TARBALL="${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://dl.google.com/go/${GO_TARBALL}"
 GO_SHA256_URL="https://dl.google.com/go/${GO_TARBALL}.sha256"
 
-# CLUSTR_MGMT_IP: stable IP alias on the management interface (eth0).
-# If not set explicitly, derive it by taking eth0's first IPv4 address and
-# replacing the last octet with 254 (the conventional .254 alias pattern).
-# This IP is what Caddy binds to — operators reach the web UI at this address.
-derive_mgmt_ip() {
+# CLUSTR_MGMT_IP: the IP address that Caddy binds to on the management interface.
+# Operators use this address to reach the web UI from their workstations.
+#
+# Resolution order:
+#   1. CLUSTR_MGMT_IP env var is set → use it (non-interactive override, e.g. for CI/automation).
+#   2. Running interactively (stdin is a TTY) → prompt the operator to identify their management
+#      network, suggest <detected-network>.254 as a safe default, and only apply the alias
+#      after explicit confirmation.
+#   3. Non-interactive and env var not set → skip alias and Caddy setup entirely; warn the
+#      operator to set CLUSTR_MGMT_IP and re-run, or configure Caddy manually.
+#
+# IMPORTANT: this script never silently changes network state on an already-running host.
+# If a CLUSTR_MGMT_IP alias is already present on eth0, the alias step is skipped.
+# Only a confirmed-fresh install, via an operator who explicitly accepts the prompt, will
+# add a new alias.
+
+# detect_management_network: returns the /24 network prefix of eth0's current IP, e.g. "192.168.1".
+detect_management_network() {
     local eth0_ip
     eth0_ip="$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {print $2; exit}' | cut -d/ -f1)"
     if [[ -z "${eth0_ip}" ]]; then
         echo ""
         return
     fi
-    # Replace last octet with 254
-    echo "${eth0_ip%.*}.254"
+    echo "${eth0_ip%.*}"
 }
 
-if [[ -z "${CLUSTR_MGMT_IP:-}" ]]; then
-    CLUSTR_MGMT_IP="$(derive_mgmt_ip)"
-    if [[ -n "${CLUSTR_MGMT_IP}" ]]; then
-        log "CLUSTR_MGMT_IP not set — derived from eth0: ${CLUSTR_MGMT_IP}"
-    else
-        warn "Could not derive CLUSTR_MGMT_IP from eth0 — Caddy config step will be skipped"
+# resolve_mgmt_ip: populate CLUSTR_MGMT_IP through the three-step flow above.
+resolve_mgmt_ip() {
+    # Step 1: env var already set — use it, no questions asked.
+    if [[ -n "${CLUSTR_MGMT_IP:-}" ]]; then
+        log "CLUSTR_MGMT_IP set via env var: ${CLUSTR_MGMT_IP}"
+        return
     fi
-fi
+
+    # Step 3 (early): non-interactive — skip entirely.
+    if [[ ! -t 0 ]]; then
+        warn "Non-interactive install and CLUSTR_MGMT_IP is not set."
+        warn "Caddy and management IP alias will NOT be configured."
+        warn "To configure later, either:"
+        warn "  export CLUSTR_MGMT_IP=<your-mgmt-ip> && bash scripts/setup/install-dev-vm.sh"
+        warn "  or set CLUSTR_MGMT_IP in the environment and re-run the Caddy install step."
+        CLUSTR_MGMT_IP=""
+        return
+    fi
+
+    # Step 2: interactive — prompt the operator.
+    local net_prefix suggested_ip operator_input
+    net_prefix="$(detect_management_network)"
+
+    echo ""
+    echo "========================================"
+    echo "  Management IP Setup"
+    echo "========================================"
+    echo ""
+    echo "clustr-serverd binds only to the provisioning interface (10.99.0.1:8080)."
+    echo "To reach the web UI from your workstation, Caddy needs an IP on the"
+    echo "management interface (eth0) to proxy from."
+    echo ""
+    if [[ -n "${net_prefix}" ]]; then
+        suggested_ip="${net_prefix}.254"
+        echo "Detected management network: ${net_prefix}.0/24"
+        echo "Suggested management IP:     ${suggested_ip}"
+        echo ""
+        echo "The .254 address is recommended — it is rarely in DHCP pools and easy"
+        echo "to remember. Using it adds a stable IP alias on eth0 alongside your"
+        echo "existing DHCP address. Your current DHCP address is unchanged."
+        echo ""
+        printf "Accept %s as the management IP? [Y/n/custom]: " "${suggested_ip}"
+        read -r operator_input
+        case "${operator_input}" in
+            ""|y|Y|yes|YES)
+                CLUSTR_MGMT_IP="${suggested_ip}"
+                log "Operator accepted: CLUSTR_MGMT_IP=${CLUSTR_MGMT_IP}"
+                ;;
+            n|N|no|NO)
+                warn "Operator declined. Caddy and management IP alias will NOT be configured."
+                warn "Set CLUSTR_MGMT_IP=<ip> and re-run to configure later."
+                CLUSTR_MGMT_IP=""
+                ;;
+            *)
+                # Operator entered a custom IP — validate it looks like an IPv4 address.
+                if echo "${operator_input}" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                    CLUSTR_MGMT_IP="${operator_input}"
+                    log "Operator entered custom IP: CLUSTR_MGMT_IP=${CLUSTR_MGMT_IP}"
+                else
+                    warn "Invalid IP address '${operator_input}'. Skipping management IP setup."
+                    warn "Set CLUSTR_MGMT_IP=<ip> and re-run to configure later."
+                    CLUSTR_MGMT_IP=""
+                fi
+                ;;
+        esac
+    else
+        echo "Could not detect eth0 address — cannot suggest a management IP."
+        echo ""
+        printf "Enter the management IP to assign to eth0 (or press Enter to skip): "
+        read -r operator_input
+        if [[ -n "${operator_input}" ]] && echo "${operator_input}" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            CLUSTR_MGMT_IP="${operator_input}"
+            log "Operator entered management IP: CLUSTR_MGMT_IP=${CLUSTR_MGMT_IP}"
+        else
+            warn "No valid management IP entered. Skipping management IP and Caddy setup."
+            CLUSTR_MGMT_IP=""
+        fi
+    fi
+    echo ""
+}
+
+resolve_mgmt_ip
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -366,19 +455,55 @@ install_autodeploy() {
 # ---------------------------------------------------------------------------
 # clustr-serverd binds CLUSTR_LISTEN_ADDR to the provisioning interface only
 # (10.99.0.1:8080). To reach the web UI from the management LAN, Caddy must
-# listen on a separate IP on eth0. We add a stable IP alias using the .254
-# convention so the operator always has a predictable address to bookmark.
+# listen on a separate IP on eth0. If the operator confirmed a management IP
+# during resolve_mgmt_ip(), we add it as a stable IP alias here.
+#
+# SAFETY CONTRACT: this function never silently changes network state on a
+# host that is already configured. Specifically:
+#   - If CLUSTR_MGMT_IP is empty (operator declined, non-interactive, or env
+#     var not set), we return immediately without touching the network.
+#   - If any address is already configured on eth0 via NetworkManager static
+#     addresses (ipv4.addresses), we assume the host was already bootstrapped
+#     and leave the NM connection alone. The operator must make changes manually.
+#   - If the requested alias is already present in the kernel (ip addr show),
+#     we skip the add — idempotent for repeated runs.
 setup_mgmt_ip_alias() {
-    if [[ -z "${CLUSTR_MGMT_IP}" ]]; then
+    if [[ -z "${CLUSTR_MGMT_IP:-}" ]]; then
         warn "CLUSTR_MGMT_IP is empty — skipping management IP alias setup"
         return
     fi
 
-    info "Setting up management IP alias: ${CLUSTR_MGMT_IP}/24 on eth0"
+    info "Setting up management IP alias: ${CLUSTR_MGMT_IP} on eth0"
 
     if ! ip link show eth0 &>/dev/null; then
         warn "eth0 not found — skipping management IP alias (run again after NIC is attached)"
         return
+    fi
+
+    # Guard: if NetworkManager already has static addresses configured on eth0,
+    # this host was previously bootstrapped. Leave the NM connection alone.
+    if command -v nmcli &>/dev/null; then
+        local mgmt_con existing_nm_static
+        mgmt_con="$(nmcli -t -f NAME,DEVICE con show 2>/dev/null | grep ':eth0$' | head -1 | cut -d: -f1)"
+        if [[ -n "${mgmt_con}" ]]; then
+            existing_nm_static="$(nmcli -f ipv4.addresses con show "${mgmt_con}" 2>/dev/null \
+                | awk '/ipv4.addresses/ {print $2}' | tr -d '[:space:]')"
+            if [[ -n "${existing_nm_static}" && "${existing_nm_static}" != "--" ]]; then
+                log "eth0 NM connection '${mgmt_con}' already has static addresses: ${existing_nm_static}"
+                log "This host appears to have been previously configured — not modifying NM connection."
+                log "If you want to change the management IP, edit the NM connection manually:"
+                log "  nmcli con mod '${mgmt_con}' ipv4.addresses '${CLUSTR_MGMT_IP}/24'"
+                log "  nmcli con up '${mgmt_con}'"
+                # Still proceed to Caddy config so it gets the right bind IP if the
+                # requested alias is already live on the interface.
+                if ip -4 addr show eth0 2>/dev/null | grep -q "${CLUSTR_MGMT_IP}"; then
+                    step_done "management IP alias (${CLUSTR_MGMT_IP} already present on eth0)"
+                else
+                    warn "${CLUSTR_MGMT_IP} is NOT currently active on eth0 — Caddy may not bind correctly"
+                fi
+                return
+            fi
+        fi
     fi
 
     # Determine the prefix length from eth0's existing address (default 24 if unknown).
@@ -386,7 +511,7 @@ setup_mgmt_ip_alias() {
     prefix_len="$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[2]; exit}')"
     prefix_len="${prefix_len:-24}"
 
-    # Check if the alias is already present.
+    # Check if the alias is already present in the kernel (idempotent re-run).
     if ip -4 addr show eth0 2>/dev/null | grep -q "${CLUSTR_MGMT_IP}"; then
         log "IP alias ${CLUSTR_MGMT_IP} already present on eth0 — skipping"
         step_done "management IP alias (already configured)"
@@ -418,7 +543,7 @@ setup_mgmt_ip_alias() {
         warn "Could not verify ${CLUSTR_MGMT_IP} on eth0 — Caddy config may not work correctly"
     fi
 
-    step_done "management IP alias (${CLUSTR_MGMT_IP}/24 on eth0)"
+    step_done "management IP alias (${CLUSTR_MGMT_IP}/${prefix_len} on eth0)"
 }
 
 # ---------------------------------------------------------------------------

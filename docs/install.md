@@ -73,21 +73,69 @@ clustr requires a **dedicated provisioning interface** on the same L2 segment as
 
 `clustr-serverd` binds to the **provisioning interface only** (`CLUSTR_LISTEN_ADDR=10.99.0.1:8080` by default). This prevents the built-in DHCP server from answering on any other network segment — a security requirement (see [docs/tls-provisioning.md §3](tls-provisioning.md#3-management-interface-access-dual-nic-setup) for background).
 
-To reach the web UI and API from your operator workstation on the management LAN, you need an IP on the management interface. The recommended pattern is to add a **stable IP alias** to the management interface (typically `eth0`) using the `.254` host address of the management subnet. For a `192.168.1.0/24` management network this is `192.168.1.254/24`.
+To reach the web UI and API from your operator workstation on the management LAN, you need an IP on the management interface. The recommended pattern is to add a **stable IP alias** to the management interface (typically `eth0`) using the `.254` host address of your management subnet, or simply bind Caddy to the host's existing DHCP address if stability is not a concern.
 
-**Why `.254`?**
+**Why `.254` as a recommended alias?**
 - The router is conventionally `.1`.
 - DHCP pools typically occupy the middle range (`.100`–`.200` or similar).
 - `.254` is the last usable address before the broadcast address (`.255`), so it is almost never in a DHCP pool and almost never conflicts with an existing host.
-- It is easy to remember: "the provisioning server is always `.254`".
+- It gives Caddy a stable bookmark address that does not change when the host's DHCP lease renews.
 
-This IP (`CLUSTR_MGMT_IP`) is what Caddy binds to, what your operator browser bookmarks, and what you pin in DNS.
+`CLUSTR_MGMT_IP` is the variable that controls what Caddy binds to, what your operator browser bookmarks, and what you pin in DNS.
 
-**Adding the IP alias — Rocky Linux 9 (NetworkManager):**
+**How `install-dev-vm.sh` handles this (important — read before running):**
+
+The install script does **not** silently modify network state. Its behavior depends on how it is invoked:
+
+| Situation | Script behavior |
+|---|---|
+| `CLUSTR_MGMT_IP` env var is set | Uses that IP directly — no prompt, no auto-derive. |
+| Running interactively (TTY) | Detects the management network, suggests `<network>.254`, and prompts you to accept, override, or skip. The alias is only added after explicit confirmation. |
+| Non-interactive and env var not set | Skips the alias and Caddy setup entirely. Prints a warning to set `CLUSTR_MGMT_IP` and re-run. |
+| Host already has NM static addresses on eth0 | Leaves the NM connection alone — does not add or remove addresses. Tells you how to make changes manually. |
+
+**Running interactively — what the prompt looks like:**
+
+```
+========================================
+  Management IP Setup
+========================================
+
+clustr-serverd binds only to the provisioning interface (10.99.0.1:8080).
+To reach the web UI from your workstation, Caddy needs an IP on the
+management interface (eth0) to proxy from.
+
+Detected management network: 192.168.1.0/24
+Suggested management IP:     192.168.1.254
+
+The .254 address is recommended — it is rarely in DHCP pools and easy
+to remember. Using it adds a stable IP alias on eth0 alongside your
+existing DHCP address. Your current DHCP address is unchanged.
+
+Accept 192.168.1.254 as the management IP? [Y/n/custom]:
+```
+
+Enter `Y` (or press Enter) to accept the suggested `.254` address, `n` to skip, or type a custom IP.
+
+**Non-interactive override — `CLUSTR_MGMT_IP`:**
+
+Set this environment variable before running the script to bypass the prompt and apply the alias unconditionally:
 
 ```bash
-# Replace eth0 with your management interface name.
-# Replace 192.168.1.254/24 with your management subnet's .254 address.
+# Use .254 of the management subnet:
+export CLUSTR_MGMT_IP=192.168.1.254
+bash scripts/setup/install-dev-vm.sh
+
+# Or bind Caddy to the host's existing DHCP address (no alias needed):
+export CLUSTR_MGMT_IP=192.168.1.151
+bash scripts/setup/install-dev-vm.sh
+```
+
+**Manually adding the alias — Rocky Linux 9 (NetworkManager):**
+
+If you want to add the `.254` alias yourself without re-running the install script:
+
+```bash
 nmcli con mod "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)" \
     +ipv4.addresses 192.168.1.254/24
 nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
@@ -96,9 +144,9 @@ nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
 ip -4 addr show eth0
 ```
 
-This creates a persistent secondary address. The alias survives reboots and NetworkManager restarts without additional configuration.
+This creates a persistent secondary address. The alias survives reboots and NetworkManager restarts.
 
-**Adding the IP alias — Ubuntu 22.04 (Netplan):**
+**Manually adding the alias — Ubuntu 22.04 (Netplan):**
 
 ```yaml
 # /etc/netplan/99-clustr-mgmt.yaml
@@ -116,35 +164,26 @@ netplan apply
 ip -4 addr show eth0   # verify both addresses appear
 ```
 
-**Adding the IP alias — Ubuntu with NetworkManager (desktop or server with NM):**
+**Already-installed systems:**
+
+The install script will not modify an already-configured host's network state. If you ran an earlier version of the script that silently added a `.254` alias and you want to remove it:
 
 ```bash
-nmcli con mod "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)" \
-    +ipv4.addresses 192.168.1.254/24
-nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
-```
-
-**Environment variable — `CLUSTR_MGMT_IP`:**
-
-The install and Caddy configuration scripts recognise the `CLUSTR_MGMT_IP` environment variable to know which IP Caddy should bind to. If unset, the scripts derive it automatically by taking the current management interface IP and replacing the last octet with `254`.
-
-```bash
-# Export before running install-dev-vm.sh or the Caddy config step:
-export CLUSTR_MGMT_IP=192.168.1.254
-
-# Or let the script derive it automatically (uses eth0 address, replaces last octet with .254):
-# e.g. if eth0 = 192.168.1.151/24, CLUSTR_MGMT_IP defaults to 192.168.1.254
+# Remove the NM static address (replace the connection name and IP to match your system):
+nmcli con mod "Wired connection 1" -ipv4.addresses "192.168.1.254/24"
+nmcli con up "Wired connection 1"
+ip -4 addr show eth0   # confirm only your DHCP address remains
 ```
 
 **DNS pin (recommended for production):**
 
-Pin a short name to the management IP in your internal DNS so that operators always reach the server by name rather than by IP:
+Pin a short name to the management IP in your internal DNS so operators can reach the server by name:
 
 ```
 clustr.lab.example.com  →  192.168.1.254
 ```
 
-Then set your Caddyfile hostname to `clustr.lab.example.com` and let Caddy obtain a certificate automatically. The `.254` alias remains the canonical stable IP regardless of which DHCP address the host's primary NIC was assigned.
+Then set your Caddyfile hostname to `clustr.lab.example.com` and let Caddy obtain a certificate automatically.
 
 ### Assign a static IP to the provisioning interface
 

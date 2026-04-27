@@ -65,17 +65,25 @@ curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
 
 **Accessing the web UI from your workstation:**
 
-`clustr-serverd` binds to the provisioning interface only (`10.99.0.1`). To reach the web UI from your operator workstation on the management LAN, you need a Caddy reverse proxy listening on the management interface. The recommended pattern is to add a stable IP alias to `eth0` using the `.254` address of your management subnet:
+`clustr-serverd` binds to the provisioning interface only (`10.99.0.1`). To reach the web UI from your operator workstation on the management LAN, you need a Caddy reverse proxy listening on a management interface address.
+
+When running `install-dev-vm.sh` interactively, the script will **prompt you** to choose a management IP. It detects your management network and suggests the `.254` address as a stable alias (e.g. `192.168.1.254` for a `192.168.1.0/24` network), but you can accept, skip, or enter a custom address. The alias is only added after your explicit confirmation — the script never silently changes network state.
+
+For non-interactive or automated installs, set `CLUSTR_MGMT_IP` before running the script:
 
 ```bash
-# Rocky Linux 9 — add the management IP alias (replace 192.168.1.254 with your subnet's .254):
+# Use the suggested .254 alias (adds a secondary address alongside your DHCP address):
 export CLUSTR_MGMT_IP=192.168.1.254
-nmcli con mod "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)" \
-    +ipv4.addresses "${CLUSTR_MGMT_IP}/24"
-nmcli con up "$(nmcli -t -f NAME,DEVICE con show | grep ':eth0$' | cut -d: -f1)"
+bash scripts/setup/install-dev-vm.sh
+
+# Or bind Caddy to the host's existing DHCP address (no alias needed):
+export CLUSTR_MGMT_IP=192.168.1.151
+bash scripts/setup/install-dev-vm.sh
 ```
 
-Then open `http://<your-clustr-mgmt-ip>/` in a browser (e.g. `http://192.168.1.254/`) and log in with `clustr` / `clustr`. You will be prompted to change the password immediately. For the full Caddy setup see [docs/tls-provisioning.md §3](docs/tls-provisioning.md#3-management-interface-access-dual-nic-setup).
+Then open `http://<CLUSTR_MGMT_IP>/` in a browser and log in with `clustr` / `clustr`. You will be prompted to change the password immediately. For the full Caddy setup see [docs/tls-provisioning.md §3](docs/tls-provisioning.md#3-management-interface-access-dual-nic-setup).
+
+**Note for existing installs:** if you ran an earlier version of the script that silently added a `.254` alias, remove it with `nmcli con mod "<connection>" -ipv4.addresses "192.168.1.254/24" && nmcli con up "<connection>"`. The install script will not modify an already-configured host's network state.
 
 For a full walk-through — including image builds, node registration, and the first-deploy smoke test — see [docs/install.md](docs/install.md).
 
