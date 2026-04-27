@@ -147,17 +147,20 @@ jobs:
       #      other devel headers that EPEL depends on but ships in CRB on EL9.
       #
       # INTENTIONALLY OMITTED from build deps (clustr3 change):
-      #   - mariadb-devel: when present, Slurm's configure auto-detects MySQL
-      #     support via `rpm -q mysql-devel` (mariadb-devel provides mysql-devel
-      #     compat), causing slurm RPMs to hard-require libmariadb.so.3.  This
-      #     library is NOT in the Rocky 9 minimal base image, so offline dnf
-      #     install (--disablerepo=*) fails.  Removing it from build deps
-      #     disables MySQL accounting storage — acceptable for our use case.
       #   - hwloc-devel: when present, Slurm's configure auto-detects hwloc and
       #     slurm-slurmd gets a hard dep on libhwloc.so.15.  That library is NOT
       #     in the Rocky 9 minimal base image and its transitive presence caused
       #     offline dnf install to fail.  Removing hwloc-devel from build deps
       #     disables NUMA topology awareness in slurmd — acceptable for lab use.
+      #
+      # NOTE: mariadb-devel is still installed because the Slurm 24.11.4 spec
+      # has an unconditional BuildRequires fallback chain that ultimately requires
+      # some form of MySQL devel package — even when MySQL is disabled at configure
+      # time.  MySQL support is explicitly disabled via --with-mysql_config=no
+      # in the rpmbuild --define flags (see "Build Slurm RPMs" step), which causes
+      # configure to skip MySQL entirely and produces RPMs with no libmariadb.so.3
+      # hard dep.  The mariadb-devel package is a build-only dep; it is NOT
+      # bundled with the deployed nodes.
       #
       # Optional packages (freeipmi-devel, rrdtool-devel, http-parser-devel):
       # These enable optional Slurm features (IPMI, rrd, REST). They may not
@@ -177,7 +180,14 @@ jobs:
           dnf install -y 'dnf-command(config-manager)'
           dnf config-manager --set-enabled crb
 
-          # 3. Mandatory build deps — hard fail if any are missing.
+          # 3. Enable mariadb AppStream module so mariadb-devel is visible.
+          # Required because Slurm's spec has an unconditional BuildRequires
+          # fallback chain that ultimately requires mariadb-devel (or one of its
+          # MySQL-compat variants) even when MySQL is disabled at configure time.
+          # MySQL is disabled via --with-mysql_config=no in the rpmbuild step.
+          dnf module enable -y mariadb
+
+          # 4. Mandatory build deps — hard fail if any are missing.
           # Note: the Rocky 9 base container ships curl-minimal which conflicts
           # with the full curl package. Use --allowerasing to allow DNF to
           # replace curl-minimal with curl. The full curl binary is only needed
@@ -199,7 +209,9 @@ jobs:
           # libjwt.so.2 that deployed nodes need is supplied by the libjwt RPM
           # we build from source and include in the bundle.
           #
-          # NOT installed: mariadb-devel (see comment above), hwloc-devel (see above)
+          # mariadb-devel: installed to satisfy Slurm spec BuildRequires (see
+          # NOTE above). MySQL is disabled at configure time via rpmbuild define.
+          # NOT installed: hwloc-devel (see INTENTIONALLY OMITTED comment above)
           dnf install -y --allowerasing \
             gcc gcc-c++ make \
             automake autoconf libtool \
@@ -207,6 +219,7 @@ jobs:
             createrepo_c \
             gnupg2 \
             munge munge-devel \
+            mariadb-devel \
             pam-devel \
             readline-devel \
             libcurl-devel \
@@ -504,6 +517,15 @@ jobs:
       # "BuildRequires: http-parser-devel" and pass "--enable-slurmrestd" to
       # configure.  http-parser-devel is available from EPEL on EL9 and was
       # already installed in the mandatory deps step above.
+      #
+      # --define "_with_mysql_config --with-mysql_config=no" (clustr3):
+      # The Slurm spec passes %{?_with_mysql_config} to ./configure.  Defining
+      # it as "--with-mysql_config=no" causes configure's x_ac_databases.m4 to
+      # skip MySQL entirely ("support for mysql is disabled"), so the compiled
+      # RPMs do NOT hard-require libmariadb.so.3.  mariadb-devel is still
+      # installed above to satisfy the spec's unconditional BuildRequires
+      # fallback chain (which always requires some MySQL devel package), but
+      # the resulting RPMs have no runtime dep on libmariadb.so.3.
       - name: Build Slurm RPMs
         shell: bash
         run: |
@@ -514,6 +536,7 @@ jobs:
           rpmbuild -ta \
             --define "_topdir $(pwd)/rpmbuild" \
             --define "_with_slurmrestd 1" \
+            --define "_with_mysql_config --with-mysql_config=no" \
             "slurm-${VERSION}.tar.bz2" \
             2>&1 | tee rpmbuild-output.log
           echo "rpmbuild complete."
