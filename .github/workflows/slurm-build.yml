@@ -44,6 +44,20 @@
 #     base image, so the chroot dnf install during deploy finalize failed
 #     silently (non-fatal) leaving nodes without Slurm installed.
 #
+# Changes in clustr5 (GAP-17 hardening):
+#   - Split bundle into two subdirs: el9-x86_64/ (clustr-signed) and
+#     el9-x86_64-deps/ (Rocky/EPEL passthrough).  Each gets its own repodata.
+#   - Capture Rocky 9 + EPEL 9 GPG keys from the build container and verify
+#     their fingerprints against the values pinned in versions.yml.  Mismatch
+#     = hard build failure.
+#   - Run rpm -K on every dep RPM against the rocky+EPEL keyring before
+#     bundling.  A dep RPM that fails signature verification = hard build failure.
+#   - Write RPM-GPG-KEY-rocky-9 and RPM-GPG-KEY-EPEL-9 into the bundle root
+#     alongside RPM-GPG-KEY-clustr.
+#   - Update manifest.json to schema v3 with has_deps_subdir: true.
+#   - Remove gpgcheck=0 from the chroot .repo file; replaced with two-stanza
+#     gpgcheck=1 (handled in finalize.go, not in this workflow).
+#
 # NON-GOALS (deferred to later PRs/sprints):
 #   - workflow_dispatch and schedule triggers (sprint 2)
 #   - EL10 / aarch64 build targets (sprint 2)
@@ -133,20 +147,46 @@ jobs:
             }
           ' "$VERSIONS_FILE")
 
+          # GAP-17: Parse pinned fingerprints for Rocky 9 and EPEL 9 dep signing keys.
+          # These are in the dep_signing_keys block.  Use awk to enter each sub-block.
+          ROCKY9_FINGERPRINT=$(awk '
+            /^dep_signing_keys:/ { in_keys=1 }
+            in_keys && /rocky9:/ { in_rocky=1 }
+            in_rocky && /fingerprint:/ {
+              gsub(/.*fingerprint: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          EPEL9_FINGERPRINT=$(awk '
+            /^dep_signing_keys:/ { in_keys=1 }
+            in_keys && /epel9:/ { in_epel=1 }
+            in_epel && /fingerprint:/ {
+              gsub(/.*fingerprint: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+
+          if [ -z "${ROCKY9_FINGERPRINT}" ] || [ -z "${EPEL9_FINGERPRINT}" ]; then
+            echo "FATAL: could not parse dep_signing_keys fingerprints from versions.yml"
+            exit 1
+          fi
+
           echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
           echo "slurm_sha256=${SLURM_SHA256}" | tee -a "$GITHUB_OUTPUT"
           echo "clustr_release=${CLUSTR_RELEASE}" | tee -a "$GITHUB_OUTPUT"
           echo "libjwt_version=${LIBJWT_VERSION}" | tee -a "$GITHUB_OUTPUT"
           echo "libjwt_sha256=${LIBJWT_SHA256}" | tee -a "$GITHUB_OUTPUT"
           echo "libjwt_url=${LIBJWT_URL}" | tee -a "$GITHUB_OUTPUT"
+          echo "rocky9_fingerprint=${ROCKY9_FINGERPRINT}" | tee -a "$GITHUB_OUTPUT"
+          echo "epel9_fingerprint=${EPEL9_FINGERPRINT}" | tee -a "$GITHUB_OUTPUT"
 
           echo "--- versions parsed ---"
-          echo "  slurm_version  : ${SLURM_VERSION}"
-          echo "  slurm_sha256   : ${SLURM_SHA256}"
-          echo "  clustr_release : ${CLUSTR_RELEASE}"
-          echo "  libjwt_version : ${LIBJWT_VERSION}"
-          echo "  libjwt_sha256  : ${LIBJWT_SHA256}"
-          echo "  libjwt_url     : ${LIBJWT_URL}"
+          echo "  slurm_version      : ${SLURM_VERSION}"
+          echo "  slurm_sha256       : ${SLURM_SHA256}"
+          echo "  clustr_release     : ${CLUSTR_RELEASE}"
+          echo "  libjwt_version     : ${LIBJWT_VERSION}"
+          echo "  libjwt_sha256      : ${LIBJWT_SHA256}"
+          echo "  libjwt_url         : ${LIBJWT_URL}"
+          echo "  rocky9_fingerprint : ${ROCKY9_FINGERPRINT}"
+          echo "  epel9_fingerprint  : ${EPEL9_FINGERPRINT}"
 
       # ── Install EPEL + build dependencies ────────────────────────────────
       # Repo setup required before the main install:
@@ -664,22 +704,85 @@ jobs:
           fi
           echo "All RPM signatures verified OK."
 
-      # ── Stage bundle directory ────────────────────────────────────────────
-      # Bundle layout per docs/slurm-build-pipeline.md §6.4:
+      # ── Capture and verify dep signing keys (GAP-17) ─────────────────────
+      # Extract Rocky 9 and EPEL 9 GPG keys from the build container's
+      # /etc/pki/rpm-gpg/ and verify their fingerprints against the values
+      # pinned in versions.yml. A fingerprint mismatch is a hard build failure.
+      #
+      # This step runs BEFORE dnf download so the keys are present before we
+      # verify the downloaded dep RPMs.
+      - name: Capture and verify dep signing key fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINNED_ROCKY9="${{ steps.versions.outputs.rocky9_fingerprint }}"
+          PINNED_EPEL9="${{ steps.versions.outputs.epel9_fingerprint }}"
+
+          # Rocky 9 key is at RPM-GPG-KEY-Rocky-9 in the container (installed by
+          # rocky-gpg-keys package, which is part of the base rocky image).
+          ROCKY_KEY_SRC="/etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9"
+          EPEL_KEY_SRC="/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9"
+
+          if [ ! -f "${ROCKY_KEY_SRC}" ]; then
+            echo "FATAL: ${ROCKY_KEY_SRC} not found in container"
+            ls /etc/pki/rpm-gpg/ || true
+            exit 1
+          fi
+          if [ ! -f "${EPEL_KEY_SRC}" ]; then
+            echo "FATAL: ${EPEL_KEY_SRC} not found — EPEL must be installed first"
+            echo "(EPEL should already be installed from the 'Enable EPEL' step above)"
+            exit 1
+          fi
+
+          # Compute fingerprint of the container key (40-char, no spaces).
+          compute_fp() {
+            gpg --show-keys --with-fingerprint --with-colons "$1" 2>/dev/null \
+              | awk -F: '$1=="fpr"{print $10; exit}'
+          }
+
+          ACTUAL_ROCKY9=$(compute_fp "${ROCKY_KEY_SRC}")
+          ACTUAL_EPEL9=$(compute_fp "${EPEL_KEY_SRC}")
+
+          echo "--- Rocky 9 GPG key fingerprint ---"
+          echo "  pinned : ${PINNED_ROCKY9}"
+          echo "  actual : ${ACTUAL_ROCKY9}"
+          if [ "${ACTUAL_ROCKY9}" != "${PINNED_ROCKY9}" ]; then
+            echo "FATAL: Rocky 9 GPG key fingerprint mismatch — supply chain integrity violation"
+            exit 1
+          fi
+          echo "  PASS"
+
+          echo "--- EPEL 9 GPG key fingerprint ---"
+          echo "  pinned : ${PINNED_EPEL9}"
+          echo "  actual : ${ACTUAL_EPEL9}"
+          if [ "${ACTUAL_EPEL9}" != "${PINNED_EPEL9}" ]; then
+            echo "FATAL: EPEL 9 GPG key fingerprint mismatch — supply chain integrity violation"
+            exit 1
+          fi
+          echo "  PASS"
+
+          # Copy verified keys to bundle root.
+          mkdir -p bundle
+          cp "${ROCKY_KEY_SRC}" bundle/RPM-GPG-KEY-rocky-9
+          cp "${EPEL_KEY_SRC}" bundle/RPM-GPG-KEY-EPEL-9
+          echo "Verified dep signing keys copied to bundle/"
+
+      # ── Stage bundle directory (clustr5: split into primary + deps subdirs) ──
+      # Bundle layout per docs/slurm-build-pipeline.md §17.4:
       #   ./manifest.json
-      #   ./RPM-GPG-KEY-clustr
-      #   ./el9-x86_64/*.rpm          ← Slurm RPMs + libjwt runtime RPM
-      #   ./el9-x86_64/repodata/
+      #   ./RPM-GPG-KEY-clustr           ← clustr release signing key
+      #   ./RPM-GPG-KEY-rocky-9          ← Rocky 9 release key (dep RPM verification)
+      #   ./RPM-GPG-KEY-EPEL-9           ← EPEL 9 release key (munge verification)
+      #   ./el9-x86_64/                  ← clustr-built RPMs only (slurm-*, libjwt-*)
+      #       *.rpm
+      #       repodata/
+      #   ./el9-x86_64-deps/             ← passthrough Rocky/EPEL dep RPMs only
+      #       *.rpm
+      #       repodata/
       #
-      # libjwt inclusion: only the runtime library RPM (libjwt-VERSION.rpm)
-      # is included in the bundle.  The -devel and -devel-docs sub-packages
-      # are build-time artifacts and are not needed on deployed nodes.
-      # Including libjwt in the repo satisfies the base slurm RPM's
-      # Requires: libjwt.so.1 without needing EPEL on deployed nodes.
-      #
-      # Decision: pack without a top-level wrapper dir so tar xzf drops
-      # files directly, satisfying the repomd.xml sanity check and
-      # simplifying PR3 extraction (no strip-components needed).
+      # The split is critical: verifyRPMSignatures in bundle.go runs two isolated
+      # rpm --dbpath passes, one per subdir, each importing only the appropriate
+      # key. Cross-contamination (a clustr RPM in deps or vice versa) = hard fail.
       - name: Stage bundle directory
         shell: bash
         run: |
@@ -687,7 +790,9 @@ jobs:
           OS="${{ matrix.target.os }}"
           ARCH="${{ matrix.target.arch }}"
           mkdir -p "bundle/${OS}-${ARCH}"
+          mkdir -p "bundle/${OS}-${ARCH}-deps"
 
+          # ── Primary subdir: clustr-built RPMs (slurm-* + libjwt runtime) ──
           # Copy all Slurm RPMs
           cp rpmbuild/RPMS/x86_64/*.rpm "bundle/${OS}-${ARCH}/"
 
@@ -703,78 +808,99 @@ jobs:
           cp "${LIBJWT_LIB_RPM}" "bundle/${OS}-${ARCH}/"
           echo "Included libjwt RPM: ${LIBJWT_LIB_RPM##*/}"
 
-          # Download runtime deps that are NOT in the base Rocky 9 minimal install
-          # but ARE required by the clustr-built Slurm RPM. These are bundled so
-          # the finalize step can install Slurm with:
-          #   --disablerepo='*' --enablerepo=clustr-slurm
-          # (no internet access from the deploy initramfs provisioning network).
-          #
-          # Package rationale (clustr4):
-          #   munge, munge-libs        — Slurm auth daemon; not in minimal install.
-          #                              libmunge.so.2 is required by base slurm RPM.
-          #   mariadb-connector-c      — provides libmariadb.so.3; slurm RPMs are
-          #                              built with MySQL support (slurmdbd accounting
-          #                              storage), so this is a hard runtime dep of
-          #                              slurm-slurmdbd and slurm base RPM.
-          #   mariadb-connector-c-config (noarch) — provides /etc/my.cnf; required
-          #                              by mariadb-connector-c at install time.
-          #   bash-completion (noarch) — required by base slurm RPM; noarch so must
-          #                              be downloaded separately (no --arch filter).
-          #   libpkgconf (x86_64)      — provides libpkgconf.so.3; required by pkgconf.
-          #   pkgconf (x86_64)         — provides /usr/bin/pkgconf; required by
-          #                              pkgconf-pkg-config.
-          #   pkgconf-m4 (noarch)      — required by pkgconf-pkg-config.
-          #   pkgconf-pkg-config (x86_64) — provides /usr/bin/pkg-config; required by
-          #                              bash-completion.  None of these four packages
-          #                              are present in the Rocky 9 minimal base image,
-          #                              causing the chroot dnf install during deploy
-          #                              finalize to fail (clustr3 regression).
-          #
-          # REMOVED vs clustr2: infiniband-diags, libibumad
-          #   IB/OFED support is disabled because rdma-core-devel is removed before
-          #   rpmbuild (see step 5 in "Enable EPEL" step), preventing configure from
-          #   detecting IB headers.  The resulting slurm RPMs no longer require
-          #   libibmad.so.5/libibumad.so.3, so infiniband-diags (and its problematic
-          #   perl dependency) is no longer needed in the bundle.
-          #
-          # x86_64 packages pinned with --arch=x86_64 to prevent i686 multilib.
-          # noarch packages downloaded in a separate invocation (no --arch flag).
-          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" \
+          echo "--- Primary subdir RPMs (clustr-signed) ---"
+          ls "bundle/${OS}-${ARCH}/"*.rpm | xargs -I{} basename {}
+
+          # ── Deps subdir: Rocky/EPEL passthrough RPMs ──
+          # Download into the deps subdir (NOT mixed with clustr-built RPMs).
+          # Package rationale:
+          #   munge, munge-libs        — Slurm auth daemon; signed by Rocky/EPEL key
+          #   mariadb-connector-c      — provides libmariadb.so.3 (MySQL slurm dep)
+          #   mariadb-connector-c-config — provides /etc/my.cnf
+          #   bash-completion          — hard dep of base slurm RPM
+          #   libpkgconf               — provides libpkgconf.so.3; dep of pkgconf
+          #   pkgconf, pkgconf-m4, pkgconf-pkg-config — provide /usr/bin/pkg-config
+          #                              (bash-completion dep; not in Rocky 9 minimal)
+          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}-deps/" \
             munge munge-libs \
             mariadb-connector-c \
             libpkgconf pkgconf pkgconf-pkg-config
-          dnf download --destdir="bundle/${OS}-${ARCH}/" \
+          dnf download --destdir="bundle/${OS}-${ARCH}-deps/" \
             mariadb-connector-c-config \
             bash-completion \
             pkgconf-m4
-          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm bundle/${OS}-${ARCH}/pkgconf*.rpm bundle/${OS}-${ARCH}/libpkgconf*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+
+          echo "--- Deps subdir RPMs (Rocky/EPEL-signed) ---"
+          ls "bundle/${OS}-${ARCH}-deps/"*.rpm | xargs -I{} basename {}
 
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
-          echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
-          echo "--- RPMs in bundle ---"
-          ls bundle/${OS}-${ARCH}/*.rpm | xargs -I{} basename {}
+          echo "Primary subdir: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs"
+          echo "Deps subdir:    $(ls bundle/${OS}-${ARCH}-deps/*.rpm | wc -l) RPMs"
 
-      # ── Generate repo metadata ────────────────────────────────────────────
+      # ── Verify dep RPM signatures against Rocky+EPEL keys (GAP-17) ────────
+      # Hard gate: every RPM in el9-x86_64-deps/ must carry a valid Rocky or
+      # EPEL GPG signature before we proceed to the bundle stage.  This closes
+      # the supply chain gap documented in §17.2 — the Rocky/EPEL signature was
+      # previously never verified anywhere in the clustr trust chain.
+      - name: Verify dep RPM signatures against Rocky+EPEL keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          DEPS_DIR="bundle/${OS}-${ARCH}-deps"
+
+          # Build an isolated rpm db with only Rocky+EPEL keys imported.
+          TMPDB=$(mktemp -d)
+          rpm --dbpath "${TMPDB}" --import bundle/RPM-GPG-KEY-rocky-9
+          rpm --dbpath "${TMPDB}" --import bundle/RPM-GPG-KEY-EPEL-9
+          echo "--- Verifying dep RPM signatures (Rocky+EPEL keyring) ---"
+          FAIL=0
+          for RPM in "${DEPS_DIR}"/*.rpm; do
+            RESULT=$(rpm --dbpath "${TMPDB}" -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM##*/}"
+              FAIL=1
+            fi
+          done
+          rm -rf "${TMPDB}"
+          if [ "${FAIL}" -ne 0 ]; then
+            echo "FATAL: one or more dep RPMs failed Rocky/EPEL signature verification"
+            exit 1
+          fi
+          echo "All dep RPM signatures verified OK."
+
+      # ── Generate repo metadata (separate createrepo_c per subdir) ─────────
+      # Each subdir gets its own repodata/ so dnf can use them as independent
+      # repositories with per-repo gpgcheck settings.
       - name: Generate repodata with createrepo_c
         shell: bash
         run: |
           set -euo pipefail
           OS="${{ matrix.target.os }}"
           ARCH="${{ matrix.target.arch }}"
+
+          echo "--- Generating repodata for primary subdir (${OS}-${ARCH}/) ---"
           createrepo_c "bundle/${OS}-${ARCH}/"
-          echo "--- repodata generated ---"
           ls -la "bundle/${OS}-${ARCH}/repodata/"
+
+          echo "--- Generating repodata for deps subdir (${OS}-${ARCH}-deps/) ---"
+          createrepo_c "bundle/${OS}-${ARCH}-deps/"
+          ls -la "bundle/${OS}-${ARCH}-deps/repodata/"
 
       # ── Generate manifest.json ────────────────────────────────────────────
       # Uses build/slurm/gen-manifest.py (committed helper script) to avoid
       # inline multi-line Python which has YAML parse issues in some parsers.
       # bundle_sha256 is set to "__PENDING__" and updated after tarball creation.
+      # HAS_DEPS_SUBDIR=true signals schema v3 (clustr5 split bundle layout).
       - name: Generate manifest.json
         shell: bash
         run: |
           set -euo pipefail
           BUILT_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           TARGET_DIR="bundle/${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          DEPS_DIR="bundle/${{ matrix.target.os }}-${{ matrix.target.arch }}-deps"
           SLURM_VERSION="${{ steps.versions.outputs.slurm_version }}"
           CLUSTR_RELEASE="${{ steps.versions.outputs.clustr_release }}"
           OS="${{ matrix.target.os }}"
@@ -782,7 +908,7 @@ jobs:
           BUILD_SHA="${GITHUB_SHA}"
           OUTPUT_FILE="bundle/manifest.json"
 
-          export TARGET_DIR SLURM_VERSION CLUSTR_RELEASE DISTRO="${OS}" ARCH BUILT_AT BUILD_SHA OUTPUT_FILE
+          export TARGET_DIR DEPS_DIR SLURM_VERSION CLUSTR_RELEASE DISTRO="${OS}" ARCH BUILT_AT BUILD_SHA OUTPUT_FILE HAS_DEPS_SUBDIR=true
           python3 build/slurm/gen-manifest.py
 
       # ── Create bundle tarball and compute SHA256 ──────────────────────────
@@ -832,7 +958,7 @@ jobs:
           tar tzf "${BUNDLE_NAME}"
 
           echo ""
-          echo "--- Checking for repomd.xml (filesystem) ---"
+          echo "--- Checking primary repomd.xml (el9-x86_64/) ---"
           REPOMD="bundle/${OS}-${ARCH}/repodata/repomd.xml"
           if [ ! -f "${REPOMD}" ]; then
             echo "FATAL: repomd.xml not found at ${REPOMD}"
@@ -842,7 +968,27 @@ jobs:
           echo "repomd.xml present at ${REPOMD} - OK"
 
           echo ""
-          echo "--- Checking for libjwt RPM in bundle ---"
+          echo "--- Checking deps repomd.xml (el9-x86_64-deps/) ---"
+          DEPS_REPOMD="bundle/${OS}-${ARCH}-deps/repodata/repomd.xml"
+          if [ ! -f "${DEPS_REPOMD}" ]; then
+            echo "FATAL: deps repomd.xml not found at ${DEPS_REPOMD}"
+            ls -la "bundle/${OS}-${ARCH}-deps/repodata/" || echo "  (deps repodata dir missing)"
+            exit 1
+          fi
+          echo "deps repomd.xml present at ${DEPS_REPOMD} - OK"
+
+          echo ""
+          echo "--- Checking for all three GPG key files in bundle root ---"
+          for KEYFILE in RPM-GPG-KEY-clustr RPM-GPG-KEY-rocky-9 RPM-GPG-KEY-EPEL-9; do
+            if [ ! -f "bundle/${KEYFILE}" ]; then
+              echo "FATAL: ${KEYFILE} not found in bundle root"
+              exit 1
+            fi
+            echo "${KEYFILE}: present - OK"
+          done
+
+          echo ""
+          echo "--- Checking for libjwt RPM in primary subdir ---"
           LIBJWT_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/libjwt-"*.rpm 2>/dev/null | head -1)
           if [ -z "${LIBJWT_IN_BUNDLE}" ]; then
             echo "FATAL: libjwt RPM not found in bundle/${OS}-${ARCH}/"
@@ -852,45 +998,79 @@ jobs:
           echo "libjwt RPM present: ${LIBJWT_IN_BUNDLE##*/} - OK"
 
           echo ""
-          echo "--- Checking for Slurm runtime dep RPMs in bundle ---"
-          FAIL_DEPS=0
-          check_rpm() {
-            local label="$1" pattern="$2"
+          echo "--- Checking for Slurm RPMs in primary subdir (clustr-built) ---"
+          FAIL_CHECK=0
+          check_rpm_in_dir() {
+            local label="$1" dir="$2" pattern="$3"
             local found
-            found=$(ls "bundle/${OS}-${ARCH}/"${pattern} 2>/dev/null | head -1)
+            found=$(ls "${dir}/"${pattern} 2>/dev/null | head -1)
             if [ -z "${found}" ]; then
-              echo "FATAL: ${label} RPM not found in bundle/${OS}-${ARCH}/ (pattern: ${pattern})"
-              FAIL_DEPS=1
+              echo "FATAL: ${label} RPM not found in ${dir}/ (pattern: ${pattern})"
+              FAIL_CHECK=1
             else
               echo "${label} RPM present: ${found##*/} - OK"
             fi
           }
-          # clustr4 bundle: IB removed (rdma-core-devel stripped); MySQL kept;
-          # pkgconf chain added (bash-completion dep not in Rocky 9 minimal base)
-          check_rpm "munge"                    "munge-[0-9]*.rpm"
-          check_rpm "munge-libs"               "munge-libs-*.rpm"
-          check_rpm "mariadb-connector-c"      "mariadb-connector-c-[0-9]*.rpm"
-          check_rpm "mariadb-connector-c-config" "mariadb-connector-c-config-*.rpm"
-          check_rpm "bash-completion"          "bash-completion-*.rpm"
-          check_rpm "libpkgconf"               "libpkgconf-[0-9]*.x86_64.rpm"
-          check_rpm "pkgconf"                  "pkgconf-[0-9]*.x86_64.rpm"
-          check_rpm "pkgconf-m4"               "pkgconf-m4-*.rpm"
-          check_rpm "pkgconf-pkg-config"       "pkgconf-pkg-config-*.rpm"
+          check_rpm_in_dir "slurm"         "bundle/${OS}-${ARCH}" "slurm-[0-9]*.rpm"
+          check_rpm_in_dir "slurm-slurmd"  "bundle/${OS}-${ARCH}" "slurm-slurmd-*.rpm"
+          check_rpm_in_dir "slurm-slurmctld" "bundle/${OS}-${ARCH}" "slurm-slurmctld-*.rpm"
 
-          # Negative check: IB RPMs must NOT be in bundle (removed in clustr3
-          # because rdma-core-devel is stripped before rpmbuild, so slurm RPMs
-          # no longer carry libibmad.so.5/libibumad.so.3 hard deps)
-          for BANNED in infiniband-diags libibumad; do
-            if ls "bundle/${OS}-${ARCH}/${BANNED}"*.rpm 2>/dev/null | grep -q .; then
-              echo "WARN: unexpected ${BANNED} RPM in bundle (IB removed in clustr3)"
+          echo ""
+          echo "--- Checking for dep RPMs in deps subdir (Rocky/EPEL passthrough) ---"
+          check_rpm_in_dir "munge"                      "bundle/${OS}-${ARCH}-deps" "munge-[0-9]*.rpm"
+          check_rpm_in_dir "munge-libs"                 "bundle/${OS}-${ARCH}-deps" "munge-libs-*.rpm"
+          check_rpm_in_dir "mariadb-connector-c"        "bundle/${OS}-${ARCH}-deps" "mariadb-connector-c-[0-9]*.rpm"
+          check_rpm_in_dir "mariadb-connector-c-config" "bundle/${OS}-${ARCH}-deps" "mariadb-connector-c-config-*.rpm"
+          check_rpm_in_dir "bash-completion"            "bundle/${OS}-${ARCH}-deps" "bash-completion-*.rpm"
+          check_rpm_in_dir "libpkgconf"                 "bundle/${OS}-${ARCH}-deps" "libpkgconf-[0-9]*.x86_64.rpm"
+          check_rpm_in_dir "pkgconf"                    "bundle/${OS}-${ARCH}-deps" "pkgconf-[0-9]*.x86_64.rpm"
+          check_rpm_in_dir "pkgconf-m4"                 "bundle/${OS}-${ARCH}-deps" "pkgconf-m4-*.rpm"
+          check_rpm_in_dir "pkgconf-pkg-config"         "bundle/${OS}-${ARCH}-deps" "pkgconf-pkg-config-*.rpm"
+
+          # Cross-contamination check: dep RPMs must NOT appear in primary subdir.
+          echo ""
+          echo "--- Cross-contamination check: dep RPMs must not be in primary subdir ---"
+          for DEP_RPM in "bundle/${OS}-${ARCH}-deps/"*.rpm; do
+            NAME=$(basename "${DEP_RPM}")
+            if [ -f "bundle/${OS}-${ARCH}/${NAME}" ]; then
+              echo "FATAL: cross-contamination — ${NAME} found in both primary and deps subdir"
+              FAIL_CHECK=1
+            fi
+          done
+          if [ "${FAIL_CHECK}" -eq 0 ]; then
+            echo "No cross-contamination detected - OK"
+          fi
+
+          # Negative check: dep RPMs must NOT be in the primary subdir.
+          for DEP_PKG in munge bash-completion pkgconf mariadb; do
+            if ls "bundle/${OS}-${ARCH}/${DEP_PKG}"*.rpm 2>/dev/null | grep -q .; then
+              echo "WARN: ${DEP_PKG} RPM found in primary subdir — should be in deps subdir only"
+              FAIL_CHECK=1
             fi
           done
 
-          if [ "${FAIL_DEPS}" -ne 0 ]; then
+          # Negative check: IB RPMs must NOT be in bundle (removed in clustr3).
+          for BANNED in infiniband-diags libibumad; do
+            for DIR in "bundle/${OS}-${ARCH}" "bundle/${OS}-${ARCH}-deps"; do
+              if ls "${DIR}/${BANNED}"*.rpm 2>/dev/null | grep -q .; then
+                echo "WARN: unexpected ${BANNED} RPM in ${DIR} (IB removed in clustr3)"
+              fi
+            done
+          done
+
+          if [ "${FAIL_CHECK}" -ne 0 ]; then
             ls "bundle/${OS}-${ARCH}/" || true
+            ls "bundle/${OS}-${ARCH}-deps/" || true
             exit 1
           fi
 
+          # Verify has_deps_subdir is true in manifest.json.
+          HAS_DEPS=$(python3 -c "import json; d=json.load(open('bundle/manifest.json')); print(d.get('has_deps_subdir', False))")
+          if [ "${HAS_DEPS}" != "True" ]; then
+            echo "FATAL: manifest.json missing has_deps_subdir: true (schema v3)"
+            cat bundle/manifest.json
+            exit 1
+          fi
           echo ""
           echo "--- Release-level manifest.json ---"
           cat bundle/manifest.json
@@ -907,6 +1087,8 @@ jobs:
             ${{ steps.bundle.outputs.bundle_name }}.sha256
             bundle/manifest.json
             bundle/RPM-GPG-KEY-clustr
+            bundle/RPM-GPG-KEY-rocky-9
+            bundle/RPM-GPG-KEY-EPEL-9
             rpmbuild-output.log
             libjwt-build.log
           if-no-files-found: error
@@ -985,6 +1167,8 @@ jobs:
           ASSET_ARGS+=("${BUNDLE_FILE}.sha256")
           ASSET_ARGS+=("release-assets/bundle/manifest.json#manifest.json")
           ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-rocky-9#RPM-GPG-KEY-rocky-9")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-EPEL-9#RPM-GPG-KEY-EPEL-9")
 
           # Individual Slurm RPMs (for transparency / rpm -K spot-check)
           for RPM in release-assets/rpmbuild/RPMS/x86_64/*.rpm; do

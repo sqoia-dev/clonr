@@ -41,7 +41,11 @@ slurm:
 #          bash-completion (hard dep of base slurm RPM) requires /usr/bin/pkg-config
 #          which is provided by pkgconf-pkg-config; none of these are in the Rocky 9
 #          minimal base image, causing chroot dnf install to fail during deploy finalize
-clustr_release: 4
+# clustr5: GAP-17 hardening — split bundle into el9-x86_64/ (clustr-signed) and
+#          el9-x86_64-deps/ (Rocky+EPEL passthrough); both repos use gpgcheck=1 against
+#          their respective pinned keys; verifyRPMSignatures runs two isolated passes;
+#          chroot .repo file emits two stanzas; removes gpgcheck=0 path
+clustr_release: 5
 
 munge:
   # MVP: pull from EPEL. Exit ramp to from-source build in sprint 3.
@@ -66,6 +70,23 @@ deps:
     source_url: "https://github.com/benmcollins/libjwt/releases/download/v1.18.3/libjwt-1.18.3.tar.bz2"
     # SHA256 verified against downloaded tarball 2026-04-27
     sha256: "7c582667fe3e6751897c8d9c1b4c8c117bbfa9067d8398524adb5dded671213e"
+
+# GPG signing keys for dep RPMs that ship in el9-x86_64-deps/ (GAP-17 hardening).
+# Full 40-char fingerprints pinned against canonical upstream sources.
+# Rocky 9 fingerprint: https://rockylinux.org/keys (Rocky Enterprise Software Foundation - Release key 2022)
+# EPEL 9 fingerprint:  https://www.fedoraproject.org/security/ (Fedora epel9)
+# Build CI compares captured container key fingerprints against these; mismatch = hard fail.
+dep_signing_keys:
+  rocky9:
+    fingerprint: "21CB256AE16FC54C6E652949702D426D350D275D"
+    source_url: "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
+    key_file: "build/slurm/keys/RPM-GPG-KEY-rocky-9.asc.pub"
+    description: "Rocky Enterprise Software Foundation - Release key 2022"
+  epel9:
+    fingerprint: "FF8AD1344597106ECE813B918A3872BF3228467C"
+    source_url: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+    key_file: "build/slurm/keys/RPM-GPG-KEY-EPEL-9.asc.pub"
+    description: "Fedora (epel9)"
 
 # Build matrix — EL10 and aarch64 deferred per design doc §3 and §4.2
 targets:
