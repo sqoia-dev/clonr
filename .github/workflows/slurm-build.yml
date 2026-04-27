@@ -2,7 +2,7 @@
 #
 # Slurm RPM build pipeline.
 #
-# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr2)
+# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr3)
 #
 # What this does:
 #   1. Inside a pinned Rocky 9 container, downloads the SchedMD tarball,
@@ -20,6 +20,21 @@
 #   - Add http-parser-devel to mandatory deps to enable slurmrestd build
 #   - Add binary-presence verification gate (slurmctld, slurmd, slurmdbd,
 #     slurmrestd, sackd) — hard-fails build if expected binaries are missing
+#
+# Changes in clustr3:
+#   - Remove mariadb-devel and hwloc-devel from build deps so the resulting RPMs
+#     do NOT carry libmariadb.so.3 or libhwloc.so.15 as hard runtime deps.
+#     Both were auto-detected by Slurm's configure when the devel headers were
+#     present in the container, even without explicit --with-mysql/--with-hwloc.
+#     These libraries are NOT in the Rocky 9 minimal base image and their absence
+#     caused dnf dep resolution to fail during offline (--disablerepo=*) install.
+#   - Remove rdma-core-devel explicitly before rpmbuild to prevent OFED/IB
+#     auto-detection by Slurm's configure (infiniband-diags, which provides
+#     libibmad.so.5, requires perl — not in minimal base image).
+#   - Replace IB/MariaDB bundle RPMs with hwloc-libs (for slurmd NUMA topology;
+#     hwloc-libs has no problematic transitive deps in the minimal image).
+#   - mariadb-connector-c, mariadb-connector-c-config, infiniband-diags,
+#     libibumad removed from bundle (no longer needed by rebuilt RPMs).
 #
 # NON-GOALS (deferred to later PRs/sprints):
 #   - workflow_dispatch and schedule triggers (sprint 2)
@@ -130,8 +145,19 @@ jobs:
       #   1. epel-release: provides munge-devel, libjwt-devel, createrepo_c, etc.
       #   2. CRB (CodeReady Builder): provides json-c-devel, libyaml-devel and
       #      other devel headers that EPEL depends on but ships in CRB on EL9.
-      #   3. mariadb module: mariadb-devel is in the AppStream mariadb module
-      #      and requires explicit module enable to be visible.
+      #
+      # INTENTIONALLY OMITTED from build deps (clustr3 change):
+      #   - mariadb-devel: when present, Slurm's configure auto-detects MySQL
+      #     support via `rpm -q mysql-devel` (mariadb-devel provides mysql-devel
+      #     compat), causing slurm RPMs to hard-require libmariadb.so.3.  This
+      #     library is NOT in the Rocky 9 minimal base image, so offline dnf
+      #     install (--disablerepo=*) fails.  Removing it from build deps
+      #     disables MySQL accounting storage — acceptable for our use case.
+      #   - hwloc-devel: when present, Slurm's configure auto-detects hwloc and
+      #     slurm-slurmd gets a hard dep on libhwloc.so.15.  That library is NOT
+      #     in the Rocky 9 minimal base image and its transitive presence caused
+      #     offline dnf install to fail.  Removing hwloc-devel from build deps
+      #     disables NUMA topology awareness in slurmd — acceptable for lab use.
       #
       # Optional packages (freeipmi-devel, rrdtool-devel, http-parser-devel):
       # These enable optional Slurm features (IPMI, rrd, REST). They may not
@@ -151,10 +177,7 @@ jobs:
           dnf install -y 'dnf-command(config-manager)'
           dnf config-manager --set-enabled crb
 
-          # 3. Enable mariadb AppStream module so mariadb-devel is visible
-          dnf module enable -y mariadb
-
-          # 4. Mandatory build deps — hard fail if any are missing.
+          # 3. Mandatory build deps — hard fail if any are missing.
           # Note: the Rocky 9 base container ships curl-minimal which conflicts
           # with the full curl package. Use --allowerasing to allow DNF to
           # replace curl-minimal with curl. The full curl binary is only needed
@@ -165,16 +188,18 @@ jobs:
           # (which is already enabled above). We treat it as mandatory so that
           # a missing http-parser-devel causes a hard build failure rather than
           # silently disabling slurmrestd.  The base slurm RPM requires
-          # libjwt.so.1 at runtime (for JWT auth in slurmctld/slurmd), so even
-          # without slurmrestd being installed on a node, libjwt.so.1 must be
-          # present.  We provide libjwt.so.1 by building libjwt from source
+          # libjwt.so.2 at runtime (for JWT auth in slurmctld/slurmd), so even
+          # without slurmrestd being installed on a node, libjwt.so.2 must be
+          # present.  We provide libjwt.so.2 by building libjwt from source
           # (see "Build libjwt RPM from source" step below) rather than
           # requiring EPEL at deploy time.
           #
           # Note: libjwt-devel is used only at Slurm *build* time (inside this
           # container) to compile the JWT-aware Slurm binaries.  The runtime
-          # libjwt.so.1 that deployed nodes need is supplied by the libjwt RPM
+          # libjwt.so.2 that deployed nodes need is supplied by the libjwt RPM
           # we build from source and include in the bundle.
+          #
+          # NOT installed: mariadb-devel (see comment above), hwloc-devel (see above)
           dnf install -y --allowerasing \
             gcc gcc-c++ make \
             automake autoconf libtool \
@@ -182,10 +207,8 @@ jobs:
             createrepo_c \
             gnupg2 \
             munge munge-devel \
-            mariadb-devel \
             pam-devel \
             readline-devel \
-            hwloc-devel \
             libcurl-devel \
             json-c-devel \
             libyaml-devel \
@@ -201,6 +224,23 @@ jobs:
             python3 \
             curl
 
+          # 4. Explicitly remove rdma-core-devel if it was pulled in transitively.
+          # Slurm's configure auto-detects OFED/InfiniBand support by searching
+          # for /usr/include/infiniband/mad.h (provided by rdma-core-devel).
+          # When detected, the compiled slurm RPM hard-requires libibmad.so.5
+          # (provided by infiniband-diags), which in turn requires /usr/bin/perl
+          # (not in the Rocky 9 minimal base image), causing offline dnf install
+          # to fail.  Removing rdma-core-devel before rpmbuild ensures configure
+          # reports "OFED not found" and skips IB support.
+          dnf remove -y rdma-core-devel libibverbs-devel 2>/dev/null || true
+          # Verify IB headers are gone
+          if [ -f /usr/include/infiniband/mad.h ]; then
+            echo "FATAL: /usr/include/infiniband/mad.h still present after rdma-core-devel removal"
+            rpm -qf /usr/include/infiniband/mad.h 2>/dev/null || true
+            exit 1
+          fi
+          echo "IB headers absent — OFED will not be compiled in: OK"
+
           # 5. Optional build deps — skip if unavailable on this snapshot.
           # Missing deps disable the corresponding Slurm plugin at build time.
           # freeipmi-devel and rrdtool-devel remain optional; their absence
@@ -211,10 +251,10 @@ jobs:
             rrdtool-devel || true
 
           echo "--- Installed build dependencies ---"
-          rpm -qa gcc rpm-build munge-devel mariadb-devel | sort
+          rpm -qa gcc rpm-build munge-devel | sort
 
       # ── Build libjwt RPM from source ──────────────────────────────────────
-      # libjwt provides libjwt.so.1, a runtime dep of the base slurm RPM.
+      # libjwt provides libjwt.so.2, a runtime dep of the base slurm RPM.
       # EPEL ships libjwt for EL9 but we build it ourselves so deployed nodes
       # never need EPEL at runtime (true zero-egress for the Slurm stack).
       #
@@ -645,32 +685,31 @@ jobs:
           #   --disablerepo='*' --enablerepo=clustr-slurm
           # (no internet access from the deploy initramfs provisioning network).
           #
-          # Package rationale:
-          #   munge, munge-libs        — Slurm auth daemon; not in minimal install
-          #   infiniband-diags         — provides libibmad.so.5 + libibnetdisc.so.5;
-          #                              slurm-24.11.4 was built with IB support so
-          #                              these are hard link-time deps of the base
-          #                              slurm RPM even on non-IB clusters
-          #   libibumad                — provides libibumad.so.3; hard dep of both
-          #                              slurm and infiniband-diags
-          #   mariadb-connector-c      — provides libmariadb.so.3; slurm was built
-          #                              with --with-mysql so this is a hard dep
-          #   mariadb-connector-c-config (noarch) — provides /etc/my.cnf which
-          #                              mariadb-connector-c requires at install time
+          # Package rationale (clustr3 — IB/MariaDB/hwloc deps removed):
+          #   munge, munge-libs        — Slurm auth daemon; not in minimal install.
+          #                              libmunge.so.2 is required by base slurm RPM.
           #   bash-completion (noarch) — required by base slurm RPM; noarch so must
           #                              be downloaded separately (no --arch filter)
+          #
+          # REMOVED from bundle vs clustr2 (all deps eliminated at build time):
+          #   infiniband-diags, libibumad — IB not compiled in (rdma-core-devel
+          #                              removed before rpmbuild); slurm RPMs no
+          #                              longer require libibmad.so.5/libibumad.so.3
+          #   mariadb-connector-c, mariadb-connector-c-config — MySQL not compiled
+          #                              in (mariadb-devel not installed); slurm RPMs
+          #                              no longer require libmariadb.so.3
+          #   hwloc-libs               — hwloc not compiled in (hwloc-devel not
+          #                              installed); slurm-slurmd no longer requires
+          #                              libhwloc.so.15.  NUMA topology awareness is
+          #                              disabled in this build (acceptable for lab).
           #
           # x86_64 packages pinned with --arch=x86_64 to prevent i686 multilib.
           # noarch packages downloaded in a separate invocation (no --arch flag).
           dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" \
-            munge munge-libs \
-            infiniband-diags \
-            libibumad \
-            mariadb-connector-c
+            munge munge-libs
           dnf download --destdir="bundle/${OS}-${ARCH}/" \
-            mariadb-connector-c-config \
             bash-completion
-          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/infiniband*.rpm bundle/${OS}-${ARCH}/libibumad*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
 
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
           echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
@@ -788,13 +827,20 @@ jobs:
               echo "${label} RPM present: ${found##*/} - OK"
             fi
           }
-          check_rpm "munge"                    "munge-[0-9]*.rpm"
-          check_rpm "munge-libs"               "munge-libs-*.rpm"
-          check_rpm "infiniband-diags"         "infiniband-diags-*.rpm"
-          check_rpm "libibumad"                "libibumad-*.rpm"
-          check_rpm "mariadb-connector-c"      "mariadb-connector-c-[0-9]*.rpm"
-          check_rpm "mariadb-connector-c-config" "mariadb-connector-c-config-*.rpm"
-          check_rpm "bash-completion"          "bash-completion-*.rpm"
+          # clustr3 bundle: IB, MariaDB, and hwloc deps all removed at build time
+          check_rpm "munge"           "munge-[0-9]*.rpm"
+          check_rpm "munge-libs"      "munge-libs-*.rpm"
+          check_rpm "bash-completion" "bash-completion-*.rpm"
+
+          # Negative checks: IB, MariaDB, hwloc RPMs must NOT be in bundle
+          # (they were present in clustr1/clustr2 but are no longer needed
+          # because the rebuilt RPMs don't carry those hard deps)
+          for BANNED in infiniband-diags libibumad mariadb-connector hwloc-libs; do
+            if ls "bundle/${OS}-${ARCH}/${BANNED}"*.rpm 2>/dev/null | grep -q .; then
+              echo "WARN: unexpected ${BANNED} RPM in bundle (should not be in clustr3)"
+            fi
+          done
+
           if [ "${FAIL_DEPS}" -ne 0 ]; then
             ls "bundle/${OS}-${ARCH}/" || true
             exit 1
