@@ -634,3 +634,162 @@ SSH access to both nodes works correctly (GAP-NEW-1c fix: /etc/shadow written by
 Zero external egress confirmed.
 All three services (slurmctld, slurmd, munge) managed by systemd on their respective nodes.
 GAP-NEW-2 (system users) and GAP-NEW-3 (role scoping) confirmed fixed end-to-end.
+
+---
+
+## R2-G1 RESOLVED — QEMU Base Image Rebuild
+
+**Date:** 2026-04-27  
+**Validator:** Gilfoyle  
+**Image ID:** `6b875781-7f43-451e-b491-163a1fe12945`  
+**Image Name:** `rocky9-slurm-free-clean` v9.7  
+**Build Method:** QEMU ISO installer (via `POST /api/v1/factory/build-from-iso`)  
+**Source ISO:** `https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso`  
+**Firmware:** BIOS (`-machine q35,accel=kvm`)  
+**Build Duration:** 270.35 seconds (4m30s)  
+**Artifact:** `/var/lib/clustr/images/6b875781-7f43-451e-b491-163a1fe12945/rootfs.tar`  
+**SHA256:** `8cbea57495d236ccf7c22b1de7ed3830318b444746c2512ee8f1f04bd1d37ea6`  
+**Size:** 1,699,512,320 bytes (~1.58 GiB)  
+**Build completed at:** 2026-04-27T18:12:53Z
+
+### Build Mechanism
+
+The QEMU build path is fully implemented. Trigger: `POST /api/v1/factory/build-from-iso` with JSON body specifying `url`, `name`, `firmware`, `distro`. The CLI does not expose this endpoint directly — curl or a UI call is required.
+
+Flow:
+1. ISO downloaded + cached at `/var/lib/clustr/iso-cache/<sha256>.iso`
+2. Kickstart generated with `isoinstaller.GenerateAutoInstallConfig` — includes Slurm-free policy verification in `%post`
+3. Kernel/initrd extracted from ISO for direct-boot (bypasses media check, saves ~8 min)
+4. QEMU launched via `/usr/libexec/qemu-kvm` (Rocky Linux path, covered by `FindQEMU` candidates list)
+5. Serial log captured; QMP socket polled for clean shutdown event
+6. Raw disk extracted via `losetup + kpartx + rsync` in subprocess mode
+7. Rootfs tarball baked deterministically; image finalized in DB as `status=ready`
+
+### R2-G1-A: Slurm-free Verification (Base Image Rootfs)
+
+```
+$ rpm -qa --root=/var/lib/clustr/images/6b875781-7f43-451e-b491-163a1fe12945/rootfs | grep -iE '^slurm'
+(no output)
+PASS: no slurm packages found
+```
+
+### R2-G1-B: OpenHPC-free Verification (Base Image Rootfs)
+
+```
+$ rpm -qa --root=/var/lib/clustr/images/6b875781-7f43-451e-b491-163a1fe12945/rootfs | grep -iE 'ohpc'
+(no output)
+PASS: no ohpc packages found
+```
+
+### R2-G1-C: /etc/shadow Existence and Permissions (Base Image Rootfs)
+
+```
+$ ls -la /var/lib/clustr/images/6b875781-7f43-451e-b491-163a1fe12945/rootfs/etc/shadow
+----------. 1 root root 717 Apr 27 11:12 rootfs/etc/shadow
+
+$ stat -c '%n %a %U %G' rootfs/etc/shadow
+rootfs/etc/shadow 0 root root
+```
+
+Mode `0000`, owner `root:root` — correct Rocky 9 convention for `/etc/shadow`. The file exists with content (717 bytes), confirming Anaconda wrote shadow entries correctly. This directly addresses the R4-GAP-1c symptom root cause: the base image now ships with a properly constructed shadow file rather than an absent one.
+
+### R2-G1-D: No OpenHPC Repo in Base Image
+
+```
+$ ls rootfs/etc/yum.repos.d/
+rocky-addons.repo  rocky-devel.repo  rocky-extras.repo  rocky.repo
+```
+
+No `OpenHPC.repo` or `ohpc*.repo` present. Only stock Rocky 9 repos.
+
+### R2-G1-E: Total RPM Count (Sanity)
+
+```
+$ rpm -qa --root=rootfs | wc -l
+349
+```
+
+349 packages — minimal Rocky 9 install as expected for `@^minimal-environment`.
+
+### R2-G1-F: Default Image Assignment
+
+Both cluster nodes assigned to `6b875781-7f43-451e-b491-163a1fe12945` (rocky9-slurm-free-clean):
+
+```
+slurm-controller  → 6b875781-7f43-451e-b491-163a1fe12945
+slurm-compute     → 6b875781-7f43-451e-b491-163a1fe12945
+```
+
+This is the default for all new deploys on this cluster.
+
+### R2-G1-G: Post-Deploy Regression Check
+
+Fresh deploy of `rocky9-slurm-free-clean` on slurm-controller (vm201) triggered at 2026-04-27T22:56:41Z, completed at 2026-04-27T22:58:17Z. Reimage ID: `494dc33d-e8f1-4a34-af61-9e56284e2c95`.
+
+**On slurm-controller (10.99.0.100) after fresh deploy:**
+
+```
+$ rpm -qa | grep -i slurm
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmctld-24.11.4-1.el9.x86_64
+```
+
+Only clustr 24.11.4 packages — no pre-baked Slurm in the base image.
+
+```
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 27 22:57 /etc/shadow
+
+$ getent shadow root
+root:!!
+```
+
+Shadow file exists (R4-GAP-1c symptom absent), `getent shadow` works correctly.
+
+```
+$ ls /etc/yum.repos.d/
+clustr-slurm.repo  rocky-addons.repo  rocky-devel.repo  rocky-extras.repo  rocky.repo
+```
+
+No OpenHPC repo. Only clustr-slurm repo (injected by finalize) and stock Rocky repos.
+
+```
+$ srun --mpi=none -N1 hostname
+slurm-compute
+```
+
+`srun` end-to-end: PASS. Job dispatched from controller to compute node without error.
+
+**On slurm-compute (10.99.0.101) — also deployed from same image:**
+
+```
+$ rpm -qa | grep -i slurm
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmd-24.11.4-1.el9.x86_64
+
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 27 22:34 /etc/shadow
+
+$ sinfo
+PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
+batch*       up   infinite      1   idle slurm-compute
+```
+
+### R2-G1-H: Deploy History Summary
+
+19 completed deploys against image `6b875781` recorded in DB across both nodes. All status=complete.
+
+### R2-G1-I: Gap Resolution Status
+
+| Item | Status |
+|---|---|
+| QEMU build path functional | RESOLVED — no Go fixes required, path worked out-of-the-box |
+| Base image Slurm-free | VERIFIED — `rpm -qa \| grep -iE '^slurm'` empty on rootfs |
+| Base image OpenHPC-free | VERIFIED — `rpm -qa \| grep -iE 'ohpc'` empty on rootfs |
+| /etc/shadow present with correct perms | VERIFIED — mode 0000, root:root, 717 bytes |
+| No OpenHPC.repo in base image | VERIFIED — only stock Rocky repos |
+| Kickstart Slurm-free policy verification live | CONFIRMED — `%post` check in kickstart template; build fails if Slurm detected |
+| Default image updated for new deploys | DONE — both nodes assigned to `6b875781` |
+| Post-deploy srun regression | PASS — `srun --mpi=none -N1 hostname` → slurm-compute |
+
+**R2-G1: RESOLVED.**
