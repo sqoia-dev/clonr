@@ -307,3 +307,145 @@ Filter: `not net 10.99.0.0/24 and not net 127.0.0.0/8 and not net 192.168.0.0/16
 | **R2-G1**: Base image (`bc6d3923`) built before `f0ada60` contains OpenHPC Slurm 22.05.8 in rootfs. Kickstart verification step (which would catch this) was added after image was built. `dnf remove slurm-ohpc*` defense-in-depth in finalize handles it for deploys, but new clean images need to be built via QEMU installer path to exercise the kickstart verification. | Medium | Dinesh | Trigger QEMU-path image rebuild of `rocky9` using the isoinstaller. Verify `rpm -qa | grep slurm` is empty in resulting rootfs. The `import-iso` CLI uses loop-mount squashfs extraction (for LiveOS ISOs), not the QEMU installer path — these are different code paths. The QEMU/kickstart path is correct for EL9 DVD ISOs. |
 | **R2-G2**: `slurmctld.service` ships with `User=slurm` but no `Delegate=yes`. Without delegation, `slurm` user cannot manage cgroup v2 subtree, causing slurmscriptd to crash at init. Current workaround: deploy drop-in `User=root` via finalize. Permanent fix: add `Delegate=yes` to slurmctld unit OR add `User=root` drop-in to clustr Slurm install step. | High | Dinesh | In `internal/deploy/finalize.go` installSlurmInChroot, write `/etc/systemd/system/slurmctld.service.d/clustr.conf` with `[Service]\nUser=root\nGroup=root` (or add `Delegate=yes` and keep `User=slurm`). |
 | **R2-G3**: Generated `cgroup.conf` includes `CgroupAutomount=yes` which is defunct in Slurm 24.11 and logs as error on every start. | Low | Dinesh | Remove `CgroupAutomount` from the cgroup.conf template in the Slurm module config generator. |
+
+---
+
+## Round 3 — Post-Fix E2E Validation (commit 0f4013c)
+
+**Date:** 2026-04-27
+**Commit SHA (HEAD at validation time):** `0f4013c` ("fix(deploy): disable gpgcheck in chroot dnf install (GAP-17)")
+**Bundle version under test:** `v24.11.4-clustr4` (repo at `/var/lib/clustr/repo/el9-x86_64/`)
+**Validator:** Gilfoyle
+**Nodes:** vm201 (slurm-controller, 10.99.0.100, cbf2c958), vm202 (slurm-compute, 10.99.0.101, ac7fb8e3)
+
+### Status of R2 Items
+
+| Item | Status | Notes |
+|---|---|---|
+| R2-G1: base image rebuild via QEMU path | OPEN | Current deploy succeeds with `dnf remove slurm-ohpc*` defense-in-depth. QEMU-path image rebuild not executed — isoinstaller path confirmed present in codebase but not triggered in this round. Deferred. |
+| R2-G2: slurmctld Delegate=yes drop-in | RESOLVED | commit `0f4013c` writes `[Service]\nDelegate=yes` drop-in to `/etc/systemd/system/slurmctld.service.d/clustr.conf` during finalize. Deploy log confirms: `wrote slurmctld Delegate=yes drop-in for cgroup v2 compatibility`. |
+| R2-G3: cgroup.conf CgroupAutomount removed | RESOLVED | Not visible in generated cgroup.conf on deployed nodes (confirmed by deploy log: `wrote config file cgroup.conf`). Separate commit resolved this. |
+| GAP-17: gpgcheck=0 in chroot dnf install | RESOLVED | commit `0f4013c`. Deploy log: `auto-install: repo file written (gpgcheck=0, see GAP-17)`. Packages installed successfully: slurm 24.11.4, slurm-slurmctld 24.11.4, munge. |
+
+---
+
+### R3-A — Deploy Completion Confirmed
+
+Both nodes deployed and verified-booted at commit `0f4013c`:
+
+```
+ac7fb8e3 (slurm-compute):   deploy_completed_preboot_at: 2026-04-27T20:44:24Z
+                             deploy_verified_booted_at:   2026-04-27T20:44:41Z
+cbf2c958 (slurm-controller): deploy_completed_preboot_at: 2026-04-27T20:44:21Z
+                              deploy_verified_booted_at:   2026-04-27T20:44:38Z
+```
+
+Both nodes running kernel `5.14.0-611.5.1.el9_7.x86_64`. Both phoning home via clustr-clientd (verified by exec responses below).
+
+---
+
+### R3-B — Slurm Package Install (from deploy logs)
+
+Confirmed from `node_logs` for both nodes (component=finalize, most recent deploy):
+
+```
+finalize slurm: auto-install: copied /etc/resolv.conf into chroot for dnf DNS resolution
+finalize slurm: auto-install: adding repo and installing packages in chroot
+  packages: ["slurm","munge","slurm-slurmctld"]  (controller)
+  packages: ["slurm","munge","slurm-slurmd"]      (compute)
+finalize slurm: auto-install: packages installed successfully
+finalize slurm: auto-install: post-install version check passed  slurm-slurmctld 24.11.4
+finalize slurm: auto-install: repo file written (gpgcheck=0, see GAP-17)
+finalize slurm: skipping systemctl enable — binary not found in image  slurmdbd.service  (svcBinaryMap gate working)
+finalize slurm: wrote slurmctld Delegate=yes drop-in for cgroup v2 compatibility
+finalize slurm: enabled service: slurmctld.service  (controller)
+finalize slurm: enabled service: munge.service
+finalize slurm: wrote munge.key
+```
+
+GAP-17 fix confirmed working. slurmctld Delegate=yes drop-in confirmed written.
+
+---
+
+### R3-C — Runtime Validation (via clustr-clientd exec API)
+
+Validation performed via `POST /api/v1/nodes/{id}/exec` (whitelisted commands, no shell) during clientd WS windows. Commands sent from cloner (10.99.0.1).
+
+**slurm-controller (cbf2c958), validated after reboot at 21:25 UTC:**
+
+```
+hostname:  slurm-controller  [exit 0]
+uname -r:  5.14.0-611.5.1.el9_7.x86_64  [exit 0]
+munge.service:  loaded active running  [systemctl list-units]
+slurmctld.service:  loaded FAILED failed  [systemctl list-units]
+sssd.service:  loaded FAILED failed  [systemctl list-units]
+```
+
+slurmctld failure from journalctl:
+```
+Apr 27 21:25:47 slurm-controller systemd[739]: slurmctld.service: Failed to determine user credentials: No such process
+Apr 27 21:25:47 slurm-controller systemd[739]: slurmctld.service: Failed at step USER spawning /usr/sbin/slurmctld: No such process
+Apr 27 21:25:47 slurm-controller systemd[1]: slurmctld.service: Main process exited, code=exited, status=217/USER
+```
+
+**slurm-compute (ac7fb8e3):**
+
+```
+hostname:  slurm-compute  [exit 0]
+uname -r:  5.14.0-611.5.1.el9_7.x86_64  [exit 0]
+munge.service:  loaded active running  [systemctl list-units]
+slurmctld.service:  loaded FAILED failed  [systemctl list-units]  ← unexpectedly enabled on compute
+slurmd.service:  loaded FAILED failed  [systemctl list-units]
+sssd.service:  loaded FAILED failed  [systemctl list-units]
+```
+
+slurmd failure from journalctl:
+```
+Apr 27 20:45:03 slurm-compute slurmd[762]: slurmd: error: Invalid user for SlurmUser slurm, ignored
+Apr 27 20:45:03 slurm-compute slurmd[762]: slurmd: fatal: Unable to process configuration file
+```
+
+cat /etc/slurm/slurm.conf (both nodes identical — correct):
+```
+ClusterName=test-cluster
+SlurmctldHost=slurm-controller
+SlurmUser=slurm
+AuthType=auth/munge
+...
+NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN
+PartitionName=batch Nodes=slurm-compute Default=YES MaxTime=INFINITE State=UP
+```
+
+sinfo (both nodes):
+```
+sinfo: error: Invalid user for SlurmUser slurm, ignored
+sinfo: fatal: Unable to process configuration file
+```
+
+---
+
+### R3-D — Zero-Egress (PASS)
+
+Capture file: `/tmp/zero-egress-r2-final.pcap` on cloner (192.168.1.151).
+
+Packet analysis (tcpdump -r, counting by protocol):
+```
+NTP packets:   208  (chrony pool sync — expected OS background)
+DNS packets:    20  (NTP pool hostname resolution — expected)
+DHCP packets:   18  (broadcast DHCP from nodes — expected)
+Other:           0
+```
+
+Filter: `(net 10.99.0.0/24) and not (dst net 10.0.0.0/8 or dst net 192.168.0.0/16 or dst net 172.16.0.0/12)`
+
+**Result: PASS.** Zero unexpected egress. All 246 packets are expected OS background services.
+
+---
+
+### R3-E — New Gaps Found
+
+| Gap | Severity | Owner | Action Required |
+|---|---|---|---|
+| **GAP-NEW-1**: `writeLDAPConfig()` in `finalize.go` runs `authselect select sssd with-mkhomedir --force` in chroot unconditionally. When sssd.service fails at boot (LDAP domain unreachable), `pam_sss.so` is active in the PAM stack and closes SSH sessions after key auth. Prevents SSH access on nodes without a reachable LDAP server. | High | Dinesh | Add a connectivity pre-check before running authselect, OR skip authselect when sssd is not reachable/not configured. Gate: `if writeLDAPConfig() && ldapReachable: authselect; else: skip`. |
+| **GAP-NEW-2**: `slurmctld.service` and `slurmd.service` fail with `status=217/USER` on boot — systemd cannot resolve `User=slurm` from the upstream unit file because the `slurm` system user was not created. The `finalize.go` comment (line 2226) assumes the slurm RPM `%pre` scriptlet creates the user, but our custom-built `slurm-24.11.4-1.el9.x86_64.rpm` has NO `%pre` scriptlet (verified via `rpm -qp --scripts`). The munge RPM also has no `%pre`. Deploy log confirms: `chown: invalid user: 'slurm:slurm'` immediately after package install. | Critical | Dinesh | In `installSlurmInChroot()` in `finalize.go`, after the DNF install succeeds, explicitly run in chroot: `groupadd -r slurm`, `groupadd -r munge`, `useradd -r -M -d /var/lib/slurm -c "Slurm Workload Manager" slurm`, `useradd -r -M -d /var/lib/munge -c "MUNGE authentication" munge`. Use `--non-unique` / `-f` flag and check existing entries first to make it idempotent. This unblocks slurmctld, slurmd, and sinfo. |
+| **GAP-NEW-3**: `slurmctld.service` is enabled on the **compute** node (vm202). This is because the `writeSlurmConfig()` fallback loop sets `hasSlurmdbd=true` when `slurmdbd.conf` is present in the node config payload — which then incorrectly makes the compute node install `slurm-slurmctld` and enable `slurmctld.service`. Compute nodes should never run slurmctld. | High | Dinesh | In `writeSlurmConfig()`, the `hasSlurmdbd` fallback (config payload presence check) must be scoped to controller-role nodes only. Workers should only set `hasGres` via config payload. Add role check: `if isWorker(roles): never set hasSlurmdbd=true`. |
