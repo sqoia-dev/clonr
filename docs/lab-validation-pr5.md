@@ -449,3 +449,188 @@ Filter: `(net 10.99.0.0/24) and not (dst net 10.0.0.0/8 or dst net 192.168.0.0/1
 | **GAP-NEW-1**: `writeLDAPConfig()` in `finalize.go` runs `authselect select sssd with-mkhomedir --force` in chroot unconditionally. When sssd.service fails at boot (LDAP domain unreachable), `pam_sss.so` is active in the PAM stack and closes SSH sessions after key auth. Prevents SSH access on nodes without a reachable LDAP server. | High | Dinesh | Add a connectivity pre-check before running authselect, OR skip authselect when sssd is not reachable/not configured. Gate: `if writeLDAPConfig() && ldapReachable: authselect; else: skip`. |
 | **GAP-NEW-2**: `slurmctld.service` and `slurmd.service` fail with `status=217/USER` on boot — systemd cannot resolve `User=slurm` from the upstream unit file because the `slurm` system user was not created. The `finalize.go` comment (line 2226) assumes the slurm RPM `%pre` scriptlet creates the user, but our custom-built `slurm-24.11.4-1.el9.x86_64.rpm` has NO `%pre` scriptlet (verified via `rpm -qp --scripts`). The munge RPM also has no `%pre`. Deploy log confirms: `chown: invalid user: 'slurm:slurm'` immediately after package install. | Critical | Dinesh | In `installSlurmInChroot()` in `finalize.go`, after the DNF install succeeds, explicitly run in chroot: `groupadd -r slurm`, `groupadd -r munge`, `useradd -r -M -d /var/lib/slurm -c "Slurm Workload Manager" slurm`, `useradd -r -M -d /var/lib/munge -c "MUNGE authentication" munge`. Use `--non-unique` / `-f` flag and check existing entries first to make it idempotent. This unblocks slurmctld, slurmd, and sinfo. |
 | **GAP-NEW-3**: `slurmctld.service` is enabled on the **compute** node (vm202). This is because the `writeSlurmConfig()` fallback loop sets `hasSlurmdbd=true` when `slurmdbd.conf` is present in the node config payload — which then incorrectly makes the compute node install `slurm-slurmctld` and enable `slurmctld.service`. Compute nodes should never run slurmctld. | High | Dinesh | In `writeSlurmConfig()`, the `hasSlurmdbd` fallback (config payload presence check) must be scoped to controller-role nodes only. Workers should only set `hasGres` via config payload. Add role check: `if isWorker(roles): never set hasSlurmdbd=true`. |
+
+---
+
+## Round 4 — Full E2E Re-Validation (2026-04-27)
+
+**Head SHA:** `5995c75` (fix(slurm): change MpiDefault from pmix to none)  
+**Commits in this round:**  
+- `b614091` — fix(deploy): GAP-NEW-1/2/3 slurm user creation, role scoping, LDAP gate  
+- `04ea8a6` — fix(deploy): reset authselect to minimal when LDAP unreachable (R4-GAP-1b)  
+- `039bf0e` — fix(deploy): write /etc/shadow when absent from base image (R4-GAP-1c)  
+- `5995c75` — fix(slurm): change MpiDefault from pmix to none (R4-GAP-2)
+
+**Bundle:** v24.11.4-clustr4 (SHA256 `923dd3b3f30265da51b7f6ed3fbc501cde355471aedc41b24ed7afa038c04241`)  
+**Provisioning host:** cloner (192.168.1.151), clustr-serverd PID 217439  
+**Validation timestamp:** 2026-04-27T22:42:59Z
+
+---
+
+### R4-Pre-Flight
+
+Both VMs hard-reset via Proxmox (`qm stop 201; qm stop 202`), boot order set to `net0;scsi0` (`qm set 201 --boot "order=net0;scsi0"`). `.installed-version` file confirmed present at `/var/lib/clustr/repo/el9-x86_64/.installed-version` (SHA matches bundle).
+
+---
+
+### R4-A — Deploy Logs (controller node, MAC bc:24:11:da:58:6a)
+
+Round 4c reimage (commit `039bf0e` initramfs):
+
+```
+1777329237: finalize: Applying node identity (hostname, network, users)
+1777329237: finalize: writing /root/.ssh/authorized_keys
+1777329248: finalize: /etc/shadow written (was absent from base image — locked passwords, pubkey auth unaffected)
+1777329248: finalize: LDAP server unreachable — resetting authselect to minimal profile
+1777329248: finalize: authselect reset to minimal (LDAP unreachable — sssd PAM entries cleared)
+1777329248: finalize slurm: auto-install: packages installed successfully
+1777329248: finalize slurm: auto-install: created system user in chroot (slurm)
+1777329248: finalize slurm: auto-install: system user verified in chroot
+1777329248: finalize slurm: auto-install: system user verified in chroot (munge)
+1777329248: finalize slurm: wrote slurmctld Delegate=yes drop-in for cgroup v2 compatibility
+1777329248: finalize slurm: enabled service (slurmctld)
+1777329248: finalize slurm: enabled service (munge)
+```
+
+Both nodes verified-booted within 200 seconds. clientd_ver=v0.2.0-353-g04ea8a6 confirmed.
+
+---
+
+### R4-B — Service Validation (controller: slurm-controller / 10.99.0.100)
+
+```
+$ id
+uid=0(root) gid=0(root) groups=0(root)
+
+$ hostname
+slurm-controller
+
+$ uname -r
+5.14.0-611.5.1.el9_7.x86_64
+
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 27 22:34 /etc/shadow
+
+$ getent passwd slurm munge
+slurm:x:995:994:Slurm Workload Manager:/var/spool/slurm:/sbin/nologin
+munge:x:996:995:Runs Uid 'N' Gid Emporium:/run/munge:/sbin/nologin
+
+$ rpm -qa slurm* | sort
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmctld-24.11.4-1.el9.x86_64
+slurm-slurmd-24.11.4-1.el9.x86_64
+
+$ systemctl is-active slurmctld
+active
+
+$ systemctl is-active munge
+active
+
+$ systemctl is-active slurmd
+active
+
+$ systemctl cat slurmctld | grep -E "(User=|Delegate=)"
+User=slurm
+Delegate=yes
+
+$ sinfo -N -l
+Mon Apr 27 22:42:59 2026
+NODELIST          NODES PARTITION       STATE CPUS    S:C:T MEMORY TMP_DISK WEIGHT AVAIL_FE REASON
+slurm-compute         1    batch*        idle 2       2:1:1   3905        0      1   (null) none
+slurm-controller      1    batch*        idle 2       2:1:1   3905        0      1   (null) none
+```
+
+---
+
+### R4-C — Service Validation (compute: slurm-compute / 10.99.0.101)
+
+```
+$ id
+uid=0(root) gid=0(root) groups=0(root)
+
+$ hostname
+slurm-compute
+
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 27 22:34 /etc/shadow
+
+$ getent passwd slurm munge
+slurm:x:995:994:Slurm Workload Manager:/var/spool/slurm:/sbin/nologin
+munge:x:996:995:Runs Uid 'N' Gid Emporium:/run/munge:/sbin/nologin
+
+$ rpm -qa slurm* | sort
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmd-24.11.4-1.el9.x86_64
+
+$ systemctl is-active slurmd
+active
+
+$ systemctl is-active munge
+active
+
+$ systemctl is-enabled slurmctld
+Failed to get unit file state for slurmctld.service: No such file or directory
+```
+
+GAP-NEW-3 CONFIRMED FIXED: slurmctld is not installed or enabled on compute.
+
+---
+
+### R4-D — srun Tests (executed from slurm-controller)
+
+```
+$ srun -N1 hostname
+slurm-compute
+
+$ srun -N1 -w slurm-compute hostname
+slurm-compute
+
+$ srun -N2 hostname
+slurm-compute
+slurm-controller
+```
+
+All three srun invocations succeeded via fully systemd-managed services. No manual workarounds.
+
+---
+
+### R4-E — Zero-Egress Verification
+
+tcpdump running on cloner eth0, filter `src net 10.99.0.0/24` (outbound from cluster nodes), duration: full reimage + boot + srun test period.
+
+```
+$ tcpdump -r /tmp/zero-egress-r4.pcap -nn | wc -l
+0
+```
+
+**Result: PASS. Zero packets captured.** No external egress from cluster nodes during deploy or operation.
+
+---
+
+### R4-F — Gap Summary
+
+| Gap | Status | Fix Commit | Notes |
+|---|---|---|---|
+| GAP-NEW-1 (authselect sssd blocks SSH) | FIXED | `b614091` + `04ea8a6` | Gate on LDAP reachability + actively reset to minimal |
+| GAP-NEW-1b (stale sssd PAM survives base image) | FIXED | `04ea8a6` | `authselect select minimal --force` when LDAP unreachable |
+| GAP-NEW-1c (/etc/shadow missing from base image) | FIXED | `039bf0e` | `ensureShadowFile()` writes shadow from /etc/passwd on deploy |
+| GAP-NEW-2 (slurm/munge system users not created) | FIXED | `b614091` | useradd in chroot after DNF install |
+| GAP-NEW-3 (slurmctld enabled on compute) | FIXED | `b614091` | Role-scoped service enablement |
+| GAP-NEW-4 (MpiDefault=pmix, plugin absent) | FIXED | `5995c75` | Changed to MpiDefault=none in slurm.conf template |
+| GAP-17 (dep RPM signature verification) | DEFERRED | — | Task #79, non-blocking for current validation |
+
+---
+
+### R4-G — Verdict
+
+**CLUSTER STATUS: TURNKEY**
+
+All required srun tests pass via systemd-managed services with no manual workarounds:
+- srun -N1 hostname → slurm-compute
+- srun -N1 -w slurm-compute hostname → slurm-compute
+- srun -N2 hostname → slurm-compute + slurm-controller
+
+SSH access to both nodes works correctly (GAP-NEW-1c fix: /etc/shadow written by finalize.go).
+Zero external egress confirmed.
+All three services (slurmctld, slurmd, munge) managed by systemd on their respective nodes.
+GAP-NEW-2 (system users) and GAP-NEW-3 (role scoping) confirmed fixed end-to-end.
