@@ -251,12 +251,17 @@ jobs:
 
           # Write ~/.rpmmacros with printf to avoid heredoc YAML parse issues.
           # %__gpg_sign_cmd overrides the gpg invocation used by rpm --addsign.
-          # %{__plaintext_filename} and %{__signature_filename} are RPM macros
-          # that expand at signing time to the source and detached-sig paths.
+          #
+          # Argument order is load-bearing:
+          #   -sbo %{__signature_filename} %{__plaintext_filename}
+          # matches the default RPM sign command format on EL9 (rpm 4.16+).
+          # The -s (sign), -b (binary), -o (output) flags are the standard
+          # detached-sig form that RPM expects.  The output file must come
+          # BEFORE the input file.
           printf '%%_signature gpg\n' > ~/.rpmmacros
           printf '%%_gpg_name 41E51A6653BBA540\n' >> ~/.rpmmacros
           printf '%%__gpg /usr/bin/gpg\n' >> ~/.rpmmacros
-          printf '%%__gpg_sign_cmd %%{__gpg} gpg --no-verbose --no-armor --homedir %s --batch --pinentry-mode loopback --passphrase-file %s -u "%%{_gpg_name}" --digest-algo sha256 --detach-sign %%{__plaintext_filename} %%{__signature_filename}\n' \
+          printf '%%__gpg_sign_cmd %%{__gpg} gpg --no-verbose --no-armor --homedir %s --batch --pinentry-mode loopback --passphrase-file %s --no-secmem-warning -u "%%{_gpg_name}" --digest-algo sha256 -sbo %%{__signature_filename} %%{__plaintext_filename}\n' \
             "${GPG_HOME}" "${PASS_FILE}" >> ~/.rpmmacros
 
           echo "rpmmacros configured:"
