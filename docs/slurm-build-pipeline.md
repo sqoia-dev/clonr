@@ -1199,3 +1199,231 @@ With libjwt in the bundle, the deployed node's `dnf install` chain becomes:
 
 `dnf install slurm slurm-slurmctld slurm-slurmd` resolves all deps from
 the clustr repo alone. No EPEL fetch at deploy time. Zero-egress claim holds.
+
+---
+
+## 17. Security-model addendum (GAP-17): heterogeneous bundle signatures
+
+**Status:** Addendum — supersedes §6.4, §7.5, §8.1 stage-3, and §15 PR4 with
+respect to chroot `gpgcheck`.
+**Trigger:** PR5 e2e validation (commit `0f4013c`).
+**Author:** Richard. **Implementer (follow-up sprint):** Dinesh.
+
+### 17.1 What the original spec missed
+
+§3 (MVP scope) and §6.4 (bundle layout) implicitly assumed every RPM in the
+bundle would be **clustr-signed** with the key whose pubkey is at
+`build/slurm/keys/clustr-release.asc.pub`. §15 PR4 instructed Dinesh to
+"Flip `gpgcheck=0` → `gpgcheck=1`" and use
+`gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr` as the only key in the
+chroot. PR4 (`e2ebd1b`) implemented that exactly.
+
+That spec is wrong for the bundle we actually ship today (clustr4):
+
+| RPM family | Count | Signed by | Source |
+|---|---|---|---|
+| `slurm-*` (12 RPMs) | 12 | clustr key `69486116d6a2fc98` | rpmbuild --tb in CI |
+| `libjwt-1.18.3` | 1 | clustr key `69486116d6a2fc98` | rpmbuild from upstream tarball in CI |
+| `bash-completion` | 1 | Rocky key `702d426d350d275d` | `dnf download` from Rocky 9 BaseOS |
+| `libpkgconf`, `pkgconf`, `pkgconf-m4`, `pkgconf-pkg-config` | 4 | Rocky key | Rocky 9 BaseOS |
+| `mariadb-connector-c`, `-config` | 2 | Rocky key | Rocky 9 BaseOS |
+| `munge`, `munge-libs` | 2 | Rocky/EPEL key (`702d426d350d275d`) | EPEL 9 (mirrored via `dnf download` in build container) |
+
+Twenty-two RPMs total. Nine of them are signed with a key the chroot does
+not have. `gpgcheck=1` against only the clustr key rejects nine RPMs as
+"Public key not installed" and the install fails closed — which is what
+Gilfoyle observed during PR5 e2e validation.
+
+The reason these third-party RPMs are in the bundle at all is the
+zero-egress invariant: we promised in §1 that "deployed nodes never reach
+schedmd.com / openhpc.community / EPEL." The `slurm` and
+`slurm-slurmctld`/`slurm-slurmd` RPMs we build have hard `Requires:` on
+`bash-completion`, `pkgconf-pkg-config`, `libmariadb.so.3`, and
+`libmunge.so.2`. None of these is in the Rocky 9 minimal base image. They
+must be either (a) shipped in our bundle, or (b) fetched from upstream
+repos at deploy time. (a) is what clustr3/clustr4 chose. The chroot dnf
+install needs them to resolve, so the trust model has to accommodate them.
+
+### 17.2 Why the "verify-at-server, trust thereafter" claim does not hold today
+
+Gilfoyle's commit message asserts that the per-RPM chroot GPG check is
+redundant because `bundle.go::verifyRPMSignatures` covers the same surface
+at server-install time. **It does not.**
+
+`verifyRPMSignatures` (cmd/clustr-serverd/bundle.go:587) does exactly:
+
+1. Write only the embedded clustr pubkey to a temp file.
+2. `rpm --dbpath <tmp> --import` that one key.
+3. `rpm --dbpath <tmp> -K <every .rpm in the bundle subdir>`.
+
+Run against the clustr4 bundle on cloner with only the clustr key imported,
+this returns `digests SIGNATURES NOT OK` for nine of the twenty-two RPMs
+(verified empirically 2026-04-27). Server-install would fail with
+`rpm -K failed`. The reason production has not tripped over this is that
+PR5's autodeploy script seeds `/var/lib/clustr/repo/` directly from the
+checkout — no `.installed-version` marker exists on the cloner host today
+(also verified 2026-04-27), so the production install path never runs
+against this bundle. The first operator who uses the actual
+`clustr-serverd bundle install --from-release` path will hit this.
+
+What the bundle SHA256 (pinned in `versions.yml`, verified at download time
+in `bundle.go`) actually proves: "these bytes are the bytes that came out
+of GHA run X on tag Y". It is a **provenance** check on the build pipeline,
+not an **authenticity** check on the upstream RPMs inside it. A tampered
+`bash-completion` RPM swapped into the bundle staging step would re-hash
+to a new bundle SHA256, which we would then pin in `versions.yml`, and
+nothing in the chain would object.
+
+So the chain today is:
+
+```
+Clustr-built RPMs (slurm-*, libjwt):
+  SchedMD GPG-verified tarball → reproducible build → clustr GPG-sign
+  → bundle SHA256 → server install rpm -K against clustr key
+  → chroot dnf gpgcheck=0 (was =1, now =0 per 0f4013c)
+  STATUS: Strong end-to-end. Chroot gpgcheck=0 is harmless because we
+          already verified twice upstream.
+
+Third-party RPMs (bash-completion, pkgconf chain, mariadb-c, munge):
+  Rocky/EPEL build → published, GPG-signed by Rocky/EPEL → fetched in
+  build container by `dnf download` (NO gpgcheck on download — dnf only
+  gpgchecks at install time, not download) → dropped into bundle as-is
+  → bundle SHA256 → server install rpm -K against clustr key (FAILS
+  silently today because PR5 doesn't run this path) → chroot dnf
+  gpgcheck=0
+  STATUS: Broken. The Rocky/EPEL signature is never verified anywhere
+          in the clustr-controlled trust chain. The bundle SHA256 only
+          binds these bytes to our build pipeline's choice.
+```
+
+### 17.3 Decision
+
+**Adopt Option 4 (hybrid trust model). Accept commit `0f4013c` as the
+ship-unblocking patch for v0.x e2e validation. Do NOT consider this the
+final security model. Land follow-up sprint "GAP-17 hardening" before any
+production v1.0 ship decision (task #65).**
+
+Why Option 4 over alternatives:
+
+| Option | Verdict | Reason |
+|---|---|---|
+| 1. Accept `gpgcheck=0` permanently | Reject | Leaves third-party RPMs cryptographically unverified anywhere in the chain. SHA256-of-bundle proves origin from our CI, not authenticity of upstream RPMs inside. |
+| 2. Bundle only clustr-signed RPMs | Reject | Breaks the §1 zero-egress promise. `bash-completion` and the pkgconf chain literally are not in Rocky 9 minimal — clustr3/clustr4 expanded the bundle precisely because of this. Reverting means deployed nodes need EPEL/BaseOS reachability at deploy time. |
+| 3. Re-sign upstream RPMs with clustr key | Reject | We would be claiming provenance for code we did not produce. Operators running `rpm -K` post-deploy lose the ability to distinguish clustr-built from upstream-mirrored. Bad SBOM, bad transparency. |
+| **4. Hybrid: split bundle into clustr-signed + Rocky/EPEL-signed sub-repos, both `gpgcheck=1`** | **CHOSEN** | Preserves zero-egress (everything still ships in the bundle). Preserves per-RPM cryptographic verification end-to-end (clustr-built verified against clustr key, upstream verified against the Rocky/EPEL key we capture and pin). Cost is bounded: two extra public keys, one extra `.repo` stanza, one split in `verifyRPMSignatures`. |
+
+### 17.4 Target architecture (post-hardening)
+
+Bundle layout (replaces §6.4):
+
+```
+clustr-slurm-bundle/
+├── manifest.json
+├── RPM-GPG-KEY-clustr
+├── RPM-GPG-KEY-rocky-9          # NEW — captured from dl.rockylinux.org at build, fingerprint pinned in versions.yml
+├── RPM-GPG-KEY-EPEL-9           # NEW — captured from dl.fedoraproject.org at build, fingerprint pinned in versions.yml
+├── el9-x86_64/                  # clustr-built RPMs only
+│   ├── slurm-*.rpm
+│   ├── libjwt-*.rpm
+│   └── repodata/
+└── el9-x86_64-deps/             # NEW — passthrough Rocky/EPEL RPMs
+    ├── bash-completion-*.rpm
+    ├── pkgconf*.rpm
+    ├── libpkgconf-*.rpm
+    ├── mariadb-connector-c*.rpm
+    ├── munge*.rpm
+    └── repodata/
+```
+
+Chroot `.repo` file (replaces §8.1 stage-3 box and §15 PR4 acceptance):
+
+```
+[clustr-slurm]
+name=clustr Slurm (built and signed by clustr)
+baseurl=http://<server>/repo/el9-x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+
+[clustr-slurm-deps]
+name=clustr Slurm runtime deps (mirrored from Rocky/EPEL, signed upstream)
+baseurl=http://<server>/repo/el9-x86_64-deps/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9 file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9
+```
+
+Build-time verification (new step in `slurm-build.yml`, immediately after
+`dnf download`):
+
+```
+# Capture upstream pubkeys with fingerprint pinning
+for k in rocky-9 EPEL-9; do
+  curl -sSfL "$KEY_URL_FOR_$k" -o "bundle/RPM-GPG-KEY-$k"
+  FP=$(gpg --show-keys --with-fingerprint --with-colons "bundle/RPM-GPG-KEY-$k" \
+        | awk -F: '$1=="fpr"{print $10; exit}')
+  [ "$FP" = "$EXPECTED_FP_FOR_$k" ] || { echo "FATAL: fingerprint mismatch"; exit 1; }
+done
+
+# Verify every passthrough RPM against those keys
+TMPDB=$(mktemp -d)
+rpm --dbpath "$TMPDB" --import bundle/RPM-GPG-KEY-rocky-9 bundle/RPM-GPG-KEY-EPEL-9
+rpm --dbpath "$TMPDB" -K bundle/el9-x86_64-deps/*.rpm    # must all be OK
+```
+
+Server-install verification (replaces single-key check in
+`bundle.go::verifyRPMSignatures`): two passes, isolated rpm dbs, one per
+subdir, each importing only the keys appropriate to that subdir. Cross-
+contamination (a Rocky-signed RPM in the clustr subdir, or vice versa) is
+a hard fail — that's the regression-detector.
+
+### 17.5 Why `0f4013c` ships now
+
+The `0f4013c` patch is **necessary** to unbreak the deploy chain so PR5
+e2e can complete. The chroot dnf install must succeed, otherwise we have
+no way to validate the rest of the pipeline (slurmctld start, srun across
+nodes, autodeploy bundle-sync). Gilfoyle's diagnosis of the symptom is
+correct, the patch resolves the symptom, and the security regression is
+**contained to v0.x e2e validation builds** that no operator is yet
+running in production. The `gpgcheck=0` choice is documented in the code
+with a `GAP-17` comment pointing at this section.
+
+The patch is **not sufficient** as the long-term security model. The
+follow-up sprint described in 17.6 closes the gap before any v1.0 ship.
+
+### 17.6 Follow-up sprint plan ("GAP-17 hardening", owner: Dinesh)
+
+Tracked separately. Acceptance criteria:
+
+1. `build/slurm/versions.yml` declares `gpg_keys.rocky9` and
+   `gpg_keys.epel9` with full 40-char fingerprints and source URLs.
+   Fingerprint mismatch in CI = hard build fail.
+2. `slurm-build.yml` writes `RPM-GPG-KEY-rocky-9` and `RPM-GPG-KEY-EPEL-9`
+   into the bundle root, and verifies every RPM in the
+   `${OS}-${ARCH}-deps/` subdir against them before bundling.
+3. `internal/server/keys.go` exposes `RockyKeyBytes()` and
+   `EPELKeyBytes()` via `//go:embed` of committed
+   `build/slurm/keys/RPM-GPG-KEY-{rocky-9,EPEL-9}.asc.pub`.
+4. `cmd/clustr-serverd/bundle.go::verifyRPMSignatures` runs in two passes
+   with isolated rpm dbs (clustr-only for `el9-x86_64/`, rocky+epel for
+   `el9-x86_64-deps/`). Mis-signed RPM in either subdir = hard fail.
+5. `internal/deploy/finalize.go::installSlurmInChroot` writes all three
+   keys into the chroot and emits a two-stanza `.repo` file with
+   `gpgcheck=1` on both. The `0f4013c`-era single-stanza `gpgcheck=0`
+   path is removed.
+6. `finalize_test.go` asserts presence of all three keyfiles in the
+   chroot, presence of both `[clustr-slurm]` and `[clustr-slurm-deps]`
+   stanzas, `gpgcheck=1` on each, and absence of any `gpgcheck=0`.
+7. Negative test in CI: tamper one passthrough RPM in the bundle staging
+   dir, re-run the build's `verifyRPMSignatures`-equivalent step, and
+   assert the build fails. Same for `bundle install` server-side.
+8. Update §6.4, §7.5, §8.1 stage-3, §15 PR4 to match (this addendum
+   already documents the target — those sections will be revised by the
+   implementer in the same PR for in-band consistency).
+
+When 17.6 lands, this addendum (§17) gets a "Status: implemented" header
+and the §6.4/§7.5/§8.1 revisions become the canonical text. Until then,
+§17 is the authoritative description of the security model and `0f4013c`
+is the live behavior.
