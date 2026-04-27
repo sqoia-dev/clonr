@@ -639,14 +639,38 @@ jobs:
           cp "${LIBJWT_LIB_RPM}" "bundle/${OS}-${ARCH}/"
           echo "Included libjwt RPM: ${LIBJWT_LIB_RPM##*/}"
 
-          # Download munge + munge-libs from the Rocky AppStream repo and include
-          # them in the bundle so the finalize step can install Slurm with
-          # --disablerepo='*' --enablerepo=clustr-slurm (no internet access needed
-          # from the deploy initramfs provisioning network).  munge-libs is a dep
-          # of munge; both are pure-libc RPMs with no additional non-system deps.
-          # We pin to x86_64 to avoid i686 multilib packages entering the bundle.
-          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" munge munge-libs
-          echo "Included munge RPMs: $(ls bundle/${OS}-${ARCH}/munge*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+          # Download runtime deps that are NOT in the base Rocky 9 minimal install
+          # but ARE required by the clustr-built Slurm RPM. These are bundled so
+          # the finalize step can install Slurm with:
+          #   --disablerepo='*' --enablerepo=clustr-slurm
+          # (no internet access from the deploy initramfs provisioning network).
+          #
+          # Package rationale:
+          #   munge, munge-libs        — Slurm auth daemon; not in minimal install
+          #   infiniband-diags         — provides libibmad.so.5 + libibnetdisc.so.5;
+          #                              slurm-24.11.4 was built with IB support so
+          #                              these are hard link-time deps of the base
+          #                              slurm RPM even on non-IB clusters
+          #   libibumad                — provides libibumad.so.3; hard dep of both
+          #                              slurm and infiniband-diags
+          #   mariadb-connector-c      — provides libmariadb.so.3; slurm was built
+          #                              with --with-mysql so this is a hard dep
+          #   mariadb-connector-c-config (noarch) — provides /etc/my.cnf which
+          #                              mariadb-connector-c requires at install time
+          #   bash-completion (noarch) — required by base slurm RPM; noarch so must
+          #                              be downloaded separately (no --arch filter)
+          #
+          # x86_64 packages pinned with --arch=x86_64 to prevent i686 multilib.
+          # noarch packages downloaded in a separate invocation (no --arch flag).
+          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" \
+            munge munge-libs \
+            infiniband-diags \
+            libibumad \
+            mariadb-connector-c
+          dnf download --destdir="bundle/${OS}-${ARCH}/" \
+            mariadb-connector-c-config \
+            bash-completion
+          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/infiniband*.rpm bundle/${OS}-${ARCH}/libibumad*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
 
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
           echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
@@ -751,16 +775,30 @@ jobs:
           echo "libjwt RPM present: ${LIBJWT_IN_BUNDLE##*/} - OK"
 
           echo ""
-          echo "--- Checking for munge RPMs in bundle ---"
-          MUNGE_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/munge-"[0-9]*.rpm 2>/dev/null | head -1)
-          MUNGE_LIBS_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/munge-libs-"*.rpm 2>/dev/null | head -1)
-          if [ -z "${MUNGE_IN_BUNDLE}" ] || [ -z "${MUNGE_LIBS_IN_BUNDLE}" ]; then
-            echo "FATAL: munge or munge-libs RPM not found in bundle/${OS}-${ARCH}/"
+          echo "--- Checking for Slurm runtime dep RPMs in bundle ---"
+          FAIL_DEPS=0
+          check_rpm() {
+            local label="$1" pattern="$2"
+            local found
+            found=$(ls "bundle/${OS}-${ARCH}/"${pattern} 2>/dev/null | head -1)
+            if [ -z "${found}" ]; then
+              echo "FATAL: ${label} RPM not found in bundle/${OS}-${ARCH}/ (pattern: ${pattern})"
+              FAIL_DEPS=1
+            else
+              echo "${label} RPM present: ${found##*/} - OK"
+            fi
+          }
+          check_rpm "munge"                    "munge-[0-9]*.rpm"
+          check_rpm "munge-libs"               "munge-libs-*.rpm"
+          check_rpm "infiniband-diags"         "infiniband-diags-*.rpm"
+          check_rpm "libibumad"                "libibumad-*.rpm"
+          check_rpm "mariadb-connector-c"      "mariadb-connector-c-[0-9]*.rpm"
+          check_rpm "mariadb-connector-c-config" "mariadb-connector-c-config-*.rpm"
+          check_rpm "bash-completion"          "bash-completion-*.rpm"
+          if [ "${FAIL_DEPS}" -ne 0 ]; then
             ls "bundle/${OS}-${ARCH}/" || true
             exit 1
           fi
-          echo "munge RPM present: ${MUNGE_IN_BUNDLE##*/} - OK"
-          echo "munge-libs RPM present: ${MUNGE_LIBS_IN_BUNDLE##*/} - OK"
 
           echo ""
           echo "--- Release-level manifest.json ---"
