@@ -12,7 +12,7 @@ CLUSTR_RELEASE       ?= $(shell awk '/^clustr_release:/{gsub(/[" ]/, "", $$2); p
 BUNDLE_VERSION       ?= v$(SLURM_VERSION)-clustr$(CLUSTR_RELEASE)
 # Bundle SHA256 is set by the release workflow and embedded via ldflags.
 # Default to the known SHA256 for the current bundle; update when bundle is rebuilt.
-BUNDLE_SHA256        ?= d5e397e19bb407b380eacfc03185ab8e1a705365eb598c0e042f80d19a91d9d6
+BUNDLE_SHA256        ?= d88690b77c63bb6e7eb1d760e4ca64c481845d115c66b7732549c1fc66230756
 
 LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.commitSHA=$(COMMIT) \
