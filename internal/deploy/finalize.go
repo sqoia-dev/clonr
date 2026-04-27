@@ -20,6 +20,7 @@ import (
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/ipmi"
+	"github.com/sqoia-dev/clustr/internal/server"
 )
 
 // ifaceNameRe validates that a network interface name contains only safe
@@ -2932,62 +2933,109 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 			Msg("finalize slurm: auto-install: stripped pre-existing OpenHPC slurm packages from image (defense-in-depth)")
 	}
 
-	// Step 3a: Write the clustr GPG public key into the chroot (retained for
-	// forward-compatibility — may be used for per-RPM signature checks in a
-	// future release). gpgKeyBytes is kept as a parameter for callers that
-	// pass it, but we no longer gate gpgcheck on it for the bundled repo.
+	// Step 3a: Write all three GPG public keys into the chroot.
 	//
-	// GAP-17 (2026-04-27): The clustr bundle contains third-party RPMs from
-	// Rocky Linux BaseOS (bash-completion, pkgconf chain, mariadb-connector-c)
-	// and EPEL (munge, munge-libs). These are signed with the Rocky/EPEL GPG
-	// keys, NOT the clustr signing key. Writing only the clustr key and using
-	// gpgcheck=1 causes dnf to reject every third-party RPM with "Public key
-	// not installed", making the entire install fail silently.
+	// GAP-17 hardening (clustr5): the bundle now ships two repo subdirectories:
+	//   - el9-x86_64/      — clustr-built RPMs (signed with clustr key)
+	//   - el9-x86_64-deps/ — passthrough Rocky/EPEL RPMs (signed with their keys)
 	//
-	// Security rationale for gpgcheck=0 here: bundle integrity is guaranteed
-	// at a higher level — the bundle tarball SHA256 is pinned in versions.yml,
-	// verified against SchedMD's official SHA256 file at build time (CI), and
-	// re-verified at bundle download time in cmd/clustr-serverd/bundle.go. All
-	// RPMs in the bundle were downloaded and SHA256-verified by the Slurm CI
-	// workflow before packaging. The per-RPM chroot dnf GPG check would only
-	// provide redundant protection for RPMs we've already verified by hash.
-	// Disabling it here removes broken security theater without weakening the
-	// actual trust chain.
-	if len(gpgKeyBytes) > 0 {
-		gpgKeyPath := filepath.Join(mountRoot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
-		if err := os.MkdirAll(filepath.Dir(gpgKeyPath), 0o755); err != nil {
+	// All three keys are written to /etc/pki/rpm-gpg/ so that dnf can perform
+	// per-RPM gpgcheck=1 against the correct key for each repo stanza.
+	// The gpgKeyBytes parameter carries the caller-provided clustr key (for
+	// backward compat with custom-URL callers); the rocky and EPEL keys are
+	// taken from the embedded binaries directly (server.RockyKeyBytes, server.EPELKeyBytes).
+	//
+	// For the clustr-builtin repo URL path (where gpgKeyBytes is non-nil), all
+	// three keys are written. For operator-provided custom URLs, only the clustr
+	// key is written (if provided); the two-stanza repo is not emitted for custom
+	// URLs since we don't know whether they follow the clustr split-bundle layout.
+	gpgKeyDir := filepath.Join(mountRoot, "etc", "pki", "rpm-gpg")
+	// isClusterBuiltin: true when gpgKeyBytes is provided (the clustr-builtin repo URL
+	// path). False for operator-provided custom repo URLs (where gpgKeyBytes is nil).
+	isClusterBuiltin := len(gpgKeyBytes) > 0
+
+	if isClusterBuiltin {
+		// Write all three embedded GPG keys: clustr, rocky-9, EPEL-9.
+		// server.WriteAllGPGKeysToRepo reads from the embedded bytes (//go:embed)
+		// not from disk, so this works even in the deploy initramfs where the
+		// build/slurm/keys/ directory is not present.
+		if err := os.MkdirAll(gpgKeyDir, 0o755); err != nil {
 			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create /etc/pki/rpm-gpg in chroot (non-fatal)")
-		} else if err := os.WriteFile(gpgKeyPath, gpgKeyBytes, 0o644); err != nil {
-			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write RPM-GPG-KEY-clustr into chroot (non-fatal)")
+		} else if err := server.WriteAllGPGKeysToRepo(gpgKeyDir); err != nil {
+			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write GPG keys into chroot (non-fatal)")
 		} else {
-			log.Info().Msg("finalize slurm: auto-install: wrote RPM-GPG-KEY-clustr into chroot at /etc/pki/rpm-gpg/ (informational — gpgcheck disabled for bundle install)")
+			log.Info().Msg("finalize slurm: auto-install: wrote RPM-GPG-KEY-{clustr,rocky-9,EPEL-9} into chroot /etc/pki/rpm-gpg/")
 		}
 	}
 
-	// Step 3b: Write a .repo file directly rather than calling dnf config-manager,
+	// Step 3b: Write the .repo file(s) directly rather than calling dnf config-manager,
 	// because config-manager may not be installed in the chroot image.
 	//
-	// gpgcheck=0   → required because the bundle contains third-party RPMs
-	//               (Rocky BaseOS, EPEL) signed with keys not present in the
-	//               chroot. Bundle integrity is enforced via SHA256 at download
-	//               time (see GAP-17 comment above).
-	// repo_gpgcheck=0 → repodata/ is not separately signed (createrepo_c output
-	//                   is not gpg-signed in the current bundle).
-	repoContent := "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL +
-		"\nenabled=1\ngpgcheck=0\nrepo_gpgcheck=0\n"
-	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	// For clustr-builtin repo URLs (gpgKeyBytes non-nil), emit a two-stanza repo:
+	//   [clustr-slurm]      → el9-x86_64/ (clustr-built), gpgcheck=1 vs clustr key
+	//   [clustr-slurm-deps] → el9-x86_64-deps/ (passthrough), gpgcheck=1 vs rocky+EPEL
+	//
+	// For operator-provided custom URLs (gpgKeyBytes nil), emit a single stanza
+	// with gpgcheck=0 (we don't know the remote repo's key setup).
+	//
+	// repo_gpgcheck=0 on both: repodata/ is not separately signed (createrepo_c
+	// output is not gpg-signed in the current bundle — repodata signing is a
+	// separate sprint).
 	if err := os.MkdirAll(filepath.Join(mountRoot, "etc", "yum.repos.d"), 0o755); err != nil {
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create yum.repos.d (non-fatal)")
 		return
 	}
+
+	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	var repoContent string
+	if isClusterBuiltin {
+		// Derive the deps URL from the primary URL by replacing the subdir name.
+		// e.g. http://10.99.0.1:8080/repo/el9-x86_64/ → http://10.99.0.1:8080/repo/el9-x86_64-deps/
+		// Robust: replace the trailing slash-terminated subpath segment.
+		depsURL := strings.Replace(repoURL, "/el9-x86_64/", "/el9-x86_64-deps/", 1)
+		if depsURL == repoURL {
+			// Fallback for non-standard URL shapes: append -deps before the trailing slash.
+			if strings.HasSuffix(repoURL, "/") {
+				depsURL = strings.TrimSuffix(repoURL, "/") + "-deps/"
+			} else {
+				depsURL = repoURL + "-deps"
+			}
+		}
+		repoContent = "[clustr-slurm]\n" +
+			"name=clustr Slurm (built and signed by clustr)\n" +
+			"baseurl=" + repoURL + "\n" +
+			"enabled=1\n" +
+			"gpgcheck=1\n" +
+			"repo_gpgcheck=0\n" +
+			"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr\n" +
+			"\n" +
+			"[clustr-slurm-deps]\n" +
+			"name=clustr Slurm runtime deps (mirrored from Rocky/EPEL, signed upstream)\n" +
+			"baseurl=" + depsURL + "\n" +
+			"enabled=1\n" +
+			"gpgcheck=1\n" +
+			"repo_gpgcheck=0\n" +
+			"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9 file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9\n"
+	} else {
+		// Custom / unknown repo URL: single stanza, gpgcheck=0 (we can't know
+		// whether the remote repo uses the clustr key or another key).
+		repoContent = "[clustr-slurm]\n" +
+			"name=clustr Slurm\n" +
+			"baseurl=" + repoURL + "\n" +
+			"enabled=1\n" +
+			"gpgcheck=0\n" +
+			"repo_gpgcheck=0\n"
+	}
+
 	if err := os.WriteFile(repoPath, []byte(repoContent), 0o644); err != nil {
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write repo file (non-fatal)")
 		return
 	}
 	log.Info().
 		Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
-		Bool("gpgcheck", false).
-		Msg("finalize slurm: auto-install: repo file written (gpgcheck=0, see GAP-17)")
+		Bool("gpgcheck_clustr", isClusterBuiltin).
+		Bool("two_stanza", isClusterBuiltin).
+		Msg("finalize slurm: auto-install: repo file written")
 
 	// Step 4: Check whether all required packages are already installed in the
 	// chroot before running dnf.  Gold images that were captured with Slurm
@@ -3007,12 +3055,24 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	}
 
 	// Step 5: Install packages inside chroot (one or more packages missing).
-	// --disablerepo='*' + --enablerepo=clustr-slurm prevents dnf from fetching
-	// metadata for the default Rocky/EPEL mirrors (which are unreachable from the
-	// deploy initramfs's isolated provisioning network). All required packages
-	// (slurm, munge, libjwt) are present in the clustr bundled repo.
+	// --disablerepo='*' prevents dnf from fetching metadata for the default
+	// Rocky/EPEL mirrors (unreachable from the deploy initramfs's isolated
+	// provisioning network).
+	//
+	// For the clustr-builtin repo (two-stanza .repo file, GAP-17 hardening):
+	//   --enablerepo=clustr-slurm,clustr-slurm-deps enables BOTH stanzas so
+	//   that clustr-built RPMs and passthrough dep RPMs are all resolvable.
+	//
+	// For custom operator URLs (single-stanza .repo file):
+	//   --enablerepo=clustr-slurm is sufficient (only one repo stanza exists).
+	var enableRepoArg string
+	if isClusterBuiltin {
+		enableRepoArg = "clustr-slurm,clustr-slurm-deps"
+	} else {
+		enableRepoArg = "clustr-slurm"
+	}
 	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False",
-		"--disablerepo=*", "--enablerepo=clustr-slurm"}, pkgs...)
+		"--disablerepo=*", "--enablerepo=" + enableRepoArg}, pkgs...)
 	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
 	if err != nil {
 		// Truncate dnf output to last 2 KB for the audit record.

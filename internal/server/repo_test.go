@@ -317,3 +317,84 @@ func TestRepoHealth_NoAuthRequired(t *testing.T) {
 	}
 }
 
+// TestRepoHealth_ListsBothSubdirs verifies that /repo/health lists both
+// el9-x86_64/ and el9-x86_64-deps/ in the "subdirs" field when both are
+// present on disk (GAP-17 hardening — two-repo split bundle).
+func TestRepoHealth_ListsBothSubdirs(t *testing.T) {
+	repoDir := t.TempDir()
+
+	// Simulate an installed split bundle: primary + deps subdirs.
+	primaryDir := filepath.Join(repoDir, "el9-x86_64")
+	depsDir := filepath.Join(repoDir, "el9-x86_64-deps")
+	_ = os.MkdirAll(primaryDir, 0o755)
+	_ = os.MkdirAll(depsDir, 0o755)
+
+	// Write .installed-version into the primary subdir only.
+	iv := map[string]string{
+		"distro":         "el9",
+		"arch":           "x86_64",
+		"slurm_version":  "24.11.4",
+		"clustr_release": "5",
+		"installed_at":   time.Now().UTC().Format(time.RFC3339),
+		"bundle_sha256":  "deadbeef",
+	}
+	ivData, _ := json.Marshal(iv)
+	_ = os.WriteFile(filepath.Join(primaryDir, ".installed-version"), ivData, 0o644)
+
+	// Add a fake repomd.xml in the deps dir to confirm it's served.
+	_ = os.MkdirAll(filepath.Join(depsDir, "repodata"), 0o755)
+	_ = os.WriteFile(filepath.Join(depsDir, "repodata", "repomd.xml"), []byte("<repomd/>"), 0o644)
+
+	ts := newRepoTestServer(t, repoDir)
+
+	resp, err := http.Get(ts.URL + "/repo/health")
+	if err != nil {
+		t.Fatalf("GET /repo/health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var result struct {
+		Installed []struct {
+			Distro       string `json:"distro"`
+			ClustrRelease string `json:"clustr_release"`
+		} `json:"installed"`
+		Subdirs []string `json:"subdirs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Both subdirs must be listed.
+	subdirSet := make(map[string]bool, len(result.Subdirs))
+	for _, s := range result.Subdirs {
+		subdirSet[s] = true
+	}
+	for _, want := range []string{"el9-x86_64", "el9-x86_64-deps"} {
+		if !subdirSet[want] {
+			t.Errorf("subdirs missing %q; got %v", want, result.Subdirs)
+		}
+	}
+
+	// One installed entry (only primary has .installed-version).
+	if len(result.Installed) != 1 {
+		t.Fatalf("installed count = %d, want 1", len(result.Installed))
+	}
+	if result.Installed[0].ClustrRelease != "5" {
+		t.Errorf("clustr_release = %q, want 5", result.Installed[0].ClustrRelease)
+	}
+
+	// Verify the deps repomd.xml is actually served.
+	repomdResp, err := http.Get(ts.URL + "/repo/el9-x86_64-deps/repodata/repomd.xml")
+	if err != nil {
+		t.Fatalf("GET el9-x86_64-deps repomd.xml: %v", err)
+	}
+	defer repomdResp.Body.Close()
+	if repomdResp.StatusCode != http.StatusOK {
+		t.Errorf("/repo/el9-x86_64-deps/repodata/repomd.xml status = %d, want 200", repomdResp.StatusCode)
+	}
+}
+

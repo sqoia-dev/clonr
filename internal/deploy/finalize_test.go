@@ -68,13 +68,11 @@ func TestElVersionFromURL(t *testing.T) {
 }
 
 // TestInstallSlurmInChroot_RepoFileContent verifies the generated .repo file
-// for the clustr-builtin path: gpgcheck=0, repo_gpgcheck=0 (GAP-17).
-// Also verifies that the GPG key file is still written to the chroot for
-// forward-compat even though it is not referenced in the repo file.
-//
-// GAP-17 (2026-04-27): gpgcheck is disabled because the bundle contains
-// third-party RPMs (Rocky BaseOS, EPEL) signed with keys not present in the
-// chroot. Bundle integrity is enforced via SHA256 at download time instead.
+// for the clustr-builtin path (GAP-17 hardening, clustr5):
+//   - Two stanzas: [clustr-slurm] and [clustr-slurm-deps]
+//   - Both have gpgcheck=1 pointing to the respective key files
+//   - All three key files are written to the chroot: RPM-GPG-KEY-{clustr,rocky-9,EPEL-9}
+//   - No gpgcheck=0 appears anywhere in the repo file
 //
 // The dnf execution is expected to fail (no real chroot), but we verify the
 // written files before the dnf call.
@@ -85,13 +83,14 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
 	}
 
+	// Non-nil gpgKeyBytes signals the clustr-builtin path.
 	const fakeKeyContent = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE KEY FOR TEST\n-----END PGP PUBLIC KEY BLOCK-----\n"
 	gpgKeyBytes := []byte(fakeKeyContent)
 	repoURL := "http://10.99.0.1:8080/repo/el9-x86_64/"
 
 	// installSlurmInChroot runs chroot+dnf which will fail in a test
 	// environment. That is expected and non-fatal (it logs a warning).
-	// We only assert the pre-dnf steps (GPG key file + .repo file).
+	// We only assert the pre-dnf steps (GPG key files + .repo file).
 	installSlurmInChroot(
 		t.Context(),
 		chroot,
@@ -103,25 +102,34 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 		gpgKeyBytes,
 	)
 
-	// --- Assert GPG key file was written (forward-compat, not used by repo) ---
-	gpgKeyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
-	gpgKeyData, err := os.ReadFile(gpgKeyPath)
-	if err != nil {
-		t.Fatalf("GPG key file not written at %s: %v", gpgKeyPath, err)
+	// --- Assert all three GPG key files were written into the chroot ---
+	// (GAP-17: clustr + rocky-9 + EPEL-9; all embedded in the server binary)
+	wantKeyFiles := []string{
+		"RPM-GPG-KEY-clustr",
+		"RPM-GPG-KEY-rocky-9",
+		"RPM-GPG-KEY-EPEL-9",
 	}
-	if string(gpgKeyData) != fakeKeyContent {
-		t.Errorf("GPG key file content mismatch:\n  got  %q\n  want %q", string(gpgKeyData), fakeKeyContent)
-	}
-	// Verify mode is 0644.
-	info, err := os.Stat(gpgKeyPath)
-	if err != nil {
-		t.Fatalf("stat GPG key file: %v", err)
-	}
-	if info.Mode().Perm() != 0o644 {
-		t.Errorf("GPG key file mode = %o, want 0644", info.Mode().Perm())
+	for _, keyName := range wantKeyFiles {
+		keyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", keyName)
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			t.Errorf("GPG key file not written at %s: %v", keyPath, err)
+			continue
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %o, want 0644", keyName, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(keyPath)
+		if err != nil {
+			t.Errorf("read %s: %v", keyPath, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("%s is empty", keyName)
+		}
 	}
 
-	// --- Assert .repo file was written with gpgcheck=0 (GAP-17) ---
+	// --- Assert .repo file has two stanzas with gpgcheck=1 (GAP-17 hardening) ---
 	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
 	repoData, err := os.ReadFile(repoPath)
 	if err != nil {
@@ -129,13 +137,14 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 	}
 	repoContent := string(repoData)
 
-	// Verify required fields are present.
+	// Both stanza headers must be present.
 	wantLines := []string{
 		"[clustr-slurm]",
-		"name=clustr Slurm",
+		"[clustr-slurm-deps]",
 		"baseurl=http://10.99.0.1:8080/repo/el9-x86_64/",
-		"enabled=1",
-		"gpgcheck=0",
+		"baseurl=http://10.99.0.1:8080/repo/el9-x86_64-deps/",
+		"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr",
+		"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9 file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9",
 		"repo_gpgcheck=0",
 	}
 	for _, line := range wantLines {
@@ -143,16 +152,21 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 			t.Errorf(".repo file missing line %q\nfull content:\n%s", line, repoContent)
 		}
 	}
-	// gpgcheck=1 must NOT appear — the clustr key only covers slurm RPMs built
-	// by CI; third-party RPMs (munge, pkgconf, bash-completion) are signed with
-	// Rocky/EPEL keys that are not present in the chroot (GAP-17).
-	if strings.Contains(repoContent, "gpgcheck=1") {
-		t.Errorf(".repo file contains 'gpgcheck=1' but expected gpgcheck=0 (GAP-17)\nfull content:\n%s", repoContent)
+
+	// gpgcheck=1 must appear (both stanzas use it).
+	if !strings.Contains(repoContent, "gpgcheck=1") {
+		t.Errorf(".repo file missing 'gpgcheck=1' (GAP-17 hardening requires gpgcheck=1 on both stanzas)\nfull content:\n%s", repoContent)
+	}
+
+	// gpgcheck=0 must NOT appear — the GAP-17 single-stanza gpgcheck=0 path is removed.
+	if strings.Contains(repoContent, "gpgcheck=0") {
+		t.Errorf(".repo file contains 'gpgcheck=0' but GAP-17 hardening requires gpgcheck=1 on all stanzas\nfull content:\n%s", repoContent)
 	}
 }
 
 // TestInstallSlurmInChroot_CustomURLFallback verifies that when gpgKeyBytes is
-// nil (operator-provided custom repo URL), the .repo file uses gpgcheck=0.
+// nil (operator-provided custom repo URL), the .repo file is a single stanza
+// with gpgcheck=0, and no GPG key files are written to the chroot.
 func TestInstallSlurmInChroot_CustomURLFallback(t *testing.T) {
 	chroot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
@@ -168,7 +182,7 @@ func TestInstallSlurmInChroot_CustomURLFallback(t *testing.T) {
 		false, // hasSlurmdbd
 		false, // hasGres
 		nil,   // auditFn
-		nil,   // gpgKeyBytes — nil for custom URL path
+		nil,   // gpgKeyBytes — nil signals custom URL path
 	)
 
 	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
@@ -178,14 +192,19 @@ func TestInstallSlurmInChroot_CustomURLFallback(t *testing.T) {
 	}
 	repoContent := string(repoData)
 
+	// Custom URL: single stanza, gpgcheck=0.
 	if !strings.Contains(repoContent, "gpgcheck=0") {
 		t.Errorf("custom-URL .repo expected gpgcheck=0\nfull content:\n%s", repoContent)
 	}
 	if strings.Contains(repoContent, "gpgcheck=1") {
 		t.Errorf("custom-URL .repo must not have gpgcheck=1\nfull content:\n%s", repoContent)
 	}
+	// Second stanza must not exist for custom URL.
+	if strings.Contains(repoContent, "[clustr-slurm-deps]") {
+		t.Errorf("custom-URL .repo must not have [clustr-slurm-deps] stanza\nfull content:\n%s", repoContent)
+	}
 
-	// GPG key file must NOT exist in chroot for custom URL path.
+	// GPG key files must NOT exist in chroot for custom URL path (no key written).
 	gpgKeyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
 	if _, err := os.Stat(gpgKeyPath); err == nil {
 		t.Errorf("GPG key file should not exist in chroot for custom URL path, but found at %s", gpgKeyPath)

@@ -1316,12 +1316,14 @@ type installedBundleInfo struct {
 	BundleSHA256  string `json:"bundle_sha256"`
 }
 
-// serveRepoHealth returns a JSON object listing all installed bundles by
-// scanning <repoDir>/*/.installed-version files.
+// serveRepoHealth returns a JSON object listing all installed bundles and all
+// repo subdirectories present on disk (GAP-17: includes both el9-x86_64/ and
+// el9-x86_64-deps/).
 // GET /repo/health — public, no auth.
 func (s *Server) serveRepoHealth(w http.ResponseWriter, r *http.Request) {
 	type response struct {
 		Installed []installedBundleInfo `json:"installed"`
+		Subdirs   []string              `json:"subdirs"` // all repo subdirs present on disk
 	}
 
 	entries, err := os.ReadDir(s.cfg.RepoDir)
@@ -1329,15 +1331,18 @@ func (s *Server) serveRepoHealth(w http.ResponseWriter, r *http.Request) {
 		// RepoDir doesn't exist yet (bundle not yet installed) — return empty list.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"installed":[]}`)
+		_, _ = fmt.Fprintf(w, `{"installed":[],"subdirs":[]}`)
 		return
 	}
 
 	var bundles []installedBundleInfo
+	var subdirs []string
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
+		subdirs = append(subdirs, entry.Name())
+
 		versionFile := filepath.Join(s.cfg.RepoDir, entry.Name(), ".installed-version")
 		data, err := os.ReadFile(versionFile)
 		if err != nil {
@@ -1353,9 +1358,12 @@ func (s *Server) serveRepoHealth(w http.ResponseWriter, r *http.Request) {
 	if bundles == nil {
 		bundles = []installedBundleInfo{}
 	}
+	if subdirs == nil {
+		subdirs = []string{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
-	_ = enc.Encode(response{Installed: bundles})
+	_ = enc.Encode(response{Installed: bundles, Subdirs: subdirs})
 }
 
 // serveIndex serves index.html from the embedded static FS.
