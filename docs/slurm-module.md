@@ -778,3 +778,72 @@ All Slurm API routes require an admin-scoped Bearer token.
 | `dnf install` fails in chroot with `file conflicts` — e.g. `file /usr/sbin/slurmctld from install of slurm-slurmctld-24.11.4 conflicts with file from package slurm-slurmctld-ohpc-22.05.8` | Base image was built before PR4 and contains OpenHPC Slurm 22.05.8 packages. Both old and new packages own the same files. | **Canonical fix:** rebuild the base image using the current kickstart (which enforces the Slurm-free policy). See [docs/imagebuilder.md](imagebuilder.md). **Safety net (if you cannot rebuild immediately):** the finalize step attempts `dnf remove slurm-ohpc* ohpc-slurm-*` before installing. If that strip succeeds, the subsequent install will work. Check deploy logs for `stripped pre-existing OpenHPC slurm packages`. |
 | Slurm install fails with `Curl error (6): Couldn't resolve host name` during finalize | DNS not available in the chroot at finalize time. The deploy initramfs must have `/etc/resolv.conf` populated (udhcpc writes it when the DHCP server advertises option 6 / OptDNS). | Check that the DHCP server on the provisioning network (pxe/dhcp.go) is advertising the clustr-server IP as the DNS resolver. The finalize step copies `/etc/resolv.conf` from the initramfs into the chroot — if the source file is absent or empty, dnf DNS will fail. Verify: `cat /etc/resolv.conf` in the PXE initramfs shows the clustr-server IP. |
 | Post-install version check in deploy logs shows `CONFLICT — installed Slurm is the old OpenHPC 22.05.8 build` | The OpenHPC strip in the finalize step did not fully remove the conflicting packages, or the dnf install resolved to a cached stale RPM. | Rebuild the base image (see [docs/imagebuilder.md](imagebuilder.md)). As a temporary workaround, manually remove OpenHPC packages on the booted node and install from the clustr repo. |
+| A template fix was committed (e.g. `MpiDefault=none`) but the deployed `slurm.conf` still has the old value | Template files are only read during initial `seedDefaultTemplates` — existing DB rows are never auto-overwritten. | Use the reseed endpoint (§11) to bump the config version from the corrected template, then push to nodes. |
+
+---
+
+## 11. Re-seeding default templates (D18)
+
+### Background
+
+clustr stores all Slurm config file content in the `slurm_config_files` table.
+The embedded template files (`internal/slurm/templates/*.tmpl`) are only
+consulted once, when the Slurm module is first enabled (`seedDefaultTemplates`).
+After that, the DB row is the authoritative source — template commits have no
+automatic effect on running clusters.
+
+To propagate a template fix to an already-seeded cluster, use the reseed
+endpoint.
+
+### The `is_clustr_default` flag
+
+Each row in `slurm_config_files` carries an `is_clustr_default` boolean:
+
+| Value | Meaning | Reseed endpoint |
+|---|---|---|
+| `1` | Row was seeded from an embedded clustr template, never operator-edited | **Will** overwrite with a new version from the current template |
+| `0` | Row was written by an operator (via API or UI) | **Skipped** — never touched |
+
+New installations (post-v1.0) seed with `is_clustr_default=1`. Existing
+clusters upgraded from pre-v1.0 have all rows set to `0` by the migration
+(safe default — treat as operator-owned). See the v1.0 one-time fix in
+[docs/upgrade.md](upgrade.md) for how to opt these rows back in.
+
+### POST /api/v1/slurm/configs/reseed-defaults
+
+```bash
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/configs/reseed-defaults \
+  -H "Authorization: Bearer <your-admin-key>"
+```
+
+Response:
+
+```json
+{
+  "reseeded": ["cgroup.conf"],
+  "skipped": [
+    {"filename": "slurm.conf", "reason": "operator-customized"}
+  ],
+  "missing": ["gres.conf"]
+}
+```
+
+- `reseeded` — files that had `is_clustr_default=1` and now have a new version
+  bumped from the embedded template. The new version also has
+  `is_clustr_default=1`.
+- `skipped` — files with `is_clustr_default=0`; content left unchanged.
+- `missing` — files in the managed list that have no embedded template (e.g.
+  `gres.conf`, which is node-specific). These are skipped without an error.
+
+### Two-step deploy
+
+The reseed endpoint creates new DB versions but does **not** push to nodes.
+After reseeding, push the new versions:
+
+```bash
+curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/sync \
+  -H "Authorization: Bearer <your-admin-key>"
+```
+
+The two-step design is intentional: the operator reviews what changed before
+it hits live nodes.

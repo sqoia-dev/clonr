@@ -28,15 +28,16 @@ type SlurmModuleConfigRow struct {
 
 // SlurmConfigFileRow represents one version of a managed config file.
 type SlurmConfigFileRow struct {
-	ID         string
-	Filename   string
-	Version    int
-	Content    string
-	IsTemplate bool
-	Checksum   string
-	AuthoredBy string
-	Message    string
-	CreatedAt  int64
+	ID               string
+	Filename         string
+	Version          int
+	Content          string
+	IsTemplate       bool
+	IsClustrDefault  bool // true = seeded by clustr, eligible for reseed; false = operator-customized (sacred)
+	Checksum         string
+	AuthoredBy       string
+	Message          string
+	CreatedAt        int64
 }
 
 // SlurmNodeOverrideRow is one per-node override key/value pair.
@@ -282,7 +283,7 @@ func (db *DB) SlurmSetStatus(ctx context.Context, status string) error {
 // SlurmGetCurrentConfig returns the highest-version row for the given filename.
 func (db *DB) SlurmGetCurrentConfig(ctx context.Context, filename string) (*SlurmConfigFileRow, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, filename, version, content, is_template, checksum, authored_by, message, created_at
+		SELECT id, filename, version, content, is_template, is_clustr_default, checksum, authored_by, message, created_at
 		FROM slurm_config_files
 		WHERE filename = ?
 		ORDER BY version DESC
@@ -294,7 +295,7 @@ func (db *DB) SlurmGetCurrentConfig(ctx context.Context, filename string) (*Slur
 // SlurmGetConfigVersion returns a specific version of a config file.
 func (db *DB) SlurmGetConfigVersion(ctx context.Context, filename string, version int) (*SlurmConfigFileRow, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, filename, version, content, is_template, checksum, authored_by, message, created_at
+		SELECT id, filename, version, content, is_template, is_clustr_default, checksum, authored_by, message, created_at
 		FROM slurm_config_files
 		WHERE filename = ? AND version = ?
 	`, filename, version)
@@ -304,7 +305,7 @@ func (db *DB) SlurmGetConfigVersion(ctx context.Context, filename string, versio
 // SlurmListConfigHistory returns all versions of a file, newest first.
 func (db *DB) SlurmListConfigHistory(ctx context.Context, filename string) ([]SlurmConfigFileRow, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, filename, version, content, is_template, checksum, authored_by, message, created_at
+		SELECT id, filename, version, content, is_template, is_clustr_default, checksum, authored_by, message, created_at
 		FROM slurm_config_files
 		WHERE filename = ?
 		ORDER BY version DESC
@@ -319,7 +320,7 @@ func (db *DB) SlurmListConfigHistory(ctx context.Context, filename string) ([]Sl
 // SlurmListCurrentConfigs returns the current (max) version of every managed file.
 func (db *DB) SlurmListCurrentConfigs(ctx context.Context) ([]SlurmConfigFileRow, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, filename, version, content, is_template, checksum, authored_by, message, created_at
+		SELECT id, filename, version, content, is_template, is_clustr_default, checksum, authored_by, message, created_at
 		FROM slurm_config_files
 		WHERE (filename, version) IN (
 			SELECT filename, MAX(version) FROM slurm_config_files GROUP BY filename
@@ -336,18 +337,30 @@ func (db *DB) SlurmListCurrentConfigs(ctx context.Context) ([]SlurmConfigFileRow
 // SlurmSaveConfigVersion inserts a new version row for the given filename.
 // The version number is MAX(version)+1 for that filename (or 1 if no rows exist).
 // Returns the new version number.
-func (db *DB) SlurmSaveConfigVersion(ctx context.Context, filename, content, authoredBy, message string) (int, error) {
+//
+// isClustrDefault controls the is_clustr_default column:
+//   - true  → row was seeded from an embedded clustr template; the reseed endpoint
+//              may overwrite it on the next operator-triggered reseed.
+//   - false → operator-authored row; the reseed endpoint will never touch it.
+//
+// Callers: seedDefaultTemplates passes true; all operator API write paths pass false.
+func (db *DB) SlurmSaveConfigVersion(ctx context.Context, filename, content, authoredBy, message string, isClustrDefault bool) (int, error) {
 	checksum := computeSHA256(content)
 	id := uuid.New().String()
 	now := time.Now().Unix()
 
+	isDefault := 0
+	if isClustrDefault {
+		isDefault = 1
+	}
+
 	// Determine next version atomically via MAX+1 within the INSERT.
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO slurm_config_files (id, filename, version, content, is_template, checksum, authored_by, message, created_at)
-		SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, 0, ?, ?, ?, ?
+		INSERT INTO slurm_config_files (id, filename, version, content, is_template, is_clustr_default, checksum, authored_by, message, created_at)
+		SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, 0, ?, ?, ?, ?, ?
 		FROM slurm_config_files
 		WHERE filename = ?
-	`, id, filename, content, checksum, authoredBy, message, now, filename)
+	`, id, filename, content, isDefault, checksum, authoredBy, message, now, filename)
 	if err != nil {
 		return 0, fmt.Errorf("db: SlurmSaveConfigVersion: %w", err)
 	}
@@ -366,12 +379,13 @@ func (db *DB) SlurmSaveConfigVersion(ctx context.Context, filename, content, aut
 func scanSlurmConfigFile(row *sql.Row) (*SlurmConfigFileRow, error) {
 	var r SlurmConfigFileRow
 	var authoredBy, message sql.NullString
-	var isTemplate int
+	var isTemplate, isClustrDefault int
 	if err := row.Scan(&r.ID, &r.Filename, &r.Version, &r.Content,
-		&isTemplate, &r.Checksum, &authoredBy, &message, &r.CreatedAt); err != nil {
+		&isTemplate, &isClustrDefault, &r.Checksum, &authoredBy, &message, &r.CreatedAt); err != nil {
 		return nil, err
 	}
 	r.IsTemplate = isTemplate != 0
+	r.IsClustrDefault = isClustrDefault != 0
 	r.AuthoredBy = authoredBy.String
 	r.Message = message.String
 	return &r, nil
@@ -383,12 +397,13 @@ func scanSlurmConfigFileRows(rows *sql.Rows) ([]SlurmConfigFileRow, error) {
 	for rows.Next() {
 		var r SlurmConfigFileRow
 		var authoredBy, message sql.NullString
-		var isTemplate int
+		var isTemplate, isClustrDefault int
 		if err := rows.Scan(&r.ID, &r.Filename, &r.Version, &r.Content,
-			&isTemplate, &r.Checksum, &authoredBy, &message, &r.CreatedAt); err != nil {
+			&isTemplate, &isClustrDefault, &r.Checksum, &authoredBy, &message, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		r.IsTemplate = isTemplate != 0
+		r.IsClustrDefault = isClustrDefault != 0
 		r.AuthoredBy = authoredBy.String
 		r.Message = message.String
 		result = append(result, r)

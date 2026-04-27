@@ -1,0 +1,11 @@
+-- 052: Add is_clustr_default to slurm_config_files.
+--
+-- is_clustr_default=1 means "this row was seeded by clustr from an embedded
+-- template and has not been operator-edited since seeding". The reseed endpoint
+-- (POST /api/v1/slurm/configs/reseed-defaults) only updates rows where this
+-- flag is 1, leaving operator-customized rows (flag=0) untouched.
+--
+-- All existing rows default to 0 (treated as operator-customized / sacred).
+-- Future seedDefaultTemplates inserts set the column to 1.
+-- Operator API writes (PUT /api/v1/slurm/configs/{filename}) always set it to 0.
+ALTER TABLE slurm_config_files ADD COLUMN is_clustr_default INTEGER NOT NULL DEFAULT 0;

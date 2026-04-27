@@ -273,7 +273,7 @@ func (m *Manager) seedDefaultTemplates(ctx context.Context, clusterName string, 
 			continue
 		}
 
-		_, err = m.db.SlurmSaveConfigVersion(ctx, filename, buf.String(), "clustr-system", "Initial default template")
+		_, err = m.db.SlurmSaveConfigVersion(ctx, filename, buf.String(), "clustr-system", "Initial default template", true)
 		if err != nil {
 			log.Warn().Err(err).Str("file", filename).Msg("slurm: save default template version failed")
 		} else {

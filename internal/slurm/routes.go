@@ -4,6 +4,7 @@
 package slurm
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -54,6 +56,13 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/nodes/{node_id}/slurm/role", m.handleGetRole)
 	r.Put("/nodes/{node_id}/slurm/role", m.handleSetRole)
 	r.Get("/nodes/{node_id}/slurm/sync-status", m.handleNodeSyncStatus)
+
+	// D18: reseed default templates (admin-only, operator-triggered).
+	// POST /api/v1/slurm/configs/reseed-defaults — re-renders embedded templates
+	// and bumps the version for all files where is_clustr_default=1.
+	// Operator-customized rows (is_clustr_default=0) are never touched.
+	// Does NOT push to nodes — operator follows up with POST /slurm/sync.
+	r.Post("/slurm/configs/reseed-defaults", m.handleSlurmReseedDefaults)
 
 	// GAP-17: flat node/role/sync endpoints expected by the walkthrough nav.
 	// /slurm/nodes — list all clustr-managed nodes with their Slurm roles.
@@ -214,7 +223,9 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authoredBy := m.actorLabel(r)
-	ver, err := m.db.SlurmSaveConfigVersion(r.Context(), filename, body.Content, authoredBy, body.Message)
+	// Operator API writes are never clustr-defaults — pass false so the reseed
+	// endpoint never overwrites operator-customized rows (D18).
+	ver, err := m.db.SlurmSaveConfigVersion(r.Context(), filename, body.Content, authoredBy, body.Message, false)
 	if err != nil {
 		log.Error().Err(err).Str("filename", filename).Msg("slurm: save config version failed")
 		jsonError(w, "failed to save config", http.StatusInternalServerError)
@@ -229,6 +240,113 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{"filename": filename, "version": ver}, http.StatusOK)
+}
+
+// handleSlurmReseedDefaults is POST /api/v1/slurm/configs/reseed-defaults (D18).
+//
+// For every managed file where the current version has is_clustr_default=1,
+// re-renders the embedded Go template and inserts a new version with
+// is_clustr_default=1. Operator-customized rows (is_clustr_default=0) are
+// skipped and reported in the response.
+//
+// Does NOT push to nodes. Operator must follow up with POST /slurm/sync.
+// Returns a JSON summary: {"reseeded":[...],"skipped":[...],"missing":[...]}.
+func (m *Manager) handleSlurmReseedDefaults(w http.ResponseWriter, r *http.Request) {
+	m.mu.RLock()
+	cfg := m.cfg
+	m.mu.RUnlock()
+
+	if cfg == nil {
+		jsonError(w, "slurm module not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	clusterName := cfg.ClusterName
+	managedFiles := cfg.ManagedFiles
+
+	type reseedResult struct {
+		Filename string `json:"filename"`
+		NewVersion int `json:"new_version,omitempty"`
+		Reason   string `json:"reason,omitempty"`
+	}
+
+	var reseeded []string
+	var skipped []reseedResult
+	var missing []string
+
+	for _, filename := range managedFiles {
+		// Read the current (highest) version for this file.
+		row, err := m.db.SlurmGetCurrentConfig(r.Context(), filename)
+		if err != nil {
+			// No row exists — nothing to reseed; it will be seeded on next enable.
+			missing = append(missing, filename)
+			continue
+		}
+
+		if !row.IsClustrDefault {
+			// Operator-customized — never touch it.
+			skipped = append(skipped, reseedResult{
+				Filename: filename,
+				Reason:   "operator-customized",
+			})
+			continue
+		}
+
+		// Re-render the embedded template.
+		tmplName := "templates/" + filename + ".tmpl"
+		tmpl, err := template.ParseFS(templateFS, tmplName)
+		if err != nil {
+			// No embedded template for this file; skip silently (e.g. gres.conf).
+			missing = append(missing, filename)
+			continue
+		}
+
+		data := map[string]interface{}{
+			"ClusterName":        clusterName,
+			"ControllerHostname": "clustr-server",
+			"Timestamp":          time.Now().UTC().Format(time.RFC3339),
+			"Nodes":              []interface{}{},
+		}
+
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			log.Error().Err(err).Str("filename", filename).Msg("slurm reseed: template render failed")
+			jsonError(w, fmt.Sprintf("render failed for %s: %v", filename, err), http.StatusInternalServerError)
+			return
+		}
+
+		newContent := buf.String()
+
+		// If the content is identical to the current version, still insert a new
+		// row so the version bump is explicit and the operator can see it happened.
+		newVer, err := m.db.SlurmSaveConfigVersion(
+			r.Context(), filename, newContent,
+			"clustr-system", "reseed-defaults: re-rendered from embedded template",
+			true, // isClustrDefault
+		)
+		if err != nil {
+			log.Error().Err(err).Str("filename", filename).Msg("slurm reseed: save version failed")
+			jsonError(w, fmt.Sprintf("save failed for %s: %v", filename, err), http.StatusInternalServerError)
+			return
+		}
+
+		reseeded = append(reseeded, filename)
+		log.Info().Str("filename", filename).Int("version", newVer).Msg("slurm reseed: reseeded from embedded template")
+
+		// Audit the reseed operation.
+		if m.Audit != nil {
+			actorID, actorLabel := m.actorInfo(r)
+			m.Audit.Record(r.Context(), actorID, actorLabel, db.AuditActionSlurmConfigChange,
+				"slurm_config", filename, r.RemoteAddr, nil,
+				map[string]interface{}{"filename": filename, "new_version": newVer, "action": "reseed"})
+		}
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"reseeded": reseeded,
+		"skipped":  skipped,
+		"missing":  missing,
+	}, http.StatusOK)
 }
 
 func (m *Manager) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
