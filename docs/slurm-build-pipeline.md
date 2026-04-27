@@ -1103,3 +1103,99 @@ the MVP done until **all** of these are green on the same SHA:
 - `clustr` repo `ci.yml` (build + test)
 - `slurm-build.yml` workflow on the cut `slurm-v24.11.4-clustr1` tag
 - The lab validation in PR 5
+
+---
+
+## 16. PR5 lab validation failures and PR6 fixes
+
+The first end-to-end lab run (`docs/lab-validation-pr5.md`, bundle
+`v24.11.4-clustr1`) exposed two build-pipeline gaps that required a
+`clustr2` rebuild. This section documents the root causes and the fixes
+shipped in clustr2.
+
+### Failure A — `libjwt.so.1` not in bundle (EPEL required at deploy time)
+
+**Symptom:** Manual Slurm install post-boot required `dnf install epel-release`
+before `dnf install slurm` would resolve. Gilfoyle's tcpdump test showed zero
+external traffic during the automated reimage, but the manual EPEL install
+added a network dep that would be triggered by any fresh deploy.
+
+**Root cause:** The base `slurm` RPM (and `slurm-slurmctld`, `slurm-slurmd`)
+link against `libjwt.so.1` for JWT-based auth token verification in the Slurm
+daemons.  `libjwt` is not in Rocky 9 BaseOS or AppStream — it lives only in
+EPEL.  The clustr1 bundle contained only Slurm RPMs; no libjwt RPM was
+included.
+
+Additionally, `slurmrestd` was silently **disabled** in the clustr1 build
+because `http-parser-devel` (required by slurmrestd's configure check) was
+listed as "optional" (install with `--skip-unavailable`). EPEL provides
+`http-parser-devel`, but the build ran the optional install after enabling EPEL
+and it apparently resolved. However, the configure check for http-parser
+reported "not found" (`checking whether to compile slurmrestd... no` at line
+3468 of the BUILD-LOG.txt), which means `http-parser-devel` was not actually
+installed successfully despite EPEL being enabled. This caused `slurmrestd` to
+be absent from the RPM set.
+
+**Fix (clustr2):**
+1. Build `libjwt` 1.18.3 from upstream source (same download → SHA256-verify →
+   rpmbuild → GPG-sign pattern as Slurm). Include the runtime RPM
+   (`libjwt-1.18.3.el9.x86_64.rpm`) in the bundle alongside the Slurm RPMs.
+   `libjwt-devel` and `libjwt-devel-docs` are build-time artifacts only and
+   are not included in the bundle.
+2. Move `http-parser-devel` from the optional install to the mandatory install
+   list so a missing `http-parser-devel` causes a hard build failure rather
+   than silently disabling slurmrestd.
+3. Also add `jansson-devel` to mandatory deps (required by libjwt's configure).
+
+**Why 1.x series (not 2.x/3.x)?** The Slurm 24.11.4 binary links against
+`libjwt.so.1`, which is the SO name for the 1.x ABI. The 2.x/3.x releases
+renamed the library (different SO version). Using 1.18.3 matches the exact
+ABI that the Slurm build expects.
+
+### Failure B — `slurmscriptd` described as "missing binary" (misdiagnosis)
+
+**Symptom reported in PR5:** The report described "slurmscriptd binary missing
+from slurm-slurmctld RPM" and noted that `systemctl start slurmctld` crashed.
+
+**Root cause (corrected):** `slurmscriptd` is **not** a standalone binary in
+Slurm 24.x. It is compiled as `.o` files and linked directly into the
+`slurmctld` binary (`src/slurmctld/Makefile.am` declares `sbin_PROGRAMS =
+slurmctld`, not a separate `slurmscriptd` target). When `slurmctld` starts, it
+fork+execs `/proc/self/exe` (itself) with the `SLURMSCRIPTD_MODE` environment
+variable set to run as the scriptd subprocess. The upstream spec's `%files
+slurmctld` section correctly lists only `/usr/sbin/slurmctld` and the systemd
+unit.
+
+The actual `systemctl start slurmctld` failure in PR5 was caused by
+`User=slurm` in the slurmctld.service unit — the `slurm` system user was
+not being created during the manual post-boot install because the RPM
+pre-install scriptlet ran in a non-chroot context, or the base image's
+existing OpenHPC `slurm` user had conflicting UID/GID. The workaround of
+invoking `/usr/sbin/slurmctld` directly as root bypassed the systemd `User=`
+constraint, confirming the binary itself is present and functional.
+
+**Fix (clustr2):** Add a binary-presence verification step in
+`slurm-build.yml` that hard-fails the build if any expected binary is missing
+from its expected RPM. The verified binaries are:
+`slurmctld`, `slurmd`, `slurmdbd`, `slurmrestd`, `sackd`.
+`slurmscriptd` is intentionally **not** in this list because it is not a
+standalone binary — it is the `slurmctld` binary itself.
+
+The systemd unit `User=slurm` issue is addressed in the separate
+"base image OpenHPC cleanup" PR (tracked in `docs/lab-validation-pr5.md §F`).
+
+### What libjwt bundling enables
+
+With libjwt in the bundle, the deployed node's `dnf install` chain becomes:
+
+```
+[clustr-slurm] repo (served by clustr-server) provides:
+  slurm-24.11.4-1.el9.x86_64.rpm        → Requires: libjwt.so.1
+  slurm-slurmctld-24.11.4-1.el9.x86_64.rpm
+  slurm-slurmrestd-24.11.4-1.el9.x86_64.rpm  (now present, was missing in clustr1)
+  libjwt-1.18.3.el9.x86_64.rpm          → Provides: libjwt.so.1
+  ...
+```
+
+`dnf install slurm slurm-slurmctld slurm-slurmd` resolves all deps from
+the clustr repo alone. No EPEL fetch at deploy time. Zero-egress claim holds.

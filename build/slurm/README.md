@@ -9,8 +9,22 @@ Slurm build pipeline. See `docs/slurm-build-pipeline.md` for the full design.
 
 | File | Purpose |
 |---|---|
-| `versions.yml` | Single source-of-truth: Slurm version, tarball SHA256, build targets |
+| `versions.yml` | Single source-of-truth: Slurm version, tarball SHA256, libjwt version, build targets |
 | `keys/clustr-release.asc.pub` | clustr RPM signing public key (armored GPG export) |
+| `gen-manifest.py` | Generates `bundle/manifest.json` with per-RPM SHA256s |
+| `gen-release-notes.py` | Generates GitHub Release notes markdown |
+
+## Bundled Dependencies
+
+The bundle includes the following non-Slurm packages built from source,
+so deployed nodes never need EPEL at runtime:
+
+| Package | Version | Why bundled |
+|---|---|---|
+| `libjwt` | 1.18.3 | Runtime dep of base `slurm` RPM (`libjwt.so.1`). EPEL-only on EL9 — bundling eliminates the EPEL runtime dep for zero-egress deploys. |
+
+The `deps:` section in `versions.yml` is the canonical pin for each bundled dep,
+mirroring the same `version` / `sha256` / `source_url` structure used for Slurm.
 
 ---
 

@@ -1,18 +1,25 @@
 # .github/workflows/slurm-build.yml
 #
-# Slurm RPM build pipeline - PR2 of the Slurm-from-source pipeline.
+# Slurm RPM build pipeline.
 #
-# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr1)
+# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr2)
 #
 # What this does:
 #   1. Inside a pinned Rocky 9 container, downloads the SchedMD tarball,
 #      verifies it via dual SHA256 check (pinned in versions.yml + live
-#      SchedMD SHA256 file), builds RPMs with rpmbuild -ta, signs them,
-#      runs createrepo_c, generates manifest.json, tarballs the bundle.
+#      SchedMD SHA256 file), builds libjwt RPM from source, builds Slurm RPMs
+#      with rpmbuild -ta, signs all RPMs, runs createrepo_c, generates
+#      manifest.json, tarballs the bundle.
 #   2. Creates a GitHub Release and attaches: signed RPMs, bundle tarball,
 #      bundle .sha256, manifest.json, and the clustr public key.
 #
 # See docs/slurm-build-pipeline.md for full design rationale.
+#
+# Changes in clustr2 (PR6):
+#   - Build libjwt from source so deployed nodes never need EPEL for libjwt.so.1
+#   - Add http-parser-devel to mandatory deps to enable slurmrestd build
+#   - Add binary-presence verification gate (slurmctld, slurmd, slurmdbd,
+#     slurmrestd, sackd) — hard-fails build if expected binaries are missing
 #
 # NON-GOALS (deferred to later PRs/sprints):
 #   - workflow_dispatch and schedule triggers (sprint 2)
@@ -54,6 +61,7 @@ jobs:
       bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
       slurm_version: ${{ steps.versions.outputs.slurm_version }}
       clustr_release: ${{ steps.versions.outputs.clustr_release }}
+      libjwt_version: ${{ steps.versions.outputs.libjwt_version }}
 
     steps:
       - name: Checkout repo
@@ -77,14 +85,45 @@ jobs:
           CLUSTR_RELEASE=$(grep '^clustr_release:' "$VERSIONS_FILE" \
             | sed 's/clustr_release: *\([0-9]*\).*/\1/')
 
+          # Parse libjwt dep section. The version: key appears multiple times
+          # (slurm and libjwt both have it), so we use awk to enter the
+          # deps.libjwt block and extract from there.
+          LIBJWT_VERSION=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /version:/ {
+              gsub(/.*version: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          LIBJWT_SHA256=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /sha256:/ {
+              gsub(/.*sha256: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          LIBJWT_URL=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /source_url:/ {
+              gsub(/.*source_url: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+
           echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
           echo "slurm_sha256=${SLURM_SHA256}" | tee -a "$GITHUB_OUTPUT"
           echo "clustr_release=${CLUSTR_RELEASE}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_version=${LIBJWT_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_sha256=${LIBJWT_SHA256}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_url=${LIBJWT_URL}" | tee -a "$GITHUB_OUTPUT"
 
           echo "--- versions parsed ---"
           echo "  slurm_version  : ${SLURM_VERSION}"
           echo "  slurm_sha256   : ${SLURM_SHA256}"
           echo "  clustr_release : ${CLUSTR_RELEASE}"
+          echo "  libjwt_version : ${LIBJWT_VERSION}"
+          echo "  libjwt_sha256  : ${LIBJWT_SHA256}"
+          echo "  libjwt_url     : ${LIBJWT_URL}"
 
       # ── Install EPEL + build dependencies ────────────────────────────────
       # Repo setup required before the main install:
@@ -121,6 +160,21 @@ jobs:
           # replace curl-minimal with curl. The full curl binary is only needed
           # at workflow script level for tarball download; libcurl-devel is the
           # actual Slurm build dep.
+          #
+          # http-parser-devel: required for slurmrestd. It's in EPEL on EL9
+          # (which is already enabled above). We treat it as mandatory so that
+          # a missing http-parser-devel causes a hard build failure rather than
+          # silently disabling slurmrestd.  The base slurm RPM requires
+          # libjwt.so.1 at runtime (for JWT auth in slurmctld/slurmd), so even
+          # without slurmrestd being installed on a node, libjwt.so.1 must be
+          # present.  We provide libjwt.so.1 by building libjwt from source
+          # (see "Build libjwt RPM from source" step below) rather than
+          # requiring EPEL at deploy time.
+          #
+          # Note: libjwt-devel is used only at Slurm *build* time (inside this
+          # container) to compile the JWT-aware Slurm binaries.  The runtime
+          # libjwt.so.1 that deployed nodes need is supplied by the libjwt RPM
+          # we build from source and include in the bundle.
           dnf install -y --allowerasing \
             gcc gcc-c++ make \
             automake autoconf libtool \
@@ -135,12 +189,13 @@ jobs:
             libcurl-devel \
             json-c-devel \
             libyaml-devel \
-            libjwt-devel \
+            http-parser-devel \
             lz4-devel \
             zlib-devel \
             numactl-devel \
             dbus-devel \
             openssl-devel \
+            jansson-devel \
             perl-devel \
             perl-ExtUtils-MakeMaker \
             python3 \
@@ -148,13 +203,96 @@ jobs:
 
           # 5. Optional build deps — skip if unavailable on this snapshot.
           # Missing deps disable the corresponding Slurm plugin at build time.
+          # freeipmi-devel and rrdtool-devel remain optional; their absence
+          # only disables IPMI and RRD plugins which are not in our MVP scope.
+          # libjwt-devel: installed after we build it from source below.
           dnf install -y --skip-unavailable \
-            http-parser-devel \
             freeipmi-devel \
             rrdtool-devel || true
 
           echo "--- Installed build dependencies ---"
           rpm -qa gcc rpm-build munge-devel mariadb-devel | sort
+
+      # ── Build libjwt RPM from source ──────────────────────────────────────
+      # libjwt provides libjwt.so.1, a runtime dep of the base slurm RPM.
+      # EPEL ships libjwt for EL9 but we build it ourselves so deployed nodes
+      # never need EPEL at runtime (true zero-egress for the Slurm stack).
+      #
+      # Build strategy:
+      #   1. Download the upstream tarball from GitHub Releases.
+      #   2. Verify SHA256 against the pinned value in versions.yml.
+      #   3. Generate a complete spec from the upstream spec.in template
+      #      (substituting @VERSION@).  The upstream spec.in is minimal and
+      #      clean — no exotic macros, no distro conditionals beyond RHEL >= 8.
+      #   4. rpmbuild -ta to build the library + devel + docs sub-packages.
+      #   5. Install libjwt-devel into the container so Slurm's configure
+      #      detects it and enables JWT support.
+      #   6. Sign the libjwt RPMs with the same clustr key as the Slurm RPMs.
+      #
+      # We only include the runtime library RPM (libjwt-*.el9.x86_64.rpm)
+      # in the bundle — the -devel and -devel-docs sub-packages are build-time
+      # artifacts only and are not needed on deployed nodes.
+      - name: Build libjwt RPM from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIBJWT_VERSION="${{ steps.versions.outputs.libjwt_version }}"
+          LIBJWT_SHA256="${{ steps.versions.outputs.libjwt_sha256 }}"
+          LIBJWT_URL="${{ steps.versions.outputs.libjwt_url }}"
+          TARBALL="libjwt-${LIBJWT_VERSION}.tar.bz2"
+
+          echo "--- Downloading libjwt ${LIBJWT_VERSION} ---"
+          curl -fSL -o "${TARBALL}" "${LIBJWT_URL}"
+
+          echo "--- Verifying SHA256 ---"
+          ACTUAL=$(sha256sum "${TARBALL}" | awk '{print $1}')
+          echo "  pinned : ${LIBJWT_SHA256}"
+          echo "  actual : ${ACTUAL}"
+          if [ "${ACTUAL}" != "${LIBJWT_SHA256}" ]; then
+            echo "FATAL: libjwt tarball SHA256 mismatch"
+            exit 1
+          fi
+          echo "  PASS"
+
+          # The upstream tarball ships dist/libjwt.spec.in with @VERSION@
+          # as the only template variable.  Extract it and substitute.
+          echo "--- Extracting spec.in from tarball ---"
+          tar -xjOf "${TARBALL}" "libjwt-${LIBJWT_VERSION}/dist/libjwt.spec.in" \
+            | sed "s/@VERSION@/${LIBJWT_VERSION}/g" \
+            > libjwt.spec
+
+          echo "--- spec first 10 lines ---"
+          head -10 libjwt.spec
+
+          # Set up a fresh rpmbuild tree for libjwt, separate from the Slurm
+          # tree we create later.
+          mkdir -p libjwt-rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cp "${TARBALL}" libjwt-rpmbuild/SOURCES/
+          cp libjwt.spec libjwt-rpmbuild/SPECS/
+
+          echo "--- Building libjwt RPMs ---"
+          rpmbuild -bb \
+            --define "_topdir $(pwd)/libjwt-rpmbuild" \
+            --define "_sourcedir $(pwd)/libjwt-rpmbuild/SOURCES" \
+            libjwt-rpmbuild/SPECS/libjwt.spec \
+            2>&1 | tee libjwt-build.log
+
+          echo "--- Built libjwt RPMs ---"
+          find libjwt-rpmbuild/RPMS/ -name '*.rpm' | sort
+
+          # Install libjwt-devel into the container so that Slurm's ./configure
+          # finds libjwt.h and links against libjwt.so.1.
+          # Use --nodeps because libjwt-devel depends on libjwt (the runtime
+          # lib), which we haven't rpm-installed yet; the .so is in the build
+          # tree but not globally installed.  We install both to be safe.
+          echo "--- Installing libjwt runtime + devel for Slurm build ---"
+          LIBJWT_LIB_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ -name 'libjwt-[0-9]*.rpm' | head -1)
+          LIBJWT_DEV_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ -name 'libjwt-devel-*.rpm' | head -1)
+          rpm -ivh "${LIBJWT_LIB_RPM}" "${LIBJWT_DEV_RPM}"
+          ldconfig  # update linker cache so ./configure finds libjwt.so.1
+
+          echo "--- libjwt version installed ---"
+          rpm -q libjwt libjwt-devel
 
       # ── Download tarball ──────────────────────────────────────────────────
       - name: Download Slurm tarball
@@ -320,30 +458,110 @@ jobs:
           echo "--- Built SRPMs ---"
           find rpmbuild/SRPMS/ -name '*.rpm' | sort
 
+      # ── Binary-presence verification ─────────────────────────────────────
+      # Hard gate: every expected binary must be present in the expected RPM.
+      # This catches upstream spec regressions (e.g., a binary added in a new
+      # Slurm release that the spec forgets to list in %files, or a build that
+      # silently disables a component due to a missing dep).
+      #
+      # NOTE on slurmscriptd: slurmscriptd is NOT a standalone binary in
+      # Slurm 24.x — it is compiled into the slurmctld binary itself.  When
+      # slurmctld starts it fork+execs /proc/self/exe (itself) with
+      # SLURMSCRIPTD_MODE env set.  The PR5 lab report described
+      # "slurmscriptd missing" but the root issue was the systemd unit running
+      # slurmctld as User=slurm, which requires the slurm user to exist.  The
+      # binary itself is /usr/sbin/slurmctld.  We verify slurmctld is present.
+      #
+      # Binaries verified:
+      #   slurmctld  → slurm-slurmctld RPM
+      #   slurmd     → slurm-slurmd RPM
+      #   slurmdbd   → slurm-slurmdbd RPM
+      #   slurmrestd → slurm-slurmrestd RPM  (requires http-parser-devel)
+      #   sackd      → slurm-sackd RPM
+      - name: Verify binary presence in built RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Map: expected binary → RPM name pattern
+          declare -A BINARY_TO_RPM=(
+            [slurmctld]="slurm-slurmctld-*.rpm"
+            [slurmd]="slurm-slurmd-*.rpm"
+            [slurmdbd]="slurm-slurmdbd-*.rpm"
+            [slurmrestd]="slurm-slurmrestd-*.rpm"
+            [sackd]="slurm-sackd-*.rpm"
+          )
+
+          FAIL=0
+          for BINARY in "${!BINARY_TO_RPM[@]}"; do
+            PATTERN="${BINARY_TO_RPM[$BINARY]}"
+            RPM_FILE=$(find rpmbuild/RPMS/x86_64/ -name "${PATTERN}" | head -1)
+            if [ -z "${RPM_FILE}" ]; then
+              echo "FAIL: RPM not found matching pattern: ${PATTERN}"
+              FAIL=1
+              continue
+            fi
+            echo "Checking ${BINARY} in ${RPM_FILE##*/} ..."
+            if ! rpm -qpl "${RPM_FILE}" | grep -qF "sbin/${BINARY}"; then
+              echo "  FAIL: /usr/sbin/${BINARY} not found in ${RPM_FILE##*/}"
+              echo "  Contents (sbin/):"
+              rpm -qpl "${RPM_FILE}" | grep sbin/ || echo "    (none)"
+              FAIL=1
+            else
+              echo "  OK: /usr/sbin/${BINARY} present"
+            fi
+          done
+
+          if [ "${FAIL}" -ne 0 ]; then
+            echo ""
+            echo "FATAL: one or more expected binaries missing from RPMs."
+            echo "Check the rpmbuild-output.log artifact for configure output"
+            echo "and %files section warnings."
+            exit 1
+          fi
+          echo ""
+          echo "All expected binaries verified present."
+
       # ── Sign RPMs ─────────────────────────────────────────────────────────
       # rpm --addsign uses %__gpg_sign_cmd from ~/.rpmmacros.
       # GNUPGHOME is set via GITHUB_ENV from the import step.
-      # Decision: sign binary RPMs only (not the SRPM).
+      # Decision: sign Slurm binary RPMs and the libjwt runtime RPM.
+      # The libjwt-devel and libjwt-devel-docs RPMs are build-time only; we
+      # sign them anyway for consistency but they are not included in the bundle.
       - name: Sign RPMs
         shell: bash
         run: |
           set -euo pipefail
           RPM_COUNT=$(find rpmbuild/RPMS/x86_64/ -name '*.rpm' | wc -l)
-          echo "Signing ${RPM_COUNT} RPMs ..."
+          LIBJWT_COUNT=$(find libjwt-rpmbuild/RPMS/x86_64/ -name '*.rpm' | wc -l)
+          echo "Signing ${RPM_COUNT} Slurm RPMs ..."
           rpm --addsign rpmbuild/RPMS/x86_64/*.rpm
+          echo "Signing ${LIBJWT_COUNT} libjwt RPMs ..."
+          rpm --addsign libjwt-rpmbuild/RPMS/x86_64/*.rpm
           echo "Signing complete."
 
       # ── Verify RPM signatures ─────────────────────────────────────────────
-      # Hard gate: every binary RPM must carry a valid signature.
+      # Hard gate: every binary RPM (Slurm + libjwt) must carry a valid
+      # clustr GPG signature before we proceed to the bundle stage.
       - name: Verify RPM signatures
         shell: bash
         run: |
           set -euo pipefail
           rpm --import build/slurm/keys/clustr-release.asc.pub
 
-          echo "--- Verifying RPM signatures ---"
+          echo "--- Verifying Slurm RPM signatures ---"
           FAIL=0
           for RPM in rpmbuild/RPMS/x86_64/*.rpm; do
+            RESULT=$(rpm -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM}"
+              FAIL=1
+            fi
+          done
+
+          echo "--- Verifying libjwt RPM signatures ---"
+          for RPM in libjwt-rpmbuild/RPMS/x86_64/*.rpm; do
             RESULT=$(rpm -K "${RPM}" 2>&1)
             echo "  ${RPM##*/}: ${RESULT}"
             if ! echo "${RESULT}" | grep -qi "OK"; then
@@ -362,8 +580,14 @@ jobs:
       # Bundle layout per docs/slurm-build-pipeline.md §6.4:
       #   ./manifest.json
       #   ./RPM-GPG-KEY-clustr
-      #   ./el9-x86_64/*.rpm
+      #   ./el9-x86_64/*.rpm          ← Slurm RPMs + libjwt runtime RPM
       #   ./el9-x86_64/repodata/
+      #
+      # libjwt inclusion: only the runtime library RPM (libjwt-VERSION.rpm)
+      # is included in the bundle.  The -devel and -devel-docs sub-packages
+      # are build-time artifacts and are not needed on deployed nodes.
+      # Including libjwt in the repo satisfies the base slurm RPM's
+      # Requires: libjwt.so.1 without needing EPEL on deployed nodes.
       #
       # Decision: pack without a top-level wrapper dir so tar xzf drops
       # files directly, satisfying the repomd.xml sanity check and
@@ -375,9 +599,26 @@ jobs:
           OS="${{ matrix.target.os }}"
           ARCH="${{ matrix.target.arch }}"
           mkdir -p "bundle/${OS}-${ARCH}"
+
+          # Copy all Slurm RPMs
           cp rpmbuild/RPMS/x86_64/*.rpm "bundle/${OS}-${ARCH}/"
+
+          # Copy only the libjwt runtime RPM (not devel, not devel-docs).
+          # Pattern: libjwt-VERSION.el9.x86_64.rpm (no hyphen after version)
+          LIBJWT_LIB_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ \
+            -name 'libjwt-[0-9]*.rpm' | head -1)
+          if [ -z "${LIBJWT_LIB_RPM}" ]; then
+            echo "FATAL: libjwt runtime RPM not found"
+            ls libjwt-rpmbuild/RPMS/x86_64/ || true
+            exit 1
+          fi
+          cp "${LIBJWT_LIB_RPM}" "bundle/${OS}-${ARCH}/"
+          echo "Included libjwt RPM: ${LIBJWT_LIB_RPM##*/}"
+
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
-          echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs"
+          echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
+          echo "--- RPMs in bundle ---"
+          ls bundle/${OS}-${ARCH}/*.rpm | xargs -I{} basename {}
 
       # ── Generate repo metadata ────────────────────────────────────────────
       - name: Generate repodata with createrepo_c
@@ -467,6 +708,16 @@ jobs:
           echo "repomd.xml present at ${REPOMD} - OK"
 
           echo ""
+          echo "--- Checking for libjwt RPM in bundle ---"
+          LIBJWT_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/libjwt-"*.rpm 2>/dev/null | head -1)
+          if [ -z "${LIBJWT_IN_BUNDLE}" ]; then
+            echo "FATAL: libjwt RPM not found in bundle/${OS}-${ARCH}/"
+            ls "bundle/${OS}-${ARCH}/" || true
+            exit 1
+          fi
+          echo "libjwt RPM present: ${LIBJWT_IN_BUNDLE##*/} - OK"
+
+          echo ""
           echo "--- Release-level manifest.json ---"
           cat bundle/manifest.json
 
@@ -477,11 +728,13 @@ jobs:
           name: slurm-build-${{ matrix.target.os }}-${{ matrix.target.arch }}
           path: |
             rpmbuild/RPMS/x86_64/*.rpm
+            libjwt-rpmbuild/RPMS/x86_64/*.rpm
             ${{ steps.bundle.outputs.bundle_name }}
             ${{ steps.bundle.outputs.bundle_name }}.sha256
             bundle/manifest.json
             bundle/RPM-GPG-KEY-clustr
             rpmbuild-output.log
+            libjwt-build.log
           if-no-files-found: error
           retention-days: 30
 
@@ -559,12 +812,21 @@ jobs:
           ASSET_ARGS+=("release-assets/bundle/manifest.json#manifest.json")
           ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
 
+          # Individual Slurm RPMs (for transparency / rpm -K spot-check)
           for RPM in release-assets/rpmbuild/RPMS/x86_64/*.rpm; do
+            [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
+          done
+
+          # Individual libjwt RPMs (runtime + devel + docs for completeness)
+          for RPM in release-assets/libjwt-rpmbuild/RPMS/x86_64/*.rpm; do
             [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
           done
 
           if [ -f "release-assets/rpmbuild-output.log" ]; then
             ASSET_ARGS+=("release-assets/rpmbuild-output.log#BUILD-LOG.txt")
+          fi
+          if [ -f "release-assets/libjwt-build.log" ]; then
+            ASSET_ARGS+=("release-assets/libjwt-build.log#LIBJWT-BUILD-LOG.txt")
           fi
 
           echo "Creating GitHub Release: ${TAG}"

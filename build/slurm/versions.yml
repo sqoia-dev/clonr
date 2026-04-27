@@ -32,13 +32,32 @@ slurm:
 # clustr_release: bump this (reset to 1 on upstream version bump) to rebuild
 # without changing the Slurm version (e.g. to fix a packaging bug or rebuild
 # against a refreshed EPEL snapshot).
-clustr_release: 1
+# clustr2: fix slurmscriptd packaging verification + bundle libjwt + enable slurmrestd
+clustr_release: 2
 
 munge:
   # MVP: pull from EPEL. Exit ramp to from-source build in sprint 3.
   # See docs/slurm-build-pipeline.md §10.
   source: "epel"
   version: "0.5.16"
+
+deps:
+  libjwt:
+    # libjwt provides libjwt.so.1 which is a runtime dep of the base slurm RPM
+    # when built with JWT support (required for slurmrestd auth).  EPEL 9 ships
+    # libjwt but we build from source so deployed nodes never need EPEL for this
+    # dep.  Building from upstream source eliminates the only remaining EPEL
+    # runtime dep in the clustr bundle.
+    # See docs/slurm-build-pipeline.md §11 (PR6 failures and fixes).
+    #
+    # Decision: 1.x series (not 2.x/3.x) because the SO name is libjwt.so.1,
+    # which matches what the Slurm 24.11.4 spec file links against.
+    # The 2.x/3.x series changed the library versioning and would require a
+    # Slurm rebuild with updated configure flags.
+    version: "1.18.3"
+    source_url: "https://github.com/benmcollins/libjwt/releases/download/v1.18.3/libjwt-1.18.3.tar.bz2"
+    # SHA256 verified against downloaded tarball 2026-04-27
+    sha256: "7c582667fe3e6751897c8d9c1b4c8c117bbfa9067d8398524adb5dded671213e"
 
 # Build matrix — EL10 and aarch64 deferred per design doc §3 and §4.2
 targets:

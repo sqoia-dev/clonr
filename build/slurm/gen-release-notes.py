@@ -35,18 +35,19 @@ output_file = os.environ.get("OUTPUT_FILE", "/tmp/release-notes.md")
 notes = f"""## Slurm {ver} - clustr release {cn}
 
 Built from the upstream SchedMD tarball. All RPMs signed with the clustr Release Signing Key.
+Bundle includes libjwt built from source for zero-egress deploys (no EPEL required at deploy time).
 
 ### Signing key
 - Key ID: `41E51A6653BBA540`
 - Fingerprint: `9EDB9E63AB84551E25C1416841E51A6653BBA540`
 - Public key: `RPM-GPG-KEY-clustr` (attached to this release)
 
-### Bundle SHA256 (for PR3 ldflags)
+### Bundle SHA256 (for Makefile / ldflags)
 ```
 {bsha}  {bname}
 ```
 
-### Install via clustr-server (PR3)
+### Install via clustr-server
 ```
 clustr-serverd bundle install --from-release {tag}
 ```
@@ -54,16 +55,18 @@ clustr-serverd bundle install --from-release {tag}
 ### Verify RPM signatures manually
 ```bash
 rpm --import RPM-GPG-KEY-clustr
-rpm -K slurm-*.rpm
+rpm -K slurm-*.rpm libjwt-*.rpm
 ```
 
 ### Assets
-- `{bname}` - canonical install artifact (signed RPMs + repodata + key + manifest)
+- `{bname}` - canonical install artifact (signed RPMs + libjwt + repodata + key + manifest)
 - `{bname}.sha256` - bundle SHA256 sidecar
-- `manifest.json` - build provenance, per-RPM SHA256s, bundle SHA256
+- `manifest.json` - build provenance, per-RPM SHA256s, bundle SHA256 (schema_version 2)
 - `RPM-GPG-KEY-clustr` - clustr release signing public key
-- `slurm-*.rpm` - individual signed RPMs (for rpm -K spot-check)
-- `BUILD-LOG.txt` - full rpmbuild stdout/stderr
+- `slurm-*.rpm` - individual signed Slurm RPMs (for rpm -K spot-check)
+- `libjwt-*.rpm` - individual signed libjwt RPMs
+- `BUILD-LOG.txt` - full Slurm rpmbuild stdout/stderr
+- `LIBJWT-BUILD-LOG.txt` - full libjwt rpmbuild stdout/stderr
 """
 
 with open(output_file, "w") as f:
