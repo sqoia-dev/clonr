@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -751,6 +753,21 @@ func (s *Server) buildRouter() chi.Router {
 	// /set-password — forced first-login password change page.
 	r.Get("/set-password", serveSetPasswordPage(staticFS))
 
+	// /repo/* — public, unauthenticated Slurm package repository served from
+	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
+	// Must be mounted BEFORE /api/v1 and outside apiKeyAuth so deployed nodes
+	// can reach it without API credentials.
+	//
+	// Cache policy (per Richard's design doc §7.3):
+	//   - repodata/* : max-age=300  (small metadata, safe to recheck frequently)
+	//   - *.rpm      : max-age=86400, immutable  (content-addressed by version in name)
+	//   - others     : no explicit Cache-Control (stdlib defaults)
+	//
+	// Byte-range requests and ETag are handled automatically by http.FileServer.
+	repoFS := http.StripPrefix("/repo", http.FileServer(http.Dir(s.cfg.RepoDir)))
+	r.Get("/repo/health", s.serveRepoHealth)
+	r.Handle("/repo/*", repoCacheMiddleware(repoFS))
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// All /api/v1 routes: resolve the API key scope from the Bearer token
 		// or the session cookie (ADR-0006). Public endpoints (boot files, node
@@ -1263,6 +1280,77 @@ func (s *Server) buildAPIKeysHandler() *handlers.APIKeysHandler {
 		MintKey:       mintFn,
 		GetActorLabel: actorLabelFn,
 	}
+}
+
+// repoCacheMiddleware wraps a repo file-server handler and sets Cache-Control
+// headers appropriate for a yum/dnf repository:
+//   - repodata/*  -> public, max-age=300   (metadata, recheck cheaply)
+//   - *.rpm       -> public, max-age=86400, immutable  (content-addressed)
+//   - everything else -> no extra header (stdlib default)
+func repoCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.Contains(path, "/repodata/"):
+			w.Header().Set("Cache-Control", "public, max-age=300")
+		case strings.HasSuffix(path, ".rpm"):
+			w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// installedBundleInfo is a JSON-serialisable record of a bundle that has been
+// installed under a repo subdirectory.  Read from .installed-version files.
+type installedBundleInfo struct {
+	Distro        string `json:"distro"`
+	Arch          string `json:"arch"`
+	SlurmVersion  string `json:"slurm_version"`
+	ClustrRelease string `json:"clustr_release"`
+	InstalledAt   string `json:"installed_at"`
+	BundleSHA256  string `json:"bundle_sha256"`
+}
+
+// serveRepoHealth returns a JSON object listing all installed bundles by
+// scanning <repoDir>/*/.installed-version files.
+// GET /repo/health — public, no auth.
+func (s *Server) serveRepoHealth(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Installed []installedBundleInfo `json:"installed"`
+	}
+
+	entries, err := os.ReadDir(s.cfg.RepoDir)
+	if err != nil {
+		// RepoDir doesn't exist yet (bundle not yet installed) — return empty list.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"installed":[]}`)
+		return
+	}
+
+	var bundles []installedBundleInfo
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		versionFile := filepath.Join(s.cfg.RepoDir, entry.Name(), ".installed-version")
+		data, err := os.ReadFile(versionFile)
+		if err != nil {
+			continue
+		}
+		var info installedBundleInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		bundles = append(bundles, info)
+	}
+
+	if bundles == nil {
+		bundles = []installedBundleInfo{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(response{Installed: bundles})
 }
 
 // serveIndex serves index.html from the embedded static FS.

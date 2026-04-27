@@ -217,6 +217,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		cfg.PXE.BootDir,
 		cfg.PXE.TFTPDir,
 		cfg.LogArchiveDir,
+		cfg.RepoDir,
 	}
 	for _, d := range requiredDirs {
 		if d == "" {

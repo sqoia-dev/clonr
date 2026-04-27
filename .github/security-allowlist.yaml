@@ -144,6 +144,20 @@
     grants access to any running system.
 
 - scanner: gosec
+  id: G204
+  disposition: allowlisted
+  locations:
+    - cmd/clustr-serverd/bundle.go (rpm --import and rpm -K invocations)
+  rationale: >
+    Two exec.Command("rpm", ...) calls in verifyRPMSignatures.  The binary
+    name is hardcoded ("rpm").  The --dbpath argument is a path returned by
+    os.MkdirTemp (controlled by the process).  The key file argument is a
+    path returned by os.CreateTemp.  The RPM file paths come from os.ReadDir
+    of a staging directory written by extractBundle under clustr's exclusive
+    control.  No user-supplied input reaches the exec arguments.
+    Per-instance #nosec G204 annotations added to both exec.Command calls.
+
+- scanner: gosec
   id: G402
   disposition: fixed
   locations:

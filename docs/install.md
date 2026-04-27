@@ -923,11 +923,44 @@ See **[docs/user-management.md](user-management.md)** for the full operator guid
 
 ---
 
+## 8. Slurm bundle install (post-server-install)
+
+After placing the `clustr-serverd` binary, install the bundled Slurm RPM
+repository.  The binary embeds the correct version and SHA256 — just run:
+
+```bash
+clustr-serverd bundle install
+```
+
+This fetches `clustr-slurm-bundle-v24.11.4-clustr1-el9-x86_64.tar.gz` from
+the GitHub Release, verifies its SHA256 and RPM signatures, and unpacks it to
+`/var/lib/clustr/repo/`.
+
+For air-gapped environments, side-load the bundle first:
+
+```bash
+# Transfer the bundle tarball to the server manually, then:
+clustr-serverd bundle install --from-file /path/to/clustr-slurm-bundle-*.tar.gz
+```
+
+Verify the install succeeded:
+
+```bash
+clustr-serverd bundle list
+curl -I http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
+```
+
+See [docs/server-repo.md](server-repo.md) for full bundle management
+documentation including rollback.
+
+---
+
 ## See Also
 
 - [docs/rbac.md](rbac.md) — Role model, group-scoped operators, user management
 - [docs/upgrade.md](upgrade.md) — Upgrade procedure, migration notes, rollback
 - [docs/tls-provisioning.md](tls-provisioning.md) — TLS setup with Caddy, initramfs HTTPS configuration
 - [docs/slurm-module.md](slurm-module.md) — Slurm module operator guide: enable, configure, first job
+- [docs/server-repo.md](server-repo.md) — Bundled Slurm repo: bundle install, rollback, /repo/* HTTP surface
 - [docs/user-management.md](user-management.md) — Human user provisioning: sysaccounts, LDAP, smoke test
 - [README.md](../README.md) — Quick Start and architecture overview

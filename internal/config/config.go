@@ -42,6 +42,11 @@ type ServerConfig struct {
 	// Default: /etc/clustr/pki
 	LDAPPKIDir    string `json:"ldap_pki_dir"`    // CLUSTR_LDAP_PKI_DIR
 
+	// RepoDir is the root directory from which clustr-serverd serves the bundled
+	// Slurm package repository at /repo/*. Populated by bundle install.
+	// Default: /var/lib/clustr/repo
+	RepoDir string `json:"repo_dir"` // CLUSTR_REPO_DIR
+
 	// LogArchiveDir is where log purge summary events are written (future cold archive).
 	// Default: /var/lib/clustr/log-archive
 	LogArchiveDir string `json:"log_archive_dir"` // CLUSTR_LOG_ARCHIVE_DIR
@@ -105,6 +110,7 @@ func LoadServerConfig() ServerConfig {
 		ClientdBinPath: os.Getenv("CLUSTR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
 		VerifyTimeout: parseVerifyTimeout(),
 		PXE:           LoadPXEConfig(),
+		RepoDir:       envOrDefault("CLUSTR_REPO_DIR", "/var/lib/clustr/repo"),
 		LDAPDataDir:   envOrDefault("CLUSTR_LDAP_DATA_DIR", "/var/lib/clustr/ldap"),
 		LDAPConfigDir: envOrDefault("CLUSTR_LDAP_CONFIG_DIR", "/etc/clustr/ldap"),
 		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
