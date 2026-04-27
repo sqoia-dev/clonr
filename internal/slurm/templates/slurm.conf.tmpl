@@ -5,7 +5,9 @@
 ClusterName={{.ClusterName}}
 SlurmctldHost={{.ControllerHostname}}
 
-MpiDefault=pmix
+# pmix is not bundled — use none (serial jobs and pmi2 jobs work without pmix).
+# Change to pmix only if slurm-libpmix and pmix-libs are in the bundle.
+MpiDefault=none
 ProctrackType=proctrack/cgroup
 TaskPlugin=task/cgroup,task/affinity
 
