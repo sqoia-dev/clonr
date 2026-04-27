@@ -527,7 +527,7 @@ jobs:
           echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
           echo "clustr_n=${CLUSTR_N}" | tee -a "$GITHUB_OUTPUT"
 
-          BUNDLE_SHA256=$(python3 -c "import json; print(json.load(open('release-assets/manifest.json'))['bundle_sha256'])")
+          BUNDLE_SHA256=$(python3 -c "import json; print(json.load(open('release-assets/bundle/manifest.json'))['bundle_sha256'])")
           echo "bundle_sha256=${BUNDLE_SHA256}" | tee -a "$GITHUB_OUTPUT"
 
           echo "  tag           : ${TAG}"
@@ -556,10 +556,10 @@ jobs:
           ASSET_ARGS=()
           ASSET_ARGS+=("${BUNDLE_FILE}")
           ASSET_ARGS+=("${BUNDLE_FILE}.sha256")
-          ASSET_ARGS+=("release-assets/manifest.json")
-          ASSET_ARGS+=("release-assets/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
+          ASSET_ARGS+=("release-assets/bundle/manifest.json#manifest.json")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
 
-          for RPM in release-assets/*.rpm; do
+          for RPM in release-assets/rpmbuild/RPMS/x86_64/*.rpm; do
             [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
           done
 
