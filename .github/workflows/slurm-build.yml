@@ -1,0 +1,669 @@
+# .github/workflows/slurm-build.yml
+#
+# Slurm RPM build pipeline — PR2 of the Slurm-from-source pipeline.
+#
+# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr1)
+#
+# What this does:
+#   1. Inside a pinned Rocky 9 container, downloads the SchedMD tarball,
+#      verifies it via dual SHA256 check (pinned in versions.yml + live
+#      SchedMD SHA256 file), builds RPMs with rpmbuild -ta, signs them,
+#      runs createrepo_c, generates manifest.json, tarballs the bundle.
+#   2. Creates a GitHub Release and attaches: signed RPMs, bundle tarball,
+#      bundle .sha256, manifest.json, and the clustr public key.
+#
+# See docs/slurm-build-pipeline.md for full design rationale.
+#
+# NON-GOALS (deferred to later PRs/sprints):
+#   - workflow_dispatch and schedule triggers (sprint 2)
+#   - EL10 / aarch64 build targets (sprint 2)
+#   - cosign signing (sprint 2)
+#   - clustr-server bundle-install wiring (PR3/PR4)
+
+on:
+  push:
+    tags:
+      - "slurm-v*"
+
+jobs:
+  build:
+    name: Build Slurm RPMs (${{ matrix.target.os }}-${{ matrix.target.arch }})
+    runs-on: ubuntu-latest
+
+    # Run inside the pinned Rocky Linux 9 container so rpmbuild and all
+    # EL9 toolchain deps are native.  The container digest pins the exact
+    # image layer for reproducibility; update via PR when needed.
+    #
+    # Decision: use container: at job level rather than docker run inside
+    # a step, so all steps share the same container filesystem without
+    # explicit volume mounts. This matches the §9.1 design scaffold.
+    container:
+      image: ${{ matrix.target.container_digest }}
+      options: --user root
+
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          # EL9 x86_64 is the MVP target.  EL10 and aarch64 deferred.
+          - os: el9
+            arch: x86_64
+            container_digest: "docker.io/rockylinux/rockylinux:9@sha256:ee90dc0e23c2f59af63886aed78c495fc847c8f0af7e825f48746547ddb7fbe2"
+
+    outputs:
+      bundle_name: ${{ steps.bundle.outputs.bundle_name }}
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+      slurm_version: ${{ steps.versions.outputs.slurm_version }}
+      clustr_release: ${{ steps.versions.outputs.clustr_release }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── Parse versions.yml ────────────────────────────────────────────────
+      # Decision: use grep+sed instead of yq to avoid adding a tool dep to
+      # the Rocky container.  versions.yml is a simple flat YAML file so
+      # the grep approach is reliable.
+      - name: Read versions.yml
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSIONS_FILE="build/slurm/versions.yml"
+
+          SLURM_VERSION=$(grep -E '^\s+version:' "$VERSIONS_FILE" | head -1 \
+            | sed 's/.*version: *"\?\([^"]*\)"\?.*/\1/')
+          SLURM_SHA256=$(grep 'tarball_sha256:' "$VERSIONS_FILE" \
+            | sed 's/.*tarball_sha256: *"\?\([^"]*\)"\?.*/\1/')
+          CLUSTR_RELEASE=$(grep '^clustr_release:' "$VERSIONS_FILE" \
+            | sed 's/clustr_release: *\([0-9]*\).*/\1/')
+
+          echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "slurm_sha256=${SLURM_SHA256}" | tee -a "$GITHUB_OUTPUT"
+          echo "clustr_release=${CLUSTR_RELEASE}" | tee -a "$GITHUB_OUTPUT"
+
+          echo "--- versions parsed ---"
+          echo "  slurm_version    : ${SLURM_VERSION}"
+          echo "  slurm_sha256     : ${SLURM_SHA256}"
+          echo "  clustr_release   : ${CLUSTR_RELEASE}"
+
+      # ── Install EPEL + build dependencies ────────────────────────────────
+      # EPEL is required for: munge-devel, http-parser-devel, libjwt-devel,
+      # libyaml-devel, freeipmi-devel, rrdtool-devel, createrepo_c.
+      # See docs/slurm-build-pipeline.md §4.3 and §10.
+      - name: Enable EPEL and install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dnf install -y epel-release
+          dnf install -y \
+            gcc gcc-c++ make \
+            automake autoconf libtool \
+            rpm-build rpm-sign \
+            createrepo_c \
+            gnupg2 \
+            munge munge-devel \
+            mariadb-devel \
+            pam-devel \
+            readline-devel \
+            hwloc-devel \
+            libcurl-devel \
+            http-parser-devel \
+            json-c-devel \
+            libyaml-devel \
+            libjwt-devel \
+            lz4-devel \
+            zlib-devel \
+            freeipmi-devel \
+            rrdtool-devel \
+            numactl-devel \
+            dbus-devel \
+            openssl-devel \
+            perl-devel \
+            perl-ExtUtils-MakeMaker \
+            python3
+
+          dnf install -y curl
+
+      # ── Download tarball ──────────────────────────────────────────────────
+      - name: Download Slurm tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          URL="https://download.schedmd.com/slurm/slurm-${VERSION}.tar.bz2"
+
+          echo "Downloading ${URL} ..."
+          curl -fSL -o "slurm-${VERSION}.tar.bz2" "${URL}"
+          echo "Download complete."
+
+      # ── Dual SHA256 verification ──────────────────────────────────────────
+      # Check 1: compare against the pinned sha256 from versions.yml.
+      # Check 2: cross-reference against the live SchedMD SHA256 checksum
+      #          file (fetched over HTTPS).
+      #
+      # NOTE: SchedMD does NOT publish detached GPG signatures (.asc) for
+      # release tarballs as of 2026-04-27 (documented in versions.yml).
+      # We skip gpg --verify; the dual SHA256 chain is the trust anchor.
+      # See docs/slurm-build-pipeline.md §5.2.
+      - name: Verify tarball SHA256 (dual check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          PINNED_SHA256="${{ steps.versions.outputs.slurm_sha256 }}"
+          TARBALL="slurm-${VERSION}.tar.bz2"
+
+          echo "--- Check 1: pinned SHA256 from versions.yml ---"
+          ACTUAL_SHA256=$(sha256sum "${TARBALL}" | awk '{print $1}')
+          echo "  pinned : ${PINNED_SHA256}"
+          echo "  actual : ${ACTUAL_SHA256}"
+          if [ "${ACTUAL_SHA256}" != "${PINNED_SHA256}" ]; then
+            echo "FATAL: SHA256 mismatch against pinned value — possible tampering or wrong version"
+            exit 1
+          fi
+          echo "  PASS"
+
+          echo ""
+          echo "--- Check 2: cross-reference against live SchedMD SHA256 file ---"
+          # SchedMD SHA256 file format: "<sha256>  <filename>" (two spaces)
+          SCHEDMD_SHA256_URL="https://download.schedmd.com/slurm/SHA256"
+          LIVE_SHA256=$(curl -fsSL "${SCHEDMD_SHA256_URL}" \
+            | grep "${TARBALL}\$" \
+            | awk '{print $1}')
+
+          if [ -z "${LIVE_SHA256}" ]; then
+            echo "FATAL: tarball '${TARBALL}' not found in SchedMD SHA256 file"
+            exit 1
+          fi
+
+          echo "  schedmd live : ${LIVE_SHA256}"
+          echo "  actual       : ${ACTUAL_SHA256}"
+          if [ "${ACTUAL_SHA256}" != "${LIVE_SHA256}" ]; then
+            echo "FATAL: SHA256 mismatch against live SchedMD SHA256 file"
+            exit 1
+          fi
+          echo "  PASS"
+
+          echo ""
+          echo "Both SHA256 checks passed. Proceeding with build."
+
+      # ── Import clustr signing key ─────────────────────────────────────────
+      # Use a temp GPG homedir to avoid polluting the container's default
+      # keyring.  The private key is imported with --batch --pinentry-mode
+      # loopback so no TTY/agent is required.
+      #
+      # Non-interactive rpm --addsign: rpm reads %__gpg_sign_cmd from
+      # ~/.rpmmacros to build its gpg invocation.  We override the sign
+      # command to add --passphrase-fd=3 and redirect fd 3 from the pass
+      # file.  This is the most portable approach across RPM/gpg versions.
+      #
+      # Decision: store the passphrase in a temp file (chmod 600) rather
+      # than passing via env var, because env vars can appear in /proc on
+      # some kernels.
+      - name: Import clustr RPM signing key
+        shell: bash
+        env:
+          CLUSTR_RPM_SIGNING_KEY: ${{ secrets.CLUSTR_RPM_SIGNING_KEY }}
+          CLUSTR_RPM_SIGNING_PASSPHRASE: ${{ secrets.CLUSTR_RPM_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          # Temp GPG homedir — persists across steps via GITHUB_ENV export
+          GPG_HOME=$(mktemp -d)
+          chmod 700 "$GPG_HOME"
+          echo "GNUPGHOME=${GPG_HOME}" >> "$GITHUB_ENV"
+
+          # Passphrase file — chmod 600, persists across steps
+          PASS_FILE=$(mktemp)
+          chmod 600 "$PASS_FILE"
+          printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
+          echo "GPG_PASS_FILE=${PASS_FILE}" >> "$GITHUB_ENV"
+
+          # Import private signing key with loopback pinentry
+          printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
+            gpg --homedir "${GPG_HOME}" \
+                --batch \
+                --pinentry-mode loopback \
+                --passphrase-file "${PASS_FILE}" \
+                --import
+
+          # Verify the key was imported
+          gpg --homedir "${GPG_HOME}" --list-secret-keys
+
+          # Write ~/.rpmmacros for rpm --addsign.
+          # %__gpg_sign_cmd overrides the full gpg invocation that rpm uses.
+          # We inject --passphrase-fd 3 and add 3< to redirect from pass file.
+          # Note: macros must NOT have leading spaces.
+          cat > ~/.rpmmacros <<'RPMMACROS'
+%_signature gpg
+%_gpg_name 41E51A6653BBA540
+RPMMACROS
+
+          # Append the GNUPGHOME-aware sign command.
+          # Shell variable expansion is intentional here (no single quotes).
+          # %{__plaintext_filename} and %{__signature_filename} are RPM macros
+          # that expand at signing time to the source and detached-sig paths.
+          # Decision: --digest-algo sha256 is set explicitly; we drop the
+          # redundant conditional macro for clarity.
+          cat >> ~/.rpmmacros << RPMMACROS
+%__gpg /usr/bin/gpg
+%__gpg_sign_cmd %{__gpg} gpg --no-verbose --no-armor --homedir ${GPG_HOME} --batch --pinentry-mode loopback --passphrase-file ${PASS_FILE} -u "%{_gpg_name}" --digest-algo sha256 --detach-sign %{__plaintext_filename} %{__signature_filename}
+RPMMACROS
+
+          echo "Signing key imported and rpmmacros configured."
+          echo "~/.rpmmacros contents:"
+          cat ~/.rpmmacros
+
+      # ── Build RPMs ────────────────────────────────────────────────────────
+      # rpmbuild -ta builds all RPMs + SRPM from the in-tarball spec.
+      # Richard's design doc §6.1 uses -ta explicitly ("build all").
+      # --tb would skip the SRPM; -ta produces the full set including
+      # slurm-*.src.rpm which we include in the release for transparency.
+      - name: Build Slurm RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          echo "Starting rpmbuild -ta ..."
+          rpmbuild -ta \
+            --define "_topdir $(pwd)/rpmbuild" \
+            "slurm-${VERSION}.tar.bz2" \
+            2>&1 | tee rpmbuild-output.log
+          echo "rpmbuild complete."
+
+          echo "--- Built RPMs ---"
+          find rpmbuild/RPMS/ -name '*.rpm' | sort
+          echo "--- Built SRPMs ---"
+          find rpmbuild/SRPMS/ -name '*.rpm' | sort
+
+      # ── Sign RPMs ─────────────────────────────────────────────────────────
+      # rpm --addsign uses the %__gpg_sign_cmd from ~/.rpmmacros configured
+      # above.  GNUPGHOME and GPG_PASS_FILE are set via GITHUB_ENV from the
+      # import step and are available here.
+      #
+      # Decision: sign binary RPMs only (not the SRPM).  The SRPM is for
+      # transparency/reproducibility; end-nodes install from binary RPMs.
+      - name: Sign RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RPM_FILES=$(find rpmbuild/RPMS/x86_64/ -name '*.rpm')
+          RPM_COUNT=$(echo "${RPM_FILES}" | wc -l)
+          echo "Signing ${RPM_COUNT} RPMs ..."
+
+          # rpm --addsign processes all RPMs in one gpg invocation per RPM.
+          # The %__gpg_sign_cmd macro provides the passphrase non-interactively.
+          rpm --addsign rpmbuild/RPMS/x86_64/*.rpm
+
+          echo "Signing complete."
+
+      # ── Verify RPM signatures ─────────────────────────────────────────────
+      # Hard gate: every binary RPM must carry a valid signature.
+      # Import the public key before verifying.
+      - name: Verify RPM signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Import public key for rpm -K verification
+          rpm --import build/slurm/keys/clustr-release.asc.pub
+
+          echo "--- Verifying RPM signatures ---"
+          FAIL=0
+          for RPM in rpmbuild/RPMS/x86_64/*.rpm; do
+            RESULT=$(rpm -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM}"
+              FAIL=1
+            fi
+          done
+
+          if [ "${FAIL}" -ne 0 ]; then
+            echo ""
+            echo "FATAL: one or more RPMs failed signature verification"
+            exit 1
+          fi
+
+          echo ""
+          echo "All RPM signatures verified OK."
+
+      # ── Stage bundle directory ────────────────────────────────────────────
+      # Bundle layout per docs/slurm-build-pipeline.md §6.4:
+      #   ./manifest.json
+      #   ./RPM-GPG-KEY-clustr
+      #   ./el9-x86_64/*.rpm
+      #   ./el9-x86_64/repodata/
+      #
+      # Decision: pack without a top-level wrapper dir so tar xzf drops
+      # files at ./manifest.json, ./RPM-GPG-KEY-clustr, ./el9-x86_64/.
+      # This satisfies the sanity-check `^./el9-x86_64/repodata/repomd.xml$`
+      # and simplifies PR3's extraction logic (no strip-components needed).
+      - name: Stage bundle directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          TARGET_DIR="${OS}-${ARCH}"
+
+          mkdir -p "bundle/${TARGET_DIR}"
+          cp rpmbuild/RPMS/x86_64/*.rpm "bundle/${TARGET_DIR}/"
+
+          # Copy public key to bundle root for air-gap offline verification
+          cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
+
+          echo "Bundle staged: $(ls bundle/${TARGET_DIR}/*.rpm | wc -l) RPMs"
+
+      # ── Generate repo metadata ────────────────────────────────────────────
+      - name: Generate repodata with createrepo_c
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          TARGET_DIR="bundle/${OS}-${ARCH}"
+
+          createrepo_c "${TARGET_DIR}/"
+
+          echo "--- repodata generated ---"
+          ls -la "${TARGET_DIR}/repodata/"
+
+      # ── Create bundle tarball + manifest ─────────────────────────────────
+      # The manifest bundle_sha256 is the SHA256 of the final tarball.
+      # We handle this by:
+      #   1. Writing manifest.json with bundle_sha256 = "__PENDING__"
+      #   2. Creating the tarball
+      #   3. Computing the tarball SHA256
+      #   4. Updating the RELEASE-LEVEL manifest.json with the real SHA256
+      #      (this is the file uploaded to the GitHub Release as a top-level
+      #      asset — PR3 reads this to get the value for ldflags)
+      #   5. The manifest.json INSIDE the tarball retains __PENDING__ to
+      #      avoid the circular-dependency problem. The embedded SHA256 in
+      #      the server binary comes from the release-level manifest.json,
+      #      not the one inside the bundle.
+      - name: Generate manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          CLUSTR_RELEASE="${{ steps.versions.outputs.clustr_release }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          TARGET_DIR="bundle/${OS}-${ARCH}"
+          BUILT_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Build rpm entries JSON array using python3 for correct escaping
+          python3 - <<PYEOF
+          import json, os, hashlib, sys
+
+          target_dir = "${TARGET_DIR}"
+          rpms = []
+          for fname in sorted(os.listdir(target_dir)):
+              if not fname.endswith('.rpm'):
+                  continue
+              fpath = os.path.join(target_dir, fname)
+              h = hashlib.sha256()
+              with open(fpath, 'rb') as f:
+                  for chunk in iter(lambda: f.read(65536), b''):
+                      h.update(chunk)
+              rpms.append({
+                  "name": fname,
+                  "sha256": h.hexdigest(),
+                  "size": os.path.getsize(fpath)
+              })
+
+          manifest = {
+              "schema_version": 1,
+              "slurm_version": "${VERSION}",
+              "clustr_release": int("${CLUSTR_RELEASE}"),
+              "distro": "${OS}",
+              "arch": "${ARCH}",
+              "built_at": "${BUILT_AT}",
+              "build_sha": os.environ.get("GITHUB_SHA", ""),
+              "rpms": rpms,
+              "signing_key_id": "41E51A6653BBA540",
+              "signing_key_fingerprint": "9EDB9E63AB84551E25C1416841E51A6653BBA540",
+              "bundle_sha256": "__PENDING__"
+          }
+
+          with open("bundle/manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+
+          print(f"manifest.json written with {len(rpms)} RPM entries.")
+          PYEOF
+
+      - name: Create bundle tarball and compute SHA256
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          CLUSTR_RELEASE="${{ steps.versions.outputs.clustr_release }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          BUNDLE_NAME="clustr-slurm-bundle-v${VERSION}-clustr${CLUSTR_RELEASE}-${OS}-${ARCH}.tar.gz"
+
+          echo "Creating ${BUNDLE_NAME} ..."
+          # -C bundle . so paths inside are ./manifest.json, ./RPM-GPG-KEY-clustr,
+          # ./el9-x86_64/, satisfying the repomd.xml sanity check pattern.
+          tar czf "${BUNDLE_NAME}" -C bundle .
+
+          BUNDLE_SHA256=$(sha256sum "${BUNDLE_NAME}" | awk '{print $1}')
+          echo "Bundle SHA256: ${BUNDLE_SHA256}"
+
+          # Write .sha256 sidecar
+          echo "${BUNDLE_SHA256}  ${BUNDLE_NAME}" > "${BUNDLE_NAME}.sha256"
+
+          # Update the RELEASE-LEVEL manifest.json (the one uploaded separately
+          # to the GitHub Release).  This is the authoritative bundle_sha256 that
+          # PR3 reads to embed into the clustr-server binary via ldflags.
+          # The manifest inside the tarball keeps __PENDING__ intentionally.
+          python3 -c "
+          import json
+          with open('bundle/manifest.json') as f:
+              m = json.load(f)
+          m['bundle_sha256'] = '${BUNDLE_SHA256}'
+          with open('bundle/manifest.json', 'w') as f:
+              json.dump(m, f, indent=2)
+          print('Release-level manifest.json updated with bundle_sha256.')
+          "
+
+          echo "bundle_name=${BUNDLE_NAME}" | tee -a "$GITHUB_OUTPUT"
+          echo "bundle_sha256=${BUNDLE_SHA256}" | tee -a "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "--- Bundle summary ---"
+          echo "  File     : ${BUNDLE_NAME}"
+          echo "  SHA256   : ${BUNDLE_SHA256}"
+          ls -lh "${BUNDLE_NAME}"
+
+      # ── Sanity check ──────────────────────────────────────────────────────
+      - name: Sanity check bundle contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_NAME="${{ steps.bundle.outputs.bundle_name }}"
+
+          echo "--- Bundle contents (first 60 lines) ---"
+          tar tzf "${BUNDLE_NAME}" | head -60
+
+          echo ""
+          echo "--- Checking for repomd.xml ---"
+          if ! tar tzf "${BUNDLE_NAME}" | grep -q "^\./el9-x86_64/repodata/repomd\.xml$"; then
+            echo "FATAL: repomd.xml not found at expected path ./el9-x86_64/repodata/repomd.xml"
+            echo "Actual paths containing 'repomd':"
+            tar tzf "${BUNDLE_NAME}" | grep -i repomd || echo "  (none)"
+            exit 1
+          fi
+          echo "repomd.xml present at ./el9-x86_64/repodata/repomd.xml — OK"
+
+          echo ""
+          echo "--- Release-level manifest.json ---"
+          cat bundle/manifest.json
+
+      # ── Upload artifacts for the release job ─────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: slurm-build-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: |
+            rpmbuild/RPMS/x86_64/*.rpm
+            ${{ steps.bundle.outputs.bundle_name }}
+            ${{ steps.bundle.outputs.bundle_name }}.sha256
+            bundle/manifest.json
+            bundle/RPM-GPG-KEY-clustr
+            rpmbuild-output.log
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── Release job ───────────────────────────────────────────────────────────
+  # Runs after all build matrix jobs pass.  Downloads build artifacts,
+  # creates the GitHub Release, and uploads all assets.
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slurm-build-*
+          merge-multiple: true
+          path: release-assets/
+
+      - name: List release assets
+        shell: bash
+        run: |
+          echo "--- Release assets ---"
+          find release-assets/ -type f | sort
+
+      # ── Parse release metadata ─────────────────────────────────────────────
+      - name: Parse release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}" | tee -a "$GITHUB_OUTPUT"
+
+          # Extract slurm version and clustr release number from tag
+          # Tag format: slurm-v<version>-clustr<N>
+          SLURM_VERSION=$(echo "${TAG}" | sed 's/slurm-v\(.*\)-clustr[0-9]*/\1/')
+          CLUSTR_N=$(echo "${TAG}" | sed 's/.*-clustr\([0-9]*\)$/\1/')
+          echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "clustr_n=${CLUSTR_N}" | tee -a "$GITHUB_OUTPUT"
+
+          # Read bundle SHA256 from the release-level manifest.json
+          BUNDLE_SHA256=$(python3 -c "
+          import json
+          with open('release-assets/manifest.json') as f:
+              m = json.load(f)
+          print(m['bundle_sha256'])
+          ")
+          echo "bundle_sha256=${BUNDLE_SHA256}" | tee -a "$GITHUB_OUTPUT"
+
+          echo "  tag           : ${TAG}"
+          echo "  slurm_version : ${SLURM_VERSION}"
+          echo "  clustr_n      : ${CLUSTR_N}"
+          echo "  bundle_sha256 : ${BUNDLE_SHA256}"
+
+      # ── Create the GitHub Release ──────────────────────────────────────────
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          SLURM_VERSION="${{ steps.meta.outputs.slurm_version }}"
+          CLUSTR_N="${{ steps.meta.outputs.clustr_n }}"
+          BUNDLE_SHA256="${{ steps.meta.outputs.bundle_sha256 }}"
+
+          BUNDLE_FILE=$(find release-assets/ -name 'clustr-slurm-bundle-*.tar.gz' | head -1)
+          BUNDLE_NAME=$(basename "${BUNDLE_FILE}")
+
+          cat > /tmp/release-notes.md << NOTES
+          ## Slurm ${SLURM_VERSION} — clustr release ${CLUSTR_N}
+
+          Built from the upstream SchedMD tarball. All RPMs signed with the clustr Release Signing Key.
+
+          ### Signing key
+          - Key ID: \`41E51A6653BBA540\`
+          - Fingerprint: \`9EDB9E63AB84551E25C1416841E51A6653BBA540\`
+          - Public key: \`RPM-GPG-KEY-clustr\` (attached to this release)
+
+          ### Bundle SHA256 (for PR3 ldflags)
+          \`\`\`
+          ${BUNDLE_SHA256}  ${BUNDLE_NAME}
+          \`\`\`
+
+          ### Install via clustr-server (PR3)
+          \`\`\`
+          clustr-serverd bundle install --from-release ${TAG}
+          \`\`\`
+
+          ### Verify RPM signatures manually
+          \`\`\`bash
+          rpm --import RPM-GPG-KEY-clustr
+          rpm -K slurm-*.rpm
+          \`\`\`
+
+          ### Assets
+          - \`${BUNDLE_NAME}\` — canonical install artifact (signed RPMs + repodata + key + manifest)
+          - \`${BUNDLE_NAME}.sha256\` — bundle SHA256 sidecar
+          - \`manifest.json\` — build provenance, per-RPM SHA256s, bundle SHA256
+          - \`RPM-GPG-KEY-clustr\` — clustr release signing public key
+          - \`slurm-*.rpm\` — individual signed RPMs (for \`rpm -K\` spot-check)
+          - \`BUILD-LOG.txt\` — full rpmbuild stdout/stderr
+          NOTES
+
+          # Collect assets — RPMs, bundle, sidecar, manifest, key, build log
+          ASSET_ARGS=()
+          ASSET_ARGS+=("${BUNDLE_FILE}")
+          ASSET_ARGS+=("${BUNDLE_FILE}.sha256")
+          ASSET_ARGS+=("release-assets/manifest.json")
+          ASSET_ARGS+=("release-assets/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
+
+          for RPM in release-assets/*.rpm; do
+            [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
+          done
+
+          if [ -f "release-assets/rpmbuild-output.log" ]; then
+            ASSET_ARGS+=("release-assets/rpmbuild-output.log#BUILD-LOG.txt")
+          fi
+
+          echo "Creating GitHub Release for tag: ${TAG}"
+          echo "Number of assets: ${#ASSET_ARGS[@]}"
+
+          gh release create "${TAG}" \
+            --title "Slurm ${SLURM_VERSION} (clustr${CLUSTR_N})" \
+            --notes-file /tmp/release-notes.md \
+            "${ASSET_ARGS[@]}"
+
+          echo ""
+          echo "Release URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: Print bundle SHA256 for PR3 ldflags
+        shell: bash
+        run: |
+          echo ""
+          echo "================================================================"
+          echo "  Bundle SHA256 (embed in clustr-server binary via ldflags):"
+          echo "  ${{ steps.meta.outputs.bundle_sha256 }}"
+          echo "================================================================"
