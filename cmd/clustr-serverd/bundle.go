@@ -68,11 +68,14 @@ type installedVersion struct {
 }
 
 // manifest is the subset of manifest.json we read for sanity-checking.
+// Schema version 3 (clustr5) adds HasDepsSubdir to indicate the bundle
+// ships a separate el9-x86_64-deps/ subtree for passthrough RPMs.
 type manifest struct {
 	SlurmVersion  string `json:"slurm_version"`
 	ClustrRelease int    `json:"clustr_release"`
 	Distro        string `json:"distro"`
 	Arch          string `json:"arch"`
+	HasDepsSubdir bool   `json:"has_deps_subdir"` // schema v3: deps subdir present
 }
 
 func init() {
@@ -222,6 +225,15 @@ func installFromFile(repoDir, path, expectedSHA256 string) error {
 }
 
 // extractAndInstall verifies + atomically installs the bundle tarball at srcPath.
+//
+// GAP-17 (clustr5): the bundle now contains two repo subdirectories:
+//   - <distro>-<arch>/      — clustr-built RPMs (slurm-*, libjwt-*)
+//   - <distro>-<arch>-deps/ — passthrough Rocky/EPEL RPMs (munge, pkgconf, …)
+//
+// Both are promoted into repoDir.  All three GPG keys (clustr, rocky-9, EPEL-9)
+// are written to repoDir root so rpm --import can find them without a chroot.
+// The .installed-version marker is written inside the primary subDir only
+// (backward-compat with bundle list + rollback logic which keyed on that file).
 func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) error {
 	// Ensure repo dir exists.
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
@@ -243,11 +255,28 @@ func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) err
 		return fmt.Errorf("extract bundle: %w", err)
 	}
 
-	// Verify RPM signatures.
-	fmt.Println("Verifying RPM signatures...")
+	// Two-pass RPM signature verification (GAP-17).
+	// Pass 1: clustr-only keyring against el9-x86_64/.
+	// Pass 2: rocky+epel keyring against el9-x86_64-deps/ (if present).
+	fmt.Println("Verifying RPM signatures (pass 1: clustr-built RPMs)...")
 	if err := verifyRPMSignatures(stagingDir, mf.Distro+"-"+mf.Arch); err != nil {
-		return fmt.Errorf("RPM signature verification failed: %w", err)
+		return fmt.Errorf("RPM signature verification (clustr pass) failed: %w", err)
 	}
+	fmt.Println("  Pass 1 OK")
+
+	if mf.HasDepsSubdir {
+		fmt.Println("Verifying RPM signatures (pass 2: Rocky/EPEL dep RPMs)...")
+		if err := verifyDepRPMSignatures(stagingDir, mf.Distro+"-"+mf.Arch+"-deps"); err != nil {
+			return fmt.Errorf("RPM signature verification (deps pass) failed: %w", err)
+		}
+		fmt.Println("  Pass 2 OK")
+
+		// Cross-contamination check: no clustr-built RPMs may appear in deps subdir.
+		if err := checkCrossContamination(stagingDir, mf.Distro+"-"+mf.Arch, mf.Distro+"-"+mf.Arch+"-deps"); err != nil {
+			return fmt.Errorf("cross-contamination check failed: %w", err)
+		}
+	}
+
 	fmt.Println("RPM signatures OK")
 
 	// Idempotency: check if the same version is already installed.
@@ -261,17 +290,18 @@ func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) err
 		}
 	}
 
-	// Atomic swap: move current → .previous-<timestamp>, then staging → live.
+	// Atomic swap: move current primary subdir → .previous-<timestamp>, then staging → live.
+	// The deps subdir is handled separately below.
 	destDir := filepath.Join(repoDir, subDir)
 	stagingSubDir := filepath.Join(stagingDir, subDir)
 
+	prevDir := ""
 	if _, err := os.Stat(destDir); err == nil {
-		prevDir := filepath.Join(repoDir, ".previous-"+time.Now().UTC().Format("20060102T150405Z"))
+		prevDir = filepath.Join(repoDir, ".previous-"+time.Now().UTC().Format("20060102T150405Z"))
 		if err := os.Rename(destDir, prevDir); err != nil {
 			return fmt.Errorf("rotate current bundle to previous: %w", err)
 		}
 		fmt.Printf("Archived current bundle to %s\n", filepath.Base(prevDir))
-		// Prune all but the most recent .previous-* to bound disk use.
 		_ = pruneOldPreviousDirs(repoDir, 1)
 	}
 
@@ -279,7 +309,25 @@ func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) err
 		return fmt.Errorf("promote staging bundle: %w", err)
 	}
 
-	// Write .installed-version.
+	// Promote deps subdir if present.
+	if mf.HasDepsSubdir {
+		depsSubDir := mf.Distro + "-" + mf.Arch + "-deps"
+		stagingDepsDir := filepath.Join(stagingDir, depsSubDir)
+		destDepsDir := filepath.Join(repoDir, depsSubDir)
+
+		// Remove stale deps dir if it exists (no need to keep previous for deps).
+		if _, err := os.Stat(destDepsDir); err == nil {
+			if err := os.RemoveAll(destDepsDir); err != nil {
+				return fmt.Errorf("remove stale deps dir: %w", err)
+			}
+		}
+		if err := os.Rename(stagingDepsDir, destDepsDir); err != nil {
+			// Non-fatal if staging deps dir doesn't exist (old-format bundle).
+			fmt.Printf("Warning: deps subdir not found in staging: %v\n", err)
+		}
+	}
+
+	// Write .installed-version in the primary subdir.
 	iv := installedVersion{
 		Distro:        mf.Distro,
 		Arch:          mf.Arch,
@@ -293,9 +341,11 @@ func extractAndInstall(repoDir, srcPath, bundleSHA256, bundleVersion string) err
 		return fmt.Errorf("write .installed-version: %w", err)
 	}
 
-	// Write RPM-GPG-KEY-clustr from embedded key (source of truth).
-	if err := server.WriteGPGKeyToRepo(repoDir); err != nil {
-		return fmt.Errorf("write GPG key: %w", err)
+	// Write all three embedded GPG keys to repoDir root (source of truth).
+	// rpm --import in verifyRPMSignatures uses these; chroot finalize writes from
+	// the server.WriteAllGPGKeysToRepo helper into /etc/pki/rpm-gpg/.
+	if err := server.WriteAllGPGKeysToRepo(repoDir); err != nil {
+		return fmt.Errorf("write GPG keys: %w", err)
 	}
 
 	fmt.Printf("Bundle %s installed successfully at %s\n", bundleVersion, destDir)
@@ -578,44 +628,104 @@ func extractBundle(srcPath, destDir string) (*manifest, error) {
 	return mf, nil
 }
 
-// verifyRPMSignatures calls "rpm -K" on every RPM in the subDir to verify
-// that each is signed by a known GPG key.  The embedded clustr pubkey is
-// imported into a throw-away RPM macro home directory first.
+// verifyRPMSignatures calls "rpm -K" on every RPM in the primary subDir
+// (el9-x86_64/) to verify that each is signed by the clustr GPG key only.
+// An isolated rpm db (--dbpath) is used so the system db is not polluted.
+//
+// This is Pass 1 of the two-pass GAP-17 verification scheme.
+// Pass 2 (dep RPMs against Rocky+EPEL keys) is handled by verifyDepRPMSignatures.
 //
 // Shell-out is explicitly acceptable here per the design doc ("shelling out
 // is fine for MVP").  rpm is available on the target host (Rocky Linux 9).
 func verifyRPMSignatures(stagingDir, subDirName string) error {
+	return runRPMKCheck(stagingDir, subDirName, server.GPGKeyBytes())
+}
+
+// verifyDepRPMSignatures calls "rpm -K" on every RPM in the deps subDir
+// (el9-x86_64-deps/) using a keyring containing only the Rocky Linux 9 and
+// EPEL 9 release public keys.  This is Pass 2 of the GAP-17 scheme.
+func verifyDepRPMSignatures(stagingDir, depsSubDirName string) error {
+	return runRPMKCheck(stagingDir, depsSubDirName, server.RockyKeyBytes(), server.EPELKeyBytes())
+}
+
+// checkCrossContamination verifies that no RPM exists in both the primary subdir
+// and the deps subdir by filename.  A clustr-signed RPM in the deps subdir (or
+// vice versa) indicates a build-time staging error and is treated as a hard fail.
+func checkCrossContamination(stagingDir, primarySubDir, depsSubDir string) error {
+	primaryDir := filepath.Join(stagingDir, primarySubDir)
+	depsDir := filepath.Join(stagingDir, depsSubDir)
+
+	// Build set of RPM names in primary subdir.
+	primaryEntries, err := os.ReadDir(primaryDir)
+	if err != nil {
+		return fmt.Errorf("read primary dir: %w", err)
+	}
+	primaryRPMs := make(map[string]bool, len(primaryEntries))
+	for _, e := range primaryEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".rpm") {
+			primaryRPMs[e.Name()] = true
+		}
+	}
+
+	// Check deps dir for any RPMs also present in primary.
+	depsEntries, err := os.ReadDir(depsDir)
+	if err != nil {
+		return fmt.Errorf("read deps dir: %w", err)
+	}
+	var contaminated []string
+	for _, e := range depsEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".rpm") {
+			if primaryRPMs[e.Name()] {
+				contaminated = append(contaminated, e.Name())
+			}
+		}
+	}
+	if len(contaminated) > 0 {
+		return fmt.Errorf("cross-contamination: %d RPM(s) found in both %s and %s: %s",
+			len(contaminated), primarySubDir, depsSubDir, strings.Join(contaminated, ", "))
+	}
+	return nil
+}
+
+// runRPMKCheck is the shared implementation for verifyRPMSignatures and
+// verifyDepRPMSignatures.  It writes the provided key bytes into an isolated
+// rpm db, then runs "rpm -K" on all .rpm files in the given subdirectory.
+// Multiple key byte slices may be passed; each is imported individually
+// (rpm --import accepts one key per invocation).
+func runRPMKCheck(stagingDir, subDirName string, keySlices ...[]byte) error {
 	rpmDir := filepath.Join(stagingDir, subDirName)
 	entries, err := os.ReadDir(rpmDir)
 	if err != nil {
-		return fmt.Errorf("read rpm dir: %w", err)
+		return fmt.Errorf("read rpm dir %s: %w", rpmDir, err)
 	}
 
-	// Write embedded pubkey to a temp file for rpm --import.
-	keyFile, err := os.CreateTemp("", "clustr-gpg-*.asc")
-	if err != nil {
-		return fmt.Errorf("create temp key file: %w", err)
-	}
-	defer os.Remove(keyFile.Name())
-
-	if _, err := keyFile.Write(server.GPGKeyBytes()); err != nil {
-		return fmt.Errorf("write temp key file: %w", err)
-	}
-	keyFile.Close()
-
-	// Import the key into a temporary rpm db so we don't pollute the system db.
+	// Create isolated rpm db.
 	tmpDB, err := os.MkdirTemp("", "clustr-rpmdb-*")
 	if err != nil {
 		return fmt.Errorf("create temp rpm db: %w", err)
 	}
 	defer os.RemoveAll(tmpDB)
 
-	// rpm --import with --dbpath uses an isolated db.
-	importCmd := exec.Command("rpm", "--dbpath", tmpDB, "--import", keyFile.Name()) // #nosec G204 -- binary hardcoded; args are clustr-controlled tmp paths
-	if out, err := importCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("rpm --import: %w\n%s", err, string(out))
+	// Import each key into the isolated db.
+	for i, keyBytes := range keySlices {
+		keyFile, err := os.CreateTemp("", fmt.Sprintf("clustr-gpg-%d-*.asc", i))
+		if err != nil {
+			return fmt.Errorf("create temp key file: %w", err)
+		}
+		_, writeErr := keyFile.Write(keyBytes)
+		keyName := keyFile.Name()
+		keyFile.Close()
+		defer os.Remove(keyName)
+		if writeErr != nil {
+			return fmt.Errorf("write temp key file: %w", writeErr)
+		}
+		importCmd := exec.Command("rpm", "--dbpath", tmpDB, "--import", keyName) // #nosec G204 -- binary hardcoded; args are clustr-controlled tmp paths
+		if out, err := importCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("rpm --import key %d: %w\n%s", i, err, string(out))
+		}
 	}
 
+	// Collect RPMs.
 	var rpms []string
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".rpm") {
@@ -626,12 +736,12 @@ func verifyRPMSignatures(stagingDir, subDirName string) error {
 		return fmt.Errorf("no RPMs found in %s", rpmDir)
 	}
 
-	// rpm -K verifies the signature on each package.
+	// rpm -K verifies the signature on each package against the imported keyring.
 	args := append([]string{"--dbpath", tmpDB, "-K"}, rpms...)
 	checkCmd := exec.Command("rpm", args...) // #nosec G204 -- binary hardcoded; RPM paths from staging dir under clustr control
 	out, err := checkCmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("rpm -K failed: %w\n%s", err, string(out))
+		return fmt.Errorf("rpm -K failed for %s: %w\n%s", subDirName, err, string(out))
 	}
 	return nil
 }

@@ -115,3 +115,94 @@ func TestWriteGPGKeyToRepo_Mode(t *testing.T) {
 		t.Fatalf("file mode = %04o, want %04o", got, want)
 	}
 }
+
+// TestRockyKeyBytes verifies the embedded Rocky 9 key is non-empty with a PGP header.
+func TestRockyKeyBytes(t *testing.T) {
+	data := server.RockyKeyBytes()
+	if len(data) == 0 {
+		t.Fatal("RockyKeyBytes() returned empty slice")
+	}
+	const header = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+	if !containsHeader(data, header) {
+		t.Fatalf("RockyKeyBytes() does not contain PGP header; got: %.80s", string(data))
+	}
+}
+
+// TestEPELKeyBytes verifies the embedded EPEL 9 key is non-empty with a PGP header.
+func TestEPELKeyBytes(t *testing.T) {
+	data := server.EPELKeyBytes()
+	if len(data) == 0 {
+		t.Fatal("EPELKeyBytes() returned empty slice")
+	}
+	const header = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+	if !containsHeader(data, header) {
+		t.Fatalf("EPELKeyBytes() does not contain PGP header; got: %.80s", string(data))
+	}
+}
+
+// TestWriteAllGPGKeysToRepo verifies that all three key files are written correctly.
+func TestWriteAllGPGKeysToRepo(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := server.WriteAllGPGKeysToRepo(dir); err != nil {
+		t.Fatalf("WriteAllGPGKeysToRepo: %v", err)
+	}
+
+	wantFiles := map[string][]byte{
+		"RPM-GPG-KEY-clustr":  server.GPGKeyBytes(),
+		"RPM-GPG-KEY-rocky-9": server.RockyKeyBytes(),
+		"RPM-GPG-KEY-EPEL-9":  server.EPELKeyBytes(),
+	}
+	for name, wantData := range wantFiles {
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("key file %s not written: %v", name, err)
+			continue
+		}
+		if string(data) != string(wantData) {
+			t.Errorf("key file %s content mismatch: got len=%d want len=%d", name, len(data), len(wantData))
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("stat %s: %v", name, err)
+			continue
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %04o, want 0644", name, info.Mode().Perm())
+		}
+	}
+}
+
+// TestWriteAllGPGKeysToRepo_Idempotent verifies calling twice is safe.
+func TestWriteAllGPGKeysToRepo_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := server.WriteAllGPGKeysToRepo(dir); err != nil {
+		t.Fatalf("first WriteAllGPGKeysToRepo: %v", err)
+	}
+	if err := server.WriteAllGPGKeysToRepo(dir); err != nil {
+		t.Fatalf("second WriteAllGPGKeysToRepo: %v", err)
+	}
+
+	// Verify all files still have correct content after the second call.
+	for _, name := range []string{"RPM-GPG-KEY-clustr", "RPM-GPG-KEY-rocky-9", "RPM-GPG-KEY-EPEL-9"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("read %s: %v", name, err)
+		}
+		if len(data) == 0 {
+			t.Errorf("%s is empty after idempotent write", name)
+		}
+	}
+}
+
+// containsHeader checks whether data contains the given string within the first 100 bytes.
+func containsHeader(data []byte, header string) bool {
+	for i := 0; i+len(header) <= len(data) && i < 100; i++ {
+		if string(data[i:i+len(header)]) == header {
+			return true
+		}
+	}
+	return false
+}

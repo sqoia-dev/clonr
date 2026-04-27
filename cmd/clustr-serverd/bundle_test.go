@@ -375,3 +375,113 @@ func TestRunBundleRollback_NoPrevious(t *testing.T) {
 		t.Fatal("expected error when no previous bundle exists")
 	}
 }
+
+// --- GAP-17 hardening tests ---
+
+// TestCheckCrossContamination_Clean verifies no error when no overlap exists.
+func TestCheckCrossContamination_Clean(t *testing.T) {
+	stagingDir := t.TempDir()
+
+	primary := filepath.Join(stagingDir, "el9-x86_64")
+	deps := filepath.Join(stagingDir, "el9-x86_64-deps")
+	_ = os.MkdirAll(primary, 0o755)
+	_ = os.MkdirAll(deps, 0o755)
+
+	// Write distinct RPMs to each dir.
+	_ = os.WriteFile(filepath.Join(primary, "slurm-24.11.4-1.el9.x86_64.rpm"), []byte("fake"), 0o644)
+	_ = os.WriteFile(filepath.Join(deps, "munge-0.5.16-1.el9.x86_64.rpm"), []byte("fake"), 0o644)
+
+	if err := checkCrossContamination(stagingDir, "el9-x86_64", "el9-x86_64-deps"); err != nil {
+		t.Errorf("expected no contamination, got: %v", err)
+	}
+}
+
+// TestCheckCrossContamination_Contaminated verifies a hard fail when the same
+// RPM filename appears in both subdirs.
+func TestCheckCrossContamination_Contaminated(t *testing.T) {
+	stagingDir := t.TempDir()
+
+	primary := filepath.Join(stagingDir, "el9-x86_64")
+	deps := filepath.Join(stagingDir, "el9-x86_64-deps")
+	_ = os.MkdirAll(primary, 0o755)
+	_ = os.MkdirAll(deps, 0o755)
+
+	// Write the same RPM name to both dirs (simulates a build staging error).
+	const sharedRPM = "slurm-24.11.4-1.el9.x86_64.rpm"
+	_ = os.WriteFile(filepath.Join(primary, sharedRPM), []byte("fake"), 0o644)
+	_ = os.WriteFile(filepath.Join(deps, sharedRPM), []byte("fake"), 0o644)
+
+	if err := checkCrossContamination(stagingDir, "el9-x86_64", "el9-x86_64-deps"); err == nil {
+		t.Error("expected cross-contamination error, got nil")
+	}
+}
+
+// TestCheckCrossContamination_EmptyDeps verifies that an empty deps dir is not
+// flagged as contaminated.
+func TestCheckCrossContamination_EmptyDeps(t *testing.T) {
+	stagingDir := t.TempDir()
+
+	primary := filepath.Join(stagingDir, "el9-x86_64")
+	deps := filepath.Join(stagingDir, "el9-x86_64-deps")
+	_ = os.MkdirAll(primary, 0o755)
+	_ = os.MkdirAll(deps, 0o755)
+
+	_ = os.WriteFile(filepath.Join(primary, "slurm-24.11.4-1.el9.x86_64.rpm"), []byte("fake"), 0o644)
+	// deps dir is empty.
+
+	if err := checkCrossContamination(stagingDir, "el9-x86_64", "el9-x86_64-deps"); err != nil {
+		t.Errorf("empty deps dir should not cause contamination error: %v", err)
+	}
+}
+
+// TestManifestHasDepsSubdir verifies that the HasDepsSubdir field is
+// correctly read from the manifest (schema v3).
+func TestManifestHasDepsSubdir(t *testing.T) {
+	// Build a fake bundle with has_deps_subdir: true in manifest.json.
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "bundle.tar.gz")
+	f, err := os.Create(tarPath)
+	if err != nil {
+		t.Fatalf("create tar: %v", err)
+	}
+
+	mfData, _ := json.Marshal(map[string]interface{}{
+		"slurm_version":   "24.11.4",
+		"clustr_release":  5,
+		"distro":          "el9",
+		"arch":            "x86_64",
+		"has_deps_subdir": true,
+	})
+
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	prefix := "clustr-slurm-bundle/"
+
+	writetar(t, tw, prefix+"manifest.json", mfData)
+	writetar(t, tw, prefix+"RPM-GPG-KEY-clustr", []byte("fake-key"))
+	writetar(t, tw, prefix+"el9-x86_64/"+"slurm-24.11.4-1.el9.x86_64.rpm", []byte("fake-rpm"))
+	writetar(t, tw, prefix+"el9-x86_64/"+"repodata/repomd.xml", []byte("<repomd/>"))
+	writetar(t, tw, prefix+"el9-x86_64-deps/"+"munge-0.5.16-1.el9.x86_64.rpm", []byte("fake-dep-rpm"))
+	writetar(t, tw, prefix+"el9-x86_64-deps/"+"repodata/repomd.xml", []byte("<repomd/>"))
+
+	_ = tw.Close()
+	_ = gw.Close()
+	f.Close()
+
+	dest := t.TempDir()
+	mf, err := extractBundle(tarPath, dest)
+	if err != nil {
+		t.Fatalf("extractBundle: %v", err)
+	}
+	if !mf.HasDepsSubdir {
+		t.Error("manifest.HasDepsSubdir = false, want true")
+	}
+	if mf.ClustrRelease != 5 {
+		t.Errorf("manifest.ClustrRelease = %d, want 5", mf.ClustrRelease)
+	}
+	// Verify the deps subdir was extracted.
+	depsPath := filepath.Join(dest, "el9-x86_64-deps", "munge-0.5.16-1.el9.x86_64.rpm")
+	if _, err := os.Stat(depsPath); err != nil {
+		t.Errorf("deps RPM not extracted at %s: %v", depsPath, err)
+	}
+}
