@@ -213,16 +213,17 @@ jobs:
           echo ""
           echo "Both SHA256 checks passed."
 
-      # ── Import clustr signing key ─────────────────────────────────────────
-      # Use a temp GPG homedir to avoid polluting the container's default
-      # keyring.  Import with --pinentry-mode loopback so no TTY is needed.
+      # ── Import clustr RPM signing key ─────────────────────────────────────
+      # Strategy: import the key into a temp GNUPGHOME, then re-export it
+      # without a passphrase into a second GNUPGHOME that rpm --addsign will
+      # use.  Stripping the passphrase within the ephemeral CI runner is safe
+      # because: (a) the runner is isolated and ephemeral, (b) the original
+      # passphrase-protected key remains only in the GitHub secret, (c) the
+      # unprotected copy never leaves the runner.  This avoids the complexity
+      # of gpg-agent pinentry setup, which varies across gpg versions.
       #
-      # Non-interactive rpm --addsign: we override %__gpg_sign_cmd in
-      # ~/.rpmmacros to pass the passphrase via --passphrase-file.
-      # All rpmmacros lines are written with printf to avoid heredoc issues.
-      #
-      # GNUPGHOME and GPG_PASS_FILE are exported via GITHUB_ENV so they
-      # persist across all subsequent steps in this job.
+      # GNUPGHOME is exported via GITHUB_ENV so it persists across all
+      # subsequent steps in this job.
       - name: Import clustr RPM signing key
         shell: bash
         env:
@@ -231,40 +232,64 @@ jobs:
         run: |
           set -euo pipefail
 
-          GPG_HOME=$(mktemp -d)
-          chmod 700 "$GPG_HOME"
-          echo "GNUPGHOME=${GPG_HOME}" >> "$GITHUB_ENV"
+          # Step 1: Import into a staging keyring with the original passphrase
+          STAGING_HOME=$(mktemp -d)
+          chmod 700 "$STAGING_HOME"
 
           PASS_FILE=$(mktemp)
           chmod 600 "$PASS_FILE"
           printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
-          echo "GPG_PASS_FILE=${PASS_FILE}" >> "$GITHUB_ENV"
 
           printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
-            gpg --homedir "${GPG_HOME}" \
+            gpg --homedir "${STAGING_HOME}" \
                 --batch \
                 --pinentry-mode loopback \
                 --passphrase-file "${PASS_FILE}" \
                 --import
 
-          gpg --homedir "${GPG_HOME}" --list-secret-keys
+          # Step 2: Re-export to a signing keyring WITHOUT passphrase.
+          # gpg --change-passphrase with empty passphrase strips it.
+          SIGN_HOME=$(mktemp -d)
+          chmod 700 "$SIGN_HOME"
 
-          # Write ~/.rpmmacros with printf to avoid heredoc YAML parse issues.
-          # %__gpg_sign_cmd overrides the gpg invocation used by rpm --addsign.
-          #
-          # Argument order is load-bearing:
-          #   -sbo %{__signature_filename} %{__plaintext_filename}
-          # matches the default RPM sign command format on EL9 (rpm 4.16+).
-          # The -s (sign), -b (binary), -o (output) flags are the standard
-          # detached-sig form that RPM expects.  The output file must come
-          # BEFORE the input file.
+          # Export the secret key from staging
+          gpg --homedir "${STAGING_HOME}" \
+              --batch \
+              --pinentry-mode loopback \
+              --passphrase-file "${PASS_FILE}" \
+              --export-secret-keys "41E51A6653BBA540" | \
+            gpg --homedir "${SIGN_HOME}" \
+                --batch \
+                --import
+
+          # Strip passphrase: change it to empty
+          printf '%s\n\n\n' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" | \
+            gpg --homedir "${SIGN_HOME}" \
+                --batch \
+                --pinentry-mode loopback \
+                --passphrase-fd 0 \
+                --passwd "41E51A6653BBA540" 2>/dev/null || true
+
+          # Verify: sign a test message without passphrase prompt
+          echo "ci-test" | \
+            gpg --homedir "${SIGN_HOME}" \
+                --batch \
+                --pinentry-mode loopback \
+                --passphrase "" \
+                --clearsign \
+                --local-user "41E51A6653BBA540" \
+                -o /dev/null
+
+          echo "GNUPGHOME=${SIGN_HOME}" >> "$GITHUB_ENV"
+          rm -rf "${STAGING_HOME}" "${PASS_FILE}"
+
+          # Write minimal rpmmacros
           printf '%%_signature gpg\n' > ~/.rpmmacros
           printf '%%_gpg_name 41E51A6653BBA540\n' >> ~/.rpmmacros
           printf '%%__gpg /usr/bin/gpg\n' >> ~/.rpmmacros
-          printf '%%__gpg_sign_cmd %%{__gpg} gpg --no-verbose --no-armor --homedir %s --batch --pinentry-mode loopback --passphrase-file %s --no-secmem-warning -u "%%{_gpg_name}" --digest-algo sha256 -sbo %%{__signature_filename} %%{__plaintext_filename}\n' \
-            "${GPG_HOME}" "${PASS_FILE}" >> ~/.rpmmacros
 
-          echo "rpmmacros configured:"
+          gpg --homedir "${SIGN_HOME}" --list-secret-keys
+          echo "rpmmacros:"
           cat ~/.rpmmacros
 
       # ── Build RPMs ────────────────────────────────────────────────────────
