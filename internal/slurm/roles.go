@@ -5,10 +5,24 @@ package slurm
 const (
 	RoleController = "controller"
 	RoleCompute    = "compute"
-	RoleLogin      = "login"
-	RoleDBD        = "dbd"
-	RoleNone       = "none"
+	// RoleWorker is a deprecated alias for RoleCompute accepted on all read paths.
+	// The canonical value is "compute"; "worker" was the original API role string
+	// before the rename. Scheduled for removal post-v1.0 once all DB rows and
+	// API callers have been migrated. Do not emit "worker" in new code — use
+	// RoleCompute instead.
+	RoleWorker = "worker"
+	RoleLogin  = "login"
+	RoleDBD    = "dbd"
+	RoleNone   = "none"
 )
+
+// IsComputeRole returns true when the role string represents a compute (slurmd)
+// role, accepting both the canonical "compute" value and the deprecated "worker"
+// alias. Use this instead of a raw hasRole check anywhere the two strings must
+// be treated equivalently.
+func IsComputeRole(role string) bool {
+	return role == RoleCompute || role == RoleWorker
+}
 
 // FilesForRoles returns which config files should be deployed to a node given
 // its roles. Files are deduplicated; order is stable.
@@ -20,7 +34,7 @@ func FilesForRoles(roles []string) []string {
 			for _, f := range []string{"slurm.conf", "cgroup.conf", "topology.conf", "plugstack.conf", "slurmdbd.conf"} {
 				set[f] = struct{}{}
 			}
-		case RoleCompute:
+		case RoleCompute, RoleWorker: // RoleWorker is deprecated alias
 			for _, f := range []string{"slurm.conf", "gres.conf", "cgroup.conf", "plugstack.conf"} {
 				set[f] = struct{}{}
 			}
@@ -57,7 +71,7 @@ func ServicesForRoles(roles []string) []string {
 		case RoleController:
 			set["slurmctld.service"] = struct{}{}
 			hasSlurmRole = true
-		case RoleCompute:
+		case RoleCompute, RoleWorker: // RoleWorker is deprecated alias
 			set["slurmd.service"] = struct{}{}
 			hasSlurmRole = true
 		case RoleDBD:
@@ -90,7 +104,7 @@ func ScriptTypesForRoles(roles []string) []string {
 			for _, s := range []string{"PrologSlurmctld", "EpilogSlurmctld"} {
 				set[s] = struct{}{}
 			}
-		case RoleCompute:
+		case RoleCompute, RoleWorker: // RoleWorker is deprecated alias
 			for _, s := range []string{"Prolog", "Epilog", "TaskProlog", "TaskEpilog", "HealthCheckProgram", "RebootProgram"} {
 				set[s] = struct{}{}
 			}

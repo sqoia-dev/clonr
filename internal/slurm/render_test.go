@@ -187,6 +187,110 @@ func TestRenderConfig_MapMissingKey_UsesZeroValue(t *testing.T) {
 	mustContain(t, out, "Override=")
 }
 
+// ─── D17: role alias tests ────────────────────────────────────────────────────
+
+// TestIsComputeRole verifies that "compute" and "worker" are treated as
+// equivalent compute roles, and other role strings are not.
+func TestIsComputeRole(t *testing.T) {
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{RoleCompute, true},
+		{RoleWorker, true}, // deprecated alias — must still return true
+		{RoleController, false},
+		{RoleLogin, false},
+		{RoleDBD, false},
+		{RoleNone, false},
+		{"", false},
+		{"unknown", false},
+	}
+	for _, tc := range cases {
+		if got := IsComputeRole(tc.role); got != tc.want {
+			t.Errorf("IsComputeRole(%q) = %v, want %v", tc.role, got, tc.want)
+		}
+	}
+}
+
+// TestFilesForRoles_WorkerAlias verifies that a node with role "worker"
+// receives the same config files as a node with role "compute".
+func TestFilesForRoles_WorkerAlias(t *testing.T) {
+	filesWorker := FilesForRoles([]string{RoleWorker})
+	filesCompute := FilesForRoles([]string{RoleCompute})
+
+	if len(filesWorker) != len(filesCompute) {
+		t.Fatalf("FilesForRoles([worker]) len=%d, want %d (same as [compute])",
+			len(filesWorker), len(filesCompute))
+	}
+	for i, f := range filesCompute {
+		if filesWorker[i] != f {
+			t.Errorf("FilesForRoles([worker])[%d] = %q, want %q", i, filesWorker[i], f)
+		}
+	}
+}
+
+// TestServicesForRoles_WorkerAlias verifies that a node with role "worker"
+// gets slurmd.service enabled, same as a node with role "compute".
+func TestServicesForRoles_WorkerAlias(t *testing.T) {
+	svcsWorker := ServicesForRoles([]string{RoleWorker})
+	svcsCompute := ServicesForRoles([]string{RoleCompute})
+
+	if len(svcsWorker) != len(svcsCompute) {
+		t.Fatalf("ServicesForRoles([worker]) len=%d, want %d (same as [compute])",
+			len(svcsWorker), len(svcsCompute))
+	}
+	for i, s := range svcsCompute {
+		if svcsWorker[i] != s {
+			t.Errorf("ServicesForRoles([worker])[%d] = %q, want %q", i, svcsWorker[i], s)
+		}
+	}
+}
+
+// TestRenderConfig_NodeWithWorkerRole_AppearsInNodeNameBlock verifies that a
+// node in a RenderContext with role "worker" is included in the NodeName block.
+// Regression test for REG-2: render.go previously dropped "worker"-role nodes
+// because the role check only matched "compute".
+func TestRenderConfig_NodeWithWorkerRole_AppearsInNodeNameBlock(t *testing.T) {
+	tmplContent := `{{- range .Nodes}}NodeName={{.NodeName}}
+{{- end}}`
+
+	// Build a context as buildRenderContext would — Nodes only contains entries
+	// that passed the role filter. We directly construct a Nodes slice here to
+	// test that "worker"-role nodes survive the filter check via IsComputeRole.
+	//
+	// The filter itself lives in buildRenderContext; we test IsComputeRole
+	// separately above. This test validates the downstream template rendering
+	// still includes the node once it passes the filter.
+	ctx := RenderContext{
+		ClusterName:        "lab",
+		ControllerHostname: "slurm-controller",
+		Nodes: []NodeRenderData{
+			{
+				NodeID:   "node-ctrl",
+				NodeName: "slurm-controller",
+				Roles:    []string{RoleController, RoleWorker},
+				CPUCount: "2", Sockets: "1", CoresPerSocket: "1", ThreadsPerCore: "2",
+				RealMemoryMB: "3905",
+			},
+			{
+				NodeID:   "node-compute",
+				NodeName: "slurm-compute",
+				Roles:    []string{RoleWorker},
+				CPUCount: "2", Sockets: "1", CoresPerSocket: "1", ThreadsPerCore: "2",
+				RealMemoryMB: "3905",
+			},
+		},
+	}
+
+	out, err := RenderConfig(tmplContent, ctx)
+	if err != nil {
+		t.Fatalf("RenderConfig: %v", err)
+	}
+
+	mustContain(t, out, "NodeName=slurm-controller")
+	mustContain(t, out, "NodeName=slurm-compute")
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func mustContain(t *testing.T, s, sub string) {

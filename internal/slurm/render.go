@@ -170,7 +170,16 @@ func (m *Manager) buildRenderContext(ctx context.Context, nodeID string) (*Rende
 
 	for _, entry := range roleEntries {
 		// Skip nodes with no meaningful compute roles.
-		if !hasRole(entry.Roles, RoleController) && !hasRole(entry.Roles, RoleCompute) {
+		// IsComputeRole accepts both "compute" and the deprecated "worker" alias
+		// (D17: REG-2 fix — render path must match the deploy path in finalize.go).
+		hasCompute := false
+		for _, r := range entry.Roles {
+			if IsComputeRole(r) {
+				hasCompute = true
+				break
+			}
+		}
+		if !hasRole(entry.Roles, RoleController) && !hasCompute {
 			continue
 		}
 

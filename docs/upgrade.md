@@ -307,6 +307,67 @@ Open an issue at `https://github.com/sqoia-dev/clustr/issues`.
 
 ---
 
+## v1.0 Release Notes — Slurm Module One-Time Fixes
+
+### REG-2 — Dual-role controller (D17)
+
+If your existing cluster has a controller node with only the `controller` role
+assigned, and you want `srun -N2` to work in a 1+1 topology (controller +
+compute sharing the same controller VM), add the `worker` role to it:
+
+```bash
+CTRL_NODE_ID="<your-controller-node-id>"
+curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/${CTRL_NODE_ID}/slurm/role \
+  -H "Authorization: Bearer <your-admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["controller", "worker"]}'
+```
+
+Then push a new Slurm config and reimage or restart `slurmd` on the controller.
+Large-cluster operators who do NOT want the controller running compute jobs should
+skip this step — the default remains whatever role you assigned.
+
+### REG-1 — Template fix propagation (D18)
+
+Migration 052 adds `is_clustr_default` to `slurm_config_files`. Existing rows
+default to `0` (operator-owned, never auto-touched).
+
+To propagate a template fix (e.g., `MpiDefault=none`) to a cluster that was
+seeded before the fix landed:
+
+1. Mark the relevant rows as clustr-default (one-time only, for clusters
+   seeded before v1.0):
+
+   ```bash
+   sqlite3 /var/lib/clustr/db/clustr.db \
+     "UPDATE slurm_config_files SET is_clustr_default=1
+      WHERE filename='slurm.conf' AND version=(
+        SELECT MAX(version) FROM slurm_config_files WHERE filename='slurm.conf'
+        AND authored_by='clustr-system'
+      );"
+   ```
+
+2. Call the reseed endpoint (admin API key required):
+
+   ```bash
+   curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/configs/reseed-defaults \
+     -H "Authorization: Bearer <your-admin-key>"
+   # Expected: {"reseeded":["slurm.conf",...],"skipped":[...],"missing":[]}
+   ```
+
+3. Sync the new version to nodes:
+
+   ```bash
+   curl -s -X POST http://10.99.0.1:8080/api/v1/slurm/sync \
+     -H "Authorization: Bearer <your-admin-key>"
+   ```
+
+Future template fixes shipped in new clustr releases propagate to fresh clusters
+automatically (new clusters seed with `is_clustr_default=1`). For existing
+clusters, run steps 2–3 after each upgrade that ships a template change.
+
+---
+
 ## See Also
 
 - [docs/install.md](install.md) — Fresh installation guide

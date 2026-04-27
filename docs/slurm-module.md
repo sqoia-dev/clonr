@@ -405,6 +405,41 @@ compute-002 .. compute-N: role=worker
 After setting roles, regenerate the `slurm.conf` (see §6) before the next
 reimage.
 
+### Role assignment — default and opt-out (D17)
+
+**Small-cluster default:** When you assign the `controller` role to a node, the
+recommended starting point is to assign **both** `controller` and `worker`
+(compute). This lets the controller node also run `slurmd`, so a 1+1 lab
+topology (1 controller + 1 compute) can satisfy `srun -N2` without a third VM.
+
+```bash
+# Dual-role controller (small cluster / lab — the recommended starting point)
+curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/slurm/role \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["controller", "worker"]}' | python3 -m json.tool
+```
+
+**Production opt-out:** For clusters where controller resource contention is a
+concern, remove `worker` from the controller's role list:
+
+```bash
+# Controller-only (production / large clusters)
+curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/${NODE_ID}/slurm/role \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"roles": ["controller"]}' | python3 -m json.tool
+```
+
+The server never overrides operator intent — the role list you PUT is the role
+list that takes effect. The dual-role recommendation is a starting-point default
+documented here, not a server-side enforcement.
+
+> **Note on role string aliases:** The API accepts both `"worker"` (canonical
+> value stored in the DB) and `"compute"` (accepted as a backward-compatible
+> alias) anywhere a compute role is expected. New deployments should use
+> `"worker"`. The `"compute"` string may be removed in v1.1.
+
 ---
 
 ## 5. Munge key distribution
