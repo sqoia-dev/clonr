@@ -2140,31 +2140,43 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 	}
 
 	// ── authselect: configure PAM and nsswitch.conf for sssd ─────────────────
-	// GAP-NEW-1: Run `authselect select sssd with-mkhomedir --force` ONLY when
-	// the LDAP server is reachable from the deploy environment.
+	// GAP-NEW-1 (revised R4): Run `authselect select sssd with-mkhomedir --force`
+	// ONLY when the LDAP server is reachable from the deploy environment.
 	//
 	// Problem: authselect rewrites the PAM stack to include pam_sss.so. If
 	// sssd.service cannot reach the LDAP server at node boot time, sssd fails,
 	// and pam_sss.so (still in the PAM stack) rejects SSH logins — even after
 	// key authentication succeeds. The node becomes unreachable.
 	//
+	// Additional problem discovered in Round 4: when deploying onto a base image
+	// that was previously deployed with `authselect select sssd`, the old sssd PAM
+	// profile survives the image extraction. Even if we skip authselect here, the
+	// stale pam_sss.so entries in the PAM stack cause the same lockout.
+	//
 	// Fix: TCP-probe the LDAP host:port before running authselect. A 3-second
 	// timeout is long enough to rule out transient loss but short enough not to
-	// block the deploy significantly. If the probe fails we skip authselect
-	// entirely, leaving the image with the distribution default PAM stack
-	// (sssd.conf is still written — if LDAP comes up later and sssd is enabled
-	// the operator can re-image or run authselect manually on the node).
+	// block the deploy significantly. If the probe fails we ACTIVELY reset the
+	// authselect profile to "minimal" (the distribution default, no pam_sss.so)
+	// to ensure no stale sssd PAM entries can block logins.
 	//
-	// We use the less-destructive option on skip: leave the existing PAM config
-	// alone (don't revert to `authselect select minimal`) so we don't clobber
-	// any operator customisation that may already be in the image.
+	// sssd.conf is still written — if LDAP comes up later, the operator reimages.
 	ldapReachable := ldapServerReachable(ldapCfg.ServerURI, 3*time.Second)
 	if !ldapReachable {
 		log.Warn().
 			Str("server_uri", ldapCfg.ServerURI).
-			Msg("finalize: LDAP server unreachable — skipping authselect sssd integration to prevent PAM lockout. " +
+			Msg("finalize: LDAP server unreachable — resetting authselect to minimal profile to prevent PAM lockout. " +
 				"If LDAP is expected to be reachable at deploy time, check the ServerURI and network connectivity. " +
-				"To activate sssd PAM integration, run `authselect select sssd with-mkhomedir --force` on the node after LDAP is confirmed reachable.")
+				"To activate sssd PAM integration, reimage after LDAP is confirmed reachable.")
+		// Actively reset to minimal so stale sssd PAM entries from a prior deploy
+		// cannot survive into the new image and block SSH logins.
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
+			"authselect", "select", "minimal", "--force",
+		).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("output", string(out)).
+				Msg("finalize: authselect select minimal in chroot failed (non-fatal) — PAM stack may contain stale sssd entries")
+		} else {
+			log.Info().Msg("finalize: authselect reset to minimal (LDAP unreachable — sssd PAM entries cleared)")
+		}
 	} else {
 		// LDAP is reachable — wire up PAM/nsswitch for sssd.
 		if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
