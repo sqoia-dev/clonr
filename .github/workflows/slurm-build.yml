@@ -457,6 +457,13 @@ jobs:
       # ── Build RPMs ────────────────────────────────────────────────────────
       # rpmbuild -ta builds all RPMs + SRPM from the in-tarball spec.
       # Richard's design doc §6.1 uses -ta ("build all").
+      #
+      # --define "_with_slurmrestd 1": the upstream spec uses %bcond_with
+      # slurmrestd, so slurmrestd is opt-in (disabled by default).  We must
+      # explicitly enable it with this define.  This causes the spec to add
+      # "BuildRequires: http-parser-devel" and pass "--enable-slurmrestd" to
+      # configure.  http-parser-devel is available from EPEL on EL9 and was
+      # already installed in the mandatory deps step above.
       - name: Build Slurm RPMs
         shell: bash
         run: |
@@ -466,6 +473,7 @@ jobs:
           echo "Starting rpmbuild -ta ..."
           rpmbuild -ta \
             --define "_topdir $(pwd)/rpmbuild" \
+            --define "_with_slurmrestd 1" \
             "slurm-${VERSION}.tar.bz2" \
             2>&1 | tee rpmbuild-output.log
           echo "rpmbuild complete."
