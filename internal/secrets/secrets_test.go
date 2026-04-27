@@ -2,6 +2,7 @@
 package secrets_test
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -93,8 +94,19 @@ func TestDecryptWithKey_TamperedCiphertext(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 
-	// Flip a byte at the end of the hex string to simulate tampering.
-	tampered := ciphertext[:len(ciphertext)-2] + "00"
+	// Tamper with a byte in the middle of the ciphertext (well inside the GCM
+	// authenticated payload, not the nonce prefix or the tag suffix). We XOR
+	// the byte at position [len/2] by 0xFF — this is always a non-identity
+	// flip, so the ciphertext is guaranteed to differ from the original
+	// regardless of the random nonce produced by EncryptWithKey. The previous
+	// approach (replace last two hex chars with "00") was flaky: ~1/256 random
+	// nonces produce a ciphertext already ending in "00", so no tampering
+	// occurred and GCM correctly accepted the unchanged ciphertext.
+	midIdx := (len(ciphertext) / 2) &^ 1 // round down to even (hex boundary)
+	byteVal := ciphertext[midIdx : midIdx+2]
+	b, _ := hex.DecodeString(byteVal) //nolint:errcheck // hex string is always valid here
+	b[0] ^= 0xFF
+	tampered := ciphertext[:midIdx] + hex.EncodeToString(b) + ciphertext[midIdx+2:]
 
 	_, err = secrets.DecryptWithKey(key, tampered)
 	if err == nil {
