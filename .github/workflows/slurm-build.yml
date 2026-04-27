@@ -237,28 +237,27 @@ jobs:
           chmod 600 "$PASS_FILE"
           printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
 
-          # The Rocky 9 container starts a gpg-agent at init time (without
-          # allow-preset-passphrase). Kill it (system default ~/.gnupg agent)
-          # before we set GNUPGHOME, then start our own.
+          # Kill the system gpg-agent (started at container init) BEFORE setting
+          # GNUPGHOME. gpgconf --kill targets the agent for the default ~/.gnupg.
           gpgconf --kill gpg-agent 2>/dev/null || true
           pkill -x gpg-agent 2>/dev/null || true
 
           export GNUPGHOME="${GPG_HOME}"
 
-          # Import the key into our isolated GNUPGHOME
+          # Write gpg-agent.conf BEFORE the first gpg call. gpg auto-starts an
+          # agent on first use; writing the conf first ensures the auto-started
+          # agent picks up allow-loopback-pinentry and allow-preset-passphrase.
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n' \
+            > "${GPG_HOME}/gpg-agent.conf"
+
+          # Import the key — this auto-starts gpg-agent with the conf above
           printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
             gpg --batch \
                 --pinentry-mode loopback \
                 --passphrase-file "${PASS_FILE}" \
                 --import
 
-          # Configure the agent: loopback pinentry + preset-passphrase support
-          printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n' \
-            > "${GPG_HOME}/gpg-agent.conf"
-
-          # Start a fresh agent from our GNUPGHOME (with the conf above)
-          gpg-agent --homedir "${GPG_HOME}" --daemon
-          # Give the agent a moment to bind its socket
+          # Give the auto-started agent a moment to finish binding its socket
           sleep 1
 
           # Get keygrip(s) and preset the passphrase.
