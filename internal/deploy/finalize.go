@@ -196,6 +196,24 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		log.Info().Int("keys", len(cfg.SSHKeys)).Msg("finalize: wrote /root/.ssh/authorized_keys")
 	}
 
+	// Ensure /etc/shadow exists with a valid root entry.
+	// Some base images (e.g. QCOW2-derived tarballs) omit /etc/shadow because
+	// the image builder runs as non-root and cannot preserve the 640/root:shadow
+	// ownership. Without /etc/shadow, pam_unix.so account phase returns
+	// PAM_AUTH_ERR for ALL users (the root password field in /etc/passwd is "x",
+	// signalling shadow use), causing sshd to log "Access denied for user root
+	// by PAM account configuration" and close the connection after key auth.
+	//
+	// We write a minimal shadow with a locked password ("!!") for root and any
+	// system accounts present in /etc/passwd that would normally appear in shadow.
+	// A locked password prevents password-based login but does NOT block pubkey auth.
+	if err := ensureShadowFile(mountRoot); err != nil {
+		// Non-fatal: log prominently, let the deploy continue.
+		// If shadow is genuinely missing, SSH will fail — the operator must
+		// investigate the base image.
+		log.Warn().Err(err).Msg("WARNING: finalize: could not ensure /etc/shadow (non-fatal) — SSH logins may be blocked by pam_unix if shadow is missing")
+	}
+
 	if cfg.KernelArgs != "" {
 		log.Info().Str("args", cfg.KernelArgs).Msg("finalize: applying kernel args to /etc/default/grub")
 		if err := applyKernelArgs(ctx, mountRoot, cfg.KernelArgs); err != nil {
@@ -843,6 +861,71 @@ func writeSSHKeys(mountRoot string, keys []string) error {
 	}
 
 	return os.WriteFile(authKeysPath, []byte(content), 0o600)
+}
+
+// ensureShadowFile writes /etc/shadow inside the deployed chroot if it is absent
+// or empty. Some base images omit /etc/shadow because the image build runs as
+// non-root and cannot preserve the 640/root:shadow ownership.
+//
+// Without /etc/shadow, pam_unix.so account phase fails for every user because
+// /etc/passwd shows "x" in the password field (indicating shadow passwords are
+// in use), and pam_unix.so returns PAM_AUTH_ERR when it cannot open the shadow
+// file — even for public-key SSH logins.
+//
+// We generate a shadow entry for every user in /etc/passwd, using "!!" (locked
+// password) as the hash. A locked password prevents password-based login but
+// does NOT block SSH public-key authentication. The last-change field is set to
+// today's day-count (days since 1970-01-01) so no forced-change logic triggers.
+//
+// Ownership and permissions are set to root:root 0o000 (same as RHEL default of
+// 0o000 when shadow-utils manages the file). We cannot set root:shadow because
+// the deploy context may not have the shadow GID available; 0o000 is the RHEL
+// default and pam_unix.so opens the file as root.
+func ensureShadowFile(mountRoot string) error {
+	log := logger()
+	shadowPath := filepath.Join(mountRoot, "etc", "shadow")
+	passwdPath := filepath.Join(mountRoot, "etc", "passwd")
+
+	// If shadow already exists and is non-empty, leave it alone.
+	if info, err := os.Stat(shadowPath); err == nil && info.Size() > 0 {
+		log.Info().Msg("finalize: /etc/shadow already present — skipping generation")
+		return nil
+	}
+
+	// Read /etc/passwd to enumerate users that need shadow entries.
+	passwdBytes, err := os.ReadFile(passwdPath)
+	if err != nil {
+		return fmt.Errorf("ensureShadowFile: read /etc/passwd: %w", err)
+	}
+
+	// Day count since 1970-01-01 (the lastchg field).
+	daysSinceEpoch := int(time.Now().UTC().Unix() / 86400)
+
+	var lines []string
+	for _, line := range strings.Split(string(passwdBytes), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		username := fields[0]
+		// shadow format: name:pwd:lastchg:min:max:warn:inactive:expire:reserved
+		// "!!" = locked password (no password-based login, pubkey still works).
+		// min=0, max=99999, warn=7, inactive empty, expire empty.
+		shadow := fmt.Sprintf("%s:!!:%d:0:99999:7:::", username, daysSinceEpoch)
+		lines = append(lines, shadow)
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(shadowPath, []byte(content), 0o000); err != nil {
+		return fmt.Errorf("ensureShadowFile: write /etc/shadow: %w", err)
+	}
+
+	log.Info().Int("entries", len(lines)).Msg("finalize: /etc/shadow written (was absent from base image — locked passwords, pubkey auth unaffected)")
+	return nil
 }
 
 // truncateKey returns the first 40 characters of a key string for log messages.
