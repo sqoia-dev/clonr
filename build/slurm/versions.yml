@@ -33,9 +33,10 @@ slurm:
 # without changing the Slurm version (e.g. to fix a packaging bug or rebuild
 # against a refreshed EPEL snapshot).
 # clustr2: fix slurmscriptd packaging verification + bundle libjwt + enable slurmrestd
-# clustr3: remove mariadb-devel+hwloc-devel from build deps + strip rdma-core-devel
-#          to eliminate libmariadb.so.3/libibmad.so.5/libhwloc.so.15 hard deps;
-#          bundle hwloc-libs instead; IB/MariaDB removed from bundle
+# clustr3: remove hwloc-devel from build deps; strip rdma-core-devel before
+#          rpmbuild to prevent OFED/IB auto-detection; eliminates libibmad.so.5
+#          and libhwloc.so.15 hard deps; MySQL kept (libmariadb.so.3 still needed
+#          for slurmdbd); IB RPMs removed from bundle; mariadb-connector-c kept
 clustr_release: 3
 
 munge:

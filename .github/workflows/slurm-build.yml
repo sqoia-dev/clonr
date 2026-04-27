@@ -153,14 +153,6 @@ jobs:
       #     offline dnf install to fail.  Removing hwloc-devel from build deps
       #     disables NUMA topology awareness in slurmd — acceptable for lab use.
       #
-      # NOTE: mariadb-devel is still installed because the Slurm 24.11.4 spec
-      # has an unconditional BuildRequires fallback chain that ultimately requires
-      # some form of MySQL devel package — even when MySQL is disabled at configure
-      # time.  MySQL support is explicitly disabled via --with-mysql_config=no
-      # in the rpmbuild --define flags (see "Build Slurm RPMs" step), which causes
-      # configure to skip MySQL entirely and produces RPMs with no libmariadb.so.3
-      # hard dep.  The mariadb-devel package is a build-only dep; it is NOT
-      # bundled with the deployed nodes.
       #
       # Optional packages (freeipmi-devel, rrdtool-devel, http-parser-devel):
       # These enable optional Slurm features (IPMI, rrd, REST). They may not
@@ -209,8 +201,9 @@ jobs:
           # libjwt.so.2 that deployed nodes need is supplied by the libjwt RPM
           # we build from source and include in the bundle.
           #
-          # mariadb-devel: installed to satisfy Slurm spec BuildRequires (see
-          # NOTE above). MySQL is disabled at configure time via rpmbuild define.
+          # mariadb-devel: installed to satisfy Slurm spec's unconditional MySQL
+          # BuildRequires chain.  MySQL support is compiled in; libmariadb.so.3
+          # is satisfied at deploy time via bundled mariadb-connector-c RPM.
           # NOT installed: hwloc-devel (see INTENTIONALLY OMITTED comment above)
           dnf install -y --allowerasing \
             gcc gcc-c++ make \
@@ -518,14 +511,15 @@ jobs:
       # configure.  http-parser-devel is available from EPEL on EL9 and was
       # already installed in the mandatory deps step above.
       #
-      # --define "_with_mysql_config --with-mysql_config=no" (clustr3):
-      # The Slurm spec passes %{?_with_mysql_config} to ./configure.  Defining
-      # it as "--with-mysql_config=no" causes configure's x_ac_databases.m4 to
-      # skip MySQL entirely ("support for mysql is disabled"), so the compiled
-      # RPMs do NOT hard-require libmariadb.so.3.  mariadb-devel is still
-      # installed above to satisfy the spec's unconditional BuildRequires
-      # fallback chain (which always requires some MySQL devel package), but
-      # the resulting RPMs have no runtime dep on libmariadb.so.3.
+      # MySQL is kept enabled (mariadb-devel in build deps) because the Slurm
+      # spec's %files section unconditionally includes accounting_storage_mysql.so
+      # regardless of configure flags — disabling MySQL via --with-mysql_config=no
+      # causes the %files packaging step to fail with "File not found".
+      # The libmariadb.so.3 runtime dep from MySQL support is satisfied by
+      # bundling mariadb-connector-c in the deployed node repo (see Stage bundle).
+      #
+      # IB/OFED is prevented by removing rdma-core-devel before this step
+      # (see "Enable EPEL" step, point 5).
       - name: Build Slurm RPMs
         shell: bash
         run: |
@@ -536,7 +530,6 @@ jobs:
           rpmbuild -ta \
             --define "_topdir $(pwd)/rpmbuild" \
             --define "_with_slurmrestd 1" \
-            --define "_with_mysql_config --with-mysql_config=no" \
             "slurm-${VERSION}.tar.bz2" \
             2>&1 | tee rpmbuild-output.log
           echo "rpmbuild complete."
@@ -708,31 +701,34 @@ jobs:
           #   --disablerepo='*' --enablerepo=clustr-slurm
           # (no internet access from the deploy initramfs provisioning network).
           #
-          # Package rationale (clustr3 — IB/MariaDB/hwloc deps removed):
+          # Package rationale (clustr3):
           #   munge, munge-libs        — Slurm auth daemon; not in minimal install.
           #                              libmunge.so.2 is required by base slurm RPM.
+          #   mariadb-connector-c      — provides libmariadb.so.3; slurm RPMs are
+          #                              built with MySQL support (slurmdbd accounting
+          #                              storage), so this is a hard runtime dep of
+          #                              slurm-slurmdbd and slurm base RPM.
+          #   mariadb-connector-c-config (noarch) — provides /etc/my.cnf; required
+          #                              by mariadb-connector-c at install time.
           #   bash-completion (noarch) — required by base slurm RPM; noarch so must
           #                              be downloaded separately (no --arch filter)
           #
-          # REMOVED from bundle vs clustr2 (all deps eliminated at build time):
-          #   infiniband-diags, libibumad — IB not compiled in (rdma-core-devel
-          #                              removed before rpmbuild); slurm RPMs no
-          #                              longer require libibmad.so.5/libibumad.so.3
-          #   mariadb-connector-c, mariadb-connector-c-config — MySQL not compiled
-          #                              in (mariadb-devel not installed); slurm RPMs
-          #                              no longer require libmariadb.so.3
-          #   hwloc-libs               — hwloc not compiled in (hwloc-devel not
-          #                              installed); slurm-slurmd no longer requires
-          #                              libhwloc.so.15.  NUMA topology awareness is
-          #                              disabled in this build (acceptable for lab).
+          # REMOVED vs clustr2: infiniband-diags, libibumad
+          #   IB/OFED support is disabled because rdma-core-devel is removed before
+          #   rpmbuild (see step 5 in "Enable EPEL" step), preventing configure from
+          #   detecting IB headers.  The resulting slurm RPMs no longer require
+          #   libibmad.so.5/libibumad.so.3, so infiniband-diags (and its problematic
+          #   perl dependency) is no longer needed in the bundle.
           #
           # x86_64 packages pinned with --arch=x86_64 to prevent i686 multilib.
           # noarch packages downloaded in a separate invocation (no --arch flag).
           dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" \
-            munge munge-libs
+            munge munge-libs \
+            mariadb-connector-c
           dnf download --destdir="bundle/${OS}-${ARCH}/" \
+            mariadb-connector-c-config \
             bash-completion
-          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
 
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
           echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
@@ -850,17 +846,19 @@ jobs:
               echo "${label} RPM present: ${found##*/} - OK"
             fi
           }
-          # clustr3 bundle: IB, MariaDB, and hwloc deps all removed at build time
-          check_rpm "munge"           "munge-[0-9]*.rpm"
-          check_rpm "munge-libs"      "munge-libs-*.rpm"
-          check_rpm "bash-completion" "bash-completion-*.rpm"
+          # clustr3 bundle: IB removed (rdma-core-devel stripped); MySQL kept
+          check_rpm "munge"                    "munge-[0-9]*.rpm"
+          check_rpm "munge-libs"               "munge-libs-*.rpm"
+          check_rpm "mariadb-connector-c"      "mariadb-connector-c-[0-9]*.rpm"
+          check_rpm "mariadb-connector-c-config" "mariadb-connector-c-config-*.rpm"
+          check_rpm "bash-completion"          "bash-completion-*.rpm"
 
-          # Negative checks: IB, MariaDB, hwloc RPMs must NOT be in bundle
-          # (they were present in clustr1/clustr2 but are no longer needed
-          # because the rebuilt RPMs don't carry those hard deps)
-          for BANNED in infiniband-diags libibumad mariadb-connector hwloc-libs; do
+          # Negative check: IB RPMs must NOT be in bundle (removed in clustr3
+          # because rdma-core-devel is stripped before rpmbuild, so slurm RPMs
+          # no longer carry libibmad.so.5/libibumad.so.3 hard deps)
+          for BANNED in infiniband-diags libibumad; do
             if ls "bundle/${OS}-${ARCH}/${BANNED}"*.rpm 2>/dev/null | grep -q .; then
-              echo "WARN: unexpected ${BANNED} RPM in bundle (should not be in clustr3)"
+              echo "WARN: unexpected ${BANNED} RPM in bundle (IB removed in clustr3)"
             fi
           done
 
