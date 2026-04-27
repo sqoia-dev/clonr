@@ -450,18 +450,21 @@ jobs:
         run: |
           set -euo pipefail
           BUNDLE_NAME="${{ steps.bundle.outputs.bundle_name }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
 
-          echo "--- Bundle contents (first 60 lines) ---"
-          tar tzf "${BUNDLE_NAME}" | head -60
+          echo "--- Bundle contents ---"
+          tar tzf "${BUNDLE_NAME}"
 
           echo ""
-          echo "--- Checking for repomd.xml ---"
-          if ! tar tzf "${BUNDLE_NAME}" | grep -q "el9-x86_64/repodata/repomd\.xml"; then
-            echo "FATAL: repomd.xml not found in bundle"
-            tar tzf "${BUNDLE_NAME}" | grep -i repomd || echo "  (none)"
+          echo "--- Checking for repomd.xml (filesystem) ---"
+          REPOMD="bundle/${OS}-${ARCH}/repodata/repomd.xml"
+          if [ ! -f "${REPOMD}" ]; then
+            echo "FATAL: repomd.xml not found at ${REPOMD}"
+            ls -la "bundle/${OS}-${ARCH}/repodata/" || echo "  (repodata dir missing)"
             exit 1
           fi
-          echo "repomd.xml present - OK"
+          echo "repomd.xml present at ${REPOMD} - OK"
 
           echo ""
           echo "--- Release-level manifest.json ---"
