@@ -37,7 +37,11 @@ slurm:
 #          rpmbuild to prevent OFED/IB auto-detection; eliminates libibmad.so.5
 #          and libhwloc.so.15 hard deps; MySQL kept (libmariadb.so.3 still needed
 #          for slurmdbd); IB RPMs removed from bundle; mariadb-connector-c kept
-clustr_release: 3
+# clustr4: add pkgconf + pkgconf-m4 + pkgconf-pkg-config + libpkgconf to bundle;
+#          bash-completion (hard dep of base slurm RPM) requires /usr/bin/pkg-config
+#          which is provided by pkgconf-pkg-config; none of these are in the Rocky 9
+#          minimal base image, causing chroot dnf install to fail during deploy finalize
+clustr_release: 4
 
 munge:
   # MVP: pull from EPEL. Exit ramp to from-source build in sprint 3.

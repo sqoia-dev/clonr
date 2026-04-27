@@ -2,7 +2,7 @@
 #
 # Slurm RPM build pipeline.
 #
-# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr3)
+# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr4)
 #
 # What this does:
 #   1. Inside a pinned Rocky 9 container, downloads the SchedMD tarball,
@@ -35,6 +35,14 @@
 #     hwloc-libs has no problematic transitive deps in the minimal image).
 #   - mariadb-connector-c, mariadb-connector-c-config, infiniband-diags,
 #     libibumad removed from bundle (no longer needed by rebuilt RPMs).
+#
+# Changes in clustr4:
+#   - Add pkgconf, pkgconf-m4, pkgconf-pkg-config, libpkgconf to bundle.
+#     The base slurm RPM has a hard Requires: bash-completion, and
+#     bash-completion Requires: /usr/bin/pkg-config, which is provided by
+#     pkgconf-pkg-config. None of these packages are in the Rocky 9 minimal
+#     base image, so the chroot dnf install during deploy finalize failed
+#     silently (non-fatal) leaving nodes without Slurm installed.
 #
 # NON-GOALS (deferred to later PRs/sprints):
 #   - workflow_dispatch and schedule triggers (sprint 2)
@@ -701,7 +709,7 @@ jobs:
           #   --disablerepo='*' --enablerepo=clustr-slurm
           # (no internet access from the deploy initramfs provisioning network).
           #
-          # Package rationale (clustr3):
+          # Package rationale (clustr4):
           #   munge, munge-libs        — Slurm auth daemon; not in minimal install.
           #                              libmunge.so.2 is required by base slurm RPM.
           #   mariadb-connector-c      — provides libmariadb.so.3; slurm RPMs are
@@ -711,7 +719,16 @@ jobs:
           #   mariadb-connector-c-config (noarch) — provides /etc/my.cnf; required
           #                              by mariadb-connector-c at install time.
           #   bash-completion (noarch) — required by base slurm RPM; noarch so must
-          #                              be downloaded separately (no --arch filter)
+          #                              be downloaded separately (no --arch filter).
+          #   libpkgconf (x86_64)      — provides libpkgconf.so.3; required by pkgconf.
+          #   pkgconf (x86_64)         — provides /usr/bin/pkgconf; required by
+          #                              pkgconf-pkg-config.
+          #   pkgconf-m4 (noarch)      — required by pkgconf-pkg-config.
+          #   pkgconf-pkg-config (x86_64) — provides /usr/bin/pkg-config; required by
+          #                              bash-completion.  None of these four packages
+          #                              are present in the Rocky 9 minimal base image,
+          #                              causing the chroot dnf install during deploy
+          #                              finalize to fail (clustr3 regression).
           #
           # REMOVED vs clustr2: infiniband-diags, libibumad
           #   IB/OFED support is disabled because rdma-core-devel is removed before
@@ -724,11 +741,13 @@ jobs:
           # noarch packages downloaded in a separate invocation (no --arch flag).
           dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" \
             munge munge-libs \
-            mariadb-connector-c
+            mariadb-connector-c \
+            libpkgconf pkgconf pkgconf-pkg-config
           dnf download --destdir="bundle/${OS}-${ARCH}/" \
             mariadb-connector-c-config \
-            bash-completion
-          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+            bash-completion \
+            pkgconf-m4
+          echo "Bundled runtime deps: $(ls bundle/${OS}-${ARCH}/munge*.rpm bundle/${OS}-${ARCH}/mariadb*.rpm bundle/${OS}-${ARCH}/bash-completion*.rpm bundle/${OS}-${ARCH}/pkgconf*.rpm bundle/${OS}-${ARCH}/libpkgconf*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
 
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
           echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
@@ -846,12 +865,17 @@ jobs:
               echo "${label} RPM present: ${found##*/} - OK"
             fi
           }
-          # clustr3 bundle: IB removed (rdma-core-devel stripped); MySQL kept
+          # clustr4 bundle: IB removed (rdma-core-devel stripped); MySQL kept;
+          # pkgconf chain added (bash-completion dep not in Rocky 9 minimal base)
           check_rpm "munge"                    "munge-[0-9]*.rpm"
           check_rpm "munge-libs"               "munge-libs-*.rpm"
           check_rpm "mariadb-connector-c"      "mariadb-connector-c-[0-9]*.rpm"
           check_rpm "mariadb-connector-c-config" "mariadb-connector-c-config-*.rpm"
           check_rpm "bash-completion"          "bash-completion-*.rpm"
+          check_rpm "libpkgconf"               "libpkgconf-[0-9]*.x86_64.rpm"
+          check_rpm "pkgconf"                  "pkgconf-[0-9]*.x86_64.rpm"
+          check_rpm "pkgconf-m4"               "pkgconf-m4-*.rpm"
+          check_rpm "pkgconf-pkg-config"       "pkgconf-pkg-config-*.rpm"
 
           # Negative check: IB RPMs must NOT be in bundle (removed in clustr3
           # because rdma-core-devel is stripped before rpmbuild, so slurm RPMs
