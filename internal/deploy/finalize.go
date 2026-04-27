@@ -2610,9 +2610,11 @@ type SlurmInstallAuditFn func(ctx context.Context, nodeID, action, detail string
 //
 // gpgKeyBytes, when non-nil, is the clustr GPG release signing public key
 // (ASCII-armored). It is written to the chroot at
-// /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr before the dnf invocation so that
-// gpgcheck=1 can verify RPM signatures. When nil (legacy custom-URL path),
-// gpgcheck=0 is used as a fallback.
+// /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr for forward-compatibility but is NOT
+// used for chroot dnf gpgcheck (see GAP-17 comment in Step 3a).  gpgcheck=0
+// is always used because the bundle contains third-party RPMs (Rocky BaseOS,
+// EPEL) that are signed with keys not present in the chroot; bundle integrity
+// is enforced via SHA256 verification at download time instead.
 func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string, hasSlurmdbd, hasGres bool, auditFn SlurmInstallAuditFn, gpgKeyBytes []byte) {
 	log := logger()
 
@@ -2747,40 +2749,49 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 			Msg("finalize slurm: auto-install: stripped pre-existing OpenHPC slurm packages from image (defense-in-depth)")
 	}
 
-	// Step 3a: Write the clustr GPG public key into the chroot so dnf can
-	// verify RPM signatures with gpgcheck=1.  Only done when gpgKeyBytes is
-	// provided (i.e. the repo URL is the clustr-builtin path).  For custom
-	// operator-provided URLs, gpgKeyBytes is nil and we fall back to gpgcheck=0.
-	gpgKeyPath := filepath.Join(mountRoot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
-	useGPGCheck := false
+	// Step 3a: Write the clustr GPG public key into the chroot (retained for
+	// forward-compatibility — may be used for per-RPM signature checks in a
+	// future release). gpgKeyBytes is kept as a parameter for callers that
+	// pass it, but we no longer gate gpgcheck on it for the bundled repo.
+	//
+	// GAP-17 (2026-04-27): The clustr bundle contains third-party RPMs from
+	// Rocky Linux BaseOS (bash-completion, pkgconf chain, mariadb-connector-c)
+	// and EPEL (munge, munge-libs). These are signed with the Rocky/EPEL GPG
+	// keys, NOT the clustr signing key. Writing only the clustr key and using
+	// gpgcheck=1 causes dnf to reject every third-party RPM with "Public key
+	// not installed", making the entire install fail silently.
+	//
+	// Security rationale for gpgcheck=0 here: bundle integrity is guaranteed
+	// at a higher level — the bundle tarball SHA256 is pinned in versions.yml,
+	// verified against SchedMD's official SHA256 file at build time (CI), and
+	// re-verified at bundle download time in cmd/clustr-serverd/bundle.go. All
+	// RPMs in the bundle were downloaded and SHA256-verified by the Slurm CI
+	// workflow before packaging. The per-RPM chroot dnf GPG check would only
+	// provide redundant protection for RPMs we've already verified by hash.
+	// Disabling it here removes broken security theater without weakening the
+	// actual trust chain.
 	if len(gpgKeyBytes) > 0 {
+		gpgKeyPath := filepath.Join(mountRoot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
 		if err := os.MkdirAll(filepath.Dir(gpgKeyPath), 0o755); err != nil {
 			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create /etc/pki/rpm-gpg in chroot (non-fatal)")
 		} else if err := os.WriteFile(gpgKeyPath, gpgKeyBytes, 0o644); err != nil {
 			log.Warn().Err(err).Msg("finalize slurm: auto-install: could not write RPM-GPG-KEY-clustr into chroot (non-fatal)")
 		} else {
-			useGPGCheck = true
-			log.Info().Msg("finalize slurm: auto-install: wrote RPM-GPG-KEY-clustr into chroot at /etc/pki/rpm-gpg/")
+			log.Info().Msg("finalize slurm: auto-install: wrote RPM-GPG-KEY-clustr into chroot at /etc/pki/rpm-gpg/ (informational — gpgcheck disabled for bundle install)")
 		}
 	}
 
 	// Step 3b: Write a .repo file directly rather than calling dnf config-manager,
 	// because config-manager may not be installed in the chroot image.
 	//
-	// gpgcheck=1  → RPM signature check against the embedded clustr key.
+	// gpgcheck=0   → required because the bundle contains third-party RPMs
+	//               (Rocky BaseOS, EPEL) signed with keys not present in the
+	//               chroot. Bundle integrity is enforced via SHA256 at download
+	//               time (see GAP-17 comment above).
 	// repo_gpgcheck=0 → repodata/ is not separately signed (createrepo_c output
-	//                   is not gpg-signed in the current bundle; only the RPMs are).
-	// gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr → key already on disk in
-	//   the chroot after step 3a; no extra HTTP round-trip needed.
-	var repoContent string
-	if useGPGCheck {
-		repoContent = "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL +
-			"\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr\n"
-	} else {
-		// Fallback for operator-provided custom repo URLs that don't carry the
-		// clustr signing key.  Keep gpgcheck=0 so custom repos still work.
-		repoContent = "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL + "\nenabled=1\ngpgcheck=0\n"
-	}
+	//                   is not gpg-signed in the current bundle).
+	repoContent := "[clustr-slurm]\nname=clustr Slurm\nbaseurl=" + repoURL +
+		"\nenabled=1\ngpgcheck=0\nrepo_gpgcheck=0\n"
 	repoPath := filepath.Join(mountRoot, "etc", "yum.repos.d", "clustr-slurm.repo")
 	if err := os.MkdirAll(filepath.Join(mountRoot, "etc", "yum.repos.d"), 0o755); err != nil {
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not create yum.repos.d (non-fatal)")
@@ -2792,8 +2803,8 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	}
 	log.Info().
 		Str("repo_file", "/etc/yum.repos.d/clustr-slurm.repo").
-		Bool("gpgcheck", useGPGCheck).
-		Msg("finalize slurm: auto-install: repo file written")
+		Bool("gpgcheck", false).
+		Msg("finalize slurm: auto-install: repo file written (gpgcheck=0, see GAP-17)")
 
 	// Step 4: Check whether all required packages are already installed in the
 	// chroot before running dnf.  Gold images that were captured with Slurm

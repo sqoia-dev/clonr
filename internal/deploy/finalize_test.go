@@ -68,9 +68,13 @@ func TestElVersionFromURL(t *testing.T) {
 }
 
 // TestInstallSlurmInChroot_RepoFileContent verifies the generated .repo file
-// for the clustr-builtin path: gpgcheck=1, repo_gpgcheck=0, and
-// gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr.  Also verifies that
-// the GPG key file is written to the chroot before the dnf step.
+// for the clustr-builtin path: gpgcheck=0, repo_gpgcheck=0 (GAP-17).
+// Also verifies that the GPG key file is still written to the chroot for
+// forward-compat even though it is not referenced in the repo file.
+//
+// GAP-17 (2026-04-27): gpgcheck is disabled because the bundle contains
+// third-party RPMs (Rocky BaseOS, EPEL) signed with keys not present in the
+// chroot. Bundle integrity is enforced via SHA256 at download time instead.
 //
 // The dnf execution is expected to fail (no real chroot), but we verify the
 // written files before the dnf call.
@@ -99,7 +103,7 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 		gpgKeyBytes,
 	)
 
-	// --- Assert GPG key file was written ---
+	// --- Assert GPG key file was written (forward-compat, not used by repo) ---
 	gpgKeyPath := filepath.Join(chroot, "etc", "pki", "rpm-gpg", "RPM-GPG-KEY-clustr")
 	gpgKeyData, err := os.ReadFile(gpgKeyPath)
 	if err != nil {
@@ -117,7 +121,7 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 		t.Errorf("GPG key file mode = %o, want 0644", info.Mode().Perm())
 	}
 
-	// --- Assert .repo file was written with correct gpgcheck settings ---
+	// --- Assert .repo file was written with gpgcheck=0 (GAP-17) ---
 	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
 	repoData, err := os.ReadFile(repoPath)
 	if err != nil {
@@ -125,28 +129,25 @@ func TestInstallSlurmInChroot_RepoFileContent(t *testing.T) {
 	}
 	repoContent := string(repoData)
 
-	// Snapshot the expected .repo content.
+	// Verify required fields are present.
 	wantLines := []string{
 		"[clustr-slurm]",
 		"name=clustr Slurm",
 		"baseurl=http://10.99.0.1:8080/repo/el9-x86_64/",
 		"enabled=1",
-		"gpgcheck=1",
+		"gpgcheck=0",
 		"repo_gpgcheck=0",
-		"gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr",
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(repoContent, line) {
 			t.Errorf(".repo file missing line %q\nfull content:\n%s", line, repoContent)
 		}
 	}
-	// "gpgcheck=0" (the bare line) must NOT appear — we should have gpgcheck=1.
-	// Note: repo_gpgcheck=0 is expected and contains "gpgcheck=0" as a substring,
-	// so we check for the exact line "gpgcheck=0\n" rather than a substring match.
-	for _, line := range strings.Split(repoContent, "\n") {
-		if strings.TrimSpace(line) == "gpgcheck=0" {
-			t.Errorf(".repo file contains line 'gpgcheck=0' but expected gpgcheck=1\nfull content:\n%s", repoContent)
-		}
+	// gpgcheck=1 must NOT appear — the clustr key only covers slurm RPMs built
+	// by CI; third-party RPMs (munge, pkgconf, bash-completion) are signed with
+	// Rocky/EPEL keys that are not present in the chroot (GAP-17).
+	if strings.Contains(repoContent, "gpgcheck=1") {
+		t.Errorf(".repo file contains 'gpgcheck=1' but expected gpgcheck=0 (GAP-17)\nfull content:\n%s", repoContent)
 	}
 }
 
