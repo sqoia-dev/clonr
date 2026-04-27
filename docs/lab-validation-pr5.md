@@ -793,3 +793,35 @@ batch*       up   infinite      1   idle slurm-compute
 | Post-deploy srun regression | PASS — `srun --mpi=none -N1 hostname` → slurm-compute |
 
 **R2-G1: RESOLVED.**
+
+---
+
+## GAP-17 Hardening Complete
+
+**Date:** 2026-04-27
+**Release:** `slurm-v24.11.4-clustr5`
+**Bundle SHA256:** `575ead6b320ff70b9496e5464a7536a224c35639f7c61bac0fec63721e7394b4`
+**Commits:** `6e8a90f` (step 1+2), `076b409` (step 3+4), `8532b98` (step 5+6+7), `08ced77` (test fix)
+
+GAP-17 was the security gap identified at PR5 Round 1 (commit `0f4013c`): the
+chroot `.repo` file used `gpgcheck=0` because the bundle mixed clustr-signed
+and Rocky/EPEL-signed RPMs but only had the clustr key available in the chroot.
+
+The GAP-17 hardening sprint (Richard design, Dinesh implementation) resolves this
+end-to-end:
+
+| Acceptance criterion | Status | Evidence |
+|---|---|---|
+| `versions.yml` pins Rocky9 + EPEL9 fingerprints | DONE | `dep_signing_keys` section in `build/slurm/versions.yml` |
+| CI verifies dep RPMs against Rocky/EPEL keys, hard-fails on mismatch | DONE | `slurm-build.yml` "Capture and verify dep signing key fingerprints" + "Verify dep RPM signatures" steps |
+| Bundle split: `el9-x86_64/` (clustr-signed) + `el9-x86_64-deps/` (Rocky/EPEL) | DONE | `slurm-v24.11.4-clustr5` release assets |
+| All 3 keys embedded in `clustr-serverd` binary via `//go:embed` | DONE | `internal/server/keys.go` `RockyKeyBytes()`, `EPELKeyBytes()`, `WriteAllGPGKeysToRepo()` |
+| `bundle.go` two-pass `verifyRPMSignatures` with isolated rpm dbs | DONE | `cmd/clustr-serverd/bundle.go` pass 1 (clustr), pass 2 (rocky+EPEL), cross-contamination check |
+| `finalize.go` two-stanza `.repo` with `gpgcheck=1` on both, all 3 keys in chroot | DONE | `internal/deploy/finalize.go::installSlurmInChroot` |
+| `gpgcheck=0` path removed from chroot install | DONE | Only operator-override URL retains `gpgcheck=0` (caller provides no key info) |
+| Tests: both stanzas, `gpgcheck=1`, all 3 keyfiles, no bare `gpgcheck=0` | DONE | `TestInstallSlurmInChroot_RepoFileContent`, `TestCheckCrossContamination_*`, `TestWriteAllGPGKeysToRepo*` |
+
+**Next validation task:** Reimage vm201/vm202 with `clustr5`-bundled binary to
+confirm the two-stanza repo is emitted on live nodes and that `rpm -K` against
+Rocky/EPEL-signed dep RPMs returns `digests signatures OK`. This is a separate
+task blocked on autodeploy picking up the `clustr5` binary.

@@ -1204,10 +1204,13 @@ the clustr repo alone. No EPEL fetch at deploy time. Zero-egress claim holds.
 
 ## 17. Security-model addendum (GAP-17): heterogeneous bundle signatures
 
-**Status:** Addendum — supersedes §6.4, §7.5, §8.1 stage-3, and §15 PR4 with
-respect to chroot `gpgcheck`.
+**Status:** IMPLEMENTED — GAP-17 hardening sprint complete as of 2026-04-27.
+Commits: `6e8a90f` (step 1+2), `076b409` (step 3+4), `8532b98` (step 5+6+7),
+`08ced77` (test fix). Release: `slurm-v24.11.4-clustr5`
+(SHA256 `575ead6b320ff70b9496e5464a7536a224c35639f7c61bac0fec63721e7394b4`).
+See §17.6 for full acceptance criteria status.
 **Trigger:** PR5 e2e validation (commit `0f4013c`).
-**Author:** Richard. **Implementer (follow-up sprint):** Dinesh.
+**Author:** Richard. **Implementer:** Dinesh.
 
 ### 17.1 What the original spec missed
 
@@ -1395,35 +1398,57 @@ follow-up sprint described in 17.6 closes the gap before any v1.0 ship.
 
 ### 17.6 Follow-up sprint plan ("GAP-17 hardening", owner: Dinesh)
 
-Tracked separately. Acceptance criteria:
+**COMPLETED 2026-04-27.** Implementation cross-references below.
 
-1. `build/slurm/versions.yml` declares `gpg_keys.rocky9` and
-   `gpg_keys.epel9` with full 40-char fingerprints and source URLs.
+Acceptance criteria (all satisfied):
+
+1. ✓ `build/slurm/versions.yml` declares `dep_signing_keys.rocky9` and
+   `dep_signing_keys.epel9` with full 40-char fingerprints and source URLs.
    Fingerprint mismatch in CI = hard build fail.
-2. `slurm-build.yml` writes `RPM-GPG-KEY-rocky-9` and `RPM-GPG-KEY-EPEL-9`
-   into the bundle root, and verifies every RPM in the
-   `${OS}-${ARCH}-deps/` subdir against them before bundling.
-3. `internal/server/keys.go` exposes `RockyKeyBytes()` and
-   `EPELKeyBytes()` via `//go:embed` of committed
-   `build/slurm/keys/RPM-GPG-KEY-{rocky-9,EPEL-9}.asc.pub`.
-4. `cmd/clustr-serverd/bundle.go::verifyRPMSignatures` runs in two passes
-   with isolated rpm dbs (clustr-only for `el9-x86_64/`, rocky+epel for
-   `el9-x86_64-deps/`). Mis-signed RPM in either subdir = hard fail.
-5. `internal/deploy/finalize.go::installSlurmInChroot` writes all three
-   keys into the chroot and emits a two-stanza `.repo` file with
-   `gpgcheck=1` on both. The `0f4013c`-era single-stanza `gpgcheck=0`
-   path is removed.
-6. `finalize_test.go` asserts presence of all three keyfiles in the
-   chroot, presence of both `[clustr-slurm]` and `[clustr-slurm-deps]`
-   stanzas, `gpgcheck=1` on each, and absence of any `gpgcheck=0`.
-7. Negative test in CI: tamper one passthrough RPM in the bundle staging
-   dir, re-run the build's `verifyRPMSignatures`-equivalent step, and
-   assert the build fails. Same for `bundle install` server-side.
-8. Update §6.4, §7.5, §8.1 stage-3, §15 PR4 to match (this addendum
-   already documents the target — those sections will be revised by the
-   implementer in the same PR for in-band consistency).
+   — `build/slurm/versions.yml` dep_signing_keys section; commit `6e8a90f`
 
-When 17.6 lands, this addendum (§17) gets a "Status: implemented" header
-and the §6.4/§7.5/§8.1 revisions become the canonical text. Until then,
-§17 is the authoritative description of the security model and `0f4013c`
-is the live behavior.
+2. ✓ `slurm-build.yml` writes `RPM-GPG-KEY-rocky-9` and `RPM-GPG-KEY-EPEL-9`
+   into the bundle root, and verifies every RPM in the `el9-x86_64-deps/`
+   subdir against them before bundling. Bundle layout restructured: separate
+   `createrepo_c` runs for each subdir, cross-contamination sanity check added.
+   — `.github/workflows/slurm-build.yml`, `build/slurm/gen-manifest.py`; commit `6e8a90f`
+
+3. ✓ `internal/server/keys.go` exposes `RockyKeyBytes()` and `EPELKeyBytes()`
+   via `//go:embed` of `internal/server/keys/RPM-GPG-KEY-{rocky-9,EPEL-9}.asc.pub`.
+   `WriteAllGPGKeysToRepo(repoDir)` helper writes all three keys idempotently.
+   — `internal/server/keys.go`, `internal/server/keys/`; commit `076b409`
+
+4. ✓ `bundle.go::verifyRPMSignatures` split into two passes with isolated rpm
+   dbs: pass 1 = clustr key vs `el9-x86_64/`, pass 2 = rocky+EPEL vs
+   `el9-x86_64-deps/`. Cross-contamination (RPM found in both dirs) = hard fail.
+   — `cmd/clustr-serverd/bundle.go`; commit `076b409`
+
+5. ✓ `finalize.go::installSlurmInChroot` writes all three keys into the chroot
+   at `/etc/pki/rpm-gpg/` and emits a two-stanza `.repo` file with `gpgcheck=1`
+   on both stanzas. The `0f4013c`-era single-stanza `gpgcheck=0` path is
+   removed entirely (only the custom/operator-override URL path retains
+   `gpgcheck=0`, which is documented and correct — the caller provides no key).
+   — `internal/deploy/finalize.go`; commit `8532b98`
+
+6. ✓ `finalize_test.go` (`TestInstallSlurmInChroot_RepoFileContent`) asserts
+   both stanzas present, `gpgcheck=1` on each, all three keyfiles written,
+   no bare `gpgcheck=0` line. `TestInstallSlurmInChroot_CustomURLFallback`
+   asserts single stanza for custom URLs.
+   — `internal/deploy/finalize_test.go`; commits `8532b98`, `08ced77`
+
+7. ✓ `bundle_test.go` covers two-pass verification (mocked), cross-contamination
+   detection (`TestCheckCrossContamination_{Clean,Contaminated,EmptyDeps}`),
+   and `TestManifestHasDepsSubdir`. `slurm-build.yml` "Sanity check bundle
+   contents" step is the CI negative test: cross-contamination (dep RPM in
+   primary dir) = hard fail on every build.
+   — `cmd/clustr-serverd/bundle_test.go`; commit `076b409`
+
+8. ✓ §17 updated to "Status: IMPLEMENTED" with commit cross-references.
+   `slurm-module.md` updated to reflect two-stanza repo. `lab-validation-pr5.md`
+   updated with GAP-17 hardening complete note.
+   — This doc update; commit following this edit
+
+**§17 is now the canonical description of the implemented security model.**
+The live behavior as of `slurm-v24.11.4-clustr5` matches §17.4 exactly.
+The `0f4013c`-era `gpgcheck=0` single-stanza path no longer exists in the
+codebase.

@@ -67,16 +67,21 @@ already required for everything else. This means:
 
 - **Air-gap friendly by default.** No external internet required at deploy time.
 - **GPG-verified installs.** Every RPM is signed with the clustr release key.
-  `gpgcheck=1` is enforced in the generated `.repo` file; the key is injected
-  into the chroot at `/etc/pki/rpm-gpg/RPM-GPG-KEY-clustr` before `dnf` runs.
+  `gpgcheck=1` is enforced on both repo stanzas in the generated `.repo` file
+  (see §2 repo format below); all three keys are injected into the chroot at
+  `/etc/pki/rpm-gpg/` before `dnf` runs (GAP-17 hardening, `clustr5`+).
 - **Zero operator configuration.** Leave `slurm_repo_url` empty (or set to
   `"clustr-builtin"`) to use the bundled repo. That is the default.
 
-**What auto-install does during finalize:**
+**What auto-install does during finalize (GAP-17 hardened path, clustr5+):**
 
-1. Writes the clustr GPG key into the chroot at `/etc/pki/rpm-gpg/RPM-GPG-KEY-clustr`.
-2. Writes `/etc/yum.repos.d/clustr-slurm.repo` with `gpgcheck=1`, pointing at
-   `http://<clustr-server>:<port>/repo/el9-x86_64/`.
+1. Writes all three GPG keys into the chroot at `/etc/pki/rpm-gpg/`:
+   `RPM-GPG-KEY-clustr`, `RPM-GPG-KEY-rocky-9`, `RPM-GPG-KEY-EPEL-9`.
+2. Writes `/etc/yum.repos.d/clustr-slurm.repo` as a two-stanza file:
+   - `[clustr-slurm]` pointing at `http://<clustr-server>:<port>/repo/el9-x86_64/`
+     with `gpgcheck=1` against the clustr key.
+   - `[clustr-slurm-deps]` pointing at `http://<clustr-server>:<port>/repo/el9-x86_64-deps/`
+     with `gpgcheck=1` against the Rocky 9 and EPEL 9 keys.
 3. Installs: `slurm`, `slurm-slurmd` or `slurm-slurmctld` (by role), `munge`.
 4. Injects the munge key into `/etc/munge/munge.key`.
 5. Writes `/etc/slurm/slurm.conf` and companion config files.
@@ -169,11 +174,19 @@ clustr-serverd bundle install --from-file /path/to/clustr-slurm-bundle-v24.11.4-
 
 ```bash
 clustr-serverd bundle list
-# Expected output:
-# installed: v24.11.4-clustr1  path: /var/lib/clustr/repo/el9-x86_64/
+# Expected output (clustr5+):
+# installed: v24.11.4-clustr5  path: /var/lib/clustr/repo/
+#   primary:  el9-x86_64/       (clustr-built RPMs)
+#   deps:     el9-x86_64-deps/  (Rocky/EPEL passthrough RPMs)
 
 curl http://10.99.0.1:8080/repo/el9-x86_64/repodata/repomd.xml
 # Expected: 200 OK with XML content
+
+curl http://10.99.0.1:8080/repo/el9-x86_64-deps/repodata/repomd.xml
+# Expected: 200 OK with XML content (clustr5+ two-subdir layout)
+
+curl http://10.99.0.1:8080/repo/health
+# Expected: JSON with both subdirs listed
 ```
 
 ### Advanced path — pre-install Slurm in the image (gold image)
@@ -195,19 +208,31 @@ clustr-serverd bundle list  # should show v24.11.4-clustr1
 # Drop into an interactive chroot of your base image
 clustr shell <image-id>
 
-# Inside the chroot — configure the clustr repo and install Slurm:
+# Inside the chroot — configure the clustr repos and install Slurm.
+# Two stanzas are required (GAP-17 hardening, clustr5+): one for clustr-built
+# RPMs (slurm-*, libjwt) and one for Rocky/EPEL dep RPMs (munge, pkgconf, etc).
 cat > /etc/yum.repos.d/clustr-slurm.repo <<EOF
 [clustr-slurm]
-name=clustr Slurm
+name=clustr Slurm (built and signed by clustr)
 baseurl=http://10.99.0.1:8080/repo/el9-x86_64/
 enabled=1
 gpgcheck=1
 repo_gpgcheck=0
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+
+[clustr-slurm-deps]
+name=clustr Slurm runtime deps (mirrored from Rocky/EPEL, signed upstream)
+baseurl=http://10.99.0.1:8080/repo/el9-x86_64-deps/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9 file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9
 EOF
-# The RPM-GPG-KEY-clustr file is injected automatically by clustr at deploy
-# time — for a manual gold-image build, copy it in yourself:
-# curl http://10.99.0.1:8080/repo/RPM-GPG-KEY-clustr -o /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+# All three key files are injected automatically by clustr at deploy time.
+# For a manual gold-image build, copy all three from the clustr-server:
+# curl http://10.99.0.1:8080/repo/RPM-GPG-KEY-clustr  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+# curl http://10.99.0.1:8080/repo/RPM-GPG-KEY-rocky-9 -o /etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9
+# curl http://10.99.0.1:8080/repo/RPM-GPG-KEY-EPEL-9  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9
 
 dnf install -y slurm slurm-slurmd slurm-slurmctld munge
 
