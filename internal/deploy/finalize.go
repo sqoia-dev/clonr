@@ -2732,7 +2732,8 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	//
 	// || true makes this idempotent — fine if the packages are not present.
 	ohpcStripArgs := []string{
-		mountRoot, "dnf", "-y", "--setopt=tsflags=noscripts", "remove",
+		mountRoot, "dnf", "-y", "--setopt=tsflags=noscripts",
+		"--disablerepo=*", "remove",
 		"slurm-ohpc", "slurm-ohpc-*", "ohpc-slurm-*",
 	}
 	ohpcOut, ohpcErr := exec.CommandContext(ctx, "chroot", ohpcStripArgs...).CombinedOutput()
@@ -2812,7 +2813,12 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 	}
 
 	// Step 5: Install packages inside chroot (one or more packages missing).
-	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False"}, pkgs...)
+	// --disablerepo='*' + --enablerepo=clustr-slurm prevents dnf from fetching
+	// metadata for the default Rocky/EPEL mirrors (which are unreachable from the
+	// deploy initramfs's isolated provisioning network). All required packages
+	// (slurm, munge, libjwt) are present in the clustr bundled repo.
+	args := append([]string{mountRoot, "dnf", "install", "-y", "--setopt=install_weak_deps=False",
+		"--disablerepo=*", "--enablerepo=clustr-slurm"}, pkgs...)
 	out, err := exec.CommandContext(ctx, "chroot", args...).CombinedOutput()
 	if err != nil {
 		// Truncate dnf output to last 2 KB for the audit record.

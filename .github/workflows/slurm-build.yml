@@ -639,6 +639,15 @@ jobs:
           cp "${LIBJWT_LIB_RPM}" "bundle/${OS}-${ARCH}/"
           echo "Included libjwt RPM: ${LIBJWT_LIB_RPM##*/}"
 
+          # Download munge + munge-libs from the Rocky AppStream repo and include
+          # them in the bundle so the finalize step can install Slurm with
+          # --disablerepo='*' --enablerepo=clustr-slurm (no internet access needed
+          # from the deploy initramfs provisioning network).  munge-libs is a dep
+          # of munge; both are pure-libc RPMs with no additional non-system deps.
+          # We pin to x86_64 to avoid i686 multilib packages entering the bundle.
+          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}/" munge munge-libs
+          echo "Included munge RPMs: $(ls bundle/${OS}-${ARCH}/munge*.rpm 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')"
+
           cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
           echo "Bundle staged: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs total"
           echo "--- RPMs in bundle ---"
@@ -740,6 +749,18 @@ jobs:
             exit 1
           fi
           echo "libjwt RPM present: ${LIBJWT_IN_BUNDLE##*/} - OK"
+
+          echo ""
+          echo "--- Checking for munge RPMs in bundle ---"
+          MUNGE_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/munge-"[0-9]*.rpm 2>/dev/null | head -1)
+          MUNGE_LIBS_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/munge-libs-"*.rpm 2>/dev/null | head -1)
+          if [ -z "${MUNGE_IN_BUNDLE}" ] || [ -z "${MUNGE_LIBS_IN_BUNDLE}" ]; then
+            echo "FATAL: munge or munge-libs RPM not found in bundle/${OS}-${ARCH}/"
+            ls "bundle/${OS}-${ARCH}/" || true
+            exit 1
+          fi
+          echo "munge RPM present: ${MUNGE_IN_BUNDLE##*/} - OK"
+          echo "munge-libs RPM present: ${MUNGE_LIBS_IN_BUNDLE##*/} - OK"
 
           echo ""
           echo "--- Release-level manifest.json ---"
