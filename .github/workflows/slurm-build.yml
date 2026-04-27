@@ -230,10 +230,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Install gnupg2-utils which provides gpg-preset-passphrase on EL9
-          # (it's in the gnupg2 package on EL9, but the binary path may vary)
-          dnf install -y gnupg2 gnupg2-smime 2>/dev/null || true
-
           GPG_HOME=$(mktemp -d)
           chmod 700 "$GPG_HOME"
 
@@ -241,24 +237,32 @@ jobs:
           chmod 600 "$PASS_FILE"
           printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
 
-          # Import the key
+          # The Rocky 9 container starts a gpg-agent at init time (without
+          # allow-preset-passphrase). Kill it (system default ~/.gnupg agent)
+          # before we set GNUPGHOME, then start our own.
+          gpgconf --kill gpg-agent 2>/dev/null || true
+          pkill -x gpg-agent 2>/dev/null || true
+
+          export GNUPGHOME="${GPG_HOME}"
+
+          # Import the key into our isolated GNUPGHOME
           printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
-            gpg --homedir "${GPG_HOME}" \
-                --batch \
+            gpg --batch \
                 --pinentry-mode loopback \
                 --passphrase-file "${PASS_FILE}" \
                 --import
 
-          # Configure agent
+          # Configure the agent: loopback pinentry + preset-passphrase support
           printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n' \
             > "${GPG_HOME}/gpg-agent.conf"
 
-          # Start agent and export environment
-          eval "$(gpg-agent --homedir "${GPG_HOME}" --daemon --sh)"
-          echo "GPG_AGENT_INFO=${GPG_AGENT_INFO:-}" >> "$GITHUB_ENV"
+          # Start a fresh agent from our GNUPGHOME (with the conf above)
+          gpg-agent --homedir "${GPG_HOME}" --daemon
+          # Give the agent a moment to bind its socket
+          sleep 1
 
-          # Get keygrip(s) for all secret keys and preset the passphrase.
-          # Use pure-bash hex encoding to avoid a dependency on xxd/vim-common.
+          # Get keygrip(s) and preset the passphrase.
+          # Pure-bash hex encoding — no dependency on xxd/vim-common.
           PASSPHRASE=$(cat "$PASS_FILE")
           hex_encode() {
             local s="$1" out="" i byte
@@ -269,36 +273,33 @@ jobs:
             printf '%s' "$out"
           }
           PASSPHRASE_HEX=$(hex_encode "${PASSPHRASE}")
-          gpg --homedir "${GPG_HOME}" \
-              --with-keygrip \
-              --list-secret-keys "41E51A6653BBA540" \
+
+          gpg --with-keygrip --list-secret-keys "41E51A6653BBA540" \
             | grep "Keygrip" | awk '{print $3}' \
             | while read -r GRIP; do
                 echo "Presetting passphrase for keygrip ${GRIP}"
                 printf 'PRESET_PASSPHRASE %s -1 %s\n' "${GRIP}" "${PASSPHRASE_HEX}" \
-                | gpg-connect-agent --homedir "${GPG_HOME}" || true
+                | gpg-connect-agent
               done
 
-          # Verify signing works without interactive passphrase
+          # Verify signing works non-interactively before proceeding
           echo "ci-test" | \
-            gpg --homedir "${GPG_HOME}" \
-                --batch \
-                --no-tty \
+            gpg --batch --no-tty \
                 --clearsign \
                 --local-user "41E51A6653BBA540" \
                 -o /dev/null
+          echo "GPG signing self-test passed."
 
           rm -f "${PASS_FILE}"
           echo "GNUPGHOME=${GPG_HOME}" >> "$GITHUB_ENV"
 
-          # Write minimal rpmmacros
+          # Write rpmmacros so rpm --addsign finds our key and agent
           printf '%%_signature gpg\n' > ~/.rpmmacros
           printf '%%_gpg_name 41E51A6653BBA540\n' >> ~/.rpmmacros
           printf '%%__gpg /usr/bin/gpg\n' >> ~/.rpmmacros
 
-          gpg --homedir "${GPG_HOME}" --list-secret-keys
-          echo "rpmmacros:"
-          cat ~/.rpmmacros
+          gpg --list-secret-keys
+          echo "rpmmacros:"; cat ~/.rpmmacros
 
       # ── Build RPMs ────────────────────────────────────────────────────────
       # rpmbuild -ta builds all RPMs + SRPM from the in-tarball spec.
