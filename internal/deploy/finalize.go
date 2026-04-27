@@ -7,11 +7,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	gossh "golang.org/x/crypto/ssh"
 
@@ -2137,18 +2140,82 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 	}
 
 	// ── authselect: configure PAM and nsswitch.conf for sssd ─────────────────
-	// Runs `authselect select sssd with-mkhomedir --force` inside the chroot so
-	// that /etc/nsswitch.conf gets `passwd: sss files` / `group: sss files` and
-	// the PAM stack includes pam_sss.so + pam_mkhomedir for first-login home
-	// directory creation. Non-fatal — authselect may not be present in every image.
-	if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
-		"authselect", "select", "sssd", "with-mkhomedir", "--force",
-	).CombinedOutput(); err != nil {
-		log.Warn().Err(err).Str("output", string(out)).
-			Msg("finalize: authselect in chroot failed (non-fatal) — PAM/nsswitch may need manual configuration")
+	// GAP-NEW-1: Run `authselect select sssd with-mkhomedir --force` ONLY when
+	// the LDAP server is reachable from the deploy environment.
+	//
+	// Problem: authselect rewrites the PAM stack to include pam_sss.so. If
+	// sssd.service cannot reach the LDAP server at node boot time, sssd fails,
+	// and pam_sss.so (still in the PAM stack) rejects SSH logins — even after
+	// key authentication succeeds. The node becomes unreachable.
+	//
+	// Fix: TCP-probe the LDAP host:port before running authselect. A 3-second
+	// timeout is long enough to rule out transient loss but short enough not to
+	// block the deploy significantly. If the probe fails we skip authselect
+	// entirely, leaving the image with the distribution default PAM stack
+	// (sssd.conf is still written — if LDAP comes up later and sssd is enabled
+	// the operator can re-image or run authselect manually on the node).
+	//
+	// We use the less-destructive option on skip: leave the existing PAM config
+	// alone (don't revert to `authselect select minimal`) so we don't clobber
+	// any operator customisation that may already be in the image.
+	ldapReachable := ldapServerReachable(ldapCfg.ServerURI, 3*time.Second)
+	if !ldapReachable {
+		log.Warn().
+			Str("server_uri", ldapCfg.ServerURI).
+			Msg("finalize: LDAP server unreachable — skipping authselect sssd integration to prevent PAM lockout. " +
+				"If LDAP is expected to be reachable at deploy time, check the ServerURI and network connectivity. " +
+				"To activate sssd PAM integration, run `authselect select sssd with-mkhomedir --force` on the node after LDAP is confirmed reachable.")
+	} else {
+		// LDAP is reachable — wire up PAM/nsswitch for sssd.
+		if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
+			"authselect", "select", "sssd", "with-mkhomedir", "--force",
+		).CombinedOutput(); err != nil {
+			log.Warn().Err(err).Str("output", string(out)).
+				Msg("finalize: authselect in chroot failed (non-fatal) — PAM/nsswitch may need manual configuration")
+		} else {
+			log.Info().Msg("finalize: authselect sssd with-mkhomedir applied (LDAP reachable)")
+		}
 	}
 
 	return nil
+}
+
+// ldapServerReachable performs a TCP dial to the host:port derived from
+// serverURI (e.g. "ldaps://10.99.0.1:636") and returns true if the connection
+// succeeds within the given timeout.
+//
+// It parses the URI with net/url. If the port is absent, it defaults to 636
+// for ldaps:// and 389 for ldap://. An unparseable URI is treated as
+// unreachable (returns false) with a warning log so authselect is safely
+// skipped rather than causing a PAM lockout.
+func ldapServerReachable(serverURI string, timeout time.Duration) bool {
+	log := logger()
+	u, err := url.Parse(serverURI)
+	if err != nil {
+		log.Warn().Err(err).Str("server_uri", serverURI).
+			Msg("finalize: LDAP reachability check: could not parse ServerURI — treating as unreachable")
+		return false
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "ldaps":
+			port = "636"
+		default: // ldap or anything else
+			port = "389"
+		}
+	}
+	addr := net.JoinHostPort(host, port)
+	conn, dialErr := net.DialTimeout("tcp", addr, timeout)
+	if dialErr != nil {
+		log.Warn().Err(dialErr).Str("addr", addr).
+			Msg("finalize: LDAP reachability check: TCP dial failed — treating server as unreachable")
+		return false
+	}
+	conn.Close()
+	log.Info().Str("addr", addr).Msg("finalize: LDAP reachability check: server is reachable")
+	return true
 }
 
 // writeSlurmConfig writes Slurm config files, scripts, and service enablement into
@@ -2182,6 +2249,13 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 	hasSlurmConf := false
 
 	if len(slurmCfg.Roles) > 0 {
+		// Roles field is authoritative — set by manager.NodeConfig() from the DB.
+		// GAP-NEW-3: do NOT fall through to the config-file heuristic when roles
+		// are present. slurmdbd.conf is included in the payload for all nodes
+		// (it is in defaultManagedFiles so manager.NodeConfig returns it regardless
+		// of role) — without this guard the config-file loop below would set
+		// hasSlurmdbd=true on every compute node, causing slurmctld to be installed
+		// and enabled on workers.
 		for _, r := range slurmCfg.Roles {
 			switch r {
 			case "controller":
@@ -2194,16 +2268,30 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 				hasGres = true
 			}
 		}
-	}
 
-	for _, cf := range slurmCfg.Configs {
-		switch cf.Filename {
-		case "slurmdbd.conf":
-			hasSlurmdbd = true
-		case "gres.conf":
-			hasGres = true
-		case "slurm.conf":
-			hasSlurmConf = true
+		// Detect hasSlurmConf from the config list even when roles are present —
+		// this flag only gates a write, not a package install or service enable.
+		for _, cf := range slurmCfg.Configs {
+			if cf.Filename == "slurm.conf" {
+				hasSlurmConf = true
+			}
+		}
+	} else {
+		// No roles assigned yet — fall back to inferring from config file names for
+		// backward compatibility with payloads that predate the Roles field.
+		// WARNING: this path can produce incorrect results when slurmdbd.conf is
+		// included in a compute-node payload (it is in defaultManagedFiles). It is
+		// kept only as a backward-compat escape hatch; new deployments always have
+		// roles populated by manager.NodeConfig().
+		for _, cf := range slurmCfg.Configs {
+			switch cf.Filename {
+			case "slurmdbd.conf":
+				hasSlurmdbd = true
+			case "gres.conf":
+				hasGres = true
+			case "slurm.conf":
+				hasSlurmConf = true
+			}
 		}
 	}
 	_ = hasSlurmConf // always written if present
@@ -2852,6 +2940,78 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		return
 	}
 	log.Info().Strs("packages", pkgs).Msg("finalize slurm: auto-install: packages installed successfully")
+
+	// Step 5a: Create slurm and munge OS users in the chroot.
+	//
+	// GAP-NEW-2: clustr's from-source Slurm RPMs have NO %pre scriptlet
+	// (verified: `rpm -qp --scripts slurm-*.rpm` returns empty). OpenHPC's RPMs
+	// used to create these users via scriptlet at install time — ours do not.
+	// Without these users:
+	//   • slurmctld.service fails with status=217/USER
+	//   • slurmd fails with "Invalid user for SlurmUser slurm"
+	//   • munged fails with "Invalid user for MungeUser munge"
+	//
+	// We use getent passwd to check idempotently — useradd exits non-zero if
+	// the user already exists (e.g. captured from a prior image with OpenHPC),
+	// so we only call useradd when the account is absent. The `|| true` ensures
+	// this remains non-fatal even in edge cases (read-only chroot, locked
+	// /etc/passwd, etc.).
+	//
+	// UIDs are left to the system range (--system picks the next available UID
+	// from /etc/login.defs SYS_UID_MIN/MAX). Slurm upstream and OpenHPC both
+	// use UID 64030/GID 64030 for slurm and UID 993/GID 991 for munge, but
+	// these vary across distros. Using --system keeps us consistent with
+	// whatever the chroot's login.defs defines and avoids conflicts with
+	// operator-assigned UIDs. If your site requires fixed UIDs, use the
+	// SystemAccounts module instead (it writes /etc/passwd entries directly).
+	//
+	// TODO(GAP-17 hardening): if we add %pre scriptlets to our RPM spec, these
+	// useradd calls become redundant and can be removed.
+	for _, u := range []struct {
+		name    string
+		home    string
+		comment string
+	}{
+		{"slurm", "/var/spool/slurm", "Slurm Workload Manager"},
+		{"munge", "/var/run/munge", "MUNGE Uid 'N' Gid Emporium"},
+	} {
+		// Check if the user already exists in the chroot's passwd database.
+		chkOut, chkErr := exec.CommandContext(ctx, "chroot", mountRoot, "getent", "passwd", u.name).CombinedOutput()
+		if chkErr == nil && len(chkOut) > 0 {
+			log.Info().Str("user", u.name).
+				Msg("finalize slurm: auto-install: system user already present in chroot, skipping useradd")
+			continue
+		}
+		// User absent — create it.
+		addOut, addErr := exec.CommandContext(ctx, "chroot", mountRoot,
+			"useradd",
+			"--system",
+			"--shell", "/sbin/nologin",
+			"--home-dir", u.home,
+			"--no-create-home",
+			"--comment", u.comment,
+			u.name,
+		).CombinedOutput()
+		if addErr != nil {
+			log.Warn().Err(addErr).Str("user", u.name).Str("output", string(addOut)).
+				Msg("finalize slurm: auto-install: useradd failed (non-fatal) — daemon will fail to start if user is absent")
+		} else {
+			log.Info().Str("user", u.name).
+				Msg("finalize slurm: auto-install: created system user in chroot")
+		}
+	}
+
+	// Verify both users are now present. Log clearly on failure so operators
+	// know exactly what is missing when slurmctld/munged fail to start.
+	for _, u := range []string{"slurm", "munge"} {
+		if verOut, verErr := exec.CommandContext(ctx, "chroot", mountRoot, "getent", "passwd", u).CombinedOutput(); verErr != nil {
+			log.Error().Str("user", u).Str("output", string(verOut)).
+				Msg("finalize slurm: auto-install: CRITICAL — system user missing after useradd; daemon will fail with status=217/USER on first boot")
+		} else {
+			log.Info().Str("user", u).Str("entry", strings.TrimSpace(string(verOut))).
+				Msg("finalize slurm: auto-install: system user verified in chroot")
+		}
+	}
 
 	// Step 6: Verify the installed Slurm version is from the clustr-builtin
 	// repo (24.11.4), not the old OpenHPC version (22.05.8). This catches the
