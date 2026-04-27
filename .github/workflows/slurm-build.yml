@@ -255,14 +255,21 @@ jobs:
           echo "  PASS"
 
           # The upstream tarball ships dist/libjwt.spec.in with @VERSION@
-          # as the only template variable.  Extract it and substitute.
+          # as the only template variable.  Extract it, substitute version,
+          # and patch the Source: line to match our actual tarball filename.
+          #
+          # The spec.in references `v%{version}.tar.gz` (GitHub auto-generated
+          # archive format) but we download the official release asset which is
+          # named `libjwt-VERSION.tar.bz2`.  We patch the Source: and the
+          # %prep %autosetup to match our actual filename.
           echo "--- Extracting spec.in from tarball ---"
           tar -xjOf "${TARBALL}" "libjwt-${LIBJWT_VERSION}/dist/libjwt.spec.in" \
             | sed "s/@VERSION@/${LIBJWT_VERSION}/g" \
+            | sed "s|Source:.*|Source:             libjwt-${LIBJWT_VERSION}.tar.bz2|" \
             > libjwt.spec
 
-          echo "--- spec first 10 lines ---"
-          head -10 libjwt.spec
+          echo "--- spec first 15 lines ---"
+          head -15 libjwt.spec
 
           # Set up a fresh rpmbuild tree for libjwt, separate from the Slurm
           # tree we create later.
