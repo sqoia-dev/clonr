@@ -1,0 +1,51 @@
+# build/slurm/versions.yml
+#
+# Single source-of-truth for the Slurm build pipeline.
+# See docs/slurm-build-pipeline.md §5 for the full verification chain rationale.
+#
+# HOW TO BUMP: edit version + tarball_sha256, reset clustr_release to 1.
+# The full release tag is: slurm-v${slurm.version}-clustr${clustr_release}
+# e.g. slurm-v24.11.4-clustr1
+#
+# VERIFICATION NOTE: SchedMD does not publish detached GPG signatures (.asc)
+# for release tarballs (confirmed 2026-04-27). They publish SHA256/MD5/SHA1
+# checksum files at https://download.schedmd.com/slurm/SHA256 over HTTPS.
+# The build workflow verifies the tarball against tarball_sha256 (pinned here)
+# and cross-references against the live SchedMD SHA256 file at download time.
+# The schedmd_key_fingerprint field below is retained as a placeholder for
+# when/if SchedMD begins publishing detached GPG signatures; the build workflow
+# skips the gpg --verify step until that is available.
+# See docs/slurm-build-pipeline.md §5.2 for the verification chain.
+
+slurm:
+  version: "24.11.4"
+  # SHA256 verified against https://download.schedmd.com/slurm/SHA256 on 2026-04-27
+  # and re-computed locally against the downloaded tarball (both matched)
+  tarball_sha256: "a2baee7b9c0775d64bd623891865a1402266280156e6e03da6c7f362fb405748"
+  tarball_url: "https://download.schedmd.com/slurm/slurm-24.11.4.tar.bz2"
+  schedmd_sha256_url: "https://download.schedmd.com/slurm/SHA256"
+  # SchedMD does not publish detached GPG signatures as of 2026-04-27.
+  # This key ID (from the design doc) is a forward-reference placeholder —
+  # the build workflow will skip gpg --verify until SchedMD publishes .asc files.
+  schedmd_signing_key_id: "0xCB8E2EB3D04E78CC"
+
+# clustr_release: bump this (reset to 1 on upstream version bump) to rebuild
+# without changing the Slurm version (e.g. to fix a packaging bug or rebuild
+# against a refreshed EPEL snapshot).
+clustr_release: 1
+
+munge:
+  # MVP: pull from EPEL. Exit ramp to from-source build in sprint 3.
+  # See docs/slurm-build-pipeline.md §10.
+  source: "epel"
+  version: "0.5.16"
+
+# Build matrix — EL10 and aarch64 deferred per design doc §3 and §4.2
+targets:
+  - os: el9
+    arch: x86_64
+    container: "docker.io/rockylinux/rockylinux:9"
+    # Pin container by digest for reproducibility. Update via PR when needed.
+    # Run: docker pull rockylinux/rockylinux:9 && docker inspect --format='{{index .RepoDigests 0}}' rockylinux/rockylinux:9
+    # Digest pinned 2026-04-27:
+    container_digest: "docker.io/rockylinux/rockylinux:9@sha256:ee90dc0e23c2f59af63886aed78c495fc847c8f0af7e825f48746547ddb7fbe2"
