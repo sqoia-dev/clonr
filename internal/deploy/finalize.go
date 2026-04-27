@@ -2641,27 +2641,25 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		}
 	}()
 
-	// Step 2: Copy the deploy environment's /etc/resolv.conf into the chroot so
-	// dnf can reach the OpenHPC repo on the public internet.
+	// Step 2: DNS prep — copy the deploy environment's /etc/resolv.conf into
+	// the chroot and ensure /etc/hosts has localhost entries.
 	//
-	// In the PXE initramfs environment the DHCP server (pxe/dhcp.go) now
-	// advertises the clustr server IP as the DNS resolver via DHCP option 6
-	// (OptDNS). udhcpc writes the received nameserver into /etc/resolv.conf so
-	// the initramfs environment has a working resolver pointing at the server.
+	// The clustr-server IP is the DNS resolver for the provisioning network
+	// (pxe/dhcp.go advertises it via DHCP option 6). The initramfs udhcpc
+	// writes the received nameserver into /etc/resolv.conf, so the deploy
+	// environment has a working resolver that points at the clustr-server.
 	// Copying that file into the chroot gives dnf the same DNS path.
 	//
-	// Without the DHCP DNS option, udhcpc does not write /etc/resolv.conf and
-	// the initramfs environment has no resolver, causing:
-	//   Curl error (6): Couldn't resolve host name for repos.openhpc.community
+	// The chroot's own resolv.conf (from the captured base image) may be empty
+	// or stale (e.g. 10.0.2.3 from QEMU NAT). Overwriting it ensures dnf uses
+	// the correct nameserver during the deploy finalize phase.
 	//
-	// The chroot's own resolv.conf (from the captured base image) may
-	// be empty or point at a stale address (e.g. 10.0.2.3 from QEMU NAT).
-	// Overwriting it with the initramfs /etc/resolv.conf ensures dnf uses the
-	// correct nameserver during the deploy finalize phase.
+	// The file is overwritten; on first boot NetworkManager writes its own
+	// resolv.conf based on the NM connection profiles injected by applyNodeConfig.
 	//
-	// The file is overwritten; the original is restored by the subsequent reboot
-	// — on first boot NetworkManager writes its own resolv.conf based on the NM
-	// connection profiles we inject in applyNodeConfig.
+	// Even though the current primary repo URL is an IP address (clustr-server),
+	// we always prepare DNS because dnf may fetch EPEL or other deps that require
+	// name resolution, and future code paths will depend on it.
 	resolvSrc := "/etc/resolv.conf"
 	resolvDst := filepath.Join(mountRoot, "etc", "resolv.conf")
 	if data, err := os.ReadFile(resolvSrc); err == nil {
@@ -2673,6 +2671,45 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		}
 	} else {
 		log.Warn().Err(err).Msg("finalize slurm: auto-install: could not read host /etc/resolv.conf (non-fatal)")
+	}
+
+	// Ensure /etc/hosts has at minimum the localhost entries. A base image
+	// captured from a QEMU install VM may have an empty or minimal hosts file.
+	// Without localhost entries, rpm scriptlets that do getent lookups fail.
+	hostsPath := filepath.Join(mountRoot, "etc", "hosts")
+	const localhostHosts = "127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain\n"
+	if raw, err := os.ReadFile(hostsPath); err != nil || !strings.Contains(string(raw), "localhost") {
+		if werr := os.WriteFile(hostsPath, []byte(localhostHosts), 0o644); werr != nil {
+			log.Warn().Err(werr).Msg("finalize slurm: auto-install: could not write /etc/hosts into chroot (non-fatal)")
+		} else {
+			log.Info().Msg("finalize slurm: auto-install: wrote localhost entries to /etc/hosts in chroot")
+		}
+	}
+
+	// Step 2.5: Strip any pre-existing OpenHPC Slurm packages from the chroot
+	// before installing clustr's Slurm RPMs. Base images built before the
+	// OpenHPC-removal change (PR4) may contain slurm-ohpc* packages that own
+	// the same files as clustr-slurm RPMs (/usr/sbin/slurmctld, etc.), causing
+	// dnf install to fail with file conflicts.
+	//
+	// This is a defense-in-depth step: the canonical fix is rebuilding the base
+	// image without OpenHPC packages (see docs/imagebuilder.md). This strip
+	// makes old images work without requiring an immediate image rebuild.
+	//
+	// || true makes this idempotent — fine if the packages are not present.
+	ohpcStripArgs := []string{
+		mountRoot, "dnf", "-y", "--setopt=tsflags=noscripts", "remove",
+		"slurm-ohpc", "slurm-ohpc-*", "ohpc-slurm-*",
+	}
+	ohpcOut, ohpcErr := exec.CommandContext(ctx, "chroot", ohpcStripArgs...).CombinedOutput()
+	if ohpcErr != nil {
+		// dnf remove exits non-zero when no packages match the glob — that is the
+		// normal case for images already built without OpenHPC. Log at debug level.
+		log.Debug().Str("dnf_output", string(ohpcOut)).
+			Msg("finalize slurm: auto-install: OpenHPC strip — no packages removed (image is already clean)")
+	} else if strings.Contains(string(ohpcOut), "Removed") {
+		log.Info().Str("dnf_output", string(ohpcOut)).
+			Msg("finalize slurm: auto-install: stripped pre-existing OpenHPC slurm packages from image (defense-in-depth)")
 	}
 
 	// Step 3a: Write the clustr GPG public key into the chroot so dnf can
@@ -2764,6 +2801,48 @@ func installSlurmInChroot(ctx context.Context, mountRoot, nodeID, repoURL string
 		return
 	}
 	log.Info().Strs("packages", pkgs).Msg("finalize slurm: auto-install: packages installed successfully")
+
+	// Step 6: Verify the installed Slurm version is from the clustr-builtin
+	// repo (24.11.4), not the old OpenHPC version (22.05.8). This catches the
+	// case where the strip in step 2.5 was a no-op but dnf still resolved to
+	// a stale cache or alternative repo.
+	//
+	// We check slurmctld and slurmd only when they are in the package list for
+	// this role — a minimal install (slurm + munge only) won't have them.
+	verifyPkgs := []string{"slurm"}
+	if hasSlurmdbd {
+		verifyPkgs = append(verifyPkgs, "slurm-slurmctld")
+	}
+	if hasGres {
+		verifyPkgs = append(verifyPkgs, "slurm-slurmd")
+	}
+	for _, pkg := range verifyPkgs {
+		verArgs := []string{mountRoot, "rpm", "-q", "--queryformat", "%{VERSION}", pkg}
+		verOut, verErr := exec.CommandContext(ctx, "chroot", verArgs...).CombinedOutput()
+		if verErr != nil {
+			log.Warn().Str("package", pkg).Err(verErr).
+				Msg("finalize slurm: auto-install: post-install rpm -q failed (non-fatal)")
+			continue
+		}
+		installedVer := strings.TrimSpace(string(verOut))
+		// OpenHPC 22.05.8 packages are the known-bad version from the pre-PR4 images.
+		if installedVer == "22.05.8" {
+			log.Error().
+				Str("package", pkg).
+				Str("installed_version", installedVer).
+				Str("node_id", nodeID).
+				Msg("finalize slurm: auto-install: CONFLICT — installed Slurm is the old OpenHPC 22.05.8 build, not clustr 24.11.4. " +
+					"Strip OpenHPC packages from the base image (see docs/imagebuilder.md) and re-image the node.")
+			if auditFn != nil {
+				auditFn(ctx, nodeID, AuditActionSlurmInstallFailed,
+					fmt.Sprintf("post-install version check: %s is %s (expected 24.11.4, got OpenHPC build). "+
+						"Rebuild the base image without OpenHPC packages.", pkg, installedVer))
+			}
+		} else {
+			log.Info().Str("package", pkg).Str("version", installedVer).
+				Msg("finalize slurm: auto-install: post-install version check passed")
+		}
+	}
 }
 
 // AuditActionSlurmInstallFailed is the audit log action recorded when the

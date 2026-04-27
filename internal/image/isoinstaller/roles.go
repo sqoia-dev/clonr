@@ -35,9 +35,14 @@ var HPCRoles = []Role{
 		ID:          "head-node",
 		Name:        "Head Node / Login Node",
 		Description: "SLURM controller, LDAP server, login shell, NFS exports, management tooling",
+		// NOTE: Slurm packages are intentionally absent. clustr installs Slurm at
+		// deploy time from the clustr-server's bundled RPM repo (gpgcheck=1). Baking
+		// Slurm into the base image couples the image to a specific Slurm version and
+		// historically caused file conflicts when images built against OpenHPC were
+		// re-deployed after the OpenHPC dependency was removed. See docs/imagebuilder.md.
 		Packages: map[Distro][]string{
 			DistroRocky: {
-				"slurm", "slurm-slurmctld", "slurm-slurmdbd", "mariadb-server",
+				"mariadb-server",
 				"openldap-servers", "openldap-clients", "sssd", "sssd-ldap",
 				"nfs-utils", "rpcbind",
 				"bash-completion", "vim-enhanced", "tmux", "screen", "htop", "tree",
@@ -49,7 +54,7 @@ var HPCRoles = []Role{
 				"opensm", "opensm-libs",
 			},
 			DistroAlmaLinux: {
-				"slurm", "slurm-slurmctld", "slurm-slurmdbd", "mariadb-server",
+				"mariadb-server",
 				"openldap-servers", "openldap-clients", "sssd", "sssd-ldap",
 				"nfs-utils", "rpcbind",
 				"bash-completion", "vim-enhanced", "tmux", "screen", "htop", "tree",
@@ -61,7 +66,7 @@ var HPCRoles = []Role{
 				"opensm", "opensm-libs",
 			},
 			DistroUbuntu: {
-				"slurm-wlm", "slurmctld", "slurmdbd", "mariadb-server",
+				"mariadb-server",
 				"slapd", "ldap-utils", "sssd", "sssd-ldap",
 				"nfs-kernel-server",
 				"vim", "tmux", "screen", "htop", "tree",
@@ -81,9 +86,9 @@ var HPCRoles = []Role{
 		ID:          "compute",
 		Name:        "CPU Compute Node",
 		Description: "SLURM worker, LDAP client, NFS client, MPI, Lmod, scientific computing base tooling",
+		// NOTE: Slurm packages are intentionally absent. See head-node role comment.
 		Packages: map[Distro][]string{
 			DistroRocky: {
-				"slurm", "slurm-slurmd", "slurm-pmi",
 				"sssd", "sssd-ldap", "oddjob-mkhomedir",
 				"nfs-utils",
 				"openmpi", "openmpi-devel",
@@ -97,7 +102,6 @@ var HPCRoles = []Role{
 				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroAlmaLinux: {
-				"slurm", "slurm-slurmd", "slurm-pmi",
 				"sssd", "sssd-ldap", "oddjob-mkhomedir",
 				"nfs-utils",
 				"openmpi", "openmpi-devel",
@@ -111,7 +115,6 @@ var HPCRoles = []Role{
 				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroUbuntu: {
-				"slurmd", "slurm-client",
 				"sssd", "sssd-ldap",
 				"nfs-common",
 				"openmpi-bin", "libopenmpi-dev",
@@ -135,9 +138,9 @@ var HPCRoles = []Role{
 		Name:        "GPU Compute Node",
 		Description: "Everything in CPU compute plus CUDA toolkit and NVIDIA drivers via vendor repo",
 		Notes:       "CUDA toolkit and NVIDIA drivers are installed via the NVIDIA CUDA repo in %post. kernel-devel must match the running kernel at driver build time.",
+		// NOTE: Slurm packages are intentionally absent. See head-node role comment.
 		Packages: map[Distro][]string{
 			DistroRocky: {
-				"slurm", "slurm-slurmd", "slurm-pmi",
 				"sssd", "sssd-ldap", "oddjob-mkhomedir",
 				"nfs-utils", "openmpi", "openmpi-devel",
 				"environment-modules",
@@ -152,7 +155,6 @@ var HPCRoles = []Role{
 				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroAlmaLinux: {
-				"slurm", "slurm-slurmd", "slurm-pmi",
 				"sssd", "sssd-ldap", "oddjob-mkhomedir",
 				"nfs-utils", "openmpi", "openmpi-devel",
 				"environment-modules",
@@ -167,7 +169,6 @@ var HPCRoles = []Role{
 				"rdma-core", "infiniband-diags", "libibverbs-utils", "perftest",
 			},
 			DistroUbuntu: {
-				"slurmd", "slurm-client",
 				"sssd", "sssd-ldap",
 				"nfs-common", "openmpi-bin", "libopenmpi-dev",
 				"environment-modules",

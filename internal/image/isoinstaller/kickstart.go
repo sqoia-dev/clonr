@@ -245,6 +245,18 @@ rm -f /etc/machine-id
 touch /etc/machine-id
 rm -f /etc/ssh/ssh_host_*
 rm -f /etc/NetworkManager/system-connections/*
+# ── Verify Slurm-free base image policy ──────────────────────────────────
+# Slurm is installed at deploy time from the clustr-server's bundled repo.
+# It must never be baked into the base image. Any Slurm package in the image
+# would cause file conflicts when clustr installs its own Slurm RPMs.
+# See docs/imagebuilder.md for the policy.
+slurm_pkgs=$(rpm -qa | grep -iE '^slurm' || true)
+if [ -n "$slurm_pkgs" ]; then
+  echo "ERROR: base image contains Slurm packages — violates Slurm-free image policy:" >&2
+  echo "$slurm_pkgs" >&2
+  echo "Remove Slurm from the role package list and rebuild the image." >&2
+  exit 1
+fi
 %end
 
 reboot --eject

@@ -148,6 +148,101 @@ func TestGenerateKickstart_BaseEnvironment_Custom(t *testing.T) {
 	}
 }
 
+// TestGenerateKickstart_SlurmFreeRoles verifies that the HPC role package lists
+// do NOT include Slurm packages for RHEL-family distros. Slurm is installed at
+// deploy time from the clustr-server's bundled repo; baking it into the base
+// image causes file conflicts (PR5 Failure A). See docs/imagebuilder.md.
+func TestGenerateKickstart_SlurmFreeRoles(t *testing.T) {
+	slurmPkgs := []string{
+		"slurm", "slurm-slurmctld", "slurm-slurmd", "slurm-slurmdbd",
+		"slurm-pmi", "slurm-ohpc", "slurm-ohpc-pmi", "munge",
+	}
+
+	slurmRoles := []string{"head-node", "compute", "gpu-compute"}
+
+	for _, roleID := range slurmRoles {
+		roleID := roleID
+		t.Run(roleID, func(t *testing.T) {
+			opts := BuildOptions{
+				Firmware: "uefi",
+				RoleIDs:  []string{roleID},
+			}
+			cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+			if err != nil {
+				t.Fatalf("generateKickstart(%s): %v", roleID, err)
+			}
+			ks := cfg.KickstartContent
+			// Extract the %packages block only (stop at %end).
+			pkgStart := strings.Index(ks, "%packages")
+			pkgEnd := strings.Index(ks[pkgStart:], "%end")
+			pkgBlock := ""
+			if pkgStart >= 0 && pkgEnd >= 0 {
+				pkgBlock = ks[pkgStart : pkgStart+pkgEnd]
+			}
+			for _, pkg := range slurmPkgs {
+				// Check each package name as a standalone line token to avoid
+				// false positives from comment lines.
+				for _, line := range strings.Split(pkgBlock, "\n") {
+					trimmed := strings.TrimSpace(line)
+					if trimmed == pkg {
+						t.Errorf("role %s: kickstart %%packages contains Slurm package %q — "+
+							"Slurm must not be baked into the base image (see docs/imagebuilder.md)",
+							roleID, pkg)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestGenerateKickstart_SlurmVerificationStep verifies that the kickstart
+// %post section includes an rpm -qa Slurm verification step that fails the
+// build if any Slurm packages are found in the image.
+func TestGenerateKickstart_SlurmVerificationStep(t *testing.T) {
+	opts := BuildOptions{Firmware: "uefi", RoleIDs: []string{"compute"}}
+	cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+	if err != nil {
+		t.Fatalf("generateKickstart error: %v", err)
+	}
+	ks := cfg.KickstartContent
+
+	// The %post block must contain the verification command.
+	if !strings.Contains(ks, "rpm -qa | grep -iE") {
+		t.Errorf("%%post block is missing the Slurm-free verification step (rpm -qa | grep -iE)\nkickstart:\n%s", ks)
+	}
+	// Must have the exit 1 on failure.
+	if !strings.Contains(ks, "exit 1") {
+		t.Errorf("%%post Slurm verification block is missing 'exit 1' on failure\nkickstart:\n%s", ks)
+	}
+}
+
+// TestGenerateKickstart_NoOpenHPCRepo verifies that the generated kickstart
+// does not reference the OpenHPC yum repo URL or repo file.
+func TestGenerateKickstart_NoOpenHPCRepo(t *testing.T) {
+	for _, roleID := range []string{"head-node", "compute", "gpu-compute"} {
+		roleID := roleID
+		t.Run(roleID, func(t *testing.T) {
+			opts := BuildOptions{Firmware: "uefi", RoleIDs: []string{roleID}}
+			cfg, err := generateKickstart(DistroRocky, testTemplateData(), opts, "")
+			if err != nil {
+				t.Fatalf("generateKickstart(%s): %v", roleID, err)
+			}
+			ks := cfg.KickstartContent
+			for _, forbidden := range []string{
+				"openhpc.community",
+				"OpenHPC.repo",
+				"ohpc",
+			} {
+				if strings.Contains(strings.ToLower(ks), strings.ToLower(forbidden)) {
+					t.Errorf("role %s: kickstart references OpenHPC artifact %q — "+
+						"OpenHPC must not be referenced in the base image kickstart",
+						roleID, forbidden)
+				}
+			}
+		})
+	}
+}
+
 // TestGenerateKickstart_BootPackages verifies that both BIOS and UEFI boot
 // packages are always present in the %packages section, regardless of the
 // firmware mode. This implements ADR-0009 (content-only images): a single image

@@ -206,3 +206,111 @@ func TestInstallSlurmInChroot_GPGKeyBase64RoundTrip(t *testing.T) {
 		t.Errorf("GPG key round-trip failed:\n  got  %q\n  want %q", string(decoded), original)
 	}
 }
+
+// TestInstallSlurmInChroot_DNSPrep verifies that installSlurmInChroot writes
+// /etc/resolv.conf and /etc/hosts into the chroot before invoking dnf.
+// This is the fix for PR5 Failure B: chroot has no DNS.
+func TestInstallSlurmInChroot_DNSPrep(t *testing.T) {
+	chroot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
+		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
+	}
+
+	// Write a known resolv.conf on the host side (the function copies from
+	// the real /etc/resolv.conf, so we simulate by pre-creating it in the
+	// chroot's /etc — the copy overwrites). We can only verify the file
+	// exists after the call; we can't intercept /etc/resolv.conf.
+	// However, we CAN verify /etc/hosts is written with localhost entries.
+	installSlurmInChroot(
+		t.Context(),
+		chroot,
+		"test-node-dns",
+		"http://10.99.0.1:8080/repo/el9-x86_64/",
+		false, // hasSlurmdbd
+		false, // hasGres
+		nil,   // auditFn
+		[]byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE\n-----END PGP PUBLIC KEY BLOCK-----\n"),
+	)
+
+	// /etc/hosts must contain localhost entries.
+	hostsPath := filepath.Join(chroot, "etc", "hosts")
+	hostsData, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatalf("/etc/hosts not written in chroot at %s: %v", hostsPath, err)
+	}
+	hostsContent := string(hostsData)
+	for _, want := range []string{"127.0.0.1", "localhost", "::1"} {
+		if !strings.Contains(hostsContent, want) {
+			t.Errorf("/etc/hosts missing %q\nfull content:\n%s", want, hostsContent)
+		}
+	}
+}
+
+// TestInstallSlurmInChroot_DNSPrep_ExistingHosts verifies that when the chroot
+// already has a /etc/hosts with localhost entries, it is left unchanged.
+func TestInstallSlurmInChroot_DNSPrep_ExistingHosts(t *testing.T) {
+	chroot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
+		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
+	}
+
+	// Pre-populate /etc/hosts with a custom entry.
+	existingHosts := "127.0.0.1 localhost localhost.localdomain\n::1 localhost\n10.0.0.1 myhost\n"
+	hostsPath := filepath.Join(chroot, "etc", "hosts")
+	if err := os.WriteFile(hostsPath, []byte(existingHosts), 0o644); err != nil {
+		t.Fatalf("setup: write /etc/hosts: %v", err)
+	}
+
+	installSlurmInChroot(
+		t.Context(),
+		chroot,
+		"test-node-existing-hosts",
+		"http://10.99.0.1:8080/repo/el9-x86_64/",
+		false, false, nil,
+		[]byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE\n-----END PGP PUBLIC KEY BLOCK-----\n"),
+	)
+
+	// The custom "myhost" entry must still be present (file not overwritten).
+	hostsData, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatalf("read /etc/hosts: %v", err)
+	}
+	if !strings.Contains(string(hostsData), "myhost") {
+		t.Errorf("existing /etc/hosts was overwritten; 'myhost' entry lost\nfull content:\n%s", string(hostsData))
+	}
+}
+
+// TestInstallSlurmInChroot_OrderDNSBeforeRepo verifies the new step ordering:
+// DNS prep (resolv.conf + hosts) and OpenHPC strip happen before the .repo
+// file is written. We verify this indirectly by asserting that the .repo file
+// exists after the call (confirming the function reached the repo-write step
+// without aborting), and that /etc/hosts has localhost entries.
+func TestInstallSlurmInChroot_OrderDNSBeforeRepo(t *testing.T) {
+	chroot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(chroot, "etc", "yum.repos.d"), 0o755); err != nil {
+		t.Fatalf("setup: mkdir yum.repos.d: %v", err)
+	}
+
+	installSlurmInChroot(
+		t.Context(),
+		chroot,
+		"test-order",
+		"http://10.99.0.1:8080/repo/el9-x86_64/",
+		true,  // hasSlurmdbd (controller)
+		false, // hasGres
+		nil,
+		[]byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE\n-----END PGP PUBLIC KEY BLOCK-----\n"),
+	)
+
+	// .repo file must exist (function ran past DNS prep without aborting).
+	repoPath := filepath.Join(chroot, "etc", "yum.repos.d", "clustr-slurm.repo")
+	if _, err := os.Stat(repoPath); err != nil {
+		t.Fatalf(".repo file not written — function may have aborted before repo step: %v", err)
+	}
+
+	// /etc/hosts must have localhost entries (DNS prep ran).
+	hostsData, _ := os.ReadFile(filepath.Join(chroot, "etc", "hosts"))
+	if !strings.Contains(string(hostsData), "localhost") {
+		t.Errorf("/etc/hosts does not contain 'localhost' — DNS prep may not have run")
+	}
+}
