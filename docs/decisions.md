@@ -1150,4 +1150,71 @@ For every ColdFront-inspired feature considered for any sprint, classify by two 
 
 ---
 
+## D26 — Attribute Visibility Defaults (Sprint E)
+
+**Date:** 2026-04-27
+**Author:** Dinesh (implementation decision during Sprint E, E-3)
+**Context:** Sprint E introduces per-attribute visibility controls with four levels
+(`public > member > pi > admin_only`). Global defaults must be seeded in migration 066.
+The question: what should the default visibility be for each NodeGroup attribute, and
+should the bias be toward openness or restriction?
+
+**Question:** For each tracked group attribute, what visibility level is the
+appropriate default, and on what principle?
+
+**Decision:** **Default to the least-sensitive reasonable level per attribute class.
+Administrative and financial data defaults to `pi` or `admin_only`. Operational data
+visible to members defaults to `member`. Publicly legible research identity data
+defaults to `public`. Security credentials are always `admin_only`.**
+
+**Defaults locked in migration 066:**
+
+| Attribute | Default | Rationale |
+|---|---|---|
+| `grant_amount` | `pi` | Financial sensitivity — members don't need dollar amounts |
+| `grant_number` | `pi` | Award numbers are often embargoed by sponsor |
+| `funding_agency` | `public` | Widely published in papers; no sensitivity |
+| `field_of_science` | `public` | Research classification; openly visible |
+| `node_count` | `member` | Members need to understand group scale; external: not needed |
+| `pi_name` | `public` | PI identity is public research record |
+| `description` | `public` | Group purpose/abstract; standard institutional transparency |
+| `bmc_credentials` | `admin_only` | Hardware access credentials; never expose below admin |
+| `publication_doi` | `public` | Published work; DOI is citable in public record |
+| `publication_title` | `public` | Published work title |
+| `publication_authors` | `public` | Author list |
+| `utilization_stats` | `member` | Node utilization data; internal operational metric |
+| `slurm_partition` | `member` | Partition names are HPC-internal |
+| `node_hardware` | `pi` | Hardware specifications; PI-level operational detail |
+
+**The principle (locked):** "Least-sensitive reasonable" — not maximum openness, not
+maximum restriction. Each attribute's default follows the most common institutional
+expectation for that attribute class. Admins and PIs can override per-project when
+their policy differs.
+
+**Why not admin_only for everything (maximum restriction):** Makes the system useless
+for its intended purpose — researchers can't see their own group's relevant operational
+context. Defeats the ColdFront-inspired self-service model.
+
+**Why not public for everything (maximum openness):** Financial and hardware details
+have genuine sensitivity. Grant amounts in particular are often pre-publication
+embargoed. BMC credentials exposed to members is a security failure.
+
+**PI override:** PIs can override any attribute's visibility for their own group via
+the PI portal "Visibility" tab, scoped to their group only. This respects institutional
+variation without requiring admin intervention.
+
+**Admin override:** Admins can change the global default for any attribute via the
+"Governance" settings tab. This allows system-wide policy re-alignment when an
+institution has blanket rules (e.g., "all financial data is admin_only").
+
+**Reversibility:** **cheap**. Visibility defaults are seeded by migration and can be
+changed at runtime by admins. No data migrations required for default changes.
+
+**Re-decision triggers:**
+- An institutional operator reports that a default creates friction or a compliance issue.
+- A new attribute is added; this decision should be extended to cover it with an explicit
+  rationale following the same principle.
+
+---
+
 *End of decisions. Sprint 1 has unambiguous targets. Re-decisions require a written counter-rationale routed through Richard.*

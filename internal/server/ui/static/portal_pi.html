@@ -261,6 +261,8 @@
             <button class="pi-tab" :class="{ active: tab === 'grants' }" @click="tab = 'grants'; loadGrants()">Grants</button>
             <button class="pi-tab" :class="{ active: tab === 'publications' }" @click="tab = 'publications'; loadPublications()">Publications</button>
             <button class="pi-tab" :class="{ active: tab === 'reviews' }" @click="tab = 'reviews'; loadReviews()">Annual Review</button>
+            <button class="pi-tab" :class="{ active: tab === 'change-requests' }" @click="tab = 'change-requests'; loadChangeRequests()">Change Requests</button>
+            <button class="pi-tab" :class="{ active: tab === 'visibility' }" @click="tab = 'visibility'; loadVisibility()">Visibility</button>
         </div>
 
         <!-- ── My Groups tab ─────────────────────────────────────────── -->
@@ -331,10 +333,27 @@
                             </template>
                         </div>
 
+                        <!-- Field of Science (E2, CF-16) -->
+                        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border,#30363d)">
+                            <label style="font-size:11px;text-transform:uppercase;color:var(--text-secondary,#8b949e);display:block;margin-bottom:4px">Field of Science</label>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <select style="flex:1;padding:5px 8px;background:var(--bg-base,#0d1117);border:1px solid var(--border,#30363d);color:var(--text-primary,#e6edf3);border-radius:5px;font-size:12px"
+                                    :value="group.field_of_science_id || ''"
+                                    @change="setGroupFOS(group.id, $event.target.value)">
+                                    <option value="">— Not classified —</option>
+                                    <template x-for="fos in fosOptions" :key="fos.id">
+                                        <option :value="fos.id" x-text="(fos.parent_id ? '  ' : '') + fos.name"></option>
+                                    </template>
+                                </select>
+                            </div>
+                        </div>
+
                         <!-- Request more nodes -->
-                        <div>
+                        <div style="margin-top:10px">
                             <button class="btn btn-secondary" style="font-size:12px;padding:4px 12px"
                                 @click="openExpansionRequest(group)">Request more nodes</button>
+                            <button class="btn btn-secondary" style="font-size:12px;padding:4px 12px;margin-left:6px"
+                                @click="openChangeRequest()">Submit change request</button>
                         </div>
 
                     </div>
@@ -459,6 +478,106 @@
             </template>
         </div>
 
+        <!-- ── Change Requests tab (E1, CF-20) ──────────────────────── -->
+        <div x-show="tab === 'change-requests'">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <span style="font-size:15px;font-weight:600">Allocation Change Requests</span>
+                <button class="btn btn-primary btn-sm" @click="openChangeRequest()">+ New request</button>
+            </div>
+            <div x-show="changeRequests.loading" class="loading"><div class="spinner"></div></div>
+            <div x-show="!changeRequests.loading && changeRequests.items.length === 0" class="empty-state">
+                <div class="empty-state-text">No change requests yet. Use "New request" to submit one.</div>
+            </div>
+            <template x-for="req in changeRequests.items" :key="req.id">
+                <div class="card" style="margin-bottom:10px">
+                    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+                        <div>
+                            <strong x-text="req.project_name || req.project_id"></strong>
+                            <span style="font-size:12px;color:var(--text-secondary);margin-left:8px" x-text="req.request_type.replace(/_/g,' ')"></span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span class="badge"
+                                :class="req.status === 'approved' ? 'badge-deployed' : req.status === 'denied' ? 'badge-error' : req.status === 'withdrawn' ? 'badge-offline' : 'badge-warning'"
+                                x-text="req.status"></span>
+                            <button x-show="req.status === 'pending'" class="btn btn-sm"
+                                style="background:none;border:1px solid var(--border);color:var(--text-secondary);padding:3px 10px;font-size:12px"
+                                @click="withdrawRequest(req)">Withdraw</button>
+                        </div>
+                    </div>
+                    <div class="card-body" style="font-size:13px;color:var(--text-secondary)">
+                        <span x-show="req.justification" x-text="req.justification"></span>
+                        <div x-show="req.review_notes" style="margin-top:6px;padding:8px 10px;background:var(--bg-elevated);border-radius:4px;border-left:3px solid var(--border)">
+                            <strong>Admin note:</strong> <span x-text="req.review_notes"></span>
+                        </div>
+                        <div style="margin-top:4px;color:var(--text-muted,#6e7681);font-size:11px" x-text="'Submitted ' + new Date(req.created_at).toLocaleDateString()"></div>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- ── Visibility tab (E3, CF-39) ────────────────────────────── -->
+        <div x-show="tab === 'visibility'">
+            <div style="margin-bottom:16px">
+                <span style="font-size:15px;font-weight:600">Attribute Visibility</span>
+                <p style="font-size:13px;color:var(--text-secondary);margin:6px 0 0">
+                    Control which attributes of your groups are visible to members, researchers, or only admins.
+                    Select a group to manage its visibility overrides.
+                </p>
+            </div>
+            <div style="margin-bottom:14px">
+                <select style="padding:6px 10px;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);border-radius:6px;font-size:13px"
+                    x-model="visibility.selectedGroupID" @change="loadVisibility()">
+                    <option value="">— Select a group —</option>
+                    <template x-for="g in groups" :key="g.id">
+                        <option :value="g.id" x-text="g.name"></option>
+                    </template>
+                </select>
+            </div>
+            <div x-show="visibility.loading" class="loading"><div class="spinner"></div></div>
+            <div x-show="!visibility.loading && visibility.selectedGroupID && visibility.attributes.length > 0">
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border)">
+                            <th style="text-align:left;padding:8px 0;font-size:11px;text-transform:uppercase;color:var(--text-secondary)">Attribute</th>
+                            <th style="text-align:left;padding:8px 0;font-size:11px;text-transform:uppercase;color:var(--text-secondary)">Default</th>
+                            <th style="text-align:left;padding:8px 0;font-size:11px;text-transform:uppercase;color:var(--text-secondary)">Current</th>
+                            <th style="text-align:left;padding:8px 0;font-size:11px;text-transform:uppercase;color:var(--text-secondary)">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="attr in visibility.attributes" :key="attr.attribute_name">
+                            <tr style="border-bottom:1px solid var(--border)">
+                                <td style="padding:8px 0">
+                                    <span x-text="attr.attribute_name.replace(/_/g,' ')"></span>
+                                    <div x-show="attr.description" style="font-size:11px;color:var(--text-secondary)" x-text="attr.description"></div>
+                                </td>
+                                <td style="padding:8px 0;color:var(--text-secondary)" x-text="attr.default_visibility"></td>
+                                <td style="padding:8px 0">
+                                    <select :data-attr="attr.attribute_name"
+                                        style="padding:3px 8px;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);border-radius:4px;font-size:12px"
+                                        x-model="attr.effective_visibility"
+                                        @change="setVisibilityOverride(attr.attribute_name, attr.effective_visibility)">
+                                        <option value="admin_only">admin only</option>
+                                        <option value="pi">pi + admin</option>
+                                        <option value="member">members + above</option>
+                                        <option value="public">all users</option>
+                                    </select>
+                                </td>
+                                <td style="padding:8px 0">
+                                    <button x-show="attr.is_overridden" class="btn btn-sm"
+                                        style="background:none;border:1px solid var(--border);color:var(--text-secondary);padding:2px 8px;font-size:11px"
+                                        @click="resetVisibilityOverride(attr.attribute_name)">Reset to default</button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+            <div x-show="!visibility.loading && visibility.selectedGroupID && visibility.attributes.length === 0" class="empty-state">
+                <div class="empty-state-text">No visibility attributes found for this group.</div>
+            </div>
+        </div>
+
     </main>
 
     <!-- ── Add Member Modal ──────────────────────────────────────────── -->
@@ -509,6 +628,48 @@
                 </button>
                 <div x-show="expansion.success" class="alert-inline success" x-text="expansion.success"></div>
                 <div x-show="expansion.error" class="alert-inline error" x-text="expansion.error"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Change Request Modal (E1, CF-20) ─────────────────────────── -->
+    <div x-show="changeRequestModal.open" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;display:flex;align-items:center;justify-content:center"
+         @click.self="changeRequestModal.open = false">
+        <div class="card" style="width:500px;max-width:95vw">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+                <strong>New Allocation Change Request</strong>
+                <button @click="changeRequestModal.open = false" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:18px">×</button>
+            </div>
+            <div class="card-body">
+                <div class="form-row">
+                    <label>Group</label>
+                    <select x-model="changeRequestModal.groupID" style="width:100%;padding:8px 10px;background:var(--bg-base,#0d1117);border:1px solid var(--border,#30363d);border-radius:6px;color:var(--text-primary,#e6edf3);font-size:14px">
+                        <template x-for="g in groups" :key="g.id">
+                            <option :value="g.id" x-text="g.name"></option>
+                        </template>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Request Type</label>
+                    <select x-model="changeRequestModal.requestType" style="width:100%;padding:8px 10px;background:var(--bg-base,#0d1117);border:1px solid var(--border,#30363d);border-radius:6px;color:var(--text-primary,#e6edf3);font-size:14px">
+                        <option value="increase_resources">Increase Resources (nodes, CPU hours, storage)</option>
+                        <option value="extend_duration">Extend Duration</option>
+                        <option value="add_member">Add Member</option>
+                        <option value="remove_member">Remove Member</option>
+                        <option value="archive_project">Archive Project</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Justification</label>
+                    <textarea x-model="changeRequestModal.justification" rows="4"
+                        placeholder="Describe the reason for this change request. Include relevant details (e.g. grant requirements, upcoming deadlines, resource needs)."></textarea>
+                </div>
+                <button class="btn btn-primary" style="width:100%" :disabled="changeRequestModal.saving" @click="submitChangeRequest()">
+                    <span x-show="!changeRequestModal.saving">Submit request</span>
+                    <span x-show="changeRequestModal.saving">Submitting…</span>
+                </button>
+                <div x-show="changeRequestModal.success" class="alert-inline success" x-text="changeRequestModal.success"></div>
+                <div x-show="changeRequestModal.error" class="alert-inline error" x-text="changeRequestModal.error"></div>
             </div>
         </div>
     </div>
@@ -694,7 +855,7 @@ function piPortalApp() {
                 return;
             }
 
-            await this.loadGroups();
+            await Promise.all([this.loadGroups(), this.loadFOSOptions()]);
             this.loading = false;
 
             // After Alpine renders, init HTMX on the utilization divs.
@@ -702,6 +863,9 @@ function piPortalApp() {
                 if (window.htmx) { htmx.process(document.body); }
             });
         },
+
+        // Field of Science options (E2, CF-16).
+        fosOptions: [],
 
         async loadGroups() {
             try {
@@ -720,6 +884,29 @@ function piPortalApp() {
             } catch (err) {
                 this.error = 'Network error: ' + err.message;
             }
+        },
+
+        async loadFOSOptions() {
+            try {
+                const r = await apiFetch('/api/v1/fields-of-science');
+                if (r.ok) {
+                    const d = await r.json();
+                    this.fosOptions = d.fields_of_science || [];
+                }
+            } catch (_) {}
+        },
+
+        async setGroupFOS(groupID, fosID) {
+            try {
+                await apiFetch(`/api/v1/portal/pi/groups/${groupID}/field-of-science`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ field_of_science_id: fosID }),
+                });
+                // Update local state.
+                const g = this.groups.find(x => x.id === groupID);
+                if (g) g.field_of_science_id = fosID;
+            } catch (_) {}
         },
 
         toggleGroup(groupID) {
@@ -1163,6 +1350,148 @@ function piPortalApp() {
             } catch (err) {
                 alert('Network error: ' + err.message);
             }
+        },
+
+        // ── Change Requests (E1, CF-20) ───────────────────────────────────
+        changeRequests: { loading: false, items: [] },
+        changeRequestModal: {
+            open: false, groupID: '', requestType: 'increase_resources',
+            justification: '', saving: false, success: null, error: null,
+        },
+
+        async loadChangeRequests() {
+            this.changeRequests.loading = true;
+            try {
+                // Load requests for all owned groups.
+                const allReqs = [];
+                for (const g of this.groups) {
+                    const r = await apiFetch(`/api/v1/portal/pi/groups/${g.id}/change-requests`);
+                    if (r.ok) {
+                        const d = await r.json();
+                        allReqs.push(...(d.requests || []));
+                    }
+                }
+                // Sort newest first.
+                allReqs.sort((a, b) => (b.created_at > a.created_at ? 1 : -1));
+                this.changeRequests.items = allReqs;
+            } catch (_) {
+                this.changeRequests.items = [];
+            } finally {
+                this.changeRequests.loading = false;
+            }
+        },
+
+        openChangeRequest() {
+            const gid = this.groups.length > 0 ? this.groups[0].id : '';
+            this.changeRequestModal = {
+                open: true, groupID: gid, requestType: 'increase_resources',
+                justification: '', saving: false, success: null, error: null,
+            };
+        },
+
+        async submitChangeRequest() {
+            this.changeRequestModal.error = null;
+            this.changeRequestModal.success = null;
+            if (!this.changeRequestModal.groupID) {
+                this.changeRequestModal.error = 'Please select a group.'; return;
+            }
+            if (!this.changeRequestModal.justification.trim()) {
+                this.changeRequestModal.error = 'Justification is required.'; return;
+            }
+            this.changeRequestModal.saving = true;
+            try {
+                const r = await apiFetch(
+                    `/api/v1/portal/pi/groups/${this.changeRequestModal.groupID}/change-requests`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            request_type: this.changeRequestModal.requestType,
+                            justification: this.changeRequestModal.justification,
+                            payload: {},
+                        }),
+                    }
+                );
+                const d = await r.json().catch(() => ({}));
+                if (r.ok) {
+                    this.changeRequestModal.success = 'Request submitted. An admin will review and respond.';
+                    this.changeRequestModal.justification = '';
+                    await this.loadChangeRequests();
+                } else {
+                    this.changeRequestModal.error = d.error || 'Failed to submit request.';
+                }
+            } catch (err) {
+                this.changeRequestModal.error = 'Network error: ' + err.message;
+            } finally {
+                this.changeRequestModal.saving = false;
+            }
+        },
+
+        async withdrawRequest(req) {
+            if (!confirm('Withdraw this change request?')) return;
+            try {
+                const r = await apiFetch(
+                    `/api/v1/portal/pi/change-requests/${req.id}/withdraw`,
+                    { method: 'POST' }
+                );
+                if (r.ok) {
+                    await this.loadChangeRequests();
+                } else {
+                    const d = await r.json().catch(() => ({}));
+                    alert('Failed to withdraw: ' + (d.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Network error: ' + err.message);
+            }
+        },
+
+        // ── Attribute Visibility (E3, CF-39) ──────────────────────────────
+        visibility: { loading: false, selectedGroupID: '', attributes: [] },
+
+        async loadVisibility() {
+            if (!this.visibility.selectedGroupID) return;
+            this.visibility.loading = true;
+            this.visibility.attributes = [];
+            try {
+                const r = await apiFetch(`/api/v1/portal/pi/groups/${this.visibility.selectedGroupID}/attribute-visibility`);
+                if (r.ok) {
+                    const d = await r.json();
+                    this.visibility.attributes = d.attributes || [];
+                }
+            } catch (_) {}
+            finally { this.visibility.loading = false; }
+        },
+
+        async setVisibilityOverride(attrName, visibility) {
+            if (!this.visibility.selectedGroupID) return;
+            try {
+                await apiFetch(
+                    `/api/v1/portal/pi/groups/${this.visibility.selectedGroupID}/attribute-visibility`,
+                    {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ attribute_name: attrName, visibility }),
+                    }
+                );
+                // Mark as overridden in local state.
+                const attr = this.visibility.attributes.find(a => a.attribute_name === attrName);
+                if (attr) {
+                    attr.is_overridden = (visibility !== attr.default_visibility);
+                }
+            } catch (_) {}
+        },
+
+        async resetVisibilityOverride(attrName) {
+            if (!this.visibility.selectedGroupID) return;
+            try {
+                const r = await apiFetch(
+                    `/api/v1/portal/pi/groups/${this.visibility.selectedGroupID}/attribute-visibility/${encodeURIComponent(attrName)}`,
+                    { method: 'DELETE' }
+                );
+                if (r.ok || r.status === 204) {
+                    await this.loadVisibility();
+                }
+            } catch (_) {}
         },
 
         async logout() {

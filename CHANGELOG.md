@@ -5,6 +5,95 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.4.0] — 2026-04-27
+
+**Sprint E — Governance Polish (CF-11, CF-15, CF-16, CF-20, CF-39)**
+
+Completes the governance layer with a unified allocation change request workflow,
+NSF Field of Science taxonomy, per-attribute visibility controls, per-user
+notification preferences, and HTML email templates for all notification events.
+No breaking changes; all new features are additive.
+
+### Added
+
+- **Allocation change request workflow (E-1 / CF-20)** — Replaces the
+  point-solution `pi_expansion_requests` with a unified `allocation_change_requests`
+  table (migration 064) covering five request types: `add_member`, `remove_member`,
+  `increase_resources`, `extend_duration`, `archive_project`. Each request carries
+  a `payload` JSON blob, status (`pending/approved/denied/expired/withdrawn`),
+  reviewer ID, and review notes. Existing expansion requests are migrated on
+  upgrade. PI portal gains a "Change Requests" tab with submit/withdraw UI and
+  status badges. Admin settings gain a "Governance" tab showing a pending-queue
+  table with one-click approve/deny (deny prompts for a review note), plus a
+  recent history table. On decision, a notification email is sent to the PI.
+
+- **Fields of Science taxonomy (E-2 / CF-16)** — `fields_of_science` table
+  (migration 065) with two-level NSF hierarchy (18 top-level fields, ~130 leaf
+  entries, `nsf_code` classification). `field_of_science_id` nullable FK added to
+  `node_groups`. PIs set their group's FOS via a dropdown on the PI portal group
+  card. Director portal gains a "Field of Science" tab with utilization breakdown
+  (group counts per FOS, percentage bar). Admin Governance tab surfaces FOS CRUD
+  (add/edit entries). Routes: `GET /api/v1/fields-of-science` (public),
+  `PATCH /api/v1/portal/pi/groups/{id}/field-of-science` (PI),
+  `GET|POST /api/v1/admin/fields-of-science`,
+  `PUT /api/v1/admin/fields-of-science/{id}` (admin),
+  `GET /api/v1/portal/director/fos-utilization` (director).
+
+- **Per-attribute visibility policy (E-3 / CF-39)** — `project_attribute_visibility`
+  (per-project overrides) and `attribute_visibility_defaults` (global defaults)
+  tables (migration 066). Four visibility levels: `public > member > pi > admin_only`.
+  `CanSee(role, level, isPI, isMember)` helper in the DB layer. D26 defaults seeded
+  at migration: grant amounts/numbers are `pi`, hardware details are `admin_only`,
+  standard group fields are `public`. PIs can override defaults per group via the
+  PI portal "Visibility" tab. Admins manage global defaults in the Governance tab.
+  Routes: `GET|PATCH /api/v1/portal/pi/groups/{id}/attribute-visibility`,
+  `DELETE /api/v1/portal/pi/groups/{id}/attribute-visibility/{attr}` (PI),
+  `GET|PUT /api/v1/admin/attribute-visibility-defaults/{attr}` (admin).
+
+- **Per-user notification preferences (E-4 / CF-11/CF-15 enhancements)** —
+  `user_notification_prefs`, `notification_digest_queue`, and
+  `notification_event_defaults` tables (migration 067). Delivery modes:
+  `immediate | hourly | daily | weekly | disabled`. D19 defaults seeded:
+  immediate for account created, membership changes, PI decisions, and broadcast;
+  daily for annual review reminders. Any authenticated user can manage their own
+  prefs via `GET /api/v1/me/notification-prefs`,
+  `PUT /api/v1/me/notification-prefs/{event}`,
+  `POST /api/v1/me/notification-prefs/reset`. Admin can inspect any user's prefs
+  at `GET /api/v1/admin/users/{id}/notification-prefs`. Digest queue processor
+  background worker flushes due entries hourly, batching by recipient.
+
+- **HTML email templates (E-4 / CF-15)** — All eight notification events now have
+  HTML counterparts alongside plain-text templates, rendered as
+  `multipart/alternative` MIME messages. `RawMailer` interface added so
+  `SMTPMailer` can send pre-built MIME messages; non-HTML mailers fall back to
+  plain text transparently. New `AllocationChangeDecisionData` struct and
+  `NotifyAllocationChangeDecision()` Notifier method for the new E-1 workflow.
+
+- **Admin Governance settings tab** — New "Governance" tab in the admin Settings
+  panel consolidates: allocation change request queue (pending + history), FOS
+  taxonomy management (add/edit entries), and attribute visibility defaults
+  (global level picker per attribute).
+
+- **Director FOS utilization breakdown** — New "Field of Science" tab in the
+  Director portal shows each FOS field with group count and percentage bar.
+  Data from `GET /api/v1/portal/director/fos-utilization`.
+
+- **DB migrations 064–067** — Allocation change requests (with data migration from
+  `pi_expansion_requests`), fields of science, attribute visibility policy tables,
+  and notification preferences with seeded defaults.
+
+### Changed
+
+- `AllocationChangeRequestHandler` and `NotificationPrefsHandler` now accept an
+  injected `GetActorInfo` closure for correct admin attribution in audit logs
+  (avoids import cycle; previously fell back to literal `"admin"`).
+- `/me/notification-prefs` routes now require `requireScope(true)` (session auth)
+  to ensure user ID is available in context.
+- Notifier instance stored on `Server` struct for use by the digest processor
+  background worker.
+
+---
+
 ## [v1.3.0] — 2026-04-27
 
 **Sprint D — IT Director Portal + Notifications + Grants/Publications**

@@ -78,6 +78,10 @@ type Server struct {
 	imgFactory          *image.Factory
 	buildInfo           BuildInfo
 
+	// notifier is the primary Notifier instance built by buildRouter and used by
+	// StartBackgroundWorkers for the digest queue processor (E4).
+	notifier *notifications.Notifier
+
 	// flipBackFailureCount tracks verify-boot flipNodeToDiskFirst failures for
 	// the /health endpoint (S4-9). Incremented atomically; read without lock for
 	// health response since occasional skew is acceptable.
@@ -232,6 +236,79 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	s.ldapMgr.StartBackgroundWorkers(ctx)
 	// Slurm module health checker.
 	s.slurmMgr.StartBackgroundWorkers(ctx)
+	// E4: Digest queue processor — sends batched notification digests.
+	if s.notifier != nil {
+		go s.runDigestProcessor(ctx)
+	}
+}
+
+// runDigestProcessor polls the notification digest queue every hour and sends
+// any entries whose scheduled_for time has passed. This is the delivery side
+// of the digest mode scaffold introduced in Sprint E (E4, CF-11/CF-15).
+func (s *Server) runDigestProcessor(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	log.Info().Msg("digest-processor: started (hourly poll)")
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("digest-processor: shutting down")
+			return
+		case <-ticker.C:
+			s.flushDigestQueue(ctx)
+		}
+	}
+}
+
+// flushDigestQueue drains all due digest entries from the queue and sends them.
+func (s *Server) flushDigestQueue(ctx context.Context) {
+	entries, err := s.db.PollDigestQueue(ctx, time.Now())
+	if err != nil {
+		log.Error().Err(err).Msg("digest-processor: poll failed")
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	log.Info().Int("count", len(entries)).Msg("digest-processor: sending queued digests")
+
+	// Group entries by recipient for batching.
+	type digestBatch struct {
+		email    string
+		subjects []string
+		bodies   []string
+	}
+	byEmail := map[string]*digestBatch{}
+	var ids []string
+	for _, e := range entries {
+		ids = append(ids, e.ID)
+		if byEmail[e.RecipientEmail] == nil {
+			byEmail[e.RecipientEmail] = &digestBatch{email: e.RecipientEmail}
+		}
+		b := byEmail[e.RecipientEmail]
+		b.subjects = append(b.subjects, e.Subject)
+		b.bodies = append(b.bodies, e.BodyText)
+	}
+
+	// Send one digest email per recipient.
+	for _, batch := range byEmail {
+		subject := "clustr digest"
+		if len(batch.subjects) == 1 {
+			subject = batch.subjects[0]
+		} else {
+			subject = fmt.Sprintf("clustr digest (%d updates)", len(batch.subjects))
+		}
+		body := strings.Join(batch.bodies, "\n\n---\n\n")
+		if err := s.notifier.Mailer.Send(ctx, []string{batch.email}, subject, body); err != nil {
+			log.Error().Err(err).Str("email", batch.email).Msg("digest-processor: send failed")
+			continue
+		}
+	}
+
+	// Delete delivered entries.
+	if err := s.db.DeleteDigestEntries(ctx, ids); err != nil {
+		log.Error().Err(err).Msg("digest-processor: delete failed after send")
+	}
 }
 
 // defaultFlipSemCap is the default max concurrent flipNodeToDiskFirst goroutines
@@ -846,6 +923,8 @@ func (s *Server) buildRouter() chi.Router {
 		smtpCfgEarly := s.loadSMTPConfig()
 		mailerEarly := notifications.NewSMTPMailer(smtpCfgEarly)
 		notifierEarly := &notifications.Notifier{Mailer: mailerEarly, Audit: s.audit}
+		// Store on the server for use by StartBackgroundWorkers (digest processor, E4).
+		s.notifier = notifierEarly
 
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
@@ -935,6 +1014,81 @@ func (s *Server) buildRouter() chi.Router {
 			Get("/admin/review-cycles", portalhandler.HandleListReviewCycles(s.db))
 		r.With(requireScope(true)).With(requireRole("admin")).
 			Get("/admin/review-cycles/{id}", portalhandler.HandleGetReviewCycle(s.db))
+
+		// ─── Sprint E — Allocation change requests (E1, CF-20) ───────────────────
+		acrH := &portalhandler.AllocationChangeRequestHandler{
+			DB:           s.db,
+			Audit:        s.audit,
+			Notifier:     notifierEarly,
+			GetActorInfo: getActorInfo,
+		}
+		// PI routes for change requests.
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			r.Get("/portal/pi/groups/{id}/change-requests", acrH.HandleListGroupChangeRequests)
+			r.Post("/portal/pi/groups/{id}/change-requests", acrH.HandleCreateChangeRequest)
+			r.Post("/portal/pi/change-requests/{reqID}/withdraw", acrH.HandleWithdrawChangeRequest)
+		})
+		// Admin queue + review.
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/change-requests", acrH.HandleAdminListChangeRequests)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/change-requests/{id}/review", acrH.HandleAdminReviewChangeRequest)
+
+		// ─── Sprint E — Field of Science taxonomy (E2, CF-16) ────────────────────
+		fosH := &portalhandler.FOSHandler{DB: s.db, Audit: s.audit}
+		// Public (authenticated) — FOS picker for PI portal.
+		r.Get("/fields-of-science", fosH.HandleListFOS)
+		// PI: set FOS on owned group.
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			r.Patch("/portal/pi/groups/{id}/field-of-science", fosH.HandleSetGroupFOS)
+		})
+		// Admin: manage the FOS list.
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/fields-of-science", fosH.HandleAdminListFOS)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/fields-of-science", fosH.HandleAdminCreateFOS)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Put("/admin/fields-of-science/{fosID}", fosH.HandleAdminUpdateFOS)
+		// Director: FOS utilization breakdown.
+		r.Group(func(r chi.Router) {
+			r.Use(requireDirector())
+			r.Use(directorMW)
+			r.Get("/portal/director/fos-utilization", fosH.HandleDirectorFOSUtilization)
+		})
+
+		// ─── Sprint E — Per-attribute visibility policy (E3, CF-39) ──────────────
+		visH := &portalhandler.AttributeVisibilityHandler{DB: s.db, Audit: s.audit}
+		// PI + admin: view/set/delete project-level visibility overrides.
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			r.Get("/portal/pi/groups/{id}/attribute-visibility", visH.HandleListGroupVisibility)
+			r.Patch("/portal/pi/groups/{id}/attribute-visibility", visH.HandleSetGroupVisibility)
+			r.Delete("/portal/pi/groups/{id}/attribute-visibility/{attr}", visH.HandleDeleteGroupVisibility)
+		})
+		// Admin: global defaults management.
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/attribute-visibility-defaults", visH.HandleListVisibilityDefaults)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Put("/admin/attribute-visibility-defaults/{attr}", visH.HandleUpdateVisibilityDefault)
+
+		// ─── Sprint E — Per-user notification preferences (E4, CF-11/CF-15) ──────
+		notifPrefsH := &handlers.NotificationPrefsHandler{
+			DB:           s.db,
+			Audit:        s.audit,
+			GetActorInfo: getActorInfo,
+		}
+		// Any session-authenticated user can manage their own prefs.
+		r.With(requireScope(true)).Get("/me/notification-prefs", notifPrefsH.HandleGetMyPrefs)
+		r.With(requireScope(true)).Put("/me/notification-prefs/{event}", notifPrefsH.HandleSetMyPref)
+		r.With(requireScope(true)).Post("/me/notification-prefs/reset", notifPrefsH.HandleResetMyPrefs)
+		// Admin: view any user's prefs.
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/users/{id}/notification-prefs", notifPrefsH.HandleAdminGetUserPrefs)
 
 		// B2-2: Bootstrap status probe — unauthenticated. Returns whether the default
 		// admin credentials hint should be shown on the login page. Safe to expose

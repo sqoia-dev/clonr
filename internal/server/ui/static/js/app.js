@@ -9217,11 +9217,11 @@ reboot</pre>
         const isAdmin = Auth._role === 'admin';
         // B3-1: Webhooks tab is admin-only. B3-4/B3-5: About tab for all roles.
         const tabs = isAdmin
-            ? ['api-keys', 'users', 'webhooks', 'notifications', 'server-info', 'about']
+            ? ['api-keys', 'users', 'webhooks', 'notifications', 'governance', 'server-info', 'about']
             : ['api-keys', 'server-info', 'about'];
         const tabBar = tabs.map(t => {
             const active = t === tab ? 'style="border-bottom:2px solid var(--accent);color:var(--accent);"' : '';
-            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'notifications': 'Notifications', 'server-info': 'System', 'about': 'About' }[t];
+            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'notifications': 'Notifications', 'governance': 'Governance', 'server-info': 'System', 'about': 'About' }[t];
             return `<button class="btn btn-ghost" ${active} onclick="Pages._settingsRender('${t}')">${label}</button>`;
         }).join('');
 
@@ -9234,6 +9234,8 @@ reboot</pre>
             body = await Pages._settingsWebhooksTab();
         } else if (tab === 'notifications') {
             body = await Pages._settingsNotificationsTab();
+        } else if (tab === 'governance') {
+            body = await Pages._settingsGovernanceTab();
         } else if (tab === 'about') {
             body = await Pages._settingsAboutTab();
         } else if (tab === 'server-info') {
@@ -10185,6 +10187,273 @@ reboot</pre>
                     <span id="bc-status" style="font-size:13px;margin-left:12px;"></span>
                 </div>
             </div>`;
+    },
+
+    // ── Governance tab (E1/E2/E3/E4 admin surfaces) ───────────────────────
+    async _settingsGovernanceTab() {
+        // Load all data in parallel: pending change requests, recent history, FOS list, vis defaults.
+        let pendingRequests = [];
+        let historicalRequests = [];
+        let fosList = [];
+        let visDefaults = [];
+        try {
+            const [pendingData, histData] = await Promise.all([
+                API.request('GET', '/admin/change-requests?status=pending&limit=50'),
+                API.request('GET', '/admin/change-requests?status=approved&limit=20'),
+            ]);
+            pendingRequests = (pendingData && pendingData.requests) || [];
+            historicalRequests = (histData && histData.requests) || [];
+        } catch (_) {}
+        // Also fetch denied history.
+        try {
+            const deniedData = await API.request('GET', '/admin/change-requests?status=denied&limit=20');
+            const denied = (deniedData && deniedData.requests) || [];
+            historicalRequests = [...historicalRequests, ...denied].sort((a, b) =>
+                new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at)
+            ).slice(0, 20);
+        } catch (_) {}
+        try {
+            const d = await API.request('GET', '/admin/fields-of-science');
+            fosList = d.fields_of_science || [];
+        } catch (_) {}
+        try {
+            const d = await API.request('GET', '/admin/attribute-visibility-defaults');
+            visDefaults = d.defaults || [];
+        } catch (_) {}
+
+        const statusBadge = (s) => {
+            const map = { pending: 'badge-warn', approved: 'badge-ready', denied: 'badge-error', expired: 'badge-neutral', withdrawn: 'badge-neutral' };
+            return `<span class="badge ${map[s] || 'badge-neutral'}" style="font-size:11px">${escHtml(s)}</span>`;
+        };
+        const typeBadge = (t) => `<span class="badge badge-info" style="font-size:11px">${escHtml((t||'').replace(/_/g,' '))}</span>`;
+
+        const pendingRows = pendingRequests.length
+            ? pendingRequests.map(r => `<tr>
+                <td style="font-size:12px;color:var(--text-secondary)">${escHtml(r.id.substring(0,8))}</td>
+                <td>${escHtml(r.pi_username || r.pi_user_id || '—')}</td>
+                <td>${escHtml(r.group_name || r.group_id || '—')}</td>
+                <td>${typeBadge(r.request_type)}</td>
+                <td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.justification||'')}">${escHtml(r.justification||'—')}</td>
+                <td>${statusBadge(r.status)}</td>
+                <td style="font-size:12px">${fmtRelative(r.created_at)}</td>
+                <td>
+                    <div class="flex gap-6">
+                        <button class="btn btn-primary btn-sm" onclick="Pages._acrReview('${escHtml(r.id)}', 'approved')">Approve</button>
+                        <button class="btn btn-danger btn-sm" onclick="Pages._acrReview('${escHtml(r.id)}', 'denied')">Deny</button>
+                    </div>
+                </td>
+            </tr>`).join('')
+            : `<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:24px">No pending requests</td></tr>`;
+
+        const histRows = historicalRequests.slice(0, 20).map(r => `<tr>
+            <td style="font-size:12px;color:var(--text-secondary)">${escHtml(r.id.substring(0,8))}</td>
+            <td>${escHtml(r.pi_username || r.pi_user_id || '—')}</td>
+            <td>${escHtml(r.group_name || r.group_id || '—')}</td>
+            <td>${typeBadge(r.request_type)}</td>
+            <td>${statusBadge(r.status)}</td>
+            <td style="font-size:12px">${fmtRelative(r.updated_at || r.created_at)}</td>
+        </tr>`).join('') || `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:16px">No history yet</td></tr>`;
+
+        // FOS table rows — two-level hierarchy (group by parent)
+        const topLevel = fosList.filter(f => !f.parent_id);
+        const fosRows = topLevel.map(parent => {
+            const children = fosList.filter(f => f.parent_id === parent.id);
+            const parentRow = `<tr style="background:var(--bg-subtle,#161b22)">
+                <td colspan="3" style="font-weight:600;padding:6px 12px">${escHtml(parent.name)} <span style="font-size:11px;color:var(--text-secondary)">${escHtml(parent.nsf_code||'')}</span></td>
+                <td style="padding:6px 12px">
+                    <button class="btn btn-secondary btn-sm" onclick="Pages._fosEdit(${JSON.stringify(JSON.stringify(parent))})">Edit</button>
+                </td>
+            </tr>`;
+            const childRows = children.map(c => `<tr>
+                <td style="padding:4px 12px 4px 28px;color:var(--text-secondary);font-size:13px">${escHtml(c.nsf_code||'')}</td>
+                <td style="padding:4px 12px;font-size:13px" colspan="2">${escHtml(c.name)}</td>
+                <td style="padding:4px 12px">
+                    <button class="btn btn-secondary btn-sm" onclick="Pages._fosEdit(${JSON.stringify(JSON.stringify(c))})">Edit</button>
+                </td>
+            </tr>`).join('');
+            return parentRow + childRows;
+        }).join('');
+
+        // Visibility defaults table
+        const visLevels = ['public', 'member', 'pi', 'admin_only'];
+        const visRows = visDefaults.map(v => `<tr>
+            <td style="font-size:13px;font-weight:600">${escHtml(v.attribute_name)}</td>
+            <td>
+                <select class="form-input" style="font-size:12px;padding:4px 8px" onchange="Pages._visDefaultUpdate('${escHtml(v.attribute_name)}', this.value)">
+                    ${visLevels.map(l => `<option value="${l}" ${v.default_visibility === l ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </td>
+            <td style="font-size:11px;color:var(--text-secondary)">${escHtml(v.description||'—')}</td>
+        </tr>`).join('') || `<tr><td colspan="3" style="padding:16px;color:var(--text-secondary)">No defaults configured</td></tr>`;
+
+        return `
+            <!-- E1: Allocation Change Requests -->
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header" style="justify-content:space-between">
+                    <div>
+                        <h2 class="card-title">Allocation Change Requests</h2>
+                        <div style="font-size:12px;color:var(--text-secondary)">PI-submitted requests for allocation changes requiring admin review</div>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="Pages._settingsRender('governance')">Refresh</button>
+                </div>
+                <div class="card-body" style="padding:0">
+                    <div style="padding:10px 16px;font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)">
+                        Pending (${pendingRequests.length})
+                    </div>
+                    <div class="table-wrap" style="margin:0">
+                        <table>
+                            <thead><tr>
+                                <th>ID</th><th>PI</th><th>Group</th><th>Type</th><th>Justification</th><th>Status</th><th>Submitted</th><th>Actions</th>
+                            </tr></thead>
+                            <tbody id="acr-pending-tbody">${pendingRows}</tbody>
+                        </table>
+                    </div>
+                    <div style="padding:10px 16px;font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border);border-top:1px solid var(--border);margin-top:12px">
+                        Recent History
+                    </div>
+                    <div class="table-wrap" style="margin:0">
+                        <table>
+                            <thead><tr>
+                                <th>ID</th><th>PI</th><th>Group</th><th>Type</th><th>Status</th><th>Updated</th>
+                            </tr></thead>
+                            <tbody>${histRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- E2: Fields of Science -->
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header" style="justify-content:space-between">
+                    <div>
+                        <h2 class="card-title">Fields of Science</h2>
+                        <div style="font-size:12px;color:var(--text-secondary)">NSF FOS taxonomy — ${fosList.length} entries. PIs assign their group's primary field.</div>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="Pages._fosCreate()">Add FOS entry</button>
+                </div>
+                <div class="card-body" style="padding:0">
+                    <div class="table-wrap" style="margin:0">
+                        <table>
+                            <thead><tr><th>NSF Code</th><th colspan="2">Name</th><th>Actions</th></tr></thead>
+                            <tbody>${fosRows || '<tr><td colspan="4" style="padding:16px;text-align:center;color:var(--text-secondary)">No FOS entries yet</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- E3: Attribute Visibility Defaults -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">Attribute Visibility Defaults</h2>
+                        <div style="font-size:12px;color:var(--text-secondary)">Global default visibility levels per attribute. PIs can override per-group. Levels: public > member > pi > admin_only.</div>
+                    </div>
+                </div>
+                <div class="card-body" style="padding:0">
+                    <div class="table-wrap" style="margin:0">
+                        <table>
+                            <thead><tr><th>Attribute</th><th>Default Visibility</th><th>Description</th></tr></thead>
+                            <tbody id="vis-defaults-tbody">${visRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+    },
+
+    // _acrReview opens a confirm-then-review modal for allocation change requests.
+    async _acrReview(reqID, decision) {
+        const note = decision === 'denied'
+            ? window.prompt(`Deny request ${reqID.substring(0,8)}? Add a note for the PI (optional):`, '')
+            : '';
+        if (note === null) return; // user cancelled prompt
+        try {
+            await API.request('POST', `/admin/change-requests/${reqID}/review`, {
+                status: decision,
+                review_notes: note || '',
+            });
+            App.toast(`Request ${decision}`, decision === 'approved' ? 'success' : 'error');
+            Pages._settingsRender('governance');
+        } catch (err) {
+            App.toast(`Failed: ${err.message}`, 'error');
+        }
+    },
+
+    // _fosCreate opens a modal to add a new FOS entry.
+    _fosCreate() {
+        Pages._fosModal(null);
+    },
+
+    // _fosEdit opens a modal to edit an existing FOS entry.
+    _fosEdit(jsonStr) {
+        const fos = JSON.parse(jsonStr);
+        Pages._fosModal(fos);
+    },
+
+    _fosModal(existing) {
+        const id = 'fos-modal';
+        const old = document.getElementById(id);
+        if (old) old.remove();
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = id;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:480px" aria-labelledby="${id}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${id}-title">${existing ? 'Edit Field of Science' : 'Add Field of Science'}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+                    <label class="form-label">NSF Code (optional)
+                        <input id="fos-code" class="form-input" type="text" value="${escHtml(existing?.nsf_code||'')}" placeholder="e.g. 2103" style="margin-top:4px">
+                    </label>
+                    <label class="form-label">Name
+                        <input id="fos-name" class="form-input" type="text" value="${escHtml(existing?.name||'')}" placeholder="e.g. Artificial Intelligence" style="margin-top:4px">
+                    </label>
+                    <label class="form-label">Parent ID (leave blank for top-level)
+                        <input id="fos-parent" class="form-input" type="text" value="${escHtml(existing?.parent_id||'')}" placeholder="parent FOS ID" style="margin-top:4px">
+                    </label>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._fosSubmit('${id}', ${existing ? `'${escHtml(existing.id)}'` : 'null'})">${existing ? 'Save' : 'Create'}</button>
+                    </div>
+                    <div id="fos-err" style="color:var(--error,#f85149);font-size:13px;display:none"></div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    },
+
+    async _fosSubmit(modalId, fosID) {
+        const errEl = document.getElementById('fos-err');
+        const name = (document.getElementById('fos-name')?.value || '').trim();
+        const code = (document.getElementById('fos-code')?.value || '').trim();
+        const parent = (document.getElementById('fos-parent')?.value || '').trim();
+        if (!name) { if (errEl) { errEl.textContent = 'Name is required'; errEl.style.display=''; } return; }
+        try {
+            const body = { name, nsf_code: code || null, parent_id: parent || null };
+            if (fosID) {
+                await API.request('PUT', `/admin/fields-of-science/${fosID}`, body);
+            } else {
+                await API.request('POST', '/admin/fields-of-science', body);
+            }
+            document.getElementById(modalId)?.remove();
+            App.toast(fosID ? 'FOS entry updated' : 'FOS entry created', 'success');
+            Pages._settingsRender('governance');
+        } catch (err) {
+            if (errEl) { errEl.textContent = 'Error: ' + err.message; errEl.style.display=''; }
+        }
+    },
+
+    // _visDefaultUpdate updates a global attribute visibility default.
+    async _visDefaultUpdate(attr, level) {
+        try {
+            await API.request('PUT', `/admin/attribute-visibility-defaults/${encodeURIComponent(attr)}`, { default_visibility: level });
+            App.toast(`${attr} default set to ${level}`, 'success');
+        } catch (err) {
+            App.toast(`Failed to update: ${err.message}`, 'error');
+        }
     },
 
     async _smtpSave() {

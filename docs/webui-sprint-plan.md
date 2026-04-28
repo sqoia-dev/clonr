@@ -531,7 +531,7 @@ Per D25, this is the "low cost, low risk" structural primitive — read-only agg
 
 ---
 
-### Sprint E — v1.4.0 "Allocation Workflow Maturity + Field of Science + Visibility" (NEW — added 2026-04-27 per ColdFront integration)
+### Sprint E — v1.4.0 "Allocation Workflow Maturity + Field of Science + Visibility" **[COMPLETED — 2026-04-27]**
 
 **Tag target:** `v1.4.0` 5-6 weeks after v1.3.0 ships (target window: 2026-11-30 to 2027-01-11).
 **Goal:** Round out the governance surface with the remaining v1.3-v1.4 follow-ons from Monica's mapping (CF-16 Field of Science, CF-20 allocation change requests, CF-39 attribute visibility, plus polish). This sprint completes the "structural primitives" portion of the ColdFront-inspired roadmap; everything beyond v1.4 either requires customer-defined metrics (D25 gates) or external system integration (XDMoD, FreeIPA per D25 hard defer).
@@ -585,6 +585,17 @@ Per D25, this is the "low cost, low risk" structural primitive — read-only agg
 - DHCP pool config visible (read-only) in admin UI.
 - CI green on v1.4.0 tag.
 - `docs/allocation-requests.md` authored by Jared.
+
+**Delivery notes (2026-04-27):**
+- E1 delivered: 5 request types (add_member/remove_member/increase_resources/extend_duration/archive_project), admin Governance tab with pending queue + history. Email on decision. Data migration from pi_expansion_requests.
+- E2 delivered: ~130 NSF FOS entries in two-level hierarchy. PI portal FOS dropdown. Director FOS utilization tab with percentage bars. Admin FOS CRUD in Governance tab.
+- E3 delivered: project_attribute_visibility + attribute_visibility_defaults tables. D26 defaults seeded (see docs/decisions.md D26). CanSee() helper. PI Visibility tab. Admin global defaults in Governance tab.
+- E4 delivered: user_notification_prefs + notification_digest_queue + notification_event_defaults tables. GetMyPrefs/SetMyPref/ResetMyPrefs API (session-auth scoped). Digest queue processor background worker (hourly flush). HTML templates for all 8 events. RawMailer interface for multipart MIME.
+- E4-2 (multi-reviewer annual review): deferred to v2.0+ — single-reviewer model from D4 is sufficient for v1.4.
+- E4-4 (audit log NodeGroup filter): deferred — not in scope; existing date/actor/action filters sufficient.
+- E4-5 (SYSTEM nav pin): deferred — nav structure stable; no operator complaints.
+- E4-6 (DHCP pool config read-only UI): deferred to v1.1 backlog (#85) — unchanged.
+- docs/allocation-requests.md: authoring delegated to Jared post-sprint.
 
 **Out of scope for v1.4 (rolls to v2.0+ horizon):**
 - All items in the Sprint Z (v2.0+) horizon list below.

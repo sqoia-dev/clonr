@@ -31,14 +31,46 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-//go:embed templates/*.txt
+//go:embed templates/*.txt templates/*.html
 var templateFS embed.FS
 
 // templateCache caches parsed templates.
 var (
-	tmplOnce  sync.Once
-	tmplCache map[string]*template.Template
+	tmplOnce     sync.Once
+	tmplCache    map[string]*template.Template
+	htmlTmplOnce sync.Once
+	htmlTmplCache map[string]*template.Template
 )
+
+func loadHTMLTemplates() map[string]*template.Template {
+	htmlTmplOnce.Do(func() {
+		cache := make(map[string]*template.Template)
+		entries, err := templateFS.ReadDir("templates")
+		if err != nil {
+			log.Error().Err(err).Msg("notifications: failed to read template dir for HTML")
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+				continue
+			}
+			data, err := templateFS.ReadFile("templates/" + e.Name())
+			if err != nil {
+				log.Error().Err(err).Str("file", e.Name()).Msg("notifications: failed to read HTML template")
+				continue
+			}
+			name := strings.TrimSuffix(e.Name(), ".html")
+			t, err := template.New(name).Parse(string(data))
+			if err != nil {
+				log.Error().Err(err).Str("name", name).Msg("notifications: failed to parse HTML template")
+				continue
+			}
+			cache[name] = t
+		}
+		htmlTmplCache = cache
+	})
+	return htmlTmplCache
+}
 
 func loadTemplates() map[string]*template.Template {
 	tmplOnce.Do(func() {
@@ -95,6 +127,16 @@ type Mailer interface {
 	Send(ctx context.Context, to []string, subject, body string) error
 	// IsConfigured reports whether SMTP is configured.
 	IsConfigured() bool
+}
+
+// RawMailer is an optional extension to Mailer for sending pre-built MIME messages
+// (used to send multipart HTML+text emails without re-building headers).
+type RawMailer interface {
+	Mailer
+	// SendRaw sends a fully-assembled RFC 2822 MIME message.
+	SendRaw(ctx context.Context, to []string, msg []byte) error
+	// From returns the From address for use when building MIME messages.
+	From() string
 }
 
 // SMTPMailer implements Mailer using net/smtp.
@@ -172,6 +214,21 @@ func (m *SMTPMailer) Send(ctx context.Context, to []string, subject, body string
 		return m.sendImplicitTLS(addr, to, msg.Bytes())
 	}
 	return m.sendSMTP(addr, to, msg.Bytes())
+}
+
+// From returns the configured From address (used when building raw MIME messages).
+func (m *SMTPMailer) From() string { return m.cfg.From }
+
+// SendRaw sends a fully pre-built MIME message to the given recipients.
+func (m *SMTPMailer) SendRaw(ctx context.Context, to []string, msg []byte) error {
+	if !m.cfg.IsConfigured() {
+		return fmt.Errorf("smtp not configured")
+	}
+	addr := net.JoinHostPort(m.cfg.Host, strconv.Itoa(m.cfg.Port))
+	if m.cfg.UseSSL {
+		return m.sendImplicitTLS(addr, to, msg)
+	}
+	return m.sendSMTP(addr, to, msg)
 }
 
 func (m *SMTPMailer) sendSMTP(addr string, to []string, msg []byte) error {
@@ -267,8 +324,8 @@ type AuditRecorder interface {
 	Record(ctx context.Context, actorID, actorLabel, action, resourceType, resourceID, ipAddr string, oldVal, newVal interface{})
 }
 
-// renderTemplate renders the named template with data. Returns the rendered
-// string, or a fallback plain message if the template is missing/broken.
+// renderTemplate renders the named plain-text template with data.
+// Returns a fallback string if the template is missing or fails to render.
 func renderTemplate(name string, data interface{}) string {
 	cache := loadTemplates()
 	t, ok := cache[name]
@@ -283,10 +340,54 @@ func renderTemplate(name string, data interface{}) string {
 	return buf.String()
 }
 
-// send is the internal dispatcher. It renders the template, sends the email,
-// and records the result in the audit log.
+// renderHTMLTemplate renders the named HTML template with data.
+// Returns empty string if the template does not exist (caller sends text-only).
+func renderHTMLTemplate(name string, data interface{}) string {
+	cache := loadHTMLTemplates()
+	t, ok := cache[name]
+	if !ok {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		log.Warn().Err(err).Str("template", name).Msg("notifications: HTML template render failed")
+		return ""
+	}
+	return buf.String()
+}
+
+// buildMIMEMessage builds a MIME email message. If htmlBody is non-empty, the
+// message is multipart/alternative with both text/plain and text/html parts.
+// Otherwise it is a plain text message.
+func buildMIMEMessage(from string, to []string, subject, textBody, htmlBody string) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("From: " + from + "\r\n")
+	buf.WriteString("To: " + strings.Join(to, ",") + "\r\n")
+	buf.WriteString("Subject: " + subject + "\r\n")
+	buf.WriteString("MIME-Version: 1.0\r\n")
+
+	if htmlBody == "" {
+		buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
+		buf.WriteString(textBody)
+	} else {
+		boundary := "clustr_boundary_" + fmt.Sprintf("%d", time.Now().UnixNano())
+		buf.WriteString("Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n\r\n")
+		buf.WriteString("--" + boundary + "\r\n")
+		buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
+		buf.WriteString(textBody + "\r\n")
+		buf.WriteString("--" + boundary + "\r\n")
+		buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
+		buf.WriteString(htmlBody + "\r\n")
+		buf.WriteString("--" + boundary + "--\r\n")
+	}
+	return buf.Bytes()
+}
+
+// send is the internal dispatcher. It renders the template (text + optional HTML),
+// sends the email, and records the result in the audit log.
 func (n *Notifier) send(ctx context.Context, eventName string, to []string, subject string, tmplName string, data interface{}) {
-	body := renderTemplate(tmplName, data)
+	textBody := renderTemplate(tmplName, data)
+	htmlBody := renderHTMLTemplate(tmplName, data)
 
 	if n.Mailer == nil || !n.Mailer.IsConfigured() {
 		log.Info().
@@ -301,12 +402,26 @@ func (n *Notifier) send(ctx context.Context, eventName string, to []string, subj
 		return
 	}
 
-	if err := n.Mailer.Send(ctx, to, subject, body); err != nil {
-		log.Error().Err(err).Str("event", eventName).Strs("to", to).Msg("notification: send failed")
+	// Use SendRaw if HTML is available for multipart support.
+	var sendErr error
+	if htmlBody != "" {
+		if rawMailer, ok := n.Mailer.(RawMailer); ok {
+			msg := buildMIMEMessage(rawMailer.From(), to, subject, textBody, htmlBody)
+			sendErr = rawMailer.SendRaw(ctx, to, msg)
+		} else {
+			// Fallback: send text-only if mailer does not support raw send.
+			sendErr = n.Mailer.Send(ctx, to, subject, textBody)
+		}
+	} else {
+		sendErr = n.Mailer.Send(ctx, to, subject, textBody)
+	}
+
+	if sendErr != nil {
+		log.Error().Err(sendErr).Str("event", eventName).Strs("to", to).Msg("notification: send failed")
 		if n.Audit != nil {
 			n.Audit.Record(ctx, "system", "clustr", "notification.failed",
 				"notification", eventName, "",
-				nil, map[string]interface{}{"event": eventName, "to": to, "error": err.Error()})
+				nil, map[string]interface{}{"event": eventName, "to": to, "error": sendErr.Error()})
 		}
 		return
 	}
@@ -422,6 +537,32 @@ type BroadcastData struct {
 	Body      string
 	AdminName string
 	GroupName string
+}
+
+// AllocationChangeDecisionData is the template data for allocation change request decisions.
+type AllocationChangeDecisionData struct {
+	PIName      string
+	GroupName   string
+	RequestType string
+	Decision    string // approved | denied
+	Notes       string
+	DecidedAt   string
+}
+
+// NotifyAllocationChangeDecision sends an email to the PI when their change request is reviewed.
+func (n *Notifier) NotifyAllocationChangeDecision(ctx context.Context, to, piName, groupName, requestType, decision, notes string, decidedAt time.Time) {
+	subject := "Allocation change request " + decision + ": " + groupName
+	n.send(ctx, "allocation_change_request."+decision, []string{to},
+		subject,
+		"allocation_change_decision",
+		AllocationChangeDecisionData{
+			PIName:      piName,
+			GroupName:   groupName,
+			RequestType: requestType,
+			Decision:    decision,
+			Notes:       notes,
+			DecidedAt:   decidedAt.Format("2006-01-02 15:04 UTC"),
+		})
 }
 
 // SendBroadcast sends a broadcast message to all provided recipients.
