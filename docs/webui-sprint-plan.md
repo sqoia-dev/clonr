@@ -384,9 +384,11 @@ The C2 module-split workstream from the original plan moved to Sprint B.5 (v1.1.
 
 ---
 
-### Sprint C.5 — v1.2.5 "PI Governance Scaffolding" (NEW — added 2026-04-27 per ColdFront integration)
+### Sprint C.5 — v1.2.5 "PI Governance Scaffolding" **[COMPLETED — 2026-04-28]**
 
-**Tag target:** `v1.2.5` 3-4 weeks after v1.2.0 ships (target window: 2026-09-07 to 2026-10-05).
+Cross-references: `internal/db/migrations/055–058`, `internal/db/pi.go`, `internal/server/handlers/portal/pi.go`, `internal/server/ui/static/portal_pi.html`, `internal/server/pi_rbac_test.go`. Tag: `v1.2.5` (commit `991a267`).
+
+**Tag target:** `v1.2.5` — shipped 2026-04-28 (1 day after v1.2.0).
 **Goal:** Promote the PI persona to first-class. Add the PI role + the PI self-service surface + the NodeGroup utilization view. This sprint operationalizes Monica's Persona 4A (PI/Research Group Lead) and absorbs the structural primitives from ColdFront's CF-08 / CF-09 / CF-02 / CF-14 governance model — but at clustr's physical-resource abstraction level, NOT ColdFront's abstract-quota model (per coldfront-feature-mapping.md Risk 4).
 **Why a v1.2.5 micro-sprint instead of folding into v1.2 or v1.3:** v1.2 (Sprint C) is already large (researcher portal + framework adoption). PI governance is a new persona — it deserves a clean release boundary so the ColdFront-aware audience knows when to look. v1.3 should focus on IT Director + notifications (different persona); bundling PI work into v1.3 conflates two persona expansions.
 **Personas served:**

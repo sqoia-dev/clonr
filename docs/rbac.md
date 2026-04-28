@@ -1,24 +1,32 @@
 # RBAC — Role-Based Access Control
 
-clustr ships with a 3-tier role model designed for small HPC teams where
-most day-to-day work (deploying nodes, managing power) is delegated to
-operators who are scoped to a subset of the cluster.
+clustr ships with a 5-role model designed for HPC teams. The role hierarchy
+determines which UI surface a user lands on after login and what API operations
+are available to them.
+
+**Role hierarchy (most to least privileged):**
+
+```
+admin > operator > pi > readonly > viewer
+```
 
 ---
 
-## The Three Roles
+## The Five Roles
 
-| Role | Capabilities |
-|------|-------------|
-| **admin** | Full access to everything: all nodes, all images, all groups, all users, API keys, audit log, LDAP config, Slurm config. Only admins can create/disable users or rotate API keys. |
-| **operator** | Can perform state-changing operations (reimage, power on/off/cycle/reset, PXE boot) on nodes that belong to a NodeGroup they are a member of. Cannot create nodes, delete nodes, manage users, or see other groups' nodes beyond read access. |
-| **readonly** | Can view all nodes, images, groups, and logs. Cannot perform any mutations. |
+| Role | Primary surface | Capabilities |
+|------|-----------------|-------------|
+| **admin** | `/` (full admin UI) | Full access to everything: all nodes, all images, all groups, all users, API keys, audit log, LDAP config, Slurm config. Only admins can create/disable users, rotate API keys, assign PI ownership, or approve PI member requests. |
+| **operator** | `/` (admin UI, scoped) | Can perform state-changing operations (reimage, power on/off/cycle/reset, PXE boot) on nodes that belong to a NodeGroup they are a member of. Cannot create nodes, delete nodes, manage users, or see other groups' nodes beyond read access. |
+| **pi** | `/portal/pi/` | Views all NodeGroups they own. Self-service member management (add/remove LDAP usernames subject to auto-approve or admin-approval). Read-only utilization stats (node count, deployed count, last deploy, failed deploys). Can submit node expansion requests. Cannot touch node config, images, or Slurm. |
+| **readonly** | `/` (admin UI, read-only) | Can view all nodes, images, groups, and logs. Cannot perform any mutations. Typically used for on-call staff or observability integrations. |
+| **viewer** | `/portal/` (researcher portal) | Read-only access to the researcher portal only. Sees their own group membership, partition status, and quota. Cannot reach any admin or PI surfaces. |
 
 ---
 
 ## Group-Scoped Operator
 
-The key design: operators are not cluster-wide. They are scoped to one or more
+The key design for operators: they are not cluster-wide. They are scoped to one or more
 **NodeGroups**. This is tracked in the `user_group_memberships` table:
 
 ```sql
@@ -43,26 +51,51 @@ can reassign nodes between groups at any time.
 
 ---
 
+## NodeGroup PI Ownership
+
+A PI is assigned to a NodeGroup by an admin:
+
+```http
+PUT /api/v1/node-groups/{id}/pi
+Content-Type: application/json
+
+{"pi_user_id": "<user-id>"}
+```
+
+Rules:
+- One NodeGroup has at most one PI (`pi_user_id` nullable FK on `node_groups`).
+- One PI can own multiple NodeGroups.
+- PI cannot transfer ownership to another user — admin-only.
+- Setting `pi_user_id` to `""` clears the PI assignment.
+
+---
+
 ## Permission Matrix
 
-| Action | admin | operator (in-group) | operator (out-of-group) | readonly |
-|--------|-------|---------------------|------------------------|---------|
-| List nodes / images / groups | Yes | Yes | Yes | Yes |
-| View node / image detail | Yes | Yes | Yes | Yes |
-| Create node | Yes | No | No | No |
-| Update node (config, hostname, tags) | Yes | No | No | No |
-| Delete node | Yes | No | No | No |
-| Power on/off/cycle/reset | Yes | Yes | No | No |
-| PXE boot / disk boot | Yes | Yes | No | No |
-| Trigger reimage | Yes | Yes | No | No |
-| Group reimage | Yes | Yes (own group) | No | No |
-| Create / delete image | Yes | No | No | No |
-| Manage users / roles | Yes | No | No | No |
-| Manage group memberships | Yes | No | No | No |
-| View audit log | Yes | No | No | No |
-| Manage LDAP config | Yes | No | No | No |
-| Manage Slurm config | Yes | No | No | No |
-| Create / revoke API keys | Yes | No | No | No |
+| Action | admin | operator (in-group) | operator (out-of-group) | pi (owned group) | pi (non-owned) | readonly | viewer |
+|--------|-------|---------------------|------------------------|------------------|----------------|---------|--------|
+| List nodes / images / groups | Yes | Yes | Yes | No | No | Yes | No |
+| View node / image detail | Yes | Yes | Yes | No | No | Yes | No |
+| Create node | Yes | No | No | No | No | No | No |
+| Update node (config, hostname, tags) | Yes | No | No | No | No | No | No |
+| Delete node | Yes | No | No | No | No | No | No |
+| Power on/off/cycle/reset | Yes | Yes | No | No | No | No | No |
+| PXE boot / disk boot | Yes | Yes | No | No | No | No | No |
+| Trigger reimage | Yes | Yes | No | No | No | No | No |
+| Group reimage | Yes | Yes (own group) | No | No | No | No | No |
+| Create / delete image | Yes | No | No | No | No | No | No |
+| Manage users / roles | Yes | No | No | No | No | No | No |
+| Manage group memberships | Yes | No | No | No | No | No | No |
+| Assign PI to group | Yes | No | No | No | No | No | No |
+| View owned groups | Yes | No | No | Yes | No | No | No |
+| View group utilization | Yes | No | No | Yes | No | No | No |
+| Add/remove group members | Yes | No | No | Yes (auto or pending) | No | No | No |
+| Submit expansion request | Yes | No | No | Yes | No | No | No |
+| View audit log | Yes | No | No | No | No | No | No |
+| Manage LDAP config | Yes | No | No | No | No | No | No |
+| Manage Slurm config | Yes | No | No | No | No | No | No |
+| Create / revoke API keys | Yes | No | No | No | No | No | No |
+| View researcher portal | Yes | No | No | Yes | Yes | No | Yes |
 
 ---
 
@@ -73,15 +106,47 @@ derived from the authenticated identity:
 
 - **Session cookie** (browser): role is stored in the `users` table
   (`users.role`). Group memberships are looked up per request for operators.
+  PI ownership is checked per request for PI portal routes.
 - **API key**: the key carries a `scope` field. Scope `admin` maps to admin
   role for API purposes. Keys scoped to `node` or `readonly` are restricted
-  accordingly. There is no operator-scoped API key today — operator access
-  requires an interactive session.
+  accordingly. There is no operator-scoped or pi-scoped API key today —
+  those roles require an interactive session.
 
 The middleware resolves the effective role on every request:
 1. Check `ctxKeyScope` (API key scope) first.
 2. Fall back to `ctxKeyUserRole` (session role).
 3. Missing both → 401 Unauthorized.
+
+### Scope sentinel values
+
+| Role | `api.KeyScope` value |
+|------|---------------------|
+| admin | `api.KeyScopeAdmin` |
+| operator | `api.KeyScopeOperator` |
+| pi | `api.KeyScope("pi")` |
+| readonly | `api.KeyScope("readonly")` |
+| viewer | `api.KeyScope("viewer")` |
+
+---
+
+## PI Member Request Workflow
+
+When a PI adds a member via the PI portal, two paths exist:
+
+**Auto-approve mode** (`pi_auto_approve = 1` in `portal_config`, or `CLUSTR_PI_AUTO_APPROVE=true` env):
+1. PI submits username via `POST /api/v1/portal/pi/groups/{id}/members`.
+2. Server immediately calls `ldap.AddUserToGroup`.
+3. Request row is created with `status = 'approved'`.
+4. No admin action required.
+
+**Manual-approve mode** (default):
+1. PI submits username.
+2. Request row is created with `status = 'pending'`.
+3. Admin sees pending request in `GET /api/v1/admin/pi/member-requests`.
+4. Admin approves or denies via `POST /api/v1/admin/pi/member-requests/{id}/resolve`.
+5. On approval, `ldap.AddUserToGroup` is called.
+
+Switch modes without restart: `POST /api/v1/admin/pi/auto-approve` or directly update `portal_config.pi_auto_approve`.
 
 ---
 
@@ -105,36 +170,32 @@ is set with a non-loopback listen address.
 
 ---
 
-## Migration Story
+## Adding Users
 
-**Single-tenant deployments (no RBAC needed):** Nothing to change. Admin API
-keys issued before Sprint 3 still work. All existing deployments run as admin
-scope and bypass group access checks entirely. No database migration is
-required beyond running the server (migrations 043 and 044 apply automatically
-on next startup).
+### Admin or operator:
+1. Settings → Users → Create User.
+2. Set role to `admin`, `operator`, or `readonly`.
+3. For `operator`: after creating, click "Edit" in the Group Memberships column and assign groups.
 
-**Adding your first operator:** 
-1. Create a NodeGroup for the nodes you want the operator to manage.
-2. Assign nodes to that group (set `group_id` on each `NodeConfig`).
-3. Create a user with role `operator`.
-4. Go to Settings → Users → click "Edit" in the Group Memberships column
-   for that user. Check the appropriate groups. Save.
-5. The operator can now log in and reimage/power nodes in their group.
+### PI:
+1. Settings → Users → Create User. Set role to `pi`.
+2. Go to the group you want to assign: `PUT /api/v1/node-groups/{id}/pi` with `{"pi_user_id":"<uid>"}`.
+3. The PI can now log in at `/portal/pi/`.
+4. To enable auto-approve: set `pi_auto_approve = 1` in `portal_config` or set `CLUSTR_PI_AUTO_APPROVE=true`.
 
-**Expanding to multi-team:**
-Repeat step 1–5 for each team. Each team gets its own NodeGroup and its own
-operator accounts. Admins can reassign nodes between groups at any time by
-changing the node's `group_id`.
+### Viewer (researcher):
+1. Settings → Users → Create User. Set role to `viewer`.
+2. The viewer can log in at `/portal/` immediately — no group assignment needed (LDAP UID is read from the session).
 
 ---
 
 ## Audit Trail
 
-All state-changing actions by admin and operator users are recorded to the
+All state-changing actions by admin, operator, and pi users are recorded to the
 `audit_log` table (migration 044). The audit log captures:
 
 - `actor_id` / `actor_label` — who performed the action (user ID or API key)
-- `action` — what happened (e.g., `node.reimage`, `user.create`)
+- `action` — what happened (e.g., `node.reimage`, `user.create`, `pi.member.add`)
 - `resource_type` / `resource_id` — what was affected
 - `old_value` / `new_value` — JSON snapshots of before/after state (for updates)
 - `ip_addr` — source IP of the request
@@ -149,4 +210,5 @@ runs hourly to delete old records.
 ## Architecture Reference
 
 See `architecture/` for the full system design. The RBAC implementation
-follows decision D12 in `decisions.md`.
+follows decision D12 in `decisions.md`. PI governance (role, portal, member
+management) is documented in `docs/pi-portal.md`.

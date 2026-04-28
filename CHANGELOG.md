@@ -5,6 +5,96 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.2.5] — 2026-04-28
+
+**Sprint C.5 — PI Governance Layer**
+
+The PI persona is now a first-class RBAC role. PIs can log in, view their
+assigned NodeGroups, manage member requests, view read-only utilization stats,
+and submit expansion requests — all without admin involvement for day-to-day
+tasks.
+
+### Added
+
+- **PI role (C.5-1 / CF-09)** — Fifth RBAC role: `admin > operator > pi > readonly > viewer`.
+  PIs authenticate with username+password; login dispatches to `/portal/pi/`.
+  API scope `pi` added to the API key auth middleware. `requirePI()` middleware
+  allows admin/operator/pi; blocks readonly and viewer.
+
+- **PI NodeGroup ownership (C.5-1)** — New `pi_user_id` column on `node_groups`
+  (migration 056). Admin assigns PI via `PUT /api/v1/node-groups/{id}/pi`.
+  One PI can own many groups; one group has at most one PI.
+
+- **PI Portal (`/portal/pi/`) (C.5-4)** — Dedicated SPA served at `/portal/pi/`.
+  Alpine.js component with two tabs: **My Groups** (cards with expandable member
+  list, Add Member modal, Expansion Request modal) and **Utilization** (read-only
+  stats with HTMX auto-refresh every 60s). Partial responses returned when
+  `HX-Request: true`.
+
+- **PI self-service member management (C.5-2 / CF-08)** — PIs can request
+  LDAP group members be added to their NodeGroup. Requests land in
+  `pi_member_requests` (migration 056) as `pending`; admins approve/deny via
+  the Admin panel or the API. When `pi_auto_approve = 1` in `portal_config`
+  (or `CLUSTR_PI_AUTO_APPROVE=true` env), requests are auto-approved and the
+  LDAP add fires immediately.
+
+- **PI expansion requests (C.5-2)** — PIs can submit node-count expansion
+  requests with a justification. Stored in `pi_expansion_requests`
+  (migration 057). Admins acknowledge or dismiss. Read-only list on the PI
+  portal under each group card.
+
+- **PI utilization view (C.5-3 / CF-02 partial)** — `GET /api/v1/portal/pi/groups/{id}/utilization`
+  returns pure-SQL aggregation: total/deployed/undeployed node counts,
+  last-deploy timestamp, failed deploys in last 30 days, active member count.
+  No rollup tables. Gaps (no Slurm job data) labeled as unavailable.
+
+- **Admin PI management routes** — `GET /api/v1/admin/pi/member-requests`,
+  `POST /api/v1/admin/pi/member-requests/{id}/resolve`,
+  `GET /api/v1/admin/pi/expansion-requests`,
+  `POST /api/v1/admin/pi/expansion-requests/{id}/resolve`.
+
+- **`auth/me` returns username** — `GET /api/v1/auth/me` now includes `username`
+  for PI portal display ("Signed in as <username>").
+
+- **LDAP manager: AddUserToGroup / RemoveUserFromGroup** — Two new public methods
+  on `ldap.Manager` delegate to the DIT client for PI-triggered membership changes.
+
+- **Migrations 055–058** — `pi_auto_approve` in `portal_config` (055),
+  `pi_user_id` FK + `pi_member_requests` table (056), `pi_expansion_requests`
+  table (057), `users.role` CHECK constraint expanded to include `pi` and
+  `viewer` (058, recreates table via rename+copy).
+
+- **PI RBAC tests** — `internal/server/pi_rbac_test.go`: 6 tests covering scope
+  gating, admin route blocking, DB ownership, member request lifecycle,
+  expansion request creation, and utilization query on empty group.
+
+### Try it
+
+```bash
+# Create a PI user (admin session required)
+curl -s -X POST http://localhost:7001/api/v1/admin/users \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <admin-key>" \
+  -d '{"username":"jdoe","password":"changeme","role":"pi"}'
+
+# Assign the PI to a NodeGroup
+curl -s -X PUT http://localhost:7001/api/v1/node-groups/<group-id>/pi \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <admin-key>" \
+  -d '{"pi_user_id":"<user-id>"}'
+
+# Log in as PI — browser is redirected to /portal/pi/
+# Username: jdoe / Password: changeme
+```
+
+### Upgrade
+
+Apply migrations 055–058. They are additive — no data loss. The `users` table is
+recreated in migration 058 (role CHECK constraint expansion); all existing rows
+are preserved. Restart `clustr-serverd` after migration.
+
+---
+
 ## [v1.2.0] — 2026-04-27
 
 **Sprint C — Researcher Portal MVP + ColdFront wedge**
