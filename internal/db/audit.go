@@ -40,6 +40,11 @@ const (
 	// The new_value JSON contains "repo_url" and "detail" (last 2KB of dnf output).
 	AuditActionSlurmInstallFailed = "slurm.install.failed"
 
+	// Sprint F expiration events.
+	AuditActionGroupExpirationSet     = "node_group.expiration_set"
+	AuditActionGroupExpirationCleared = "node_group.expiration_cleared"
+	AuditActionExpirationWarning      = "node_group.expiration_warning"
+
 	// Sprint D notification + grant/pub/review events.
 	AuditActionNotificationSent     = "notification.sent"
 	AuditActionNotificationFailed   = "notification.failed"
@@ -232,4 +237,71 @@ func (db *DB) QueryAuditLog(ctx context.Context, p AuditQueryParams) ([]AuditRec
 		out = append(out, rec)
 	}
 	return out, total, rows.Err()
+}
+
+// StreamAuditLog streams audit records matching p to fn in ascending created_at
+// order (oldest first — SIEM consumers expect chronological order).
+// Unlike QueryAuditLog this uses an unbounded query with no pagination and
+// calls fn for each record row; fn should write to the HTTP response and flush.
+// The caller is responsible for enforcing reasonable time bounds via p.Since/Until.
+func (db *DB) StreamAuditLog(ctx context.Context, p AuditQueryParams, fn func(AuditRecord) error) error {
+	// Build dynamic WHERE clause (same as QueryAuditLog).
+	where := "WHERE 1=1"
+	args := []interface{}{}
+
+	if !p.Since.IsZero() {
+		where += " AND created_at >= ?"
+		args = append(args, p.Since.Unix())
+	}
+	if !p.Until.IsZero() {
+		where += " AND created_at <= ?"
+		args = append(args, p.Until.Unix())
+	}
+	if p.ActorID != "" {
+		where += " AND actor_id = ?"
+		args = append(args, p.ActorID)
+	}
+	if p.Action != "" {
+		where += " AND action = ?"
+		args = append(args, p.Action)
+	}
+	if p.ResourceType != "" {
+		where += " AND resource_type = ?"
+		args = append(args, p.ResourceType)
+	}
+
+	query := "SELECT id, actor_id, actor_label, action, resource_type, resource_id, " +
+		"old_value, new_value, ip_addr, created_at " +
+		"FROM audit_log " + where + " ORDER BY created_at ASC"
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("db: stream audit log: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rec AuditRecord
+		var createdAt int64
+		var oldVal, newVal sql.NullString
+		if err := rows.Scan(
+			&rec.ID, &rec.ActorID, &rec.ActorLabel, &rec.Action,
+			&rec.ResourceType, &rec.ResourceID, &oldVal, &newVal, &rec.IPAddr, &createdAt,
+		); err != nil {
+			return fmt.Errorf("db: stream audit log scan: %w", err)
+		}
+		rec.CreatedAt = time.Unix(createdAt, 0).UTC()
+		if oldVal.Valid {
+			raw := json.RawMessage(oldVal.String)
+			rec.OldValue = &raw
+		}
+		if newVal.Valid {
+			raw := json.RawMessage(newVal.String)
+			rec.NewValue = &raw
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }

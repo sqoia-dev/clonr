@@ -13,11 +13,19 @@
 # Both SHA256 values below were verified against two independent CDNs
 # (jsdelivr + unpkg) on 2026-04-27.
 
-# Alpine.js 3.15.11
+# Alpine.js 3.15.11 (standard build — NOT loaded in production; kept for reference)
 # Source:   https://cdn.jsdelivr.net/npm/alpinejs@3.15.11/dist/cdn.min.js
 # Cross-verified: https://unpkg.com/alpinejs@3.15.11/dist/cdn.min.js
 # License:  MIT  https://github.com/alpinejs/alpine/blob/main/LICENSE.md
 beeba63d08956f64fa060f6b6a29c87a341bf069fb96c9459c222c6fd42e58ae  alpinejs/alpine-3.15.11.min.js
+
+# Alpine.js 3.15.11 CSP build — LOADED IN PRODUCTION (Sprint F, v1.5.0)
+# The CSP build evaluates x-data expressions in a shadow realm; no unsafe-eval needed.
+# Source:   https://cdn.jsdelivr.net/npm/@alpinejs/csp@3.15.11/dist/cdn.min.js
+# Cross-verified: https://unpkg.com/@alpinejs/csp@3.15.11/dist/cdn.min.js
+# Verified:  2026-04-27. Both CDNs returned identical SHA256.
+# License:  MIT  https://github.com/alpinejs/alpine/blob/main/LICENSE.md
+24560d2a22fa5ec57384894527f4e0ed7c40aa33332030ef5934107f8e1c1e45  alpinejs/alpine-csp-3.15.11.min.js
 
 # HTMX 2.0.9
 # Source:   https://cdn.jsdelivr.net/npm/htmx.org@2.0.9/dist/htmx.min.js

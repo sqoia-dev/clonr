@@ -1040,6 +1040,19 @@ documentation including the `/repo/*` HTTP surface and supply-chain details.
 
 ---
 
+## Security Headers (v1.5.0)
+
+`clustr-serverd` sets the following HTTP security headers on all responses:
+
+- `Content-Security-Policy: default-src 'self'; script-src 'self'; ...`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: same-origin`
+
+See [docs/security-headers.md](security-headers.md) for the full policy and rationale.
+
+---
+
 ## See Also
 
 - [docs/rbac.md](rbac.md) — Role model, group-scoped operators, user management
@@ -1048,4 +1061,6 @@ documentation including the `/repo/*` HTTP surface and supply-chain details.
 - [docs/slurm-module.md](slurm-module.md) — Slurm module operator guide: enable, configure, first job
 - [docs/server-repo.md](server-repo.md) — Bundled Slurm repo: bundle install, rollback, /repo/* HTTP surface
 - [docs/user-management.md](user-management.md) — Human user provisioning: sysaccounts, LDAP, smoke test
+- [docs/security-headers.md](security-headers.md) — CSP policy, security headers reference (v1.5.0)
+- [docs/audit.md](audit.md) — Audit log query API, SIEM export, action reference (v1.5.0)
 - [README.md](../README.md) — Quick Start and architecture overview

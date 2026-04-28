@@ -82,6 +82,432 @@ const Router = {
     },
 };
 
+// ─── CSP-safe event delegation (F1, v1.5.0) ──────────────────────────────
+//
+// All inline event handlers (onclick=, onsubmit=, onchange=, oninput=) have been
+// moved out of HTML attribute strings into data-on-* attributes.  This delegation
+// system intercepts those events and dispatches them safely — no eval, no innerHTML
+// script execution.
+//
+// data-on-click="EXPR"   — delegated click handler (bubbles up from any element)
+// data-on-submit="EXPR"  — delegated form submit (attach listener on form)
+// data-on-change="EXPR"  — delegated change handler
+// data-on-input="EXPR"   — delegated input handler
+//
+// EXPR is a JavaScript expression string.  Dispatch is eval-free: the expression
+// is matched against a compiled pattern table and routed to the corresponding
+// function.  Patterns must be registered in _dispatch before use.
+//
+// Security note: the EXPR values come from server-rendered JS template literals,
+// never from user-supplied content.  All user data in EXPRs is passed through
+// escHtml() before insertion and then extracted as data-* attributes.
+
+const Delegate = {
+    // _dispatch maps compiled RegExp → handler function.
+    // The handler receives (el, match) where el is the target element
+    // and match is the RegExp exec result.
+    _dispatch: [],
+
+    // register adds a new dispatch rule.
+    // pattern: RegExp  handler: (el, match, event) => void
+    register(pattern, handler) {
+        this._dispatch.push({ pattern, handler });
+    },
+
+    // run evaluates EXPR against the dispatch table.
+    // Returns true if a rule matched.
+    run(expr, el, event) {
+        expr = (expr || '').trim();
+        for (const rule of this._dispatch) {
+            const m = rule.pattern.exec(expr);
+            if (m) {
+                try { rule.handler(el, m, event); } catch (e) { console.error('Delegate error', expr, e); }
+                return true;
+            }
+        }
+        // No match — log for debugging in dev; silent in production.
+        if (window.location.hostname === 'localhost' || window.location.port) {
+            console.warn('Delegate: unmatched expression', expr);
+        }
+        return false;
+    },
+
+    // attach installs delegated listeners on container.
+    // Call once on DOMContentLoaded with document.body.
+    attach(container) {
+        container.addEventListener('click', e => {
+            // Walk up the DOM tree to find the first element with data-on-click.
+            let el = e.target;
+            while (el && el !== container) {
+                const expr = el.getAttribute('data-on-click');
+                if (expr) {
+                    // Prevent default only for buttons and links to avoid navigation.
+                    if (el.tagName === 'BUTTON' || el.tagName === 'A') {
+                        // Only prevent if the expression doesn't contain "Router.navigate"
+                        // (navigation clicks intentionally trigger hash change).
+                        if (!expr.includes('Router.navigate') && !expr.includes('window.location')) {
+                            e.preventDefault();
+                        }
+                    }
+                    this.run(expr, el, e);
+                    return;
+                }
+                el = el.parentElement;
+            }
+        }, true); // capture phase to intercept before Alpine/HTMX
+
+        container.addEventListener('change', e => {
+            const el = e.target;
+            const expr = el.getAttribute('data-on-change');
+            if (expr) this.run(expr, el, e);
+        });
+
+        container.addEventListener('input', e => {
+            const el = e.target;
+            const expr = el.getAttribute('data-on-input');
+            if (expr) this.run(expr, el, e);
+        });
+
+        // Form submit delegation.
+        container.addEventListener('submit', e => {
+            const el = e.target;
+            const expr = el.getAttribute('data-on-submit');
+            if (expr) {
+                e.preventDefault();
+                this.run(expr, el, e);
+            }
+        });
+    },
+};
+
+// ─── Dispatch rules ───────────────────────────────────────────────────────
+// These are registered before DOMContentLoaded; Pages.* methods are referenced
+// by closure and will be available at call time (lazy resolution).
+//
+// Pattern convention:
+//   - Use ^…$ anchors for precision.
+//   - Capture groups provide arguments.
+//   - String literals in the original EXPR have single quotes; RegExp uses them.
+
+(function registerDelegateRules() {
+    const D = Delegate;
+
+    // ── document.getElementById('ID').remove() ──────────────────────────────
+    D.register(/^document\.getElementById\('([^']+)'\)\.remove\(\)$/, (el, m) => {
+        const target = document.getElementById(m[1]);
+        if (target) target.remove();
+    });
+
+    // ── document.getElementById('ID').remove() with optional cancel callback ─
+    // e.g. document.getElementById('modal-id').remove();Pages._confirmModalCancel_modal-id()
+    D.register(/^document\.getElementById\('([^']+)'\)\.remove\(\)(?:;Pages\._confirmModalCancel_([^(]+)\(\))?$/, (el, m) => {
+        const target = document.getElementById(m[1]);
+        if (target) target.remove();
+        if (m[2]) {
+            const fn = Pages['_confirmModalCancel_' + m[2]];
+            if (fn) fn();
+        }
+    });
+
+    // ── this.parentElement.remove() ────────────────────────────────────────
+    D.register(/^this\.parentElement\.remove\(\)$/, (el) => {
+        if (el.parentElement) el.parentElement.remove();
+    });
+
+    // ── Router.navigate('/path') ────────────────────────────────────────────
+    D.register(/^Router\.navigate\('([^']+)'\)$/, (el, m) => {
+        Router.navigate(m[1]);
+    });
+
+    // ── window.location.hash = '#/path' ─────────────────────────────────────
+    D.register(/^window\.location\.hash='([^']+)'$/, (el, m) => {
+        window.location.hash = m[1];
+    });
+
+    // ── Auth.logout() ───────────────────────────────────────────────────────
+    D.register(/^Auth\.logout\(\)$/, () => Auth.logout());
+
+    // ── Auth.extendSession() ────────────────────────────────────────────────
+    D.register(/^Auth\.extendSession\(\)$/, () => Auth.extendSession());
+
+    // ── Pages.METHOD() — no args ────────────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]]();
+    });
+
+    // ── Pages.METHOD('arg') — single string arg ─────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\('([^']*)'\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](m[2]);
+    });
+
+    // ── Pages.METHOD('arg', 'arg2') — two string args ───────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\('([^']*)',\s*'([^']*)'\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](m[2], m[3]);
+    });
+
+    // ── Pages.METHOD('arg', true) ───────────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\('([^']*)',\s*(true|false)\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](m[2], m[3] === 'true');
+    });
+
+    // ── Pages.METHOD(number) — integer arg ──────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\((\d+)\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](parseInt(m[2], 10));
+    });
+
+    // ── Pages.METHOD(JSON_ARRAY) — JSON array arg ───────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\((\[.*\])\)$/, (el, m) => {
+        try {
+            const arg = JSON.parse(m[2]);
+            if (typeof Pages[m[1]] === 'function') Pages[m[1]](arg);
+        } catch (_) {}
+    });
+
+    // ── Pages.showNodeModal(null, JSON, JSON) — triple arg ──────────────────
+    D.register(/^Pages\.showNodeModal\(null,\s*(.+),\s*(.+)\)$/, (el, m) => {
+        try {
+            const a1 = JSON.parse(m[1]);
+            const a2 = JSON.parse(m[2]);
+            Pages.showNodeModal(null, a1, a2);
+        } catch (_) {}
+    });
+
+    // ── Pages._cdStep('id', 'back'/'next', ...) — configure-and-deploy step ─
+    D.register(/^Pages\._cdStep\(([^,]+),\s*'(next|back)'(?:,\s*'([^']*)')?\)$/, (el, m) => {
+        Pages._cdStep(m[1], m[2], m[3] || undefined);
+    });
+
+    // ── Pages._configureAndDeployModal('id','name') ──────────────────────────
+    D.register(/^Pages\._configureAndDeployModal\('([^']*)',\s*'([^']*)'\)$/, (el, m) => {
+        Pages._configureAndDeployModal(m[1], m[2]);
+    });
+
+    // ── Pages._listPowerAction / _listConfirmPowerAction ─────────────────────
+    D.register(/^Pages\._listPowerAction\('([^']*)',\s*'([^']*)'\);Pages\._togglePowerDropdown\('([^']*)',\s*null\)$/, (el, m) => {
+        Pages._listPowerAction(m[1], m[2]);
+        Pages._togglePowerDropdown(m[3], null);
+    });
+    D.register(/^Pages\._listConfirmPowerAction\('([^']*)',\s*'([^']*)',\s*'([^']*)',\s*'([^']*)'\);Pages\._togglePowerDropdown\('([^']*)',\s*null\)$/, (el, m) => {
+        Pages._listConfirmPowerAction(m[1], m[2], m[3], m[4]);
+        Pages._togglePowerDropdown(m[5], null);
+    });
+    D.register(/^Pages\._togglePowerDropdown\('([^']*)',\s*event\)$/, (el, m, evt) => {
+        Pages._togglePowerDropdown(m[1], evt);
+    });
+
+    // ── Pages._cancelAllActiveDeploys chain ───────────────────────────────────
+    D.register(/^Pages\.cancelAllActiveDeploys\(\)\.then\(\(\)\s*=>\s*\{\s*document\.getElementById\('([^']+)'\)\?\.remove\(\);\s*Pages\.images\(\);\s*\}\)$/, (el, m) => {
+        Pages.cancelAllActiveDeploys().then(() => {
+            const modal = document.getElementById(m[1]);
+            if (modal) modal.remove();
+            Pages.images();
+        });
+    });
+
+    // ── Pages._switchCaptureAuth('key'|'pwd') ────────────────────────────────
+    D.register(/^Pages\._switchCaptureAuth\('([^']*)'\)$/, (el, m) => {
+        Pages._switchCaptureAuth(m[1]);
+    });
+
+    // ── Pages._nodesSelectByStatus('status') ─────────────────────────────────
+    D.register(/^Pages\._nodesSelectByStatus\('([^']*)'\)$/, (el, m) => {
+        Pages._nodesSelectByStatus(m[1]);
+    });
+
+    // ── Pages._nodesSelectAll(false) ─────────────────────────────────────────
+    D.register(/^Pages\._nodesSelectAll\(false\);document\.getElementById\('([^']+)'\)&&\(document\.getElementById\('([^']+)'\)\.checked=false\)$/, (el, m) => {
+        Pages._nodesSelectAll(false);
+        const chk = document.getElementById(m[1]);
+        if (chk) chk.checked = false;
+    });
+
+    // ── Pages._nodesSelectAll(this.checked) ──────────────────────────────────
+    D.register(/^Pages\._nodesSelectAll\(this\.checked\)$/, (el) => {
+        Pages._nodesSelectAll(el.checked);
+    });
+
+    // ── Pages._nodesOnCheckboxChange() ────────────────────────────────────────
+    D.register(/^Pages\._nodesOnCheckboxChange\(\)$/, () => Pages._nodesOnCheckboxChange());
+
+    // ── Pages._nodesSearchDebounced(this.value) ───────────────────────────────
+    D.register(/^Pages\._nodesSearchDebounced\(this\.value\)$/, (el) => {
+        Pages._nodesSearchDebounced(el.value);
+    });
+
+    // ── Pages._updateRolePreview() ────────────────────────────────────────────
+    D.register(/^Pages\._updateRolePreview\(\)$/, () => Pages._updateRolePreview());
+
+    // ── Pages._imageTagFilter(this.value) / Pages.images(this.value) ─────────
+    D.register(/^Pages\.images\(this\.value\)$/, (el) => Pages.images(el.value));
+    D.register(/^Pages\._imageTagFilter\(this\.value\)$/, (el) => {
+        if (typeof Pages._imageTagFilter === 'function') Pages._imageTagFilter(el.value);
+        else Pages.images(el.value);
+    });
+
+    // ── Pages._nodesSortBy('col') ─────────────────────────────────────────────
+    D.register(/^Pages\._nodesSortBy\('([^']*)'\)$/, (el, m) => Pages._nodesSortBy(m[1]));
+
+    // ── Pages._toggleNodesSection('role') ────────────────────────────────────
+    D.register(/^Pages\._toggleNodesSection\('([^']*)'\)$/, (el, m) => Pages._toggleNodesSection(m[1]));
+
+    // ── Pages.deleteInitramfsHistory('id') ───────────────────────────────────
+    D.register(/^Pages\.deleteInitramfsHistory\('([^']*)'\)$/, (el, m) => Pages.deleteInitramfsHistory(m[1]));
+
+    // ── Pages.openShellTerminal('id') ─────────────────────────────────────────
+    D.register(/^Pages\.openShellTerminal\('([^']*)'\)$/, (el, m) => Pages.openShellTerminal(m[1]));
+
+    // ── Pages.closeShellTerminal() ────────────────────────────────────────────
+    D.register(/^Pages\.closeShellTerminal\(\)$/, () => Pages.closeShellTerminal());
+
+    // ── Pages._downloadImageBlob('id','name') ────────────────────────────────
+    D.register(/^Pages\._downloadImageBlob\('([^']*)',\s*'([^']*)'\)$/, (el, m) => Pages._downloadImageBlob(m[1], m[2]));
+
+    // ── Pages.showDeleteImageModal('id','name') ───────────────────────────────
+    D.register(/^Pages\.showDeleteImageModal\('([^']*)',\s*'([^']*)'\)$/, (el, m) => Pages.showDeleteImageModal(m[1], m[2]));
+
+    // ── Pages._confirmDeleteImage('id') ──────────────────────────────────────
+    D.register(/^Pages\._confirmDeleteImage\('([^']*)'\)$/, (el, m) => Pages._confirmDeleteImage(m[1]));
+
+    // ── Pages._addImageTag / _removeImageTag ─────────────────────────────────
+    D.register(/^Pages\._addImageTag\('([^']*)'\)$/, (el, m) => Pages._addImageTag(m[1]));
+    D.register(/^Pages\._removeImageTag\('([^']*)',\s*'([^']*)'\)$/, (el, m) => Pages._removeImageTag(m[1], m[2]));
+
+    // ── Pages.resumeImageBuild('id') ─────────────────────────────────────────
+    D.register(/^event\.stopPropagation\(\);Pages\.resumeImageBuild\('([^']*)'\)$/, (el, m, evt) => {
+        if (evt) evt.stopPropagation();
+        Pages.resumeImageBuild(m[1]);
+    });
+
+    // ── Pages._listRetryLastReimage / _listRedeploy ──────────────────────────
+    D.register(/^Pages\._listRetryLastReimage\('([^']*)'\)$/, (el, m) => Pages._listRetryLastReimage(m[1]));
+    D.register(/^Pages\._listRedeploy\('([^']*)',\s*'([^']*)'\)$/, (el, m) => Pages._listRedeploy(m[1], m[2]));
+
+    // ── Pages._nodesBulkReimage() ────────────────────────────────────────────
+    D.register(/^Pages\._nodesBulkReimage\(\)$/, () => Pages._nodesBulkReimage());
+
+    // ── Pages._nodesBulkReimageSubmit([...]) ─────────────────────────────────
+    D.register(/^Pages\._nodesBulkReimageSubmit\((\[.*?\])\)$/, (el, m) => {
+        try { Pages._nodesBulkReimageSubmit(JSON.parse(m[1])); } catch (_) {}
+    });
+
+    // ── Pages.showNodeGroupModal(null) ────────────────────────────────────────
+    D.register(/^Pages\.showNodeGroupModal\(null\)$/, () => Pages.showNodeGroupModal(null));
+
+    // ── Pages.showAddMemberModal('id') ────────────────────────────────────────
+    D.register(/^Pages\.showAddMemberModal\('([^']*)'\)$/, (el, m) => Pages.showAddMemberModal(m[1]));
+
+    // ── Pages._regenerateHostname('mac') ─────────────────────────────────────
+    D.register(/^Pages\._regenerateHostname\('([^']*)'\)$/, (el, m) => Pages._regenerateHostname(m[1]));
+
+    // ── Pages._layoutEditorRemoveRow(N) ──────────────────────────────────────
+    D.register(/^Pages\._layoutEditorRemoveRow\((\d+)\)$/, (el, m) => Pages._layoutEditorRemoveRow(parseInt(m[1], 10)));
+
+    // ── Pages.submitNode(event, 'id'|null) ────────────────────────────────────
+    D.register(/^Pages\.submitNode\(event,\s*(?:'([^']*)'|null)\)$/, (el, m, evt) => {
+        Pages.submitNode(evt, m[1] || null);
+    });
+
+    // ── Pages.submitPull(event) / submitCapture(event) / submitImportISO(event) ─
+    D.register(/^Pages\.submitPull\(event\)$/, (el, m, evt) => Pages.submitPull(evt));
+    D.register(/^Pages\.submitCapture\(event\)$/, (el, m, evt) => Pages.submitCapture(evt));
+    D.register(/^Pages\.submitImportISO\(event\)$/, (el, m, evt) => Pages.submitImportISO(evt));
+    D.register(/^Pages\.submitBuildFromISO\(event\)$/, (el, m, evt) => Pages.submitBuildFromISO(evt));
+    D.register(/^Pages\.confirmRebuildInitramfs\(\)$/, () => Pages.confirmRebuildInitramfs());
+    D.register(/^Pages\.cancelAllActiveDeploys\(\)$/, () => Pages.cancelAllActiveDeploys());
+
+    // ── Pages._tabMarkDirty('tab') ────────────────────────────────────────────
+    D.register(/^Pages\._tabMarkDirty\('([^']*)'\)$/, (el, m) => Pages._tabMarkDirty(m[1]));
+
+    // ── Pages._tabMarkDirty('tab');Pages._checkRoleMismatchInline(...) ────────
+    D.register(/^Pages\._tabMarkDirty\('([^']*)'\);Pages\._checkRoleMismatchInline\(this\.value,\s*(.+),\s*(.+)\)$/, (el, m, evt) => {
+        Pages._tabMarkDirty(m[1]);
+        try { Pages._checkRoleMismatchInline(el.value, JSON.parse(m[2]), JSON.parse(m[3])); } catch (_) {}
+    });
+
+    // ── Pages.METHOD(this.value) — value from element ────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(this\.value\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](el.value);
+    });
+
+    // ── Pages.METHOD(this.value, 'str') ──────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(this\.value,\s*'([^']*)'\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](el.value, m[2]);
+    });
+
+    // ── Pages.METHOD('str', this.value) ──────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\('([^']*)',\s*this\.value\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](m[2], el.value);
+    });
+
+    // ── Pages.METHOD(this.checked) ────────────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(this\.checked\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](el.checked);
+    });
+
+    // ── Pages.METHOD(this.checked, 'str') ─────────────────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(this\.checked,\s*'([^']*)'\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](el.checked, m[2]);
+    });
+
+    // ── Pages.METHOD(N,'field',this.value) — layout editor row update ─────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\((\d+),\s*'([^']*)',\s*this\.value\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](parseInt(m[2], 10), m[3], el.value);
+    });
+
+    // ── Pages.METHOD1();Pages.METHOD2() — two no-arg calls ────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(\);Pages\.([A-Za-z_][A-Za-z0-9_]*)\(\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]]();
+        if (typeof Pages[m[2]] === 'function') Pages[m[2]]();
+    });
+
+    // ── Pages.METHOD1(this.value);Pages.METHOD2('str') ────────────────────────
+    D.register(/^Pages\.([A-Za-z_][A-Za-z0-9_]*)\(this\.value\);Pages\.([A-Za-z_][A-Za-z0-9_]*)\('([^']*)'\)$/, (el, m) => {
+        if (typeof Pages[m[1]] === 'function') Pages[m[1]](el.value);
+        if (typeof Pages[m[2]] === 'function') Pages[m[2]](m[3]);
+    });
+
+    // ── document.getElementById('ID').textContent=this.value+' GB' ───────────
+    D.register(/^document\.getElementById\('([^']+)'\)\.textContent=this\.value\+'\s*(\w+)'$/, (el, m) => {
+        const t = document.getElementById(m[1]);
+        if (t) t.textContent = el.value + ' ' + m[2];
+    });
+
+    // ── navigator.clipboard.writeText(...).then(...) ─────────────────────────
+    D.register(/^navigator\.clipboard(?:&&navigator\.clipboard)?\.writeText\((.+)\)\.then\(\(\)=>App\.toast\('([^']+)','success'\)\)$/, (el, m) => {
+        try {
+            const text = (new Function('return ' + m[1]))();
+            navigator.clipboard && navigator.clipboard.writeText(text).then(() => App.toast(m[2], 'success'));
+        } catch (_) {}
+    });
+
+    // ── Pages._showSetExpirationModal('groupId','groupName') ────────────────────
+    D.register(/^Pages\._showSetExpirationModal\('([^']*)',\s*'([^']*)'\)$/, (el, m) => {
+        Pages._showSetExpirationModal(m[1], m[2]);
+    });
+
+    // ── Pages._submitGroupExpiration('groupId','modalId') ────────────────────
+    D.register(/^Pages\._submitGroupExpiration\('([^']*)',\s*'([^']*)'\)$/, (el, m) => {
+        Pages._submitGroupExpiration(m[1], m[2]);
+    });
+
+    // ── Pages._clearGroupExpiration('groupId') ───────────────────────────────
+    D.register(/^Pages\._clearGroupExpiration\('([^']*)'\)$/, (el, m) => {
+        Pages._clearGroupExpiration(m[1]);
+    });
+
+    // ── Pages._auditLogRender({}) — clear audit filters ────────────────────────
+    D.register(/^Pages\._auditLogRender\(\{\}\)$/, () => Pages._auditLogRender({}));
+
+    // ── Pages._auditLogRender({...Pages._auditFilters,offset:N}) — paginate ────
+    D.register(/^Pages\._auditLogRender\(\{\.\.\.Pages\._auditFilters,offset:(-?\d+)\}\)$/, (el, m) => {
+        Pages._auditLogRender({ ...Pages._auditFilters, offset: parseInt(m[1], 10) });
+    });
+
+    // ── Pages._auditExport() — trigger JSONL download ────────────────────────
+    D.register(/^Pages\._auditExport\(\)$/, () => Pages._auditExport());
+
+})();
+
 // ─── App state ────────────────────────────────────────────────────────────
 
 const App = {
@@ -149,7 +575,7 @@ const App = {
         toast.setAttribute('aria-live', 'assertive');
         toast.setAttribute('aria-atomic', 'true');
         toast.style.cssText = `background:${c.bg};color:white;padding:12px 16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:14px;font-weight:500;min-width:280px;max-width:420px;display:flex;align-items:center;gap:10px;pointer-events:auto;animation:toastIn 0.2s ease-out`;
-        toast.innerHTML = `<span style="font-size:18px;font-weight:bold" aria-hidden="true">${c.icon}</span><span style="flex:1">${escHtml(message)}</span><button style="cursor:pointer;opacity:0.7;padding:0 4px;background:none;border:none;color:white;font-size:16px;line-height:1" aria-label="Dismiss notification" onclick="this.parentElement.remove()">×</button>`;
+        toast.innerHTML = `<span style="font-size:18px;font-weight:bold" aria-hidden="true">${c.icon}</span><span style="flex:1">${escHtml(message)}</span><button style="cursor:pointer;opacity:0.7;padding:0 4px;background:none;border:none;color:white;font-size:16px;line-height:1" aria-label="Dismiss notification" data-on-click="this.parentElement.remove()">×</button>`;
         container.appendChild(toast);
         toast._toastTimer = setTimeout(() => {
             toast.style.animation = 'toastOut 0.2s ease-in forwards';
@@ -669,14 +1095,14 @@ const Pages = {
         overlay.id = id;
 
         const cancelBtn = cancelText
-            ? `<button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()${opts.onCancel ? ';Pages._confirmModalCancel_' + id + '()' : ''}">${escHtml(cancelText)}</button>`
+            ? `<button class="btn btn-secondary" data-on-click="document.getElementById('${id}').remove()${opts.onCancel ? ';Pages._confirmModalCancel_' + id + '()' : ''}">${escHtml(cancelText)}</button>`
             : '';
 
         overlay.innerHTML = `
             <div class="modal" style="max-width:440px" aria-labelledby="${id}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${id}-title">${escHtml(title)}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${id}').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <div style="color:var(--text-secondary);font-size:14px;line-height:1.5;margin-bottom:16px">${message}</div>
@@ -1354,7 +1780,7 @@ const Pages = {
             </tr></thead>
             <tbody>
             ${images.map(img => `
-                <tr class="clickable" data-key="${escHtml(img.id)}" onclick="Router.navigate('/images/${img.id}')">
+                <tr class="clickable" data-key="${escHtml(img.id)}" data-on-click="Router.navigate('/images/${img.id}')">
                     <td>
                         <span style="font-weight:500">${escHtml(img.name)}</span>
                         ${img.version ? `<span class="text-dim text-sm"> v${escHtml(img.version)}</span>` : ''}
@@ -1379,7 +1805,7 @@ const Pages = {
             </tr></thead>
             <tbody>
             ${nodes.map(n => `
-                <tr class="clickable" data-key="${escHtml(n.id)}" onclick="Router.navigate('/nodes/${n.id}')">
+                <tr class="clickable" data-key="${escHtml(n.id)}" data-on-click="Router.navigate('/nodes/${n.id}')">
                     <td>
                         ${(n.hostname && n.hostname !== '(none)')
                             ? `<span style="font-weight:500">${escHtml(n.hostname)}</span>`
@@ -1413,7 +1839,7 @@ const Pages = {
             images.forEach(img => (img.tags || []).forEach(t => allTagsSet.add(t)));
             const allTags = Array.from(allTagsSet).sort();
             const tagFilterHtml = allTags.length > 0 || filterTag ? `
-                <select id="img-tag-filter" onchange="Pages.images(this.value)"
+                <select id="img-tag-filter" data-on-change="Pages.images(this.value)"
                     style="padding:6px 10px;font-size:13px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)">
                     <option value="">All tags</option>
                     ${allTags.map(t => `<option value="${escHtml(t)}" ${t === filterTag ? 'selected' : ''}>${escHtml(t)}</option>`).join('')}
@@ -1430,16 +1856,16 @@ const Pages = {
                         ${tagFilterHtml}
                         <!-- S5-8: secondary actions grouped together, Build from ISO is primary -->
                         <span title="Pull a pre-built image tarball from a URL or registry">
-                            <button class="btn btn-secondary" onclick="Pages.showPullModal()">Pull</button>
+                            <button class="btn btn-secondary" data-on-click="Pages.showPullModal()">Pull</button>
                         </span>
                         <span title="Capture the running OS of an SSH-reachable host into a clustr image">
-                            <button class="btn btn-secondary" onclick="Pages.showCaptureModal()">Capture from Host</button>
+                            <button class="btn btn-secondary" data-on-click="Pages.showCaptureModal()">Capture from Host</button>
                         </span>
                         <span title="Import a raw ISO file already present on the server filesystem">
-                            <button class="btn btn-secondary" onclick="Pages.showImportISOModal()">Import ISO</button>
+                            <button class="btn btn-secondary" data-on-click="Pages.showImportISOModal()">Import ISO</button>
                         </span>
                         <!-- Build from ISO is first-choice and visually highlighted -->
-                        <button class="btn btn-primary" onclick="Pages.showBuildFromISOModal()">
+                        <button class="btn btn-primary" data-on-click="Pages.showBuildFromISOModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/>
                             </svg>
@@ -1468,8 +1894,8 @@ const Pages = {
                         filterTag ? `No images with tag "${filterTag}"` : 'No images yet',
                         filterTag ? 'Try a different tag filter or clear the filter.' : 'Use "Build from ISO" to create your first image.',
                         filterTag
-                            ? `<button class="btn btn-secondary" onclick="Pages.images()">Clear Filter</button>`
-                            : `<button class="btn btn-primary" onclick="Pages.showBuildFromISOModal()">Build from ISO</button>`
+                            ? `<button class="btn btn-secondary" data-on-click="Pages.images()">Clear Filter</button>`
+                            : `<button class="btn btn-primary" data-on-click="Pages.showBuildFromISOModal()">Build from ISO</button>`
                     )}</div></div>`
                     : `<div class="image-grid">${images.map(img => this._imageCard(img)).join('')}</div>`
                 }
@@ -1510,7 +1936,7 @@ const Pages = {
                 const isDeletable = !isLive && h.outcome !== 'pending';
                 const delBtn = isDeletable
                     ? `<button class="btn btn-xs" style="padding:2px 6px;font-size:11px;color:var(--error);background:transparent;border:1px solid var(--error);border-radius:4px;cursor:pointer;line-height:1.2"
-                         onclick="Pages.deleteInitramfsHistory('${escHtml(h.id)}')" title="Delete this entry">×</button>`
+                         data-on-click="Pages.deleteInitramfsHistory('${escHtml(h.id)}')" title="Delete this entry">×</button>`
                     : '';
                 return `<tr>
                 <td class="text-mono text-sm">${escHtml(h.sha256 ? h.sha256.slice(0,16)+'…' : '—')}</td>
@@ -1528,10 +1954,10 @@ const Pages = {
             <div class="card-header">
                 <h2 class="card-title">System Initramfs</h2>
                 <div class="flex gap-8">
-                    <button class="btn btn-secondary btn-sm" style="color:var(--error);border-color:var(--error)" onclick="Pages.cancelAllActiveDeploys()" title="Cancel all pending/running/triggered reimage requests — unblocks initramfs rebuild">
+                    <button class="btn btn-secondary btn-sm" style="color:var(--error);border-color:var(--error)" data-on-click="Pages.cancelAllActiveDeploys()" title="Cancel all pending/running/triggered reimage requests — unblocks initramfs rebuild">
                         Cancel All Active Deploys
                     </button>
-                    <button class="btn btn-secondary btn-sm" onclick="Pages.showRebuildInitramfsModal()">
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages.showRebuildInitramfsModal()">
                         Rebuild
                     </button>
                 </div>
@@ -1577,7 +2003,7 @@ const Pages = {
             <div class="modal" style="max-width:480px" aria-labelledby="modal-title-1">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-1">Rebuild System Initramfs</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('rebuild-initramfs-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('rebuild-initramfs-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="color:var(--text-secondary);margin-bottom:16px">
@@ -1594,8 +2020,8 @@ const Pages = {
                     <div id="rebuild-result" style="margin-top:12px;display:none"></div>
                 </div>
                 <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
-                    <button class="btn btn-secondary" onclick="document.getElementById('rebuild-initramfs-modal').remove()">Cancel</button>
-                    <button class="btn btn-primary" id="rebuild-confirm-btn" onclick="Pages.confirmRebuildInitramfs()">Rebuild</button>
+                    <button class="btn btn-secondary" data-on-click="document.getElementById('rebuild-initramfs-modal').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="rebuild-confirm-btn" data-on-click="Pages.confirmRebuildInitramfs()">Rebuild</button>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
@@ -1639,7 +2065,7 @@ const Pages = {
                     resultDiv.innerHTML = `<div class="alert alert-error" style="background:rgba(239,68,68,0.1);border:1px solid var(--error);border-radius:6px;padding:12px;color:var(--error)">
                         <div style="margin-bottom:8px"><strong>Blocked:</strong> ${escHtml(e.message)}</div>
                         <button class="btn btn-secondary btn-sm" style="color:var(--error);border-color:var(--error)"
-                            onclick="Pages.cancelAllActiveDeploys().then(() => { document.getElementById('rebuild-initramfs-modal')?.remove(); Pages.images(); })">
+                            data-on-click="Pages.cancelAllActiveDeploys().then(() => { document.getElementById('rebuild-initramfs-modal')?.remove(); Pages.images(); })">
                             Cancel All Active Deploys
                         </button>
                     </div>`;
@@ -1691,12 +2117,12 @@ const Pages = {
         const isResumable = img.status === 'interrupted' || img.status === 'error';
         const resumeBtn = isResumable
             ? `<button class="btn btn-secondary btn-sm" style="margin-top:8px;font-size:11px"
-                onclick="event.stopPropagation();Pages.resumeImageBuild('${escHtml(img.id)}')">
+                data-on-click="event.stopPropagation();Pages.resumeImageBuild('${escHtml(img.id)}')">
                 &#9654; Resume
                </button>`
             : '';
 
-        return `<div class="image-card" onclick="Router.navigate('/images/${img.id}')">
+        return `<div class="image-card" data-on-click="Router.navigate('/images/${img.id}')">
             <div class="image-card-name" title="${escHtml(img.name)}">${escHtml(img.name)}</div>
             <div class="image-card-meta">
                 <span class="badge ${statusClass}">${escHtml(img.status)}</span>
@@ -1732,10 +2158,10 @@ const Pages = {
             <div class="modal" style="max-width:600px" aria-labelledby="modal-title-2">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-2">Pull Image</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('pull-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('pull-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <form id="pull-form" onsubmit="Pages.submitPull(event)">
+                    <form id="pull-form" data-on-submit="Pages.submitPull(event)">
                         <div class="form-grid">
                             <div class="form-group" style="grid-column:1/-1">
                                 <label>Image URL *</label>
@@ -1821,7 +2247,7 @@ const Pages = {
                         </div>
                         <div id="pull-result"></div>
                         <div class="form-actions">
-                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('pull-modal').remove()">Cancel</button>
+                            <button type="button" class="btn btn-secondary" data-on-click="document.getElementById('pull-modal').remove()">Cancel</button>
                             <button type="submit" class="btn btn-primary" id="pull-btn">Pull Image</button>
                         </div>
                     </form>
@@ -1860,7 +2286,7 @@ const Pages = {
                            title="${escHtml(r.notes || '')}">
                         <input type="checkbox" name="role_ids" value="${escHtml(r.id)}"
                                style="margin-top:2px;flex-shrink:0"
-                               onchange="Pages._updateRolePreview()">
+                               data-on-change="Pages._updateRolePreview()">
                         <span>
                             <strong>${escHtml(r.name)}</strong>
                             <span style="color:var(--text-secondary);font-size:12px;display:block">${escHtml(r.description)}</span>
@@ -1953,10 +2379,10 @@ const Pages = {
             <div class="modal" aria-labelledby="modal-title-3">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-3">Upload Image File</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('iso-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('iso-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <form id="iso-form" onsubmit="Pages.submitImportISO(event)">
+                    <form id="iso-form" data-on-submit="Pages.submitImportISO(event)">
                         <div class="form-group" style="margin-bottom:16px">
                             <label>Image File</label>
                             <div class="upload-zone" id="iso-drop-zone">
@@ -1991,7 +2417,7 @@ const Pages = {
                         </div>
                         <div id="iso-result"></div>
                         <div class="form-actions">
-                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('iso-modal').remove()">Cancel</button>
+                            <button type="button" class="btn btn-secondary" data-on-click="document.getElementById('iso-modal').remove()">Cancel</button>
                             <button type="submit" class="btn btn-primary" id="iso-btn">Upload &amp; Import</button>
                         </div>
                     </form>
@@ -2215,15 +2641,15 @@ const Pages = {
             <div class="modal" style="max-width:480px" aria-labelledby="modal-title-4">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-4">Delete Image</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('delete-image-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('delete-image-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 4px;font-weight:600">${escHtml(name)}</p>
                     ${nodesHtml}
                     <div id="delete-image-error" style="display:none" class="form-error"></div>
                     <div class="form-actions" style="margin-top:0">
-                        <button class="btn btn-secondary" onclick="document.getElementById('delete-image-modal').remove()">Cancel</button>
-                        <button class="btn btn-danger" id="delete-image-confirm-btn" onclick="Pages._confirmDeleteImage('${id}')">Delete Permanently</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('delete-image-modal').remove()">Cancel</button>
+                        <button class="btn btn-danger" id="delete-image-confirm-btn" data-on-click="Pages._confirmDeleteImage('${id}')">Delete Permanently</button>
                     </div>
                 </div>
             </div>`;
@@ -2261,14 +2687,14 @@ const Pages = {
             <div class="modal" style="max-width:560px" aria-labelledby="modal-title-5">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-5">Capture from Host</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('capture-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('capture-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
                     <div class="alert alert-info" role="note" style="margin-bottom:16px;font-size:12px">
                         The server will SSH to the source host and rsync its filesystem into a new image.
                         SSH host key verification is disabled — only use this on trusted golden nodes.
                     </div>
-                    <form id="capture-form" onsubmit="Pages.submitCapture(event)">
+                    <form id="capture-form" data-on-submit="Pages.submitCapture(event)">
                         <div class="form-group" style="margin-bottom:14px">
                             <label>Source Host * <span style="font-size:11px;color:var(--text-secondary)">(user@host or host)</span></label>
                             <input type="text" name="source_host" placeholder="root@192.168.1.10" value="${escHtml(prefillHost)}" required>
@@ -2298,8 +2724,8 @@ const Pages = {
                         <div style="margin-bottom:14px">
                             <label style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block">SSH Authentication</label>
                             <div class="tab-bar" style="margin-bottom:10px">
-                                <div class="tab active" id="ssh-tab-key" onclick="Pages._switchCaptureAuth('key')">Private Key (server path)</div>
-                                <div class="tab" id="ssh-tab-pwd" onclick="Pages._switchCaptureAuth('pwd')">Password</div>
+                                <div class="tab active" id="ssh-tab-key" data-on-click="Pages._switchCaptureAuth('key')">Private Key (server path)</div>
+                                <div class="tab" id="ssh-tab-pwd" data-on-click="Pages._switchCaptureAuth('pwd')">Password</div>
                             </div>
                             <div id="ssh-auth-key">
                                 <div class="form-group">
@@ -2330,7 +2756,7 @@ const Pages = {
                         </div>
                         <div id="capture-result"></div>
                         <div class="form-actions">
-                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('capture-modal').remove()">Cancel</button>
+                            <button type="button" class="btn btn-secondary" data-on-click="document.getElementById('capture-modal').remove()">Cancel</button>
                             <button type="submit" class="btn btn-primary" id="capture-btn">Start Capture</button>
                         </div>
                     </form>
@@ -2431,7 +2857,7 @@ const Pages = {
                 </div>
                 <div class="page-header">
                     <div style="display:flex;align-items:center;gap:12px">
-                        <button class="detail-back-btn" onclick="Router.navigate('/images')">
+                        <button class="detail-back-btn" data-on-click="Router.navigate('/images')">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <polyline points="15 18 9 12 15 6"/>
                             </svg>
@@ -2445,13 +2871,13 @@ const Pages = {
                     </div>
                     <div class="flex gap-8">
                         ${img.status === 'ready'
-                            ? `<button class="btn btn-secondary" onclick="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
+                            ? `<button class="btn btn-secondary" data-on-click="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
                             : ''}
                         ${img.status === 'ready'
                             // C3-6: blob download via fetch() so non-2xx responses show an error toast.
-                            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._downloadImageBlob('${escHtml(img.id)}', '${escHtml(img.name)}')">Download Image</button>`
+                            ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._downloadImageBlob('${escHtml(img.id)}', '${escHtml(img.name)}')">Download Image</button>`
                             : ''}
-                        ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" onclick="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>` : ''}
+                        ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" data-on-click="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>` : ''}
                     </div>
                 </div>
 
@@ -2576,7 +3002,7 @@ const Pages = {
             <span class="badge badge-neutral" style="display:inline-flex;align-items:center;gap:4px">
                 ${escHtml(t)}
                 <button type="button" class="tag-remove-btn" title="Remove tag"
-                    onclick="Pages._removeImageTag('${escHtml(imageId)}', '${escHtml(t)}')"
+                    data-on-click="Pages._removeImageTag('${escHtml(imageId)}', '${escHtml(t)}')"
                     style="background:none;border:none;cursor:pointer;padding:0;line-height:1;color:inherit;opacity:0.7;font-size:12px">&times;</button>
             </span>`).join(' ');
         return `
@@ -2587,7 +3013,7 @@ const Pages = {
                 <input type="text" id="img-tag-input" placeholder="Add tag…"
                     style="width:160px;padding:4px 8px;font-size:13px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-secondary);color:var(--text-primary)"
                     onkeydown="if(event.key==='Enter'){event.preventDefault();Pages._addImageTag('${escHtml(imageId)}');}">
-                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._addImageTag('${escHtml(imageId)}')">Add</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._addImageTag('${escHtml(imageId)}')">Add</button>
                 <span id="img-tag-error" style="color:var(--color-danger);font-size:12px"></span>
             </div>`;
     },
@@ -2730,7 +3156,7 @@ const Pages = {
                         </div>
                         <span class="shell-modal-title" id="shell-modal-title">shell &mdash; ${escHtml(imageId)}</span>
                     </div>
-                    <button class="shell-modal-close" onclick="Pages.closeShellTerminal()" title="Close terminal">&times;</button>
+                    <button class="shell-modal-close" data-on-click="Pages.closeShellTerminal()" title="Close terminal">&times;</button>
                 </div>
                 ${warnHtml}
                 <div class="shell-modal-body">
@@ -2923,7 +3349,7 @@ const Pages = {
         const sortClick = (col) => `onclick="Pages._nodesSortBy('${col}')"`;
         // S5-4: Select-all checkbox.
         const selectAllCb = (Auth._role === 'admin' || Auth._role === 'operator')
-            ? `<th style="width:32px"><input type="checkbox" id="nodes-select-all" title="Select all" onchange="Pages._nodesSelectAll(this.checked)"></th>`
+            ? `<th style="width:32px"><input type="checkbox" id="nodes-select-all" title="Select all" data-on-change="Pages._nodesSelectAll(this.checked)"></th>`
             : '';
         const tableHeader = `<thead><tr>
             ${selectAllCb}
@@ -2945,7 +3371,7 @@ const Pages = {
             return `
                 <div class="card" style="margin-bottom:16px" id="nodes-section-${safeRole}">
                     <div class="card-header" style="cursor:pointer;user-select:none"
-                         onclick="Pages._toggleNodesSection('${safeRole}')">
+                         data-on-click="Pages._toggleNodesSection('${safeRole}')">
                         <h2 class="card-title">${escHtml(label)}
                             <span class="badge badge-neutral badge-sm" style="margin-left:8px;font-size:11px">${roleNodes.length}</span>
                         </h2>
@@ -3028,16 +3454,16 @@ const Pages = {
         bar.style.display = 'flex';
         bar.innerHTML = `
             <span style="font-size:13px;font-weight:600">${count} node${count !== 1 ? 's' : ''} selected</span>
-            <button class="btn btn-primary btn-sm" onclick="Pages._nodesBulkReimage()">Reimage Selected</button>
+            <button class="btn btn-primary btn-sm" data-on-click="Pages._nodesBulkReimage()">Reimage Selected</button>
             <div style="width:1px;background:var(--border);align-self:stretch"></div>
             <button class="btn btn-secondary btn-sm" title="Select all nodes in failed state"
-                onclick="Pages._nodesSelectByStatus('failed')">+ Failed</button>
+                data-on-click="Pages._nodesSelectByStatus('failed')">+ Failed</button>
             <button class="btn btn-secondary btn-sm" title="Select all nodes with verify-boot timeout"
-                onclick="Pages._nodesSelectByStatus('verify_timeout')">+ Timed Out</button>
+                data-on-click="Pages._nodesSelectByStatus('verify_timeout')">+ Timed Out</button>
             <button class="btn btn-secondary btn-sm" title="Select all nodes that have never deployed (image assigned but no deploy attempt)"
-                onclick="Pages._nodesSelectByStatus('never_deployed')">+ Never Deployed</button>
+                data-on-click="Pages._nodesSelectByStatus('never_deployed')">+ Never Deployed</button>
             <div style="width:1px;background:var(--border);align-self:stretch"></div>
-            <button class="btn btn-secondary btn-sm" onclick="Pages._nodesSelectAll(false);document.getElementById('nodes-select-all')&&(document.getElementById('nodes-select-all').checked=false)">Clear</button>`;
+            <button class="btn btn-secondary btn-sm" data-on-click="Pages._nodesSelectAll(false);document.getElementById('nodes-select-all')&&(document.getElementById('nodes-select-all').checked=false)">Clear</button>`;
     },
 
     // C3-21: _nodesSelectByStatus selects all visible checkboxes for nodes matching status.
@@ -3072,7 +3498,7 @@ const Pages = {
             <div class="card" style="width:460px;max-width:95vw;">
                 <div class="card-header">
                     <h2 class="card-title">Bulk Reimage (${ids.length} nodes)</h2>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('bulk-reimage-modal').remove()">×</button>
+                    <button class="btn btn-ghost btn-sm" data-on-click="document.getElementById('bulk-reimage-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
                     <div class="alert alert-warning">
@@ -3092,8 +3518,8 @@ const Pages = {
                     </div>
                     <div id="brm-progress" style="display:none;font-size:13px;color:var(--text-secondary)">Submitting…</div>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('bulk-reimage-modal').remove()">Cancel</button>
-                        <button class="btn btn-danger" onclick="Pages._nodesBulkReimageSubmit(${JSON.stringify(ids)})">Reimage ${ids.length} Nodes</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('bulk-reimage-modal').remove()">Cancel</button>
+                        <button class="btn btn-danger" data-on-click="Pages._nodesBulkReimageSubmit(${JSON.stringify(ids)})">Reimage ${ids.length} Nodes</button>
                     </div>
                 </div>
             </div>`;
@@ -3221,7 +3647,7 @@ const Pages = {
             const sectionsHtml = filteredNodes.length
                 ? Pages._nodesRoleSections(filteredNodes, imgMap, images, groupMap)
                 : `<div class="card">${emptyState('No nodes', groupFilter ? 'No nodes in this group.' : 'Add your first node using the button above',
-                    groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>Add Node</button>`)}</div>`;
+                    groupFilter ? `<a href="#/nodes" class="btn btn-secondary">Clear filter</a>` : `<button class="btn btn-primary" data-on-click='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>Add Node</button>`)}</div>`;
 
             const canAdd = Auth._role === 'admin';
 
@@ -3234,8 +3660,8 @@ const Pages = {
                     <div class="flex gap-8">
                         <input id="nodes-search" type="search" placeholder="Search hostname, MAC, status…"
                             style="width:220px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-secondary);color:var(--text-primary);font-size:13px"
-                            oninput="Pages._nodesSearchDebounced(this.value)">
-                        ${canAdd ? `<button class="btn btn-primary" onclick='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>
+                            data-on-input="Pages._nodesSearchDebounced(this.value)">
+                        ${canAdd ? `<button class="btn btn-primary" data-on-click='Pages.showNodeModal(null, ${JSON.stringify(JSON.stringify(images))}, ${JSON.stringify(JSON.stringify(groups))})'>
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                             </svg>
@@ -3245,8 +3671,8 @@ const Pages = {
                 </div>
 
                 <div class="tab-bar" style="margin-bottom:20px">
-                    <div class="tab active" onclick="Router.navigate('/nodes')">All Nodes</div>
-                    <div class="tab" onclick="Router.navigate('/nodes/groups')">Groups</div>
+                    <div class="tab active" data-on-click="Router.navigate('/nodes')">All Nodes</div>
+                    <div class="tab" data-on-click="Router.navigate('/nodes/groups')">Groups</div>
                 </div>
 
                 ${filterBanner}
@@ -3349,7 +3775,7 @@ const Pages = {
             return n._deployStatus || 'unknown';
         })();
         const checkboxCell = canMutate
-            ? `<td style="width:32px"><input type="checkbox" class="node-select-cb" data-id="${escHtml(n.id)}" data-status="${nodeStatusKey}" onchange="Pages._nodesOnCheckboxChange()"></td>`
+            ? `<td style="width:32px"><input type="checkbox" class="node-select-cb" data-id="${escHtml(n.id)}" data-status="${nodeStatusKey}" data-on-change="Pages._nodesOnCheckboxChange()"></td>`
             : '';
         // S5-1: Power state cell. Initially shows — ; populated async by Pages._nodesFetchPower().
         const powerCell = `<td id="pwr-cell-${escHtml(n.id)}" class="text-dim text-sm">—</td>`;
@@ -3400,30 +3826,30 @@ const Pages = {
         // B2-1: show "Configure and Deploy" CTA for nodes registered but not yet assigned an image.
         const isRegistered = n.hardware_profile && !n.base_image_id;
         const configureBtn = (canMutate && isRegistered)
-            ? `<button class="btn btn-primary btn-sm" onclick="Pages._configureAndDeployModal('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Assign an image and deploy this node">Configure &amp; Deploy</button>`
+            ? `<button class="btn btn-primary btn-sm" data-on-click="Pages._configureAndDeployModal('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Assign an image and deploy this node">Configure &amp; Deploy</button>`
             : '';
         // S5-5: "Retry" appears for nodes in Failed state.
         const isFailed = n._deployStatus === 'error' || (n.last_deploy_failed_at && (!n.last_deploy_succeeded_at || n.last_deploy_failed_at > n.last_deploy_succeeded_at));
         const retryBtn = (canMutate && isFailed)
-            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._listRetryLastReimage('${n.id}')" title="Retry the last failed deploy">Retry</button>`
+            ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._listRetryLastReimage('${n.id}')" title="Retry the last failed deploy">Retry</button>`
             : '';
         // S5-5: "Re-deploy last image" pre-populates reimage modal with last image.
         const redeployBtn = (canMutate && n.base_image_id && !isFailed)
-            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._listRedeploy('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Re-deploy the currently assigned image">Re-deploy</button>`
+            ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._listRedeploy('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Re-deploy the currently assigned image">Re-deploy</button>`
             : '';
         const pwrDropdown = canMutate ? `
             <div class="actions-dropdown" id="pwr-dd-${n.id}">
-                <button class="btn btn-secondary btn-sm" onclick="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
+                <button class="btn btn-secondary btn-sm" data-on-click="Pages._togglePowerDropdown('${n.id}',event)" title="Power actions">
                     &#9889;
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:11px;height:11px;margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
                 <div class="actions-dropdown-menu" id="pwr-menu-${n.id}">
-                    <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
-                    <button class="actions-dropdown-item" onclick="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
+                    <button class="actions-dropdown-item" data-on-click="Pages._listPowerAction('${n.id}','on');Pages._togglePowerDropdown('${n.id}',null)">Power On</button>
+                    <button class="actions-dropdown-item" data-on-click="Pages._listPowerAction('${n.id}','status');Pages._togglePowerDropdown('${n.id}',null)">Check Status</button>
                     <div class="actions-dropdown-sep"></div>
-                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
-                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
-                    <button class="actions-dropdown-item danger" onclick="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
+                    <button class="actions-dropdown-item danger" data-on-click="Pages._listConfirmPowerAction('${n.id}','off','Power Off','This will immediately cut power to the node.');Pages._togglePowerDropdown('${n.id}',null)">Power Off</button>
+                    <button class="actions-dropdown-item danger" data-on-click="Pages._listConfirmPowerAction('${n.id}','reset','Reset','This will issue a hard reset. The node will reboot immediately.');Pages._togglePowerDropdown('${n.id}',null)">Reset</button>
+                    <button class="actions-dropdown-item danger" data-on-click="Pages._listConfirmPowerAction('${n.id}','cycle','Power Cycle','This will hard-cycle the node (power off then on).');Pages._togglePowerDropdown('${n.id}',null)">Power Cycle</button>
                 </div>
             </div>` : '';
         return `<div class="flex gap-6" style="align-items:center">
@@ -3500,7 +3926,7 @@ const Pages = {
             <div class="modal" style="max-width:480px" aria-labelledby="${MID}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${MID}-title">Configure &amp; Deploy — ${escHtml(displayName)}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${MID}').remove()">&#215;</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${MID}').remove()">&#215;</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:16px;">
                     <!-- Step indicator -->
@@ -3546,9 +3972,9 @@ const Pages = {
                     <div id="${MID}-err" style="color:var(--error);font-size:13px;display:none;"></div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn btn-secondary" id="${MID}-back" style="display:none;" onclick="Pages._cdStep(${JSON.stringify(MID)}, 'back')">Back</button>
-                    <button class="btn btn-secondary" id="${MID}-cancel" onclick="document.getElementById('${JSON.stringify(MID)}').remove()">Cancel</button>
-                    <button class="btn btn-primary" id="${MID}-next" onclick="Pages._cdStep('${MID}', 'next', '${nodeId}')">Next</button>
+                    <button class="btn btn-secondary" id="${MID}-back" style="display:none;" data-on-click="Pages._cdStep(${JSON.stringify(MID)}, 'back')">Back</button>
+                    <button class="btn btn-secondary" id="${MID}-cancel" data-on-click="document.getElementById('${JSON.stringify(MID)}').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="${MID}-next" data-on-click="Pages._cdStep('${MID}', 'next', '${nodeId}')">Next</button>
                 </div>
             </div>`;
 
@@ -3738,10 +4164,10 @@ const Pages = {
             <div class="modal" aria-labelledby="modal-title-6">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-6">${isEdit ? 'Edit Node' : 'Add Node'}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('node-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('node-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <form id="node-form" onsubmit="Pages.submitNode(event, ${isEdit ? `'${node.id}'` : 'null'})">
+                    <form id="node-form" data-on-submit="Pages.submitNode(event, ${isEdit ? `'${node.id}'` : 'null'})">
                         <div class="form-grid">
                             <div class="form-group">
                                 <label>Hostname *
@@ -3756,7 +4182,7 @@ const Pages = {
                                         style="flex:1" required>
                                     ${isEdit && node.hostname_auto
                                         ? `<button type="button" class="btn btn-secondary btn-sm"
-                                               onclick="Pages._regenerateHostname('${escHtml(node.primary_mac)}')"
+                                               data-on-click="Pages._regenerateHostname('${escHtml(node.primary_mac)}')"
                                                title="Pick a new auto-generated hostname">Regenerate</button>`
                                         : ''}
                                 </div>
@@ -3811,7 +4237,7 @@ const Pages = {
                                 <div class="form-group" style="grid-column:1/-1">
                                     <label>Provider Type</label>
                                     <select name="power_provider_type" id="pp-type-select"
-                                        onchange="Pages._onPowerProviderTypeChange(this.value)"
+                                        data-on-change="Pages._onPowerProviderTypeChange(this.value)"
                                         value="${isEdit && node.power_provider ? escHtml(node.power_provider.type || '') : ''}">
                                         <option value="">None — no power management</option>
                                         <option value="ipmi" ${isEdit && node.power_provider && node.power_provider.type === 'ipmi' ? 'selected' : ''}>IPMI (uses BMC config)</option>
@@ -3872,7 +4298,7 @@ const Pages = {
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
                                 <div style="font-weight:600;font-size:13px;color:var(--text-secondary)">Additional Mounts (fstab)</div>
                                 <div style="display:flex;gap:6px;align-items:center">
-                                    <select id="mount-preset-select" onchange="Pages._applyMountPreset()" style="font-size:12px;padding:4px 6px">
+                                    <select id="mount-preset-select" data-on-change="Pages._applyMountPreset()" style="font-size:12px;padding:4px 6px">
                                         <option value="">Insert preset…</option>
                                         <option value="nfs-home">NFS home directory</option>
                                         <option value="lustre">Lustre scratch</option>
@@ -3881,7 +4307,7 @@ const Pages = {
                                         <option value="bind">Bind mount</option>
                                         <option value="tmpfs">tmpfs for /tmp</option>
                                     </select>
-                                    <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._addMountRow()">+ Add Mount</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._addMountRow()">+ Add Mount</button>
                                 </div>
                             </div>
                             <div id="mounts-table-wrap">
@@ -3914,7 +4340,7 @@ const Pages = {
 
                         <div id="node-form-result"></div>
                         <div class="form-actions">
-                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('node-modal').remove()">Cancel</button>
+                            <button type="button" class="btn btn-secondary" data-on-click="document.getElementById('node-modal').remove()">Cancel</button>
                             <button type="submit" class="btn btn-primary" id="node-submit-btn">${isEdit ? 'Save Changes' : 'Create Node'}</button>
                         </div>
                     </form>
@@ -3984,7 +4410,7 @@ const Pages = {
             </td>
             <td style="padding:4px 3px">
                 <button type="button" class="btn btn-danger btn-sm"
-                    onclick="Pages._removeMountRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
+                    data-on-click="Pages._removeMountRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
             </td>
         </tr>`;
     },
@@ -4326,7 +4752,7 @@ const Pages = {
                 const prefillName = (node.hostname && node.hostname !== '(none)')
                     ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture'
                     : '';
-                captureBtn = '<button class="btn btn-secondary" onclick="Pages.showCaptureModal(' +
+                captureBtn = '<button class="btn btn-secondary" data-on-click="Pages.showCaptureModal(' +
                     JSON.stringify(prefillHost) + ',' + JSON.stringify(prefillName) + ')">Capture this node</button>';
             }
 
@@ -4353,7 +4779,7 @@ const Pages = {
                 </div>
                 <div class="page-header">
                     <div style="display:flex;align-items:center;gap:12px">
-                        <button class="detail-back-btn" onclick="Pages._nodeDetailBack()">
+                        <button class="detail-back-btn" data-on-click="Pages._nodeDetailBack()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                 <polyline points="15 18 9 12 15 6"/>
                             </svg>
@@ -4374,16 +4800,16 @@ const Pages = {
                         ${captureBtn}
                         ${Auth._role === 'readonly' ? '' : `
                         <div class="actions-dropdown" id="node-actions-dropdown">
-                            <button class="btn btn-secondary" onclick="Pages._toggleActionsDropdown()">
+                            <button class="btn btn-secondary" data-on-click="Pages._toggleActionsDropdown()">
                                 Actions
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="6 9 12 15 18 9"/></svg>
                             </button>
                             <div class="actions-dropdown-menu" id="node-actions-menu">
-                                <button class="actions-dropdown-item" onclick="Pages._nodeActionsRediscover('${node.id}');Pages._toggleActionsDropdown()">Queue Reimage</button>
-                                <button class="actions-dropdown-item" onclick="Pages._nodeActionsTriggerReimage('${node.id}','${escHtml(displayName)}');Pages._toggleActionsDropdown()">Trigger reimage</button>
-                                ${iface ? `<button class="actions-dropdown-item" onclick="Pages.showCaptureModal(${JSON.stringify('root@' + iface.ip_address.split('/')[0])},${JSON.stringify((node.hostname && node.hostname !== '(none)') ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture' : '')});Pages._toggleActionsDropdown()">Capture as image</button>` : ''}
+                                <button class="actions-dropdown-item" data-on-click="Pages._nodeActionsRediscover('${node.id}');Pages._toggleActionsDropdown()">Queue Reimage</button>
+                                <button class="actions-dropdown-item" data-on-click="Pages._nodeActionsTriggerReimage('${node.id}','${escHtml(displayName)}');Pages._toggleActionsDropdown()">Trigger reimage</button>
+                                ${iface ? `<button class="actions-dropdown-item" data-on-click="Pages.showCaptureModal(${JSON.stringify('root@' + iface.ip_address.split('/')[0])},${JSON.stringify((node.hostname && node.hostname !== '(none)') ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture' : '')});Pages._toggleActionsDropdown()">Capture as image</button>` : ''}
                                 ${Auth._role === 'admin' ? `<div class="actions-dropdown-sep"></div>
-                                <button class="actions-dropdown-item danger" onclick="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}');Pages._toggleActionsDropdown()">Delete node</button>` : ''}
+                                <button class="actions-dropdown-item danger" data-on-click="Pages.deleteNodeAndGoBack('${node.id}', '${escHtml(displayName)}');Pages._toggleActionsDropdown()">Delete node</button>` : ''}
                             </div>
                         </div>
                         `}
@@ -4408,11 +4834,11 @@ const Pages = {
                         </div>
                         <div style="display:flex;gap:8px;flex-shrink:0">
                             <button class="btn btn-secondary btn-sm"
-                                onclick="Pages._switchNodeTab(document.getElementById('node-tab-btn-logs'), 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">
+                                data-on-click="Pages._switchNodeTab(document.getElementById('node-tab-btn-logs'), 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">
                                 View Logs
                             </button>
                             ${Auth._role !== 'readonly' ? `<button class="btn btn-secondary btn-sm"
-                                onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">
+                                data-on-click="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">
                                 Re-deploy
                             </button>` : ''}
                         </div>
@@ -4420,18 +4846,18 @@ const Pages = {
                 })()}
 
                 <div class="tab-bar" id="node-tab-bar">
-                    <div class="tab active" id="node-tab-btn-overview" onclick="Pages._switchNodeTab(this, 'tab-overview', 'overview')">Overview</div>
-                    <div class="tab" id="node-tab-btn-hardware" onclick="Pages._switchNodeTab(this, 'tab-hardware', 'hardware')">Hardware</div>
-                    <div class="tab" id="node-tab-btn-network" onclick="Pages._switchNodeTab(this, 'tab-network', 'network')">Network</div>
-                    <div class="tab" id="node-tab-btn-bmc" onclick="Pages._switchNodeTab(this, 'tab-bmc', 'bmc');Pages._onBMCTabOpen('${node.id}', ${!!(node.bmc || node.power_provider)})">Power / IPMI</div>
-                    <div class="tab" id="node-tab-btn-disklayout" onclick="Pages._switchNodeTab(this, 'tab-disklayout', 'disklayout');Pages._onDiskLayoutTabOpen('${node.id}')">Disk Layout</div>
-                    <div class="tab" id="node-tab-btn-mounts" onclick="Pages._switchNodeTab(this, 'tab-mounts', 'mounts');Pages._onMountsTabOpen('${node.id}')">Mounts</div>
-                    <div class="tab" id="node-tab-btn-config" onclick="Pages._switchNodeTab(this, 'tab-config', 'config')">Configuration</div>
-                    <div class="tab" id="node-tab-btn-logs" onclick="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
-                    <div class="tab" id="node-tab-btn-configpush" onclick="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
-                    <div class="tab" id="node-tab-btn-slurm" onclick="Pages._switchNodeTab(this, 'tab-slurm', 'slurm');Pages._onSlurmTabOpen('${escHtml(node.id)}')">Slurm</div>
-                    <div class="tab" id="node-tab-btn-confighistory" onclick="Pages._switchNodeTab(this, 'tab-confighistory', 'confighistory');Pages._onConfigHistoryTabOpen('${escHtml(node.id)}')">Config History</div>
-                    ${(node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000) ? `<div class="tab" id="node-tab-btn-diagnostics" onclick="Pages._switchNodeTab(this, 'tab-diagnostics', 'diagnostics')">Diagnostics</div>` : ''}
+                    <div class="tab active" id="node-tab-btn-overview" data-on-click="Pages._switchNodeTab(this, 'tab-overview', 'overview')">Overview</div>
+                    <div class="tab" id="node-tab-btn-hardware" data-on-click="Pages._switchNodeTab(this, 'tab-hardware', 'hardware')">Hardware</div>
+                    <div class="tab" id="node-tab-btn-network" data-on-click="Pages._switchNodeTab(this, 'tab-network', 'network')">Network</div>
+                    <div class="tab" id="node-tab-btn-bmc" data-on-click="Pages._switchNodeTab(this, 'tab-bmc', 'bmc');Pages._onBMCTabOpen('${node.id}', ${!!(node.bmc || node.power_provider)})">Power / IPMI</div>
+                    <div class="tab" id="node-tab-btn-disklayout" data-on-click="Pages._switchNodeTab(this, 'tab-disklayout', 'disklayout');Pages._onDiskLayoutTabOpen('${node.id}')">Disk Layout</div>
+                    <div class="tab" id="node-tab-btn-mounts" data-on-click="Pages._switchNodeTab(this, 'tab-mounts', 'mounts');Pages._onMountsTabOpen('${node.id}')">Mounts</div>
+                    <div class="tab" id="node-tab-btn-config" data-on-click="Pages._switchNodeTab(this, 'tab-config', 'config')">Configuration</div>
+                    <div class="tab" id="node-tab-btn-logs" data-on-click="Pages._switchNodeTab(this, 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Logs</div>
+                    <div class="tab" id="node-tab-btn-configpush" data-on-click="Pages._switchNodeTab(this, 'tab-configpush', 'configpush')">Config Push</div>
+                    <div class="tab" id="node-tab-btn-slurm" data-on-click="Pages._switchNodeTab(this, 'tab-slurm', 'slurm');Pages._onSlurmTabOpen('${escHtml(node.id)}')">Slurm</div>
+                    <div class="tab" id="node-tab-btn-confighistory" data-on-click="Pages._switchNodeTab(this, 'tab-confighistory', 'confighistory');Pages._onConfigHistoryTabOpen('${escHtml(node.id)}')">Config History</div>
+                    ${(node.last_seen_at && (Date.now() - new Date(node.last_seen_at).getTime()) < 2 * 60 * 1000) ? `<div class="tab" id="node-tab-btn-diagnostics" data-on-click="Pages._switchNodeTab(this, 'tab-diagnostics', 'diagnostics')">Diagnostics</div>` : ''}
                 </div>
 
                 <!-- Overview tab — inline editable -->
@@ -4443,7 +4869,7 @@ const Pages = {
                         (timeout at ${fmtDate(node.deploy_verify_timeout_at)}).
                         Node may not be bootable — possible causes: bootloader failure, kernel panic,
                         network misconfiguration, or <code>/etc/clustr/node-token</code> not written correctly.
-                        Attach serial console to investigate or ${Auth._role !== 'readonly' ? `<button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Re-deploy</button>` : ''}
+                        Attach serial console to investigate or ${Auth._role !== 'readonly' ? `<button class="btn btn-secondary btn-sm" style="margin-left:4px" data-on-click="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Re-deploy</button>` : ''}
                     </div>` : ''}
                     ${(node.deploy_completed_preboot_at && !node.deploy_verified_booted_at && !node.deploy_verify_timeout_at) ? `
                     <div class="alert alert-warning" style="margin-bottom:12px">
@@ -4453,8 +4879,8 @@ const Pages = {
                     </div>` : ''}
                     <div id="tab-save-bar-overview" class="tab-save-bar" style="display:none">
                         <span class="save-status modified" id="tab-save-status-overview">Unsaved changes</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._tabRevert('overview')" id="tab-revert-overview">Revert</button>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveOverview('${node.id}')" id="tab-save-overview">Save</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._tabRevert('overview')" id="tab-revert-overview">Revert</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._tabSaveOverview('${node.id}')" id="tab-save-overview">Save</button>
                     </div>
                     ${cardWrap('Node Details', `
                         <div class="form-grid" style="margin-bottom:0">
@@ -4462,17 +4888,17 @@ const Pages = {
                                     <label>Hostname</label>
                                     <input type="text" id="ov-hostname" value="${escHtml(node.hostname || '')}"
                                         placeholder="clustr-node" pattern="^[a-zA-Z0-9][a-zA-Z0-9.-]*$"
-                                        oninput="Pages._tabMarkDirty('overview')">
+                                        data-on-input="Pages._tabMarkDirty('overview')">
                                 </div>
                                 <div class="form-group">
                                     <label>FQDN</label>
                                     <input type="text" id="ov-fqdn" value="${escHtml(node.fqdn || '')}"
                                         placeholder="node.example.com"
-                                        oninput="Pages._tabMarkDirty('overview')">
+                                        data-on-input="Pages._tabMarkDirty('overview')">
                                 </div>
                                 <div class="form-group">
                                     <label>Base Image</label>
-                                    <select id="ov-base-image" onchange="Pages._tabMarkDirty('overview');Pages._checkRoleMismatchInline(this.value, ${JSON.stringify(node)}, ${JSON.stringify(images)})">
+                                    <select id="ov-base-image" data-on-change="Pages._tabMarkDirty('overview');Pages._checkRoleMismatchInline(this.value, ${JSON.stringify(node)}, ${JSON.stringify(images)})">
                                         <option value="">No image assigned</option>
                                         ${imgOptions}
                                     </select>
@@ -4480,7 +4906,7 @@ const Pages = {
                                 </div>
                                 <div class="form-group">
                                     <label>Node Group</label>
-                                    <select id="ov-group-id" onchange="Pages._tabMarkDirty('overview')">
+                                    <select id="ov-group-id" data-on-change="Pages._tabMarkDirty('overview')">
                                         <option value="">None</option>
                                         ${groupOptions}
                                     </select>
@@ -4489,7 +4915,7 @@ const Pages = {
                                     <label>Tags <span class="tooltip-icon" title="Unstructured labels used for filtering and Slurm role assignment." style="cursor:help;font-size:11px;color:var(--text-secondary)">(?)</span> <span style="font-size:11px;color:var(--text-secondary)">(comma-separated)</span></label>
                                     <input type="text" id="ov-tags" value="${escHtml((node.tags || node.groups || []).join(', '))}"
                                         placeholder="compute, gpu, infiniband"
-                                        oninput="Pages._tabMarkDirty('overview')">
+                                        data-on-input="Pages._tabMarkDirty('overview')">
                                 </div>
                                 <div class="form-group" style="grid-column:1/-1">
                                     <label>Reimage Status</label>
@@ -4498,7 +4924,7 @@ const Pages = {
                                             ? `<span class="badge badge-warning">Reimage pending</span>
                                                <span class="text-dim" style="font-size:12px">Node will re-deploy on next PXE boot</span>`
                                             : `<span class="badge badge-neutral">Normal</span>
-                                               ${Auth._role !== 'readonly' ? `<button type="button" class="btn btn-secondary btn-sm" onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Request Reimage</button>` : ''}`}
+                                               ${Auth._role !== 'readonly' ? `<button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">Request Reimage</button>` : ''}`}
                                     </div>
                                 </div>
                             </div>`)}
@@ -4622,7 +5048,7 @@ const Pages = {
                                 : '';
                             const cancelBtn = !TERMINAL.has(r.status)
                                 ? `<button class="btn btn-xs" style="padding:2px 6px;font-size:11px;color:var(--error);background:transparent;border:1px solid var(--error);border-radius:4px;cursor:pointer;line-height:1.2"
-                                       onclick="Pages._cancelReimage('${escHtml(r.id)}','${escHtml(node.id)}')" title="Cancel this reimage">Cancel</button>`
+                                       data-on-click="Pages._cancelReimage('${escHtml(r.id)}','${escHtml(node.id)}')" title="Cancel this reimage">Cancel</button>`
                                 : '';
                             return `<tr>
                                 <td class="text-mono text-sm" ${errTip}>${escHtml(r.id.slice(0,8))}</td>
@@ -4649,7 +5075,7 @@ const Pages = {
                 <div id="tab-hardware" class="tab-panel">
                     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
                         ${hw && hw.discovered_at ? `<span class="text-dim" style="font-size:12px">Last discovered: ${fmtRelative(hw.discovered_at)}</span>` : ''}
-                        <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="Pages._nodeActionsRediscover('${node.id}')">
+                        <button class="btn btn-secondary btn-sm" style="margin-left:auto" data-on-click="Pages._nodeActionsRediscover('${node.id}')">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                             Queue Reimage
                         </button>
@@ -4661,13 +5087,13 @@ const Pages = {
                 <div id="tab-network" class="tab-panel">
                     <div id="tab-save-bar-network" class="tab-save-bar" style="display:none">
                         <span class="save-status modified" id="tab-save-status-network">Unsaved changes</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._tabRevert('network')" id="tab-revert-network">Revert</button>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveNetwork('${node.id}')" id="tab-save-network">Save</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._tabRevert('network')" id="tab-revert-network">Revert</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._tabSaveNetwork('${node.id}')" id="tab-save-network">Save</button>
                     </div>
                     ${cardWrap('Network Interfaces', `
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
                             <span class="text-dim" style="font-size:12px">Configure logical interfaces. Discovered interfaces are shown read-only on the Hardware tab.</span>
-                            <button type="button" class="btn btn-secondary btn-sm" data-macs="${escHtml(discoveredMACsJSON)}" onclick="Pages._netAddInterface(JSON.parse(this.dataset.macs))">+ Add Interface</button>
+                            <button type="button" class="btn btn-secondary btn-sm" data-macs="${escHtml(discoveredMACsJSON)}" data-on-click="Pages._netAddInterface(JSON.parse(this.dataset.macs))">+ Add Interface</button>
                         </div>
                         <div id="net-interfaces-list">
                             ${(node.interfaces || []).length === 0
@@ -4686,7 +5112,7 @@ const Pages = {
                                 <div id="power-label" style="font-weight:600;font-size:15px">Checking…</div>
                                 <div id="power-last-checked" class="text-dim text-sm"></div>
                             </div>
-                            <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="Pages._refreshPowerStatus('${node.id}')">Refresh</button>
+                            <button class="btn btn-secondary btn-sm" style="margin-left:auto" data-on-click="Pages._refreshPowerStatus('${node.id}')">Refresh</button>
                         </div>
                         <div id="power-error-msg" style="display:none" class="alert alert-error"></div>`,
                         ''
@@ -4694,25 +5120,25 @@ const Pages = {
 
                     ${node.bmc && node.bmc.ip_address ? cardWrap('Power Controls',
                         `<div class="flex gap-8" style="flex-wrap:wrap;margin-bottom:8px">
-                            <button id="btn-power-on"    class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'on')">Power On</button>
-                            <button id="btn-power-off"   class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'off',   'Power Off', 'This will immediately cut power to the node.')">Power Off</button>
-                            <button id="btn-power-cycle" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'cycle', 'Power Cycle', 'This will hard-cycle the node (power off then on).')">Power Cycle</button>
-                            <button id="btn-power-reset" class="btn btn-danger btn-sm"    onclick="Pages._confirmPowerAction('${node.id}', 'reset', 'Reset', 'This will issue a hard reset. The node will reboot immediately.')">Reset</button>
+                            <button id="btn-power-on"    class="btn btn-secondary btn-sm" data-on-click="Pages._doPowerAction('${node.id}', 'on')">Power On</button>
+                            <button id="btn-power-off"   class="btn btn-danger btn-sm"    data-on-click="Pages._confirmPowerAction('${node.id}', 'off',   'Power Off', 'This will immediately cut power to the node.')">Power Off</button>
+                            <button id="btn-power-cycle" class="btn btn-danger btn-sm"    data-on-click="Pages._confirmPowerAction('${node.id}', 'cycle', 'Power Cycle', 'This will hard-cycle the node (power off then on).')">Power Cycle</button>
+                            <button id="btn-power-reset" class="btn btn-danger btn-sm"    data-on-click="Pages._confirmPowerAction('${node.id}', 'reset', 'Reset', 'This will issue a hard reset. The node will reboot immediately.')">Reset</button>
                         </div>
                         <div class="flex gap-8" style="flex-wrap:wrap">
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._confirmPowerAction('${node.id}', 'pxe',  'Boot to PXE', 'Sets next boot to PXE and power-cycles the node.')">
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._confirmPowerAction('${node.id}', 'pxe',  'Boot to PXE', 'Sets next boot to PXE and power-cycles the node.')">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
                                 PXE Boot
                             </button>
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._doPowerAction('${node.id}', 'disk')">
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._doPowerAction('${node.id}', 'disk')">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
                                 Boot to Disk
                             </button>
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._doFlipToDisk('${node.id}')">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
                                 Flip Next Boot → Disk
                             </button>
-                            <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">
+                            <button class="btn btn-danger btn-sm" data-on-click="Pages._doFlipToDisk('${node.id}', true)">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                                 Flip → Disk + Reboot
                             </button>
@@ -4721,8 +5147,8 @@ const Pages = {
                         ''
                     ) : (node.power_provider && node.power_provider.type ? cardWrap('Power Actions',
                         `<div class="flex gap-8">
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._doFlipToDisk('${node.id}')">Flip Next Boot → Disk</button>
-                            <button class="btn btn-danger btn-sm" onclick="Pages._doFlipToDisk('${node.id}', true)">Flip → Disk + Reboot</button>
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._doFlipToDisk('${node.id}')">Flip Next Boot → Disk</button>
+                            <button class="btn btn-danger btn-sm" data-on-click="Pages._doFlipToDisk('${node.id}', true)">Flip → Disk + Reboot</button>
                         </div>
                         <div id="power-action-feedback" style="display:none;margin-top:10px" class="alert alert-info" role="status" aria-live="polite"></div>`, ''
                     ) : '')}
@@ -4739,21 +5165,21 @@ const Pages = {
 
                     ${node.bmc && node.bmc.ip_address ? cardWrap('Sensor Readings',
                         `<div id="sensor-table-wrap"><div class="loading"><div class="spinner"></div>Loading sensors…</div></div>`,
-                        `<button class="btn btn-secondary btn-sm" onclick="Pages._refreshSensors('${node.id}')">Refresh</button>`
+                        `<button class="btn btn-secondary btn-sm" data-on-click="Pages._refreshSensors('${node.id}')">Refresh</button>`
                     ) : ''}
                     ` : ''}
 
                     <!-- Power Provider Configuration — always shown, inline editable -->
                     <div id="tab-save-bar-bmc" class="tab-save-bar" style="display:none">
                         <span class="save-status modified" id="tab-save-status-bmc">Unsaved changes</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._tabRevert('bmc')" id="tab-revert-bmc">Revert</button>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._tabSavePower('${node.id}')" id="tab-save-bmc">Save</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._tabRevert('bmc')" id="tab-revert-bmc">Revert</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._tabSavePower('${node.id}')" id="tab-save-bmc">Save</button>
                     </div>
                     ${cardWrap('Power Provider Configuration', `
                         <div class="form-grid">
                                 <div class="form-group" style="grid-column:1/-1">
                                     <label>Provider Type</label>
-                                    <select id="pp-type" onchange="Pages._onPowerProviderInlineTypeChange(this.value);Pages._tabMarkDirty('bmc')">
+                                    <select id="pp-type" data-on-change="Pages._onPowerProviderInlineTypeChange(this.value);Pages._tabMarkDirty('bmc')">
                                         <option value="" ${!node.power_provider || !node.power_provider.type ? 'selected' : ''}>None — no power management</option>
                                         <option value="ipmi" ${node.power_provider && node.power_provider.type === 'ipmi' ? 'selected' : ''}>IPMI (uses BMC config)</option>
                                         <option value="proxmox" ${node.power_provider && node.power_provider.type === 'proxmox' ? 'selected' : ''}>Proxmox VE</option>
@@ -4766,23 +5192,23 @@ const Pages = {
                                         <label>BMC IP Address</label>
                                         <input type="text" id="pp-ipmi-ip"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.ip || '' : '')}"
-                                            placeholder="192.168.1.100" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="192.168.1.100" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>Username</label>
                                         <input type="text" id="pp-ipmi-username"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.username || '' : '')}"
-                                            placeholder="admin" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="admin" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>Password <span style="font-size:11px;color:var(--text-secondary)">(blank = keep existing)</span></label>
-                                        <input type="password" id="pp-ipmi-password" placeholder="••••••••" oninput="Pages._tabMarkDirty('bmc')" autocomplete="new-password">
+                                        <input type="password" id="pp-ipmi-password" placeholder="••••••••" data-on-input="Pages._tabMarkDirty('bmc')" autocomplete="new-password">
                                     </div>
                                     <div class="form-group">
                                         <label>Channel</label>
                                         <input type="number" id="pp-ipmi-channel"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.channel || '1' : '1')}"
-                                            min="1" max="15" oninput="Pages._tabMarkDirty('bmc')">
+                                            min="1" max="15" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                 </div>
                             </div>
@@ -4792,39 +5218,39 @@ const Pages = {
                                         <label>API URL</label>
                                         <input type="text" id="pp-pve-url"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.api_url || '' : '')}"
-                                            placeholder="https://proxmox.example.com:8006" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="https://proxmox.example.com:8006" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>PVE Node Name</label>
                                         <input type="text" id="pp-pve-node"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.node || '' : '')}"
-                                            placeholder="pve" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="pve" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>VM ID</label>
                                         <input type="text" id="pp-pve-vmid"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.vmid || '' : '')}"
-                                            placeholder="202" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="202" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>Username</label>
                                         <input type="text" id="pp-pve-username"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.username || '' : '')}"
-                                            placeholder="root@pam" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="root@pam" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group">
                                         <label>Password <span style="font-size:11px;color:var(--text-secondary)">(blank = keep existing)</span></label>
-                                        <input type="password" id="pp-pve-password" placeholder="••••••••" oninput="Pages._tabMarkDirty('bmc')" autocomplete="new-password">
+                                        <input type="password" id="pp-pve-password" placeholder="••••••••" data-on-input="Pages._tabMarkDirty('bmc')" autocomplete="new-password">
                                     </div>
                                     <div class="form-group">
                                         <label>TLS CA Cert Path <span style="font-size:11px;color:var(--text-secondary)">(optional)</span></label>
                                         <input type="text" id="pp-pve-ca-cert-path"
                                             value="${escHtml(node.power_provider && node.power_provider.fields ? node.power_provider.fields.tls_ca_cert_path || '' : '')}"
-                                            placeholder="/etc/clustr/pki/proxmox-ca.pem" oninput="Pages._tabMarkDirty('bmc')">
+                                            placeholder="/etc/clustr/pki/proxmox-ca.pem" data-on-input="Pages._tabMarkDirty('bmc')">
                                     </div>
                                     <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:22px">
                                         <input type="checkbox" id="pp-pve-insecure" ${node.power_provider && node.power_provider.fields && node.power_provider.fields.insecure === 'true' ? 'checked' : ''}
-                                            onchange="Pages._tabMarkDirty('bmc')">
+                                            data-on-change="Pages._tabMarkDirty('bmc')">
                                         <label for="pp-pve-insecure" style="margin:0;font-weight:400;cursor:pointer">Skip TLS verification (self-signed certs)</label>
                                     </div>
                                 </div>
@@ -4842,8 +5268,8 @@ const Pages = {
                 <div id="tab-mounts" class="tab-panel">
                     <div id="tab-save-bar-mounts" class="tab-save-bar" style="display:none">
                         <span class="save-status modified" id="tab-save-status-mounts">Unsaved changes</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._tabRevert('mounts')" id="tab-revert-mounts">Revert</button>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveMounts('${node.id}')" id="tab-save-mounts">Save</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._tabRevert('mounts')" id="tab-revert-mounts">Revert</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._tabSaveMounts('${node.id}')" id="tab-save-mounts">Save</button>
                     </div>
                     <div id="mounts-content">
                         <div class="loading"><div class="spinner"></div>Loading mounts…</div>
@@ -4854,15 +5280,15 @@ const Pages = {
                 <div id="tab-config" class="tab-panel">
                     <div id="tab-save-bar-config" class="tab-save-bar" style="display:none">
                         <span class="save-status modified" id="tab-save-status-config">Unsaved changes</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._tabRevert('config')" id="tab-revert-config">Revert</button>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._tabSaveConfig('${node.id}')" id="tab-save-config">Save</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._tabRevert('config')" id="tab-revert-config">Revert</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._tabSaveConfig('${node.id}')" id="tab-save-config">Save</button>
                     </div>
                     ${cardWrap('SSH Authorized Keys', `
                         <div class="form-group" style="margin-bottom:0">
                             <label>One key per line</label>
                             <textarea id="cfg-ssh-keys" rows="6"
                                 placeholder="ssh-ed25519 AAAA…&#10;ssh-rsa AAAA…"
-                                oninput="Pages._tabMarkDirty('config')"
+                                data-on-input="Pages._tabMarkDirty('config')"
                                 style="font-family:var(--font-mono);font-size:12px">${escHtml((node.ssh_keys || []).join('\n'))}</textarea>
                             <div id="cfg-ssh-keys-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
                         </div>`)}
@@ -4872,7 +5298,7 @@ const Pages = {
                             <label>Extra kernel cmdline args appended at boot</label>
                             <input type="text" id="cfg-kernel-args" value="${escHtml(node.kernel_args || '')}"
                                 placeholder="quiet splash"
-                                oninput="Pages._tabMarkDirty('config')">
+                                data-on-input="Pages._tabMarkDirty('config')">
                             <div id="cfg-kernel-args-error" style="display:none;color:var(--error);font-size:12px;margin-top:4px"></div>
                         </div>`)}
 
@@ -4883,7 +5309,7 @@ const Pages = {
                                 <!-- C3-15: "Supported variables" link -->
                                 <a href="https://github.com/sqoia-dev/clustr/blob/main/docs/install.md#custom-variables" target="_blank" rel="noopener" style="color:var(--accent);margin-left:4px;">Supported variables</a>
                             </span>
-                            <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._cfgAddVar()">+ Add Variable</button>
+                            <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._cfgAddVar()">+ Add Variable</button>
                         </div>
                         <div id="cfg-vars-list">
                             ${Object.keys(node.custom_vars || {}).length === 0
@@ -4900,11 +5326,11 @@ const Pages = {
                                 <input type="number" id="cfg-verify-timeout" min="0" max="86400"
                                     value="${node.verify_timeout_override != null ? node.verify_timeout_override : ''}"
                                     placeholder="e.g. 600"
-                                    oninput="Pages._tabMarkDirty('config')"
+                                    data-on-input="Pages._tabMarkDirty('config')"
                                     style="width:140px">
                                 <button type="button" class="btn btn-secondary btn-sm" id="cfg-verify-timeout-clear"
                                     style="${node.verify_timeout_override != null ? '' : 'display:none'}"
-                                    onclick="Pages._cfgClearVerifyTimeout()">Use Global Default</button>
+                                    data-on-click="Pages._cfgClearVerifyTimeout()">Use Global Default</button>
                             </div>
                             <div class="form-hint" style="margin-top:4px">
                                 Overrides <code>CLUSTR_VERIFY_TIMEOUT</code> for this node only.
@@ -4922,13 +5348,13 @@ const Pages = {
                             <div style="display:flex;align-items:center;gap:8px">
                                 <span class="text-dim" style="font-size:12px;white-space:nowrap">Source:</span>
                                 <select id="node-log-source" class="select" style="font-size:12px;padding:2px 6px;height:28px"
-                                    onchange="Pages.onNodeLogSourceChange(this.value, '${escHtml(node.primary_mac)}')">
+                                    data-on-change="Pages.onNodeLogSourceChange(this.value, '${escHtml(node.primary_mac)}')">
                                     <option value="deploy">Deploy Logs</option>
                                     <option value="journal">Live Journal</option>
                                 </select>
                             </div>
                             <label class="toggle" id="node-follow-label">
-                                <input type="checkbox" id="node-follow-toggle" onchange="Pages.toggleNodeLogs(this.checked, '${escHtml(node.primary_mac)}')">
+                                <input type="checkbox" id="node-follow-toggle" data-on-change="Pages.toggleNodeLogs(this.checked, '${escHtml(node.primary_mac)}')">
                                 Live
                             </label>
                             <span class="follow-indicator" id="node-follow-ind">
@@ -4936,7 +5362,7 @@ const Pages = {
                             </span>
                         </div>
                         <div id="node-log-viewer" class="log-viewer tall"></div>`,
-                        `<button class="btn btn-secondary btn-sm" id="node-log-refresh" onclick="Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Refresh</button>`)}
+                        `<button class="btn btn-secondary btn-sm" id="node-log-refresh" data-on-click="Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">Refresh</button>`)}
                 </div>
 
                 <!-- Config Push tab -->
@@ -4968,7 +5394,7 @@ const Pages = {
                                     placeholder="Paste file content here…"></textarea>
                             </div>
                             <div id="configpush-result" style="display:none;margin-bottom:12px" role="status" aria-live="polite"></div>`;
-                    })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" onclick="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
+                    })(), `${nodeIsLive ? `<button class="btn btn-primary btn-sm" id="configpush-submit" data-on-click="Pages._doConfigPush('${escHtml(node.id)}')">Push</button>` : ''}`)}
                 </div>`;
                 })()}
 
@@ -4998,14 +5424,14 @@ const Pages = {
                         </div>
                         <div id="slurm-role-save-row" style="display:flex;align-items:center;gap:10px">
                             <button class="btn btn-primary btn-sm" id="slurm-role-save-btn"
-                                onclick="Pages._saveSlurmRole('${escHtml(node.id)}')">Save Role</button>
+                                data-on-click="Pages._saveSlurmRole('${escHtml(node.id)}')">Save Role</button>
                             <span id="slurm-role-save-status" style="font-size:12px;color:var(--text-secondary)"></span>
                         </div>
                     `)}
                     ${cardWrap('Sync Status', `
                         <div id="slurm-node-sync-status">Loading…</div>
                         <div style="margin-top:12px;">
-                            <button class="btn btn-primary btn-sm" onclick="Pages._pushToSingleNode('${escHtml(node.id)}')">Push to This Node</button>
+                            <button class="btn btn-primary btn-sm" data-on-click="Pages._pushToSingleNode('${escHtml(node.id)}')">Push to This Node</button>
                             <a href="#/slurm/sync" style="font-size:13px;color:var(--accent);margin-left:12px;">View all sync status</a>
                         </div>
                     `)}
@@ -5051,7 +5477,7 @@ const Pages = {
                                 <div style="display:flex;flex-wrap:wrap;gap:6px">
                                     ${quickCmds.map(q =>
                                         `<button class="btn btn-secondary btn-sm"
-                                            onclick="Pages._runDiagnosticCmd('${escHtml(node.id)}', '${escHtml(q.cmd)}', ${JSON.stringify(q.args)})"
+                                            data-on-click="Pages._runDiagnosticCmd('${escHtml(node.id)}', '${escHtml(q.cmd)}', ${JSON.stringify(q.args)})"
                                         >${escHtml(q.label)}</button>`
                                     ).join('')}
                                 </div>
@@ -5073,7 +5499,7 @@ const Pages = {
                                     </div>
                                     <div style="padding-bottom:0">
                                         <button class="btn btn-primary btn-sm" id="diag-run-btn"
-                                            onclick="Pages._runDiagnosticCmdCustom('${escHtml(node.id)}')">Run</button>
+                                            data-on-click="Pages._runDiagnosticCmdCustom('${escHtml(node.id)}')">Run</button>
                                     </div>
                                 </div>
                             </div>
@@ -5744,49 +6170,49 @@ const Pages = {
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
                 <span style="font-size:12px;font-weight:600;color:var(--text-secondary)">Interface ${idx + 1}</span>
                 <button type="button" class="btn btn-danger btn-sm" style="padding:2px 8px;font-size:11px"
-                    onclick="Pages._netRemoveInterface(this);Pages._tabMarkDirty('network')">Remove</button>
+                    data-on-click="Pages._netRemoveInterface(this);Pages._tabMarkDirty('network')">Remove</button>
             </div>
             <div class="form-grid" style="margin-bottom:0">
                 <div class="form-group">
                     <label>MAC Address</label>
                     ${discoveredMACs && discoveredMACs.length
-                        ? `<select class="net-iface-mac" onchange="Pages._tabMarkDirty('network')">
+                        ? `<select class="net-iface-mac" data-on-change="Pages._tabMarkDirty('network')">
                                 <option value="">Custom / none</option>
                                 ${macOptions}
                             </select>`
                         : `<input type="text" class="net-iface-mac" value="${escHtml(iface.mac_address || '')}"
-                                placeholder="aa:bb:cc:dd:ee:ff" oninput="Pages._tabMarkDirty('network')">`
+                                placeholder="aa:bb:cc:dd:ee:ff" data-on-input="Pages._tabMarkDirty('network')">`
                     }
                 </div>
                 <div class="form-group">
                     <label>Interface Name</label>
                     <input type="text" class="net-iface-name" value="${escHtml(iface.name || '')}"
-                        placeholder="eth0" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="eth0" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
                 <div class="form-group">
                     <label>IP Address (CIDR)</label>
                     <input type="text" class="net-iface-ip" value="${escHtml(iface.ip_address || '')}"
-                        placeholder="192.168.1.50/24" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="192.168.1.50/24" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
                 <div class="form-group">
                     <label>Gateway</label>
                     <input type="text" class="net-iface-gw" value="${escHtml(iface.gateway || '')}"
-                        placeholder="192.168.1.1" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="192.168.1.1" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
                 <div class="form-group">
                     <label>DNS <span style="font-size:11px;color:var(--text-secondary)">(comma-separated)</span></label>
                     <input type="text" class="net-iface-dns" value="${escHtml((iface.dns || []).join(', '))}"
-                        placeholder="8.8.8.8, 8.8.4.4" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="8.8.8.8, 8.8.4.4" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
                 <div class="form-group">
                     <label>MTU</label>
                     <input type="number" class="net-iface-mtu" value="${iface.mtu || ''}"
-                        placeholder="1500" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="1500" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
                 <div class="form-group">
                     <label>Bond</label>
                     <input type="text" class="net-iface-bond" value="${escHtml(iface.bond || '')}"
-                        placeholder="bond0" oninput="Pages._tabMarkDirty('network')">
+                        placeholder="bond0" data-on-input="Pages._tabMarkDirty('network')">
                 </div>
             </div>
         </div>`;
@@ -5825,11 +6251,11 @@ const Pages = {
         return `<div class="cfg-var-row" data-idx="${idx}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
             ${warnIcon}
             <input type="text" class="cfg-var-key" value="${escHtml(key)}"
-                placeholder="variable_name" style="flex:1${keyInvalid ? ';border-color:#f59e0b;' : ''}" oninput="Pages._tabMarkDirty('config')">
+                placeholder="variable_name" style="flex:1${keyInvalid ? ';border-color:#f59e0b;' : ''}" data-on-input="Pages._tabMarkDirty('config')">
             <input type="text" class="cfg-var-val" value="${escHtml(value)}"
-                placeholder="value" style="flex:2" oninput="Pages._tabMarkDirty('config')">
+                placeholder="value" style="flex:2" data-on-input="Pages._tabMarkDirty('config')">
             <button type="button" class="btn btn-danger btn-sm" style="padding:2px 8px;font-size:11px;flex-shrink:0"
-                onclick="Pages._cfgRemoveVar(this);Pages._tabMarkDirty('config')">✕</button>
+                data-on-click="Pages._cfgRemoveVar(this);Pages._tabMarkDirty('config')">✕</button>
         </div>`;
     },
 
@@ -5920,7 +6346,7 @@ const Pages = {
             <div class="modal" style="max-width:440px" role="dialog" aria-modal="true">
                 <div class="modal-header">
                     <span class="modal-title">Trigger Reimage</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('reimage-trigger-modal').remove()">&#215;</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('reimage-trigger-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 14px;font-size:13px">
@@ -5942,8 +6368,8 @@ const Pages = {
                     <div id="reimage-trigger-error" style="color:var(--error);font-size:13px;margin-top:8px;display:none"></div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn btn-secondary" onclick="document.getElementById('reimage-trigger-modal').remove()">Cancel</button>
-                    <button class="btn btn-danger" id="reimage-trigger-btn" onclick="Pages._nodeActionsTriggerReimageSubmit('${nodeId}')">Trigger Reimage</button>
+                    <button class="btn btn-secondary" data-on-click="document.getElementById('reimage-trigger-modal').remove()">Cancel</button>
+                    <button class="btn btn-danger" id="reimage-trigger-btn" data-on-click="Pages._nodeActionsTriggerReimageSubmit('${nodeId}')">Trigger Reimage</button>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
@@ -6469,9 +6895,9 @@ const Pages = {
                     <option value="tmpfs">tmpfs</option>
                 </select>
                 <button type="button" class="btn btn-secondary btn-sm"
-                    onclick="Pages._mountsApplyPreset()">Apply</button>
+                    data-on-click="Pages._mountsApplyPreset()">Apply</button>
                 <button type="button" class="btn btn-secondary btn-sm"
-                    onclick="Pages._mountsAddRow()">+ Add Mount</button>
+                    data-on-click="Pages._mountsAddRow()">+ Add Mount</button>
             </div>
             <div id="mounts-node-table-wrap">
                 <div class="table-wrap" style="overflow-x:auto${nodeMounts.length === 0 ? ';display:none' : ''}">
@@ -6526,7 +6952,7 @@ const Pages = {
             </td>
             <td style="padding:4px 3px">
                 <button type="button" class="btn btn-danger btn-sm"
-                    onclick="Pages._mountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
+                    data-on-click="Pages._mountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
             </td>
         </tr>`;
     },
@@ -6732,10 +7158,10 @@ const Pages = {
                         Customize Layout${customizeSummaryHint}
                     </summary>
                     <div style="padding:12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
-                        <button class="btn btn-secondary btn-sm" onclick='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
+                        <button class="btn btn-secondary btn-sm" data-on-click='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
                             Edit Override
                         </button>
-                        ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" onclick='Pages._clearLayoutOverride(${JSON.stringify(nodeId)})'>Clear Override</button>` : ''}
+                        ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" data-on-click='Pages._clearLayoutOverride(${JSON.stringify(nodeId)})'>Clear Override</button>` : ''}
                         <span style="font-size:12px;color:var(--text-secondary)">Override replaces the ${escHtml(effective.source)} default for this node only.</span>
                     </div>
                 </details>`;
@@ -6754,7 +7180,7 @@ const Pages = {
                 `${layoutToTable(rec.layout)}
                 ${warnings}
                 ${rec.reasoning ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Reasoning</summary><pre style="font-size:11px;margin-top:8px;white-space:pre-wrap;color:var(--text-secondary)">${escHtml(rec.reasoning)}</pre></details>` : ''}`,
-                `<button class="btn btn-primary btn-sm" onclick='Pages._applyRecommendedLayout(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(rec.layout))})'>Apply Recommended Layout</button>`
+                `<button class="btn btn-primary btn-sm" data-on-click='Pages._applyRecommendedLayout(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(rec.layout))})'>Apply Recommended Layout</button>`
             );
         } else if (rec === null) {
             recSection = cardWrap('Recommended Layout',
@@ -6805,19 +7231,19 @@ const Pages = {
         // Build an editable partition table in a modal.
         const rows = (layout.partitions || []).map((p, i) => `
             <tr>
-                <td><input type="text" value="${escHtml(p.label||'')}" onchange="Pages._layoutEditorUpdate(${i},'label',this.value)" style="width:90px"></td>
+                <td><input type="text" value="${escHtml(p.label||'')}" data-on-change="Pages._layoutEditorUpdate(${i},'label',this.value)" style="width:90px"></td>
                 <td>
-                    <input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}" onchange="Pages._layoutEditorParseSizeInput(${i},this.value)" style="width:80px" placeholder="e.g. 100GB or fill">
+                    <input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}" data-on-change="Pages._layoutEditorParseSizeInput(${i},this.value)" style="width:80px" placeholder="e.g. 100GB or fill">
                 </td>
                 <td>
-                    <select onchange="Pages._layoutEditorUpdate(${i},'filesystem',this.value)">
+                    <select data-on-change="Pages._layoutEditorUpdate(${i},'filesystem',this.value)">
                         ${[['xfs','xfs'],['ext4','ext4'],['vfat','vfat (ESP/FAT)'],['swap','swap'],['biosboot','biosboot'],['','none (raw/LVM PV)']].map(([val,lbl]) =>
                             `<option value="${val}" ${(p.filesystem||'')===val?'selected':''}>${lbl}</option>`).join('')}
                     </select>
                 </td>
-                <td><input type="text" value="${escHtml(p.mountpoint||'')}" onchange="Pages._layoutEditorUpdate(${i},'mountpoint',this.value)" style="width:90px"></td>
+                <td><input type="text" value="${escHtml(p.mountpoint||'')}" data-on-change="Pages._layoutEditorUpdate(${i},'mountpoint',this.value)" style="width:90px"></td>
                 <td>
-                    <button class="btn btn-danger btn-sm" onclick="Pages._layoutEditorRemoveRow(${i})" style="padding:2px 8px">✕</button>
+                    <button class="btn btn-danger btn-sm" data-on-click="Pages._layoutEditorRemoveRow(${i})" style="padding:2px 8px">✕</button>
                 </td>
             </tr>`).join('');
 
@@ -6838,13 +7264,13 @@ const Pages = {
                         </table>
                     </div>
                     <div style="margin-top:10px;display:flex;gap:8px">
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._layoutEditorAddRow()">Add Partition</button>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._layoutEditorFillLast()">Set Last → Fill</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._layoutEditorAddRow()">Add Partition</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._layoutEditorFillLast()">Set Last → Fill</button>
                     </div>
                     <div id="layout-editor-result" style="margin-top:10px"></div>
                     <div class="form-actions" style="margin-top:16px">
-                        <button class="btn btn-secondary" onclick="document.getElementById('layout-editor-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" id="layout-save-btn" onclick="Pages._layoutEditorSave('${nodeId}')">Save Override</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('layout-editor-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" id="layout-save-btn" data-on-click="Pages._layoutEditorSave('${nodeId}')">Save Override</button>
                     </div>
                 </div>
             </div>`;
@@ -6917,14 +7343,14 @@ const Pages = {
         const parts = modal._layoutState.partitions;
         tbody.innerHTML = parts.map((p, i) => `
             <tr>
-                <td><input type="text" value="${escHtml(p.label||'')}" onchange="Pages._layoutEditorUpdate(${i},'label',this.value)" style="width:90px"></td>
-                <td><input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}" onchange="Pages._layoutEditorParseSizeInput(${i},this.value)" style="width:80px"></td>
-                <td><select onchange="Pages._layoutEditorUpdate(${i},'filesystem',this.value)">${
+                <td><input type="text" value="${escHtml(p.label||'')}" data-on-change="Pages._layoutEditorUpdate(${i},'label',this.value)" style="width:90px"></td>
+                <td><input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}" data-on-change="Pages._layoutEditorParseSizeInput(${i},this.value)" style="width:80px"></td>
+                <td><select data-on-change="Pages._layoutEditorUpdate(${i},'filesystem',this.value)">${
                     [['xfs','xfs'],['ext4','ext4'],['vfat','vfat (ESP/FAT)'],['swap','swap'],['biosboot','biosboot'],['','none (raw/LVM PV)']].map(([val,lbl]) =>
                         `<option value="${val}" ${(p.filesystem||'')===val?'selected':''}>${lbl}</option>`).join('')
                 }</select></td>
-                <td><input type="text" value="${escHtml(p.mountpoint||'')}" onchange="Pages._layoutEditorUpdate(${i},'mountpoint',this.value)" style="width:90px"></td>
-                <td><button class="btn btn-danger btn-sm" onclick="Pages._layoutEditorRemoveRow(${i})" style="padding:2px 8px">✕</button></td>
+                <td><input type="text" value="${escHtml(p.mountpoint||'')}" data-on-change="Pages._layoutEditorUpdate(${i},'mountpoint',this.value)" style="width:90px"></td>
+                <td><button class="btn btn-danger btn-sm" data-on-click="Pages._layoutEditorRemoveRow(${i})" style="padding:2px 8px">✕</button></td>
             </tr>`).join('');
         this._layoutEditorValidate(modal);
     },
@@ -7034,7 +7460,7 @@ const Pages = {
                     </table></div>
                     <div id="confighistory-footer" style="margin-top:8px">
                         ${hasMore
-                            ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', 2)">Load more (${total - rows.length} remaining)</button>`
+                            ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" data-on-click="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', 2)">Load more (${total - rows.length} remaining)</button>`
                             : `<span class="text-dim text-sm">${total} change${total !== 1 ? 's' : ''} total</span>`}
                     </div>`;
             } else {
@@ -7045,7 +7471,7 @@ const Pages = {
                 const loaded = page * perPage;
                 if (footer) {
                     footer.innerHTML = hasMore
-                        ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page + 1})">Load more (${total - loaded} remaining)</button>`
+                        ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" data-on-click="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page + 1})">Load more (${total - loaded} remaining)</button>`
                         : `<span class="text-dim text-sm">${total} change${total !== 1 ? 's' : ''} total</span>`;
                 }
             }
@@ -7397,11 +7823,11 @@ const Pages = {
                     <td>
                         <div class="flex gap-6">
                             <button class="btn btn-secondary btn-sm"
-                                onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})'>Edit</button>
+                                data-on-click='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(g))})'>Edit</button>
                             <button class="btn btn-primary btn-sm"
-                                onclick="Pages.showGroupReimageModal('${escHtml(g.id)}', '${escHtml(g.name)}')">Reimage</button>
+                                data-on-click="Pages.showGroupReimageModal('${escHtml(g.id)}', '${escHtml(g.name)}')">Reimage</button>
                             <button class="btn btn-danger btn-sm"
-                                onclick="Pages.deleteNodeGroup('${escHtml(g.id)}', '${escHtml(g.name)}')">Delete</button>
+                                data-on-click="Pages.deleteNodeGroup('${escHtml(g.id)}', '${escHtml(g.name)}')">Delete</button>
                         </div>
                     </td>
                 </tr>`;
@@ -7424,7 +7850,7 @@ const Pages = {
                 : emptyState(
                     'No node groups yet',
                     'Groups let you share disk layouts, mounts, and config across nodes with similar roles.',
-                    `<button class="btn btn-primary" onclick="Pages.showNodeGroupModal(null)">Create First Group</button>`
+                    `<button class="btn btn-primary" data-on-click="Pages.showNodeGroupModal(null)">Create First Group</button>`
                 );
 
             App.render(`
@@ -7433,7 +7859,7 @@ const Pages = {
                         <h1 class="page-title">Node Groups</h1>
                         <div class="page-subtitle">${groups.length} group${groups.length !== 1 ? 's' : ''} defined</div>
                     </div>
-                    <button class="btn btn-primary" onclick="Pages.showNodeGroupModal(null)">
+                    <button class="btn btn-primary" data-on-click="Pages.showNodeGroupModal(null)">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                         </svg>
@@ -7442,14 +7868,76 @@ const Pages = {
                 </div>
 
                 <div class="tab-bar" style="margin-bottom:20px">
-                    <div class="tab" onclick="Router.navigate('/nodes')">All Nodes</div>
-                    <div class="tab active" onclick="Router.navigate('/nodes/groups')">Groups</div>
+                    <div class="tab" data-on-click="Router.navigate('/nodes')">All Nodes</div>
+                    <div class="tab active" data-on-click="Router.navigate('/nodes/groups')">Groups</div>
                 </div>
 
                 ${cardWrap('All Groups', tableHtml)}
             `);
         } catch (e) {
             App.render(alertBox(`Failed to load node groups: ${e.message}`));
+        }
+    },
+
+    // F3: Show a modal to set an expiration date on a node group.
+    _showSetExpirationModal(groupId, groupName) {
+        const modalId = 'expiration-modal';
+        document.getElementById(modalId)?.remove();
+        const el = document.createElement('div');
+        el.id = modalId;
+        el.className = 'modal-overlay';
+        el.innerHTML = `
+            <div class="modal" style="max-width:420px;">
+                <div class="modal-header">
+                    <h2 class="modal-title">Set Expiration — ${escHtml(groupName)}</h2>
+                    <button class="modal-close" data-on-click="document.getElementById('${modalId}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="padding:20px;">
+                    <p style="font-size:14px;color:var(--text-secondary);margin-bottom:16px;">
+                        After this date, members will receive warning emails and the allocation may be reclaimed.
+                    </p>
+                    <label class="form-label">Expiration Date
+                        <input id="exp-date-input" class="form-input" type="date" style="margin-top:6px;width:100%;">
+                    </label>
+                    <div id="exp-modal-err" style="color:var(--error,#ef4444);font-size:13px;margin-top:8px;display:none;"></div>
+                </div>
+                <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:16px 20px;border-top:1px solid var(--border);">
+                    <button class="btn btn-secondary" data-on-click="document.getElementById('${modalId}').remove()">Cancel</button>
+                    <button class="btn btn-primary" data-on-click="Pages._submitGroupExpiration('${escHtml(groupId)}', '${modalId}')">Set Expiration</button>
+                </div>
+            </div>`;
+        document.body.appendChild(el);
+    },
+
+    async _submitGroupExpiration(groupId, modalId) {
+        const dateEl = document.getElementById('exp-date-input');
+        const errEl  = document.getElementById('exp-modal-err');
+        if (!dateEl || !dateEl.value) {
+            if (errEl) { errEl.textContent = 'Please select a date.'; errEl.style.display = ''; }
+            return;
+        }
+        const isoDate = dateEl.value + 'T00:00:00Z';
+        const btn = document.querySelector(`#${modalId} .btn-primary`);
+        if (btn) btn.disabled = true;
+        try {
+            await API.nodeGroups.setExpiration(groupId, isoDate);
+            document.getElementById(modalId)?.remove();
+            App.toast('Expiration date set.', 'success');
+            Pages.nodeGroupDetail(groupId);
+        } catch (err) {
+            if (errEl) { errEl.textContent = err.message || 'Failed to set expiration.'; errEl.style.display = ''; }
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    async _clearGroupExpiration(groupId) {
+        if (!confirm('Remove the expiration date from this group?')) return;
+        try {
+            await API.nodeGroups.clearExpiration(groupId);
+            App.toast('Expiration cleared.', 'success');
+            Pages.nodeGroupDetail(groupId);
+        } catch (err) {
+            App.toast('Failed to clear expiration: ' + (err.message || ''), 'error');
         }
     },
 
@@ -7472,7 +7960,7 @@ const Pages = {
 
             const nodesHtml = nodes.length === 0
                 ? `<div class="text-dim" style="padding:12px;font-size:13px">No nodes currently assigned to this group.
-                   <button class="btn btn-secondary btn-sm" style="margin-left:12px" onclick="Pages.showAddMemberModal('${escHtml(id)}')">Add Node</button></div>`
+                   <button class="btn btn-secondary btn-sm" style="margin-left:12px" data-on-click="Pages.showAddMemberModal('${escHtml(id)}')">Add Node</button></div>`
                 : `<div class="table-wrap"><table>
                     <thead><tr><th>Hostname</th><th>MAC</th><th>Status</th><th>Updated</th><th></th></tr></thead>
                     <tbody>
@@ -7481,12 +7969,12 @@ const Pages = {
                         <td class="text-mono text-dim text-sm">${escHtml(n.primary_mac || '—')}</td>
                         <td>${nodeBadge(n)}</td>
                         <td class="text-dim text-sm">${fmtRelative(n.updated_at)}</td>
-                        <td><button class="btn btn-danger btn-sm" onclick="Pages.removeGroupMember('${escHtml(id)}', '${escHtml(n.id)}', '${escHtml(n.hostname || n.primary_mac)}')">Remove</button></td>
+                        <td><button class="btn btn-danger btn-sm" data-on-click="Pages.removeGroupMember('${escHtml(id)}', '${escHtml(n.id)}', '${escHtml(n.hostname || n.primary_mac)}')">Remove</button></td>
                     </tr>`).join('')}
                     </tbody>
                 </table></div>
                 <div style="padding:8px 12px;border-top:1px solid var(--border)">
-                    <button class="btn btn-secondary btn-sm" onclick="Pages.showAddMemberModal('${escHtml(id)}')">+ Add Node</button>
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages.showAddMemberModal('${escHtml(id)}')">+ Add Node</button>
                 </div>`;
 
             const layoutHtml = hasLayout
@@ -7547,11 +8035,11 @@ const Pages = {
                         ${group.description ? `<div class="page-subtitle">${escHtml(group.description)}</div>` : ''}
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-primary" onclick="Pages.showGroupReimageModal('${escHtml(group.id)}', '${escHtml(group.name)}')">
+                        <button class="btn btn-primary" data-on-click="Pages.showGroupReimageModal('${escHtml(group.id)}', '${escHtml(group.name)}')">
                             Reimage Group
                         </button>
-                        <button class="btn btn-secondary" onclick='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})'>Edit Group</button>
-                        <button class="btn btn-danger btn-sm" onclick="Pages.deleteNodeGroup('${escHtml(group.id)}', '${escHtml(group.name)}')">Delete</button>
+                        <button class="btn btn-secondary" data-on-click='Pages.showNodeGroupModal(${JSON.stringify(JSON.stringify(group))})'>Edit Group</button>
+                        <button class="btn btn-danger btn-sm" data-on-click="Pages.deleteNodeGroup('${escHtml(group.id)}', '${escHtml(group.name)}')">Delete</button>
                     </div>
                 </div>
 
@@ -7561,6 +8049,17 @@ const Pages = {
                     <div class="kv-item"><div class="kv-key">Nodes</div><div class="kv-value">${nodes.length}</div></div>
                     <div class="kv-item"><div class="kv-key">Created</div><div class="kv-value">${fmtDate(group.created_at)}</div></div>
                     <div class="kv-item"><div class="kv-key">Updated</div><div class="kv-value">${fmtDate(group.updated_at)}</div></div>
+                    ${group.expires_at
+                        ? `<div class="kv-item"><div class="kv-key">Expires</div>
+                               <div class="kv-value" style="display:flex;align-items:center;gap:8px;">
+                                   <span style="color:var(--warning,#d97706);font-weight:600;">${fmtDate(group.expires_at)}</span>
+                                   <button class="btn btn-danger btn-sm" data-on-click="Pages._clearGroupExpiration('${escHtml(group.id)}')">Clear</button>
+                               </div></div>`
+                        : `<div class="kv-item"><div class="kv-key">Expires</div>
+                               <div class="kv-value" style="display:flex;align-items:center;gap:8px;">
+                                   <span class="text-dim">—</span>
+                                   <button class="btn btn-secondary btn-sm" data-on-click="Pages._showSetExpirationModal('${escHtml(group.id)}', '${escHtml(group.name)}')">Set</button>
+                               </div></div>`}
                 </div>
 
                 ${cardWrap('Nodes in this Group', nodesHtml)}
@@ -7599,7 +8098,7 @@ const Pages = {
             <div class="modal" style="max-width:760px;width:96vw;max-height:90vh;overflow-y:auto" aria-labelledby="modal-title-8">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-8">${isEdit ? 'Edit Group' : 'Create Node Group'}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('node-group-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('node-group-modal').remove()">×</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="ng-form-result" style="margin-bottom:10px"></div>
@@ -7611,7 +8110,7 @@ const Pages = {
                             <input type="text" id="ng-name" value="${escHtml(group ? group.name : '')}"
                                 placeholder="compute-nodes"
                                 pattern="^[a-zA-Z0-9][a-zA-Z0-9_\\-]*$"
-                                oninput="Pages._ngValidateName(this)"
+                                data-on-input="Pages._ngValidateName(this)"
                                 required>
                             <div id="ng-name-hint" class="form-hint" style="min-height:16px"></div>
                         </div>
@@ -7645,12 +8144,12 @@ const Pages = {
                             <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
                                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
                                     <input type="radio" name="ng-layout-mode" value="inherit"
-                                        ${!hasLayout ? 'checked' : ''} onchange="Pages._ngLayoutModeChange(this.value)">
+                                        ${!hasLayout ? 'checked' : ''} data-on-change="Pages._ngLayoutModeChange(this.value)">
                                     Inherit from image (default)
                                 </label>
                                 <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400">
                                     <input type="radio" name="ng-layout-mode" value="custom"
-                                        ${hasLayout ? 'checked' : ''} onchange="Pages._ngLayoutModeChange(this.value)">
+                                        ${hasLayout ? 'checked' : ''} data-on-change="Pages._ngLayoutModeChange(this.value)">
                                     Use custom layout for this group
                                 </label>
                             </div>
@@ -7665,8 +8164,8 @@ const Pages = {
                                     </table>
                                 </div>
                                 <div style="margin-top:8px;display:flex;gap:8px">
-                                    <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngLayoutAddRow()">Add Partition</button>
-                                    <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngLayoutFillLast()">Set Last → Fill</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._ngLayoutAddRow()">Add Partition</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._ngLayoutFillLast()">Set Last → Fill</button>
                                 </div>
                             </div>
                         </div>
@@ -7691,8 +8190,8 @@ const Pages = {
                                     <option value="bind">Bind mount</option>
                                     <option value="tmpfs">tmpfs</option>
                                 </select>
-                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngMountsApplyPreset()">Apply</button>
-                                <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._ngMountsAddRow()">+ Add Mount</button>
+                                <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._ngMountsApplyPreset()">Apply</button>
+                                <button type="button" class="btn btn-secondary btn-sm" data-on-click="Pages._ngMountsAddRow()">+ Add Mount</button>
                             </div>
                             <div id="ng-mounts-wrap">
                                 ${mounts.length > 0 ? `<div class="table-wrap" style="overflow-x:auto"><table id="ng-mounts-table" style="width:100%;font-size:12px;border-collapse:collapse">
@@ -7724,9 +8223,9 @@ const Pages = {
                     </details>
 
                     <div class="form-actions">
-                        <button class="btn btn-secondary" onclick="document.getElementById('node-group-modal').remove()">Cancel</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('node-group-modal').remove()">Cancel</button>
                         <button class="btn btn-primary" id="ng-save-btn"
-                            onclick="Pages._ngSubmit(${isEdit ? `'${escHtml(group.id)}'` : 'null'})">
+                            data-on-click="Pages._ngSubmit(${isEdit ? `'${escHtml(group.id)}'` : 'null'})">
                             ${isEdit ? 'Save Changes' : 'Create Group'}
                         </button>
                     </div>
@@ -7773,16 +8272,16 @@ const Pages = {
         p = p || {};
         return `<tr>
             <td><input type="text" value="${escHtml(p.label||'')}"
-                onchange="Pages._ngLayoutUpdate(${idx},'label',this.value)" style="width:90px"></td>
+                data-on-change="Pages._ngLayoutUpdate(${idx},'label',this.value)" style="width:90px"></td>
             <td><input type="text" value="${p.size_bytes ? fmtBytes(p.size_bytes) : 'fill'}"
-                onchange="Pages._ngLayoutParseSize(${idx},this.value)" style="width:80px" placeholder="e.g. 100GB or fill"></td>
-            <td><select onchange="Pages._ngLayoutUpdate(${idx},'filesystem',this.value)">
+                data-on-change="Pages._ngLayoutParseSize(${idx},this.value)" style="width:80px" placeholder="e.g. 100GB or fill"></td>
+            <td><select data-on-change="Pages._ngLayoutUpdate(${idx},'filesystem',this.value)">
                 ${[['xfs','xfs'],['ext4','ext4'],['vfat','vfat (ESP/FAT)'],['swap','swap'],['biosboot','biosboot'],['','none (raw/LVM PV)']].map(([val,lbl]) =>
                     `<option value="${val}" ${(p.filesystem||'')===val?'selected':''}>${lbl}</option>`).join('')}
             </select></td>
             <td><input type="text" value="${escHtml(p.mountpoint||'')}"
-                onchange="Pages._ngLayoutUpdate(${idx},'mountpoint',this.value)" style="width:90px"></td>
-            <td><button class="btn btn-danger btn-sm" onclick="Pages._ngLayoutRemoveRow(${idx})"
+                data-on-change="Pages._ngLayoutUpdate(${idx},'mountpoint',this.value)" style="width:90px"></td>
+            <td><button class="btn btn-danger btn-sm" data-on-click="Pages._ngLayoutRemoveRow(${idx})"
                 style="padding:2px 8px">✕</button></td>
         </tr>`;
     },
@@ -7891,7 +8390,7 @@ const Pages = {
             </td>
             <td style="padding:4px 3px">
                 <button type="button" class="btn btn-danger btn-sm"
-                    onclick="Pages._ngMountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
+                    data-on-click="Pages._ngMountsRemoveRow(this)" style="padding:2px 6px;font-size:11px">✕</button>
             </td>
         </tr>`;
     },
@@ -8108,7 +8607,7 @@ const Pages = {
             <div class="modal" style="max-width:480px;width:96vw" aria-labelledby="modal-title-9">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-9">Reimage Group: ${escHtml(groupName)}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('group-reimage-modal').remove()">&#215;</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('group-reimage-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="grm-result" style="margin-bottom:10px"></div>
@@ -8148,8 +8647,8 @@ const Pages = {
                             : 'This will power-cycle all nodes in the group. Each node will PXE boot and deploy the selected image.'}
                     </div>
                     <div class="form-actions">
-                        <button class="btn btn-secondary" onclick="document.getElementById('group-reimage-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" id="grm-submit" onclick="Pages._submitGroupReimage('${escHtml(groupId)}')">
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('group-reimage-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" id="grm-submit" data-on-click="Pages._submitGroupReimage('${escHtml(groupId)}')">
                             Start Rolling Reimage
                         </button>
                     </div>
@@ -8205,7 +8704,7 @@ const Pages = {
                             <div class="kv-item"><div class="kv-key">Concurrency</div><div class="kv-value">${effConcurrency}${concurrencyNote}</div></div>
                             <div class="kv-item"><div class="kv-key">Triggered</div><div class="kv-value" id="grm-triggered">${job.triggered_nodes || 0} / ${job.total_nodes || 0}</div></div>
                         </div>
-                        <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="document.getElementById('group-reimage-modal').remove()">Close</button>
+                        <button class="btn btn-secondary btn-sm" style="margin-top:10px" data-on-click="document.getElementById('group-reimage-modal').remove()">Close</button>
                     </div>`;
                 if (job.job_id) Pages._pollGroupReimageJob(job.job_id);
             }
@@ -8282,7 +8781,7 @@ const Pages = {
             <div class="modal" style="max-width:400px;width:96vw" aria-labelledby="modal-title-10">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-10">Add Node to Group</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('add-member-modal').remove()">&#215;</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('add-member-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body" style="padding:20px">
                     <div id="amm-result" style="margin-bottom:10px"></div>
@@ -8293,8 +8792,8 @@ const Pages = {
                         </select>
                     </div>
                     <div class="form-actions">
-                        <button class="btn btn-secondary" onclick="document.getElementById('add-member-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._submitAddMember('${escHtml(groupId)}')">Add to Group</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('add-member-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._submitAddMember('${escHtml(groupId)}')">Add to Group</button>
                     </div>
                 </div>
             </div>`;
@@ -8402,7 +8901,7 @@ const Pages = {
             ? roles.map(r => `
                 <label class="role-card" data-role-id="${escHtml(r.id)}">
                     <div class="role-card-header">
-                        <input type="checkbox" name="role_ids" value="${escHtml(r.id)}" onchange="Pages._onRoleToggle()">
+                        <input type="checkbox" name="role_ids" value="${escHtml(r.id)}" data-on-change="Pages._onRoleToggle()">
                         <span class="role-card-name">${escHtml(r.name)}</span>
                         <span class="role-card-count">${r.package_count} pkgs</span>
                     </div>
@@ -8421,16 +8920,16 @@ const Pages = {
             <div class="modal modal-wide" aria-labelledby="modal-title-11">
                 <div class="modal-header">
                     <span class="modal-title" id="modal-title-11">Build Image from ISO</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('build-iso-modal').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('build-iso-modal').remove()">×</button>
                 </div>
                 <div class="modal-body">
-                    <form id="build-iso-form" onsubmit="Pages.submitBuildFromISO(event)">
+                    <form id="build-iso-form" data-on-submit="Pages.submitBuildFromISO(event)">
 
                         <div class="form-group" style="margin-bottom:6px">
                             <label>ISO URL *</label>
                             <input type="url" id="build-iso-url" name="url"
                                 placeholder="https://download.rockylinux.org/pub/rocky/10/isos/x86_64/Rocky-10.1-x86_64-dvd1.iso"
-                                oninput="Pages._onISOUrlChange(this.value)"
+                                data-on-input="Pages._onISOUrlChange(this.value)"
                                 required>
                             <div id="build-iso-url-hint" class="form-hint" style="min-height:18px"></div>
                         </div>
@@ -8485,19 +8984,19 @@ const Pages = {
                                     <label>Disk: <span id="build-iso-disk-val">20 GB</span></label>
                                     <input type="range" name="disk_size_gb" id="build-iso-disk"
                                         min="10" max="100" step="5" value="20"
-                                        oninput="document.getElementById('build-iso-disk-val').textContent=this.value+' GB'">
+                                        data-on-input="document.getElementById('build-iso-disk-val').textContent=this.value+' GB'">
                                 </div>
                                 <div class="form-group">
                                     <label>Memory: <span id="build-iso-mem-val">2 GB</span></label>
                                     <input type="range" name="memory_gb" id="build-iso-mem"
                                         min="1" max="8" step="1" value="2"
-                                        oninput="document.getElementById('build-iso-mem-val').textContent=this.value+' GB'">
+                                        data-on-input="document.getElementById('build-iso-mem-val').textContent=this.value+' GB'">
                                 </div>
                                 <div class="form-group">
                                     <label>CPUs: <span id="build-iso-cpu-val">2</span></label>
                                     <input type="range" name="cpus" id="build-iso-cpu"
                                         min="1" max="8" step="1" value="2"
-                                        oninput="document.getElementById('build-iso-cpu-val').textContent=this.value">
+                                        data-on-input="document.getElementById('build-iso-cpu-val').textContent=this.value">
                                 </div>
                             </div>
                         </div>
@@ -8530,7 +9029,7 @@ const Pages = {
                             <div style="margin-bottom:8px;font-size:12px;">
                                 <a href="#" id="build-iso-ks-default-toggle"
                                    style="color:var(--accent);text-decoration:underline;"
-                                   onclick="Pages._toggleKickstartDefault(event)">View default kickstart template</a>
+                                   data-on-click="Pages._toggleKickstartDefault(event)">View default kickstart template</a>
                             </div>
                             <pre id="build-iso-ks-default-preview" style="display:none;background:var(--bg-code,#f8fafc);border:1px solid var(--border);border-radius:6px;
                                  padding:10px;font-size:11px;max-height:240px;overflow:auto;white-space:pre;margin-bottom:8px;">
@@ -8582,7 +9081,7 @@ reboot</pre>
 
                         <div id="build-iso-result" style="margin-top:12px"></div>
                         <div class="form-actions">
-                            <button type="button" class="btn btn-secondary" onclick="document.getElementById('build-iso-modal').remove()">Cancel</button>
+                            <button type="button" class="btn btn-secondary" data-on-click="document.getElementById('build-iso-modal').remove()">Cancel</button>
                             <button type="submit" class="btn btn-primary" id="build-iso-btn">Build Image</button>
                         </div>
                     </form>
@@ -8745,7 +9244,7 @@ reboot</pre>
                         Check the build log for details, or delete this image and retry.
                         <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
                             <a class="btn btn-secondary btn-sm" href="${escHtml(API.buildProgress.buildLogUrl(img.id))}" target="_blank" rel="noreferrer">View Build Log</a>
-                            <button class="btn btn-danger btn-sm" onclick="Pages._deleteAndRetryBuild('${escHtml(img.id)}', ${JSON.stringify(img.source_url || '')})">Delete and Retry</button>
+                            <button class="btn btn-danger btn-sm" data-on-click="Pages._deleteAndRetryBuild('${escHtml(img.id)}', ${JSON.stringify(img.source_url || '')})">Delete and Retry</button>
                         </div>
                     </div>
                     <div id="iso-build-phase" style="font-size:13px;margin-bottom:12px;color:var(--text-secondary)">
@@ -8761,7 +9260,7 @@ reboot</pre>
                     <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Serial console</div>
                     <div id="iso-serial-log" class="iso-serial-log log-viewer" style="height:240px;overflow-y:auto;font-family:var(--font-mono);font-size:11px;background:var(--bg-tertiary);border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-all"></div>
                     <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-                        <button class="btn btn-danger btn-sm" id="iso-cancel-btn" onclick="Pages._cancelIsoBuild('${escHtml(img.id)}')">Cancel Build</button>
+                        <button class="btn btn-danger btn-sm" id="iso-cancel-btn" data-on-click="Pages._cancelIsoBuild('${escHtml(img.id)}')">Cancel Build</button>
                         <a class="btn btn-secondary btn-sm" href="${escHtml(API.buildProgress.buildLogUrl(img.id))}" target="_blank" rel="noreferrer">Download Full Log</a>
                     </div>
                 </div>
@@ -9068,7 +9567,7 @@ reboot</pre>
                         <div class="page-subtitle">Reimage history and live deploy progress</div>
                     </div>
                     <div class="flex gap-8">
-                        <button class="btn btn-secondary btn-sm" onclick="Pages.deploys()" title="Refresh">
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages.deploys()" title="Refresh">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                             Refresh
                         </button>
@@ -9158,10 +9657,10 @@ reboot</pre>
             })();
 
             const retryBtn = (canMutate && r.status === 'failed')
-                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._deploysRetry('${r.id}')">Retry</button>`
+                ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._deploysRetry('${r.id}')">Retry</button>`
                 : '';
             const cancelBtn = (canMutate && (r.status === 'pending' || r.status === 'triggered' || r.status === 'in_progress'))
-                ? `<button class="btn btn-danger btn-sm" onclick="Pages._deploysCancel('${r.id}')">Cancel</button>`
+                ? `<button class="btn btn-danger btn-sm" data-on-click="Pages._deploysCancel('${r.id}')">Cancel</button>`
                 : '';
 
             return `<tr data-key="${escHtml(r.id)}">
@@ -9222,7 +9721,7 @@ reboot</pre>
         const tabBar = tabs.map(t => {
             const active = t === tab ? 'style="border-bottom:2px solid var(--accent);color:var(--accent);"' : '';
             const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'notifications': 'Notifications', 'governance': 'Governance', 'server-info': 'System', 'about': 'About' }[t];
-            return `<button class="btn btn-ghost" ${active} onclick="Pages._settingsRender('${t}')">${label}</button>`;
+            return `<button class="btn btn-ghost" ${active} data-on-click="Pages._settingsRender('${t}')">${label}</button>`;
         }).join('');
 
         let body = loading('Loading…');
@@ -9247,10 +9746,10 @@ reboot</pre>
                     <div style="display:flex;align-items:center;gap:10px;">
                         <span class="follow-indicator" id="app-follow-ind"><span class="follow-dot"></span>static</span>
                         <label class="toggle" style="margin:0;">
-                            <input type="checkbox" id="app-follow-toggle" onchange="Pages.toggleFollow(this.checked)">
+                            <input type="checkbox" id="app-follow-toggle" data-on-change="Pages.toggleFollow(this.checked)">
                             Live
                         </label>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages.clearLogs()">Clear</button>
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages.clearLogs()">Clear</button>
                     </div>
                 </div>
                 <div style="padding:8px 12px 4px;display:flex;flex-wrap:wrap;gap:8px;border-bottom:1px solid var(--border);">
@@ -9275,7 +9774,7 @@ reboot</pre>
                         <option value="raid">raid</option>
                     </select>
                     <input id="lf-since" type="datetime-local" title="Since (local time)" style="width:185px">
-                    <button class="btn btn-secondary btn-sm" onclick="Pages.loadLogs()">Query</button>
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages.loadLogs()">Query</button>
                 </div>
                 <div style="padding:0 0 4px;">
                     <div id="log-viewer" class="log-viewer" style="height:360px;border-radius:0 0 var(--radius) var(--radius);"></div>
@@ -9417,8 +9916,8 @@ reboot</pre>
                         <td class="text-sm text-secondary">${escHtml(k.created_by || '—')}</td>
                         <td>
                             <div style="display:flex;gap:6px;">
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._settingsRotateKey('${k.id}')">Rotate</button>
-                                <button class="btn btn-danger btn-sm" onclick="Pages._settingsRevokeKey('${k.id}', '${escHtml(k.label || k.hash_prefix)}')">Revoke</button>
+                                <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsRotateKey('${k.id}')">Rotate</button>
+                                <button class="btn btn-danger btn-sm" data-on-click="Pages._settingsRevokeKey('${k.id}', '${escHtml(k.label || k.hash_prefix)}')">Revoke</button>
                             </div>
                         </td>
                     </tr>`;
@@ -9428,7 +9927,7 @@ reboot</pre>
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">API Keys</h2>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._settingsCreateKeyModal()">+ Create Key</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._settingsCreateKeyModal()">+ Create Key</button>
                     </div>
                     <table class="table">
                         <thead>
@@ -9484,7 +9983,7 @@ reboot</pre>
                                 ? `<span class="badge badge-info badge-sm" style="cursor:default">${escHtml(g.name)}</span>`
                                 : `<span class="badge badge-neutral badge-sm text-mono" style="font-size:10px">${gid.substring(0,8)}</span>`;
                         });
-                        const editBtn = `<button class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="Pages._settingsEditGroupMemberships('${u.id}','${escHtml(u.username)}',${JSON.stringify(memberGroupIDs)},${JSON.stringify(groups)})">Edit</button>`;
+                        const editBtn = `<button class="btn btn-secondary btn-sm" style="margin-left:4px" data-on-click="Pages._settingsEditGroupMemberships('${u.id}','${escHtml(u.username)}',${JSON.stringify(memberGroupIDs)},${JSON.stringify(groups)})">Edit</button>`;
                         groupCell = `<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">${chips.length ? chips.join('') : '<span class="text-dim">none</span>'}${editBtn}</div>`;
                     }
 
@@ -9496,9 +9995,9 @@ reboot</pre>
                         <td>${groupCell}</td>
                         <td>
                             <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._settingsResetUserPassword('${u.id}')">Reset PW</button>
-                                <button class="btn btn-secondary btn-sm" onclick="Pages._settingsChangeUserRole('${u.id}','${u.role}')">Role</button>
-                                <button class="btn btn-danger btn-sm" onclick="Pages._settingsDisableUser('${u.id}','${escHtml(u.username)}')" ${!u.disabled ? actionDisabled : 'disabled title="Already disabled"'}>${u.disabled ? 'Disabled' : 'Disable'}</button>
+                                <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsResetUserPassword('${u.id}')">Reset PW</button>
+                                <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsChangeUserRole('${u.id}','${u.role}')">Role</button>
+                                <button class="btn btn-danger btn-sm" data-on-click="Pages._settingsDisableUser('${u.id}','${escHtml(u.username)}')" ${!u.disabled ? actionDisabled : 'disabled title="Already disabled"'}>${u.disabled ? 'Disabled' : 'Disable'}</button>
                             </div>
                         </td>
                     </tr>`;
@@ -9508,7 +10007,7 @@ reboot</pre>
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">Users</h2>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._settingsCreateUserModal()">+ Create User</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._settingsCreateUserModal()">+ Create User</button>
                     </div>
                     <table class="table">
                         <thead>
@@ -9540,7 +10039,7 @@ reboot</pre>
             <div class="modal" style="max-width:420px" role="dialog" aria-modal="true">
                 <div class="modal-header">
                     <span class="modal-title">Group Memberships — ${escHtml(username)}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('group-membership-modal').remove()">&#215;</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('group-membership-modal').remove()">&#215;</button>
                 </div>
                 <div class="modal-body">
                     <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
@@ -9553,8 +10052,8 @@ reboot</pre>
                     <div id="gm-error" style="color:var(--error);font-size:13px;margin-top:8px;display:none"></div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn btn-secondary" onclick="document.getElementById('group-membership-modal').remove()">Cancel</button>
-                    <button class="btn btn-primary" id="gm-save-btn" onclick="Pages._settingsEditGroupMembershipsSubmit('${userID}')">Save</button>
+                    <button class="btn btn-secondary" data-on-click="document.getElementById('group-membership-modal').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="gm-save-btn" data-on-click="Pages._settingsEditGroupMembershipsSubmit('${userID}')">Save</button>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
@@ -9708,7 +10207,7 @@ reboot</pre>
             <div class="card" style="width:480px;max-width:95vw;">
                 <div class="card-header">
                     <h2 class="card-title">Create User</h2>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('create-user-modal').remove()">×</button>
+                    <button class="btn btn-ghost btn-sm" data-on-click="document.getElementById('create-user-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
                     <label class="form-label">Username
@@ -9725,8 +10224,8 @@ reboot</pre>
                         </select>
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('create-user-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._settingsCreateUserSubmit()">Create</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('create-user-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._settingsCreateUserSubmit()">Create</button>
                     </div>
                 </div>
             </div>`;
@@ -9769,7 +10268,7 @@ reboot</pre>
             <div class="modal" style="max-width:420px" aria-labelledby="${mid}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${mid}-title">Reset Password</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${mid}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${mid}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
                     <p style="margin:0;font-size:13px;color:var(--text-secondary);">
@@ -9779,8 +10278,8 @@ reboot</pre>
                         <input id="rp-pw" class="form-input" type="password" placeholder="••••••••" autocomplete="new-password" style="margin-top:4px;">
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('${mid}').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._settingsResetUserPasswordSubmit('${mid}', '${escHtml(id)}')">Reset Password</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('${mid}').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._settingsResetUserPasswordSubmit('${mid}', '${escHtml(id)}')">Reset Password</button>
                     </div>
                 </div>
             </div>`;
@@ -9813,7 +10312,7 @@ reboot</pre>
             <div class="modal" style="max-width:420px" aria-labelledby="${mid}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${mid}-title">Change Role</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${mid}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${mid}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
                     <p style="margin:0;font-size:13px;color:var(--text-secondary);">
@@ -9826,8 +10325,8 @@ reboot</pre>
                         </select>
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('${mid}').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._settingsChangeUserRoleSubmit('${mid}', '${escHtml(id)}')">Change Role</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('${mid}').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._settingsChangeUserRoleSubmit('${mid}', '${escHtml(id)}')">Change Role</button>
                     </div>
                 </div>
             </div>`;
@@ -9880,13 +10379,13 @@ reboot</pre>
             <div class="card" style="width:520px;max-width:95vw;">
                 <div class="card-header">
                     <h2 class="card-title">Create API Key</h2>
-                    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('create-key-modal').remove()">×</button>
+                    <button class="btn btn-ghost btn-sm" data-on-click="document.getElementById('create-key-modal').remove()">×</button>
                 </div>
                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
                     <!-- S5-6: CI preset shortcut -->
                     <div style="background:var(--surface-secondary);border:1px solid var(--border);border-radius:6px;padding:10px 14px;display:flex;align-items:center;gap:10px">
                         <span style="font-size:12px;color:var(--text-secondary)">Quick preset:</span>
-                        <button class="btn btn-secondary btn-sm" onclick="Pages._settingsCIKeyPreset()">
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsCIKeyPreset()">
                             CI / Pipeline key (node-scoped, 30-day TTL)
                         </button>
                     </div>
@@ -9906,8 +10405,8 @@ reboot</pre>
                         <input id="ckm-expires" class="form-input" type="datetime-local" style="margin-top:4px;">
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('create-key-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._settingsCreateKeySubmit()">Create</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('create-key-modal').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._settingsCreateKeySubmit()">Create</button>
                     </div>
                 </div>
             </div>`;
@@ -9995,8 +10494,8 @@ reboot</pre>
                         <pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:12px;overflow:auto;white-space:pre;margin:0">${escHtml(curlSnippet)}</pre>
                     </div>
                     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
-                        <button class="btn btn-secondary" onclick="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(rawKey)}).then(()=>App.toast('Key copied','success'))">Copy Key</button>
-                        <button class="btn btn-primary" onclick="document.getElementById('rawkey-modal').remove()">Done</button>
+                        <button class="btn btn-secondary" data-on-click="navigator.clipboard&&navigator.clipboard.writeText(${JSON.stringify(rawKey)}).then(()=>App.toast('Key copied','success'))">Copy Key</button>
+                        <button class="btn btn-primary" data-on-click="document.getElementById('rawkey-modal').remove()">Done</button>
                     </div>
                 </div>
             </div>`;
@@ -10055,8 +10554,8 @@ reboot</pre>
                         ${escHtml(rawKey)}
                     </div>
                     <div style="display:flex;gap:8px;justify-content:flex-end;">
-                        <button class="btn btn-secondary" onclick="navigator.clipboard.writeText(${JSON.stringify(rawKey)}).then(()=>App.toast('Copied','success'))">Copy to clipboard</button>
-                        <button class="btn btn-primary" onclick="document.getElementById('rawkey-modal').remove();Pages._settingsRender('api-keys')">Done</button>
+                        <button class="btn btn-secondary" data-on-click="navigator.clipboard.writeText(${JSON.stringify(rawKey)}).then(()=>App.toast('Copied','success'))">Copy to clipboard</button>
+                        <button class="btn btn-primary" data-on-click="document.getElementById('rawkey-modal').remove();Pages._settingsRender('api-keys')">Done</button>
                     </div>
                 </div>
             </div>`;
@@ -10080,16 +10579,16 @@ reboot</pre>
                         <td>${wh.enabled ? '<span class="badge badge-ready">Enabled</span>' : '<span class="badge badge-neutral">Disabled</span>'}</td>
                         <td style="font-size:12px;color:var(--text-secondary);">${fmtDate(wh.created_at)}</td>
                         <td style="text-align:right;">
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._webhookDeliveriesModal('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Deliveries</button>
-                            <button class="btn btn-secondary btn-sm" style="margin-left:4px;" onclick="Pages._webhookEditModal('${escHtml(wh.id)}', '${escHtml(wh.url)}', ${JSON.stringify(wh.events||[])}, ${wh.enabled})">Edit</button>
-                            <button class="btn btn-danger btn-sm" style="margin-left:4px;" onclick="Pages._webhookDelete('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Delete</button>
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._webhookDeliveriesModal('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Deliveries</button>
+                            <button class="btn btn-secondary btn-sm" style="margin-left:4px;" data-on-click="Pages._webhookEditModal('${escHtml(wh.id)}', '${escHtml(wh.url)}', ${JSON.stringify(wh.events||[])}, ${wh.enabled})">Edit</button>
+                            <button class="btn btn-danger btn-sm" style="margin-left:4px;" data-on-click="Pages._webhookDelete('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Delete</button>
                         </td>
                     </tr>`).join('');
             return `
                 <div class="card">
                     <div class="card-header">
                         <h2 class="card-title">Webhook Subscriptions</h2>
-                        <button class="btn btn-primary btn-sm" onclick="Pages._webhookCreateModal()">+ Add Webhook</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._webhookCreateModal()">+ Add Webhook</button>
                     </div>
                     <div class="card-body">
                         <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
@@ -10159,8 +10658,8 @@ reboot</pre>
                         </div>
                     </div>
                     <div style="display:flex;gap:8px;margin-top:16px;align-items:center;">
-                        <button class="btn btn-primary" onclick="Pages._smtpSave()">Save SMTP settings</button>
-                        <button class="btn btn-secondary" onclick="Pages._smtpTest()">Send test email</button>
+                        <button class="btn btn-primary" data-on-click="Pages._smtpSave()">Save SMTP settings</button>
+                        <button class="btn btn-secondary" data-on-click="Pages._smtpTest()">Send test email</button>
                         <span id="smtp-status" style="font-size:13px;"></span>
                     </div>
                 </div>
@@ -10183,7 +10682,7 @@ reboot</pre>
                     <label class="form-label" style="margin-bottom:12px;">Body
                         <textarea id="bc-body" class="form-input" rows="5" placeholder="Message body (plain text)" style="margin-top:4px;min-height:100px;resize:vertical;"></textarea>
                     </label>
-                    <button class="btn btn-primary" onclick="Pages._bcSend()">Send broadcast</button>
+                    <button class="btn btn-primary" data-on-click="Pages._bcSend()">Send broadcast</button>
                     <span id="bc-status" style="font-size:13px;margin-left:12px;"></span>
                 </div>
             </div>`;
@@ -10238,8 +10737,8 @@ reboot</pre>
                 <td style="font-size:12px">${fmtRelative(r.created_at)}</td>
                 <td>
                     <div class="flex gap-6">
-                        <button class="btn btn-primary btn-sm" onclick="Pages._acrReview('${escHtml(r.id)}', 'approved')">Approve</button>
-                        <button class="btn btn-danger btn-sm" onclick="Pages._acrReview('${escHtml(r.id)}', 'denied')">Deny</button>
+                        <button class="btn btn-primary btn-sm" data-on-click="Pages._acrReview('${escHtml(r.id)}', 'approved')">Approve</button>
+                        <button class="btn btn-danger btn-sm" data-on-click="Pages._acrReview('${escHtml(r.id)}', 'denied')">Deny</button>
                     </div>
                 </td>
             </tr>`).join('')
@@ -10261,14 +10760,14 @@ reboot</pre>
             const parentRow = `<tr style="background:var(--bg-subtle,#161b22)">
                 <td colspan="3" style="font-weight:600;padding:6px 12px">${escHtml(parent.name)} <span style="font-size:11px;color:var(--text-secondary)">${escHtml(parent.nsf_code||'')}</span></td>
                 <td style="padding:6px 12px">
-                    <button class="btn btn-secondary btn-sm" onclick="Pages._fosEdit(${JSON.stringify(JSON.stringify(parent))})">Edit</button>
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages._fosEdit(${JSON.stringify(JSON.stringify(parent))})">Edit</button>
                 </td>
             </tr>`;
             const childRows = children.map(c => `<tr>
                 <td style="padding:4px 12px 4px 28px;color:var(--text-secondary);font-size:13px">${escHtml(c.nsf_code||'')}</td>
                 <td style="padding:4px 12px;font-size:13px" colspan="2">${escHtml(c.name)}</td>
                 <td style="padding:4px 12px">
-                    <button class="btn btn-secondary btn-sm" onclick="Pages._fosEdit(${JSON.stringify(JSON.stringify(c))})">Edit</button>
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages._fosEdit(${JSON.stringify(JSON.stringify(c))})">Edit</button>
                 </td>
             </tr>`).join('');
             return parentRow + childRows;
@@ -10279,7 +10778,7 @@ reboot</pre>
         const visRows = visDefaults.map(v => `<tr>
             <td style="font-size:13px;font-weight:600">${escHtml(v.attribute_name)}</td>
             <td>
-                <select class="form-input" style="font-size:12px;padding:4px 8px" onchange="Pages._visDefaultUpdate('${escHtml(v.attribute_name)}', this.value)">
+                <select class="form-input" style="font-size:12px;padding:4px 8px" data-on-change="Pages._visDefaultUpdate('${escHtml(v.attribute_name)}', this.value)">
                     ${visLevels.map(l => `<option value="${l}" ${v.default_visibility === l ? 'selected' : ''}>${l}</option>`).join('')}
                 </select>
             </td>
@@ -10294,7 +10793,7 @@ reboot</pre>
                         <h2 class="card-title">Allocation Change Requests</h2>
                         <div style="font-size:12px;color:var(--text-secondary)">PI-submitted requests for allocation changes requiring admin review</div>
                     </div>
-                    <button class="btn btn-secondary btn-sm" onclick="Pages._settingsRender('governance')">Refresh</button>
+                    <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsRender('governance')">Refresh</button>
                 </div>
                 <div class="card-body" style="padding:0">
                     <div style="padding:10px 16px;font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)">
@@ -10329,7 +10828,7 @@ reboot</pre>
                         <h2 class="card-title">Fields of Science</h2>
                         <div style="font-size:12px;color:var(--text-secondary)">NSF FOS taxonomy — ${fosList.length} entries. PIs assign their group's primary field.</div>
                     </div>
-                    <button class="btn btn-primary btn-sm" onclick="Pages._fosCreate()">Add FOS entry</button>
+                    <button class="btn btn-primary btn-sm" data-on-click="Pages._fosCreate()">Add FOS entry</button>
                 </div>
                 <div class="card-body" style="padding:0">
                     <div class="table-wrap" style="margin:0">
@@ -10402,7 +10901,7 @@ reboot</pre>
             <div class="modal" style="max-width:480px" aria-labelledby="${id}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${id}-title">${existing ? 'Edit Field of Science' : 'Add Field of Science'}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${id}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
                     <label class="form-label">NSF Code (optional)
@@ -10415,8 +10914,8 @@ reboot</pre>
                         <input id="fos-parent" class="form-input" type="text" value="${escHtml(existing?.parent_id||'')}" placeholder="parent FOS ID" style="margin-top:4px">
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
-                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._fosSubmit('${id}', ${existing ? `'${escHtml(existing.id)}'` : 'null'})">${existing ? 'Save' : 'Create'}</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._fosSubmit('${id}', ${existing ? `'${escHtml(existing.id)}'` : 'null'})">${existing ? 'Save' : 'Create'}</button>
                     </div>
                     <div id="fos-err" style="color:var(--error,#f85149);font-size:13px;display:none"></div>
                 </div>
@@ -10525,7 +11024,7 @@ reboot</pre>
             <div class="modal" style="max-width:500px" aria-labelledby="${id}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${id}-title">Add Webhook</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${id}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
                     <label class="form-label">Endpoint URL
@@ -10541,8 +11040,8 @@ reboot</pre>
                         </label>`).join('')}
                     </div>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._webhookCreateSubmit('${id}')">Create</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._webhookCreateSubmit('${id}')">Create</button>
                     </div>
                 </div>
             </div>`;
@@ -10582,7 +11081,7 @@ reboot</pre>
             <div class="modal" style="max-width:500px" aria-labelledby="${id}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${id}-title">Edit Webhook</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${id}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
                     <label class="form-label">Endpoint URL
@@ -10601,8 +11100,8 @@ reboot</pre>
                         <input type="checkbox" id="whe-enabled" ${enabled ? 'checked' : ''}> Enabled
                     </label>
                     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Pages._webhookEditSubmit('${id}', '${escHtml(whId)}')">Save</button>
+                        <button class="btn btn-secondary" data-on-click="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" data-on-click="Pages._webhookEditSubmit('${id}', '${escHtml(whId)}')">Save</button>
                     </div>
                 </div>
             </div>`;
@@ -10660,7 +11159,7 @@ reboot</pre>
             <div class="modal" style="max-width:700px;max-height:85vh;display:flex;flex-direction:column;" aria-labelledby="${id}-title">
                 <div class="modal-header">
                     <span class="modal-title" id="${id}-title">Last Deliveries — ${escHtml(url)}</span>
-                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('${id}').remove()">×</button>
                 </div>
                 <div class="modal-body" style="overflow-y:auto;flex:1;">
                     <div id="wh-deliveries-body">${loading('Loading deliveries…')}</div>
@@ -10787,9 +11286,9 @@ reboot</pre>
             const hasPrev = offset > 0;
             const pager   = (total > 100) ? `
                 <div style="display:flex;align-items:center;gap:8px;padding:12px 0;">
-                    ${hasPrev ? `<button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({...Pages._auditFilters,offset:${offset - 100}})">← Previous</button>` : ''}
+                    ${hasPrev ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._auditLogRender({...Pages._auditFilters,offset:${offset - 100}})">← Previous</button>` : ''}
                     <span style="font-size:13px;color:var(--text-secondary);">Showing ${offset + 1}–${Math.min(offset + 100, total)} of ${total}</span>
-                    ${hasNext ? `<button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({...Pages._auditFilters,offset:${offset + 100}})">Next →</button>` : ''}
+                    ${hasNext ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._auditLogRender({...Pages._auditFilters,offset:${offset + 100}})">Next →</button>` : ''}
                 </div>` : '';
 
             Pages._auditFilters = filters;
@@ -10799,6 +11298,9 @@ reboot</pre>
                     <div>
                         <h1 class="page-title">Audit Log</h1>
                         <div class="page-subtitle">${total} events total</div>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button class="btn btn-secondary btn-sm" data-on-click="Pages._auditExport()" title="Download JSONL export of current filters">Export JSONL</button>
                     </div>
                 </div>
                 <div class="card" style="margin-bottom:16px;">
@@ -10824,8 +11326,8 @@ reboot</pre>
                                     value="${escHtml(filters.until || '')}"
                                     style="margin-top:4px;font-size:13px;">
                             </label>
-                            <button class="btn btn-primary btn-sm" onclick="Pages._auditApplyFilters()">Apply</button>
-                            <button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({})">Clear</button>
+                            <button class="btn btn-primary btn-sm" data-on-click="Pages._auditApplyFilters()">Apply</button>
+                            <button class="btn btn-secondary btn-sm" data-on-click="Pages._auditLogRender({})">Clear</button>
                         </div>
                     </div>
                 </div>
@@ -10859,6 +11361,20 @@ reboot</pre>
         // Convert date strings to RFC3339 midnight UTC for the API.
         const toRFC = (d) => d ? new Date(d + 'T00:00:00Z').toISOString() : '';
         Pages._auditLogRender({ actor, action, since: toRFC(since), until: toRFC(until), offset: 0 });
+    },
+
+    // F2: Trigger a JSONL export download using current filters.
+    // Opens a new tab to GET /api/v1/audit/export with current filter params.
+    // The browser will download the JSONL file as the server streams it.
+    async _auditExport() {
+        const f = Pages._auditFilters || {};
+        const params = new URLSearchParams();
+        if (f.since)  params.set('since',  f.since);
+        if (f.until)  params.set('until',  f.until);
+        if (f.actor)  params.set('actor',  f.actor);
+        if (f.action) params.set('action', f.action);
+        const url = '/api/v1/audit/export?' + params.toString();
+        window.open(url, '_blank');
     },
 
     // ─── DHCP Allocations (Alpine.js pilot — Sprint B.5) ──────────────────
@@ -11236,4 +11752,25 @@ const Auth = {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => Auth.boot());
+document.addEventListener('DOMContentLoaded', () => {
+    // F1 (v1.5.0): Attach global event delegation.
+    // Must be called before Auth.boot() so delegation is active when the first page renders.
+    Delegate.attach(document.body);
+
+    Auth.boot();
+
+    // F1 (v1.5.0): Wire sidebar button event handlers here instead of inline
+    // onclick attributes in index.html, so the page passes script-src 'self' CSP.
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', () => { window.location.hash = '#/settings'; });
+    }
+    const logoutBtn = document.getElementById('logout-btn');
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', () => Auth.logout());
+    }
+    const expiryBanner = document.getElementById('session-expiry-banner');
+    if (expiryBanner) {
+        expiryBanner.addEventListener('click', () => Auth.extendSession());
+    }
+});

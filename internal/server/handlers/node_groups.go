@@ -413,3 +413,101 @@ func (h *NodeGroupsHandler) SetNodeGroupPI(w http.ResponseWriter, r *http.Reques
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// HandleSetExpiration handles PUT /api/v1/node-groups/{id}/expiration.
+// Body: {"expires_at": "2026-12-31T00:00:00Z"} (RFC3339, required).
+// Admin or PI of the group can set expiration (PI check is enforced at the router
+// level via role middleware; this handler only needs admin or pi role).
+// Sprint F (v1.5.0): F3 allocation expiration.
+func (h *NodeGroupsHandler) HandleSetExpiration(w http.ResponseWriter, r *http.Request) {
+	groupID := chi.URLParam(r, "id")
+
+	var body struct {
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if body.ExpiresAt == "" {
+		writeValidationError(w, "expires_at is required")
+		return
+	}
+	t, err := time.Parse(time.RFC3339, body.ExpiresAt)
+	if err != nil {
+		writeValidationError(w, "expires_at must be RFC3339 (e.g. 2026-12-31T00:00:00Z)")
+		return
+	}
+	if t.Before(time.Now()) {
+		writeValidationError(w, "expires_at must be in the future")
+		return
+	}
+	t = t.UTC()
+
+	// Verify group exists.
+	old, err := h.DB.GetNodeGroupFull(r.Context(), groupID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if err := h.DB.SetNodeGroupExpiration(r.Context(), groupID, &t); err != nil {
+		log.Error().Err(err).Str("group_id", groupID).Msg("node_groups: set expiration failed")
+		writeJSON(w, http.StatusInternalServerError, api.ErrorResponse{Error: "failed to set expiration", Code: "internal_error"})
+		return
+	}
+
+	actorID, actorLabel := "", "admin"
+	if h.GetActorInfo != nil {
+		actorID, actorLabel = h.GetActorInfo(r)
+	}
+	oldExpStr := ""
+	if old.ExpiresAt != nil {
+		oldExpStr = old.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	h.Audit.Record(r.Context(), actorID, actorLabel,
+		db.AuditActionGroupExpirationSet,
+		"node_group", groupID, r.RemoteAddr,
+		map[string]string{"expires_at": oldExpStr},
+		map[string]string{"expires_at": t.Format(time.RFC3339)},
+	)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "expires_at": t.Format(time.RFC3339)})
+}
+
+// HandleClearExpiration handles DELETE /api/v1/node-groups/{id}/expiration.
+// Removes the expiration date from a node group.
+// Sprint F (v1.5.0): F3 allocation expiration.
+func (h *NodeGroupsHandler) HandleClearExpiration(w http.ResponseWriter, r *http.Request) {
+	groupID := chi.URLParam(r, "id")
+
+	// Verify group exists.
+	old, err := h.DB.GetNodeGroupFull(r.Context(), groupID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if old.ExpiresAt == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if err := h.DB.SetNodeGroupExpiration(r.Context(), groupID, nil); err != nil {
+		log.Error().Err(err).Str("group_id", groupID).Msg("node_groups: clear expiration failed")
+		writeJSON(w, http.StatusInternalServerError, api.ErrorResponse{Error: "failed to clear expiration", Code: "internal_error"})
+		return
+	}
+
+	actorID, actorLabel := "", "admin"
+	if h.GetActorInfo != nil {
+		actorID, actorLabel = h.GetActorInfo(r)
+	}
+	h.Audit.Record(r.Context(), actorID, actorLabel,
+		db.AuditActionGroupExpirationCleared,
+		"node_group", groupID, r.RemoteAddr,
+		map[string]string{"expires_at": old.ExpiresAt.UTC().Format(time.RFC3339)},
+		nil,
+	)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

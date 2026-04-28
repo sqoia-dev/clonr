@@ -257,6 +257,9 @@ const API = {
         // Job status polling.
         jobStatus(jobId)    { return API.get(`/reimages/jobs/${encodeURIComponent(jobId)}`); },
         resumeJob(jobId)    { return API.post(`/reimages/jobs/${encodeURIComponent(jobId)}/resume`, {}); },
+        // F3: Allocation expiration (v1.5.0).
+        setExpiration(id, expiresAt)  { return API.put(`/node-groups/${id}/expiration`, { expires_at: expiresAt }); },
+        clearExpiration(id)           { return API.del(`/node-groups/${id}/expiration`); },
     },
     reimages: {
         // listForNode fetches reimage history for a single node.
@@ -292,7 +295,20 @@ const API = {
         setGroupMemberships(id, groupIDs)  { return API.put(`/users/${id}/group-memberships`, { group_ids: groupIDs }); },
     },
     audit: {
-        query(params = {}) { return API.get('/audit', params); },
+        query(params = {})  { return API.get('/audit', params); },
+        // F2: export URL builder — returns the fetch URL for a JSONL export.
+        // Callers open this URL directly (window.open) rather than using API.get
+        // because the response is streamed JSONL, not JSON.
+        exportURL(params = {}) {
+            const q = new URLSearchParams();
+            if (params.since)         q.set('since',         params.since);
+            if (params.until)         q.set('until',         params.until);
+            if (params.actor)         q.set('actor',         params.actor);
+            if (params.action)        q.set('action',        params.action);
+            if (params.resource_type) q.set('resource_type', params.resource_type);
+            const qs = q.toString();
+            return '/api/v1/audit/export' + (qs ? '?' + qs : '');
+        },
     },
     system: {
         // initramfs — GET current status + history, POST to rebuild, DELETE history entry.

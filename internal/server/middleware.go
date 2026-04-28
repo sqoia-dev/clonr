@@ -821,6 +821,50 @@ func endpointLabel(path string) string {
 	return "/"
 }
 
+// securityHeadersMiddleware adds security-hardening HTTP response headers to
+// every request. It MUST be added to the router before any handler that writes
+// response headers.
+//
+// Content-Security-Policy (F1, v1.5.0):
+//
+//   - default-src 'self'           — no external resource loads by default
+//   - script-src 'self'            — only files served by clustr-serverd itself;
+//     Alpine CSP build (alpinejs-csp) evaluates x-data in a shadow realm so
+//     unsafe-eval is NOT required.  Inline <script> blocks are NOT allowed;
+//     all JS has been moved to external .js files (Sprint F).
+//   - style-src 'self' 'unsafe-inline' — inline styles still needed for progress
+//     bars and dynamic colour values set by JS; tighten in a future sprint.
+//   - img-src 'self' data:          — data: URIs for SVG favicon badge
+//   - connect-src 'self'            — HTMX/fetch requests go to same origin;
+//     DOI lookup (CrossRef) is done server-side — no direct browser call.
+//   - frame-ancestors 'none'        — no embedding in iframes (clickjacking)
+//   - form-action 'self'            — form POSTs only to same origin
+//   - base-uri 'self'               — blocks <base> tag hijacking
+//
+// Other headers:
+//
+//	X-Content-Type-Options: nosniff  — no MIME sniffing
+//	X-Frame-Options: DENY            — belt-and-suspenders clickjacking (pre-CSP clients)
+//	Referrer-Policy: same-origin     — no referrer on cross-origin requests
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	const csp = "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"frame-ancestors 'none'; " +
+		"form-action 'self'; " +
+		"base-uri 'self'"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // panicRecovery converts panics into 500 responses and logs them.
 func panicRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

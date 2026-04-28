@@ -240,6 +240,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	if s.notifier != nil {
 		go s.runDigestProcessor(ctx)
 	}
+	// F3: Allocation expiration scanner — sends warnings at 30/14/7 days.
+	go s.runExpirationScanner(ctx)
 }
 
 // runDigestProcessor polls the notification digest queue every hour and sends
@@ -591,6 +593,91 @@ func (s *Server) runAuditPurger(ctx context.Context) {
 	}
 }
 
+// expirationWarnDays are the thresholds at which we send expiration warning emails.
+var expirationWarnDays = []int{30, 14, 7}
+
+// runExpirationScanner ticks once per day and sends expiration warning emails for
+// node groups that have an expires_at set and are within 30, 14, or 7 days of
+// expiring. Warnings are sent at most once per threshold per group.
+// Sprint F (v1.5.0): F3 allocation expiration.
+func (s *Server) runExpirationScanner(ctx context.Context) {
+	log.Info().Msg("expiration scanner: started")
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	// Run immediately on startup so warnings aren't delayed on first deploy.
+	s.scanExpirations(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("expiration scanner: stopping")
+			return
+		case <-ticker.C:
+			s.scanExpirations(ctx)
+		}
+	}
+}
+
+func (s *Server) scanExpirations(ctx context.Context) {
+	groups, err := s.db.ListGroupsWithExpiration(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("expiration scanner: list groups failed")
+		return
+	}
+	now := time.Now().UTC()
+	for _, g := range groups {
+		daysUntilExpiry := int(g.ExpiresAt.Sub(now).Hours() / 24)
+		// Check if already expired (fire once on the expiry day).
+		if daysUntilExpiry < 0 {
+			continue
+		}
+		for _, threshold := range expirationWarnDays {
+			if daysUntilExpiry > threshold {
+				continue
+			}
+			// Check if this threshold warning has already been sent.
+			alreadySent := false
+			for _, sent := range g.WarningSentDays {
+				if sent == threshold {
+					alreadySent = true
+					break
+				}
+			}
+			if alreadySent {
+				continue
+			}
+			// Fetch member emails.
+			emails, err := s.db.ListApprovedMemberEmails(ctx, g.GroupID)
+			if err != nil {
+				log.Error().Err(err).Str("group", g.GroupID).Msg("expiration scanner: get emails failed")
+				continue
+			}
+			if len(emails) == 0 {
+				log.Info().Str("group", g.GroupID).Int("days", threshold).
+					Msg("expiration scanner: no recipient emails, skipping")
+			} else if s.notifier != nil {
+				s.notifier.NotifyExpirationWarning(ctx, emails, g.GroupName,
+					g.ExpiresAt.Format("2006-01-02"), threshold)
+			}
+			// Record audit event and mark as sent regardless of email outcome
+			// to prevent repeated attempts if SMTP is not configured.
+			if s.audit != nil {
+				s.audit.Record(ctx, "system", "clustr",
+					db.AuditActionExpirationWarning,
+					"node_group", g.GroupID, "",
+					nil, map[string]interface{}{
+						"group_name":     g.GroupName,
+						"expires_at":     g.ExpiresAt.Format(time.RFC3339),
+						"days_remaining": threshold,
+						"recipients":     len(emails),
+					})
+			}
+			if err := s.db.MarkExpirationWarningSent(ctx, g.GroupID, threshold); err != nil {
+				log.Error().Err(err).Str("group", g.GroupID).Msg("expiration scanner: mark sent failed")
+			}
+		}
+	}
+}
+
 // diskSpaceThresholds are the disk usage fractions at which we warn / error / fatal.
 const (
 	diskWarnThreshold  = 0.80
@@ -656,6 +743,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Global middleware stack.
 	r.Use(panicRecovery)
+	r.Use(securityHeadersMiddleware) // F1: CSP + X-Frame-Options + X-Content-Type-Options
 	r.Use(corsMiddleware) // CORS before logging so preflight OPTIONS are handled cleanly
 	r.Use(requestLogger)
 	r.Use(chimiddleware.StripSlashes)
@@ -1224,6 +1312,8 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Audit log (S3-4) — admin only (operators and readonly cannot read audit log).
 			r.With(requireRole("admin")).Get("/audit", auditH.HandleQuery)
+			// F2: SIEM JSONL streaming export — admin only, rate-limited 1/min.
+			r.With(requireRole("admin")).Get("/audit/export", auditH.HandleExport)
 
 			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
@@ -1325,6 +1415,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.Delete("/node-groups/{id}/members/{node_id}", nodeGroups.RemoveGroupMember)
 			// C5-1-2: PI ownership assignment (admin-only).
 			r.With(requireRole("admin")).Put("/node-groups/{id}/pi", nodeGroups.SetNodeGroupPI)
+			// F3: Allocation expiration — pi rank or higher can set/clear.
+			// requireRole("pi") passes pi, operator, and admin through.
+			r.With(requireRole("pi")).Put("/node-groups/{id}/expiration", nodeGroups.HandleSetExpiration)
+			r.With(requireRole("pi")).Delete("/node-groups/{id}/expiration", nodeGroups.HandleClearExpiration)
 			// Rolling group reimage — requires admin or group-scoped operator access.
 			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
 			// Group reimage job status polling.

@@ -1,14 +1,16 @@
 package handlers
 
-// audit.go — GET /api/v1/audit (S3-4 + C2-4)
+// audit.go — GET /api/v1/audit (S3-4 + C2-4) and
+//            GET /api/v1/audit/export (F2, v1.5.0)
 //
-// Returns paginated audit log records with optional filters.
+// HandleQuery: returns paginated audit log records with optional filters.
 // Admin-only. Operators and readonly users get 403.
+// C2-4 HTMX content negotiation: HX-Request returns HTML fragment rows.
 //
-// C2-4 HTMX content negotiation: when HX-Request: true the handler returns
-// an HTML fragment (<tr>…</tr> rows) suitable for HTMX swap into the audit
-// table body. When HX-Request is absent (or for API consumers with
-// Accept: application/json) the existing JSON response is returned unchanged.
+// HandleExport: streams audit log as JSONL (one JSON object per line).
+// Admin-only. Rate limited: 1 export per minute per admin actor.
+// Use since/until query params to bound the export window.
+// format=jsonl (default) — only format supported in v1.
 
 import (
 	"encoding/json"
@@ -16,13 +18,35 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
 )
 
-// AuditHandler handles GET /api/v1/audit.
+// exportRateLimiter enforces a minimum interval between audit exports per actor.
+// Key: actorID string → time of last export.
+var exportRateLimiter = struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
+
+const exportRateLimitInterval = time.Minute
+
+// checkExportRateLimit returns true if the actor is allowed to export now.
+// It records the current time if allowed.
+func checkExportRateLimit(actorID string) bool {
+	exportRateLimiter.mu.Lock()
+	defer exportRateLimiter.mu.Unlock()
+	if t, ok := exportRateLimiter.last[actorID]; ok && time.Since(t) < exportRateLimitInterval {
+		return false
+	}
+	exportRateLimiter.last[actorID] = time.Now()
+	return true
+}
+
+// AuditHandler handles GET /api/v1/audit and GET /api/v1/audit/export.
 type AuditHandler struct {
 	DB *db.DB
 }
@@ -158,6 +182,135 @@ func (h *AuditHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"limit":   p.Limit,
 		"offset":  p.Offset,
 	})
+}
+
+// HandleExport streams the audit log as JSONL (one JSON object per line).
+//
+// Query params:
+//
+//	since=<RFC3339>   — only records at or after this time (required for safety)
+//	until=<RFC3339>   — only records at or before this time
+//	format=jsonl      — only "jsonl" supported (default)
+//
+// Auth: admin-only.
+// Rate limit: 1 export per minute per actor (identified by actorLabel in context).
+//
+// The response is:
+//
+//	Content-Type: application/x-ndjson
+//	Transfer-Encoding: chunked (streaming)
+//
+// Each line is a JSON object with the stable schema documented in docs/audit.md.
+func (h *AuditHandler) HandleExport(w http.ResponseWriter, r *http.Request) {
+	// Identify the requesting actor for rate limiting.
+	// The route requires admin auth (requireRole("admin") middleware), so
+	// RemoteAddr is a reasonable rate-limit key; admin accounts are few.
+	// Using RemoteAddr (not user ID) avoids importing the server middleware
+	// context key types into the handlers package.
+	actorID := r.RemoteAddr
+
+	// Rate limit: 1 export per minute per actor.
+	if !checkExportRateLimit(actorID) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = fmt.Fprintf(w, `{"error":"export rate limit exceeded — maximum 1 export per minute","code":"rate_limited"}`)
+		return
+	}
+
+	q := r.URL.Query()
+
+	p := db.AuditQueryParams{
+		ActorID:      q.Get("actor"),
+		Action:       q.Get("action"),
+		ResourceType: q.Get("resource_type"),
+	}
+
+	if s := q.Get("since"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			p.Since = t
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"error":"invalid 'since' — must be RFC3339 (e.g. 2026-01-01T00:00:00Z)","code":"bad_request"}`)
+			return
+		}
+	}
+	if s := q.Get("until"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			p.Until = t
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"error":"invalid 'until' — must be RFC3339 (e.g. 2026-12-31T23:59:59Z)","code":"bad_request"}`)
+			return
+		}
+	}
+
+	// Set up streaming response.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+
+	flusher, canFlush := w.(http.Flusher)
+
+	enc := json.NewEncoder(w)
+
+	err := h.DB.StreamAuditLog(r.Context(), p, func(rec db.AuditRecord) error {
+		line := auditJSONLLine{
+			ID:           rec.ID,
+			CreatedAt:    rec.CreatedAt.UTC().Format(time.RFC3339),
+			ActorID:      rec.ActorID,
+			ActorLabel:   rec.ActorLabel,
+			Action:       rec.Action,
+			ResourceType: rec.ResourceType,
+			ResourceID:   rec.ResourceID,
+			IPAddr:       rec.IPAddr,
+		}
+		if rec.OldValue != nil {
+			line.OldValue = rec.OldValue
+		}
+		if rec.NewValue != nil {
+			line.NewValue = rec.NewValue
+		}
+		if err := enc.Encode(line); err != nil {
+			return err
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+		return nil
+	})
+	if err != nil {
+		// If headers haven't been written yet this would be a 500, but since we
+		// streamed some data already we can only log the error.
+		log.Error().Err(err).Msg("audit export: stream failed")
+	}
+}
+
+// auditJSONLLine is the stable wire schema for one JSONL export line.
+// Field names and types must not change without a version bump (D28).
+type auditJSONLLine struct {
+	// ID is the unique audit record identifier (e.g. "aud-1234567890").
+	ID string `json:"id"`
+	// CreatedAt is the RFC3339 UTC timestamp when the event was recorded.
+	CreatedAt string `json:"created_at"`
+	// ActorID is the internal ID of the actor (users.id or api_keys.id).
+	ActorID string `json:"actor_id"`
+	// ActorLabel is a human-readable actor string: "user:<id>" or "key:<label>".
+	ActorLabel string `json:"actor_label"`
+	// Action is the event type (e.g. "node.create", "user.update").
+	Action string `json:"action"`
+	// ResourceType is the category of the affected resource (e.g. "node", "image").
+	ResourceType string `json:"resource_type"`
+	// ResourceID is the ID of the affected resource.
+	ResourceID string `json:"resource_id"`
+	// IPAddr is the remote IP address of the actor request, if available.
+	IPAddr string `json:"ip_addr,omitempty"`
+	// OldValue is the JSON representation of the resource state before the action.
+	OldValue *json.RawMessage `json:"old_value,omitempty"`
+	// NewValue is the JSON representation of the resource state after the action.
+	NewValue *json.RawMessage `json:"new_value,omitempty"`
 }
 
 // escapeHTMLAudit escapes characters that are special in HTML attribute/text

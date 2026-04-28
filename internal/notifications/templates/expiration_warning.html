@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Allocation Expiration Warning</title></head>
+<body style="font-family:sans-serif;color:#1a1a1a;max-width:560px;margin:0 auto;padding:24px">
+  <h2 style="color:#b45309">Allocation Expiration Warning</h2>
+  <p>Your HPC allocation for project group <strong>{{.GroupName}}</strong> is set to expire in
+    <strong>{{.DaysRemaining}} day{{if ne .DaysRemaining 1}}s{{end}}</strong>, on
+    <strong>{{.ExpiresAt}}</strong>.</p>
+  <p>After expiration, nodes in this group may be reclaimed by the system administrator.
+     To extend your allocation, please contact your HPC administrator or submit an
+     allocation change request through the portal.</p>
+  <table style="border-collapse:collapse;width:100%;margin:16px 0">
+    <tr><td style="padding:6px 12px;background:#f9f9f9;font-weight:600">Group</td>
+        <td style="padding:6px 12px">{{.GroupName}}</td></tr>
+    <tr><td style="padding:6px 12px;background:#f9f9f9;font-weight:600">Expires</td>
+        <td style="padding:6px 12px">{{.ExpiresAt}}</td></tr>
+    <tr><td style="padding:6px 12px;background:#f9f9f9;font-weight:600">Days remaining</td>
+        <td style="padding:6px 12px">{{.DaysRemaining}}</td></tr>
+  </table>
+  <p style="color:#555;font-size:13px">— clustr allocation management</p>
+</body>
+</html>

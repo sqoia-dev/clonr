@@ -566,6 +566,28 @@ func (n *Notifier) NotifyAllocationChangeDecision(ctx context.Context, to, piNam
 }
 
 // SendBroadcast sends a broadcast message to all provided recipients.
+// ExpirationWarningData is the template data for expiration_warning.
+type ExpirationWarningData struct {
+	GroupName     string
+	ExpiresAt     string // RFC3339 date
+	DaysRemaining int
+}
+
+// NotifyExpirationWarning sends an allocation expiration warning to members of
+// the group. Called by the daily background expiration scanner (Sprint F, v1.5.0).
+func (n *Notifier) NotifyExpirationWarning(ctx context.Context, to []string, groupName, expiresAt string, daysRemaining int) {
+	data := ExpirationWarningData{
+		GroupName:     groupName,
+		ExpiresAt:     expiresAt,
+		DaysRemaining: daysRemaining,
+	}
+	subject := fmt.Sprintf("[clustr] Allocation expiration warning: %s expires in %d day", groupName, daysRemaining)
+	if daysRemaining != 1 {
+		subject += "s"
+	}
+	n.send(ctx, "expiration_warning", to, subject, "expiration_warning", data)
+}
+
 func (n *Notifier) SendBroadcast(ctx context.Context, to []string, subject, body, adminName, groupName string) error {
 	if n.Mailer == nil || !n.Mailer.IsConfigured() {
 		log.Info().Strs("to", to).Msg("[broadcast skipped: SMTP not configured]")

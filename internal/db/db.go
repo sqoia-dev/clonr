@@ -2088,6 +2088,85 @@ func (db *DB) DeleteNodeGroup(ctx context.Context, id string) error {
 	return requireOneRow(res, "node_groups", id)
 }
 
+// SetNodeGroupExpiration sets or clears the expires_at field for a node group.
+// Pass nil to clear the expiration. Resets expiration_warning_sent to '[]' so
+// warnings will be re-sent if a new deadline is set.
+// Sprint F (v1.5.0): F3 allocation expiration.
+func (db *DB) SetNodeGroupExpiration(ctx context.Context, groupID string, expiresAt *time.Time) error {
+	var expiresAtVal interface{}
+	if expiresAt != nil {
+		expiresAtVal = expiresAt.Unix()
+	}
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_groups
+		SET expires_at = ?, expiration_warning_sent = '[]', updated_at = ?
+		WHERE id = ?
+	`, expiresAtVal, time.Now().Unix(), groupID)
+	if err != nil {
+		return fmt.Errorf("db: set node group expiration: %w", err)
+	}
+	return requireOneRow(res, "node_groups", groupID)
+}
+
+// ListGroupsWithExpiration returns node groups that have a non-null expires_at,
+// along with their expiration_warning_sent JSON array. Used by the daily
+// expiration scanner to determine which warnings to send.
+type NodeGroupExpiration struct {
+	GroupID              string
+	GroupName            string
+	ExpiresAt            time.Time
+	WarningSentDays      []int // thresholds already emailed (e.g. [30, 14])
+}
+
+func (db *DB) ListGroupsWithExpiration(ctx context.Context) ([]NodeGroupExpiration, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, name, expires_at, COALESCE(expiration_warning_sent, '[]')
+		FROM node_groups
+		WHERE expires_at IS NOT NULL
+		ORDER BY expires_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list groups with expiration: %w", err)
+	}
+	defer rows.Close()
+
+	var out []NodeGroupExpiration
+	for rows.Next() {
+		var nge NodeGroupExpiration
+		var expiresAtUnix int64
+		var warnJSON string
+		if err := rows.Scan(&nge.GroupID, &nge.GroupName, &expiresAtUnix, &warnJSON); err != nil {
+			return nil, fmt.Errorf("db: scan group expiration: %w", err)
+		}
+		nge.ExpiresAt = time.Unix(expiresAtUnix, 0).UTC()
+		_ = json.Unmarshal([]byte(warnJSON), &nge.WarningSentDays) // best-effort; nil slice if invalid
+		out = append(out, nge)
+	}
+	return out, rows.Err()
+}
+
+// MarkExpirationWarningSent appends daysRemaining to the expiration_warning_sent
+// array for the given group so the warning is not sent again.
+func (db *DB) MarkExpirationWarningSent(ctx context.Context, groupID string, daysRemaining int) error {
+	// Fetch existing array, append, re-serialize.
+	var existing string
+	if err := db.sql.QueryRowContext(ctx,
+		`SELECT COALESCE(expiration_warning_sent, '[]') FROM node_groups WHERE id = ?`, groupID,
+	).Scan(&existing); err != nil {
+		return fmt.Errorf("db: mark expiration warning: fetch: %w", err)
+	}
+	var days []int
+	_ = json.Unmarshal([]byte(existing), &days)
+	days = append(days, daysRemaining)
+	b, _ := json.Marshal(days)
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE node_groups SET expiration_warning_sent = ? WHERE id = ?`, string(b), groupID)
+	if err != nil {
+		return fmt.Errorf("db: mark expiration warning: update: %w", err)
+	}
+	return nil
+}
+
 // AssignNodeToGroup updates a node's primary group assignment via
 // node_group_memberships. Pass empty groupID to remove the primary flag (node
 // retains any secondary memberships; use RemoveGroupMember for full removal).
@@ -2267,7 +2346,7 @@ func (db *DB) ListGroupMemberships(ctx context.Context, nodeID string) ([]string
 func (db *DB) ListNodeGroupsWithCount(ctx context.Context) ([]api.NodeGroupWithCount, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT ng.id, ng.name, ng.description, ng.role, ng.disk_layout, ng.extra_mounts,
-		       ng.created_at, ng.updated_at,
+		       ng.created_at, ng.updated_at, ng.expires_at,
 		       COUNT(m.node_id) AS member_count
 		FROM node_groups ng
 		LEFT JOIN node_group_memberships m ON m.group_id = ng.id
@@ -2288,10 +2367,11 @@ func (db *DB) ListNodeGroupsWithCount(ctx context.Context) ([]api.NodeGroupWithC
 			extraMountsJSON string
 			createdAtUnix   int64
 			updatedAtUnix   int64
+			expiresAtUnix   sql.NullInt64
 		)
 		err := rows.Scan(&g.ID, &g.Name, &g.Description, &roleNull,
 			&diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix,
-			&g.MemberCount)
+			&expiresAtUnix, &g.MemberCount)
 		if err != nil {
 			return nil, fmt.Errorf("db: scan node group with count: %w", err)
 		}
@@ -2299,6 +2379,10 @@ func (db *DB) ListNodeGroupsWithCount(ctx context.Context) ([]api.NodeGroupWithC
 		g.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
 		if roleNull.Valid {
 			g.Role = roleNull.String
+		}
+		if expiresAtUnix.Valid {
+			t := time.Unix(expiresAtUnix.Int64, 0).UTC()
+			g.ExpiresAt = &t
 		}
 		if diskLayoutJSON != "" && diskLayoutJSON != "{}" {
 			var layout api.DiskLayout
@@ -2316,25 +2400,25 @@ func (db *DB) ListNodeGroupsWithCount(ctx context.Context) ([]api.NodeGroupWithC
 	return groups, rows.Err()
 }
 
-// GetNodeGroupFull returns a NodeGroup with role populated.
+// GetNodeGroupFull returns a NodeGroup with role and expiration populated.
 func (db *DB) GetNodeGroupFull(ctx context.Context, id string) (api.NodeGroup, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at
+		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at, expires_at
 		FROM node_groups WHERE id = ?
 	`, id)
 	return scanNodeGroupFull(row)
 }
 
-// GetNodeGroupByNameFull returns a NodeGroup by name with role populated.
+// GetNodeGroupByNameFull returns a NodeGroup by name with role and expiration populated.
 func (db *DB) GetNodeGroupByNameFull(ctx context.Context, name string) (api.NodeGroup, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at
+		SELECT id, name, description, role, disk_layout, extra_mounts, created_at, updated_at, expires_at
 		FROM node_groups WHERE name = ?
 	`, name)
 	return scanNodeGroupFull(row)
 }
 
-// UpdateNodeGroupFull replaces all mutable fields including role.
+// UpdateNodeGroupFull replaces all mutable fields including role and expiration.
 func (db *DB) UpdateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
 	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
 	if err != nil {
@@ -2348,18 +2432,22 @@ func (db *DB) UpdateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
 	if g.Role != "" {
 		roleVal = g.Role
 	}
+	var expiresAtVal interface{}
+	if g.ExpiresAt != nil {
+		expiresAtVal = g.ExpiresAt.Unix()
+	}
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_groups
-		SET name = ?, description = ?, role = ?, disk_layout = ?, extra_mounts = ?, updated_at = ?
+		SET name = ?, description = ?, role = ?, disk_layout = ?, extra_mounts = ?, expires_at = ?, updated_at = ?
 		WHERE id = ?
-	`, g.Name, g.Description, roleVal, diskLayout, extraMounts, time.Now().Unix(), g.ID)
+	`, g.Name, g.Description, roleVal, diskLayout, extraMounts, expiresAtVal, time.Now().Unix(), g.ID)
 	if err != nil {
 		return fmt.Errorf("db: update node group full: %w", err)
 	}
 	return requireOneRow(res, "node_groups", g.ID)
 }
 
-// CreateNodeGroupFull inserts a NodeGroup with role support.
+// CreateNodeGroupFull inserts a NodeGroup with role and expiration support.
 func (db *DB) CreateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
 	diskLayout, err := marshalDiskLayoutOverride(g.DiskLayoutOverride)
 	if err != nil {
@@ -2373,10 +2461,14 @@ func (db *DB) CreateNodeGroupFull(ctx context.Context, g api.NodeGroup) error {
 	if g.Role != "" {
 		roleVal = g.Role
 	}
+	var expiresAtVal interface{}
+	if g.ExpiresAt != nil {
+		expiresAtVal = g.ExpiresAt.Unix()
+	}
 	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO node_groups (id, name, description, role, disk_layout, extra_mounts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, g.ID, g.Name, g.Description, roleVal, diskLayout, extraMounts, g.CreatedAt.Unix(), g.UpdatedAt.Unix())
+		INSERT INTO node_groups (id, name, description, role, disk_layout, extra_mounts, expires_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, g.ID, g.Name, g.Description, roleVal, diskLayout, extraMounts, expiresAtVal, g.CreatedAt.Unix(), g.UpdatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("db: create node group full: %w", err)
 	}
@@ -2391,9 +2483,10 @@ func scanNodeGroupFull(s scanner) (api.NodeGroup, error) {
 		extraMountsJSON string
 		createdAtUnix   int64
 		updatedAtUnix   int64
+		expiresAtUnix   sql.NullInt64
 	)
 	err := s.Scan(&g.ID, &g.Name, &g.Description, &roleNull,
-		&diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix)
+		&diskLayoutJSON, &extraMountsJSON, &createdAtUnix, &updatedAtUnix, &expiresAtUnix)
 	if err == sql.ErrNoRows {
 		return api.NodeGroup{}, api.ErrNotFound
 	}
@@ -2404,6 +2497,10 @@ func scanNodeGroupFull(s scanner) (api.NodeGroup, error) {
 	g.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
 	if roleNull.Valid {
 		g.Role = roleNull.String
+	}
+	if expiresAtUnix.Valid {
+		t := time.Unix(expiresAtUnix.Int64, 0).UTC()
+		g.ExpiresAt = &t
 	}
 	if diskLayoutJSON != "" && diskLayoutJSON != "{}" {
 		var layout api.DiskLayout

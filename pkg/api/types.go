@@ -75,6 +75,10 @@ type NodeGroup struct {
 	Role               string       `json:"role,omitempty"`
 	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"` // nil = use image default
 	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
+	// ExpiresAt is an optional UTC timestamp after which this allocation is
+	// considered expired. Nil means no expiration. Set by admin or PI via
+	// PUT /api/v1/node-groups/{id}/expiration (Sprint F, v1.5.0).
+	ExpiresAt          *time.Time   `json:"expires_at,omitempty"`
 	CreatedAt          time.Time    `json:"created_at"`
 	UpdatedAt          time.Time    `json:"updated_at"`
 }

@@ -2,6 +2,54 @@
 
 ---
 
+## v1.5.0 — Security & Audit Hardening (Sprint F) (2026-04-27)
+
+### F1: Content Security Policy
+
+- Added `securityHeadersMiddleware` in `internal/server/middleware.go` setting:
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'`
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: same-origin`
+- Switched Alpine.js to the CSP-safe `@alpinejs/csp` build (v3.15.11) in `index.html`.
+- Removed all inline `<script>` blocks from portal HTML files; extracted to external `.js` files.
+- Replaced 300+ inline event handler attributes in `app.js` template literals with `data-on-*` attributes dispatched by a central `Delegate` object (no `eval`).
+
+### F2: SIEM JSONL Audit Log Export
+
+- New endpoint: `GET /api/v1/audit/export` — streams audit log as JSONL/NDJSON.
+- Admin-only. Rate-limited to 1 export per minute per actor.
+- Accepts `since=`, `until=`, `actor=`, `action=`, `resource_type=` query params.
+- Records are returned in ascending `created_at` order (chronological for SIEM consumers).
+- Added "Export JSONL" button to the admin Audit Log page.
+- New `StreamAuditLog` method in `internal/db/audit.go` for memory-efficient row streaming.
+- See `docs/audit.md` for SIEM integration guide.
+
+### F3: Allocation Expiration
+
+- Added optional `expires_at` field to `node_groups` (migration 068).
+- New endpoints:
+  - `PUT /api/v1/node-groups/{id}/expiration` — set expiration date (pi role or higher).
+  - `DELETE /api/v1/node-groups/{id}/expiration` — clear expiration date.
+- Background worker (`runExpirationScanner`) runs daily and sends SMTP warning emails at 30, 14, and 7 days before expiration. Each threshold is emailed at most once per group.
+- Added `NotifyExpirationWarning` to the notifications package with text + HTML templates.
+- Admin group detail page shows expiration date with Set/Clear controls.
+- Audit log events: `node_group.expiration_set`, `node_group.expiration_cleared`, `node_group.expiration_warning`.
+
+### F4: CSP Regression Tests
+
+- New test suite: `test/js/csp-policy.test.mjs` (18 tests, `node:test`).
+- Asserts: no inline scripts in HTML, no inline event handlers, CSP header configured, Alpine CSP build used, SIEM export route registered.
+- Added to CI (`test` job in `.github/workflows/ci.yml`).
+
+### F5: Documentation
+
+- New: `docs/security-headers.md` — CSP policy reference, Alpine CSP build notes.
+- New: `docs/audit.md` — audit log query API, SIEM export, JSONL schema, action reference.
+- Updated: `CHANGELOG.md` (this entry).
+
+---
+
 ## Feat: management IP alias and Caddy setup (CLUSTR_MGMT_IP) (2026-04-25)
 
 ### Background

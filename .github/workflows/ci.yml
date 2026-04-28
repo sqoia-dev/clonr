@@ -45,6 +45,20 @@ jobs:
       - name: go test
         run: go test ./... -v -count=1 -timeout 300s
 
+      # F4 (v1.5.0): CSP regression test suite — asserts no inline scripts or
+      # event handlers in served HTML, CSP header present, Alpine CSP build used.
+      # Uses Node.js built-in test runner (node:test), no npm install required.
+      - name: Setup Node.js for CSP tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JS CSP policy tests
+        run: node --test test/js/csp-policy.test.mjs
+
+      - name: JS app-utils unit tests
+        run: node --test test/js/app-utils.test.mjs
+
   build:
     name: Build
     runs-on: ubuntu-latest

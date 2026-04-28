@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E are RELEASED (v1.0.1 → v1.4.0). Sprints F, G, H are COMMITTED (v1.5.0 → v1.6.0 → v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F are RELEASED (v1.0.1 → v1.5.0). Sprints G, H are COMMITTED (v1.6.0 → v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -663,7 +663,7 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
-### Sprint F — v1.5.0 "Security & Audit Hardening" (COMMITTED)
+### Sprint F — v1.5.0 "Security & Audit Hardening" **[COMPLETED — 2026-04-27]**
 
 **Goal:** Lock down the webui's security posture (CSP) and operationalize the audit log for downstream consumers (SIEM JSONL, optional allocation expiration). All deliverables additive; no breaking changes; v1.5.0 minor bump per D28.
 
