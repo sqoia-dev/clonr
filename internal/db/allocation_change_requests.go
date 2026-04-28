@@ -14,21 +14,21 @@ import (
 
 // AllocationChangeRequest represents a PI-submitted request for an allocation change.
 type AllocationChangeRequest struct {
-	ID              string
-	ProjectID       string
-	ProjectName     string // populated by join
-	RequesterUserID string
-	RequesterName   string // populated by join
-	RequestType     string // add_member | remove_member | increase_resources | extend_duration | archive_project
-	Payload         string // JSON blob
-	Justification   string
-	Status          string // pending | approved | denied | expired | withdrawn
-	ReviewedBy      string
-	ReviewedByName  string // populated by join
-	ReviewedAt      *time.Time
-	ReviewNotes     string
-	CreatedAt       time.Time
-	ExpiresAt       *time.Time
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"group_id"`
+	ProjectName     string     `json:"group_name"`    // populated by join
+	RequesterUserID string     `json:"pi_user_id"`
+	RequesterName   string     `json:"pi_username"`   // populated by join
+	RequestType     string     `json:"request_type"`  // add_member | remove_member | increase_resources | extend_duration | archive_project
+	Payload         string     `json:"payload"`       // JSON blob
+	Justification   string     `json:"justification"`
+	Status          string     `json:"status"`        // pending | approved | denied | expired | withdrawn
+	ReviewedBy      string     `json:"reviewed_by"`
+	ReviewedByName  string     `json:"reviewed_by_name"` // populated by join
+	ReviewedAt      *time.Time `json:"reviewed_at,omitempty"`
+	ReviewNotes     string     `json:"review_notes"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 }
 
 // ErrChangeRequestNotFound is returned when a change request row does not exist.

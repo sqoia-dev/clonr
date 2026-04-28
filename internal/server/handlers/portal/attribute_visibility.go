@@ -144,8 +144,9 @@ func (h *AttributeVisibilityHandler) HandleSetGroupVisibility(w http.ResponseWri
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "attribute_visibility.set", "node_group", groupID,
-		`{"attribute":"`+body.AttributeName+`","visibility":"`+body.Visibility+`"}`)
+	h.Audit.Record(ctx, userID, "pi:"+userID, "attribute_visibility.set",
+		"node_group", groupID, "",
+		nil, map[string]string{"attribute": body.AttributeName, "visibility": body.Visibility})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"project_id":     groupID,
 		"attribute_name": body.AttributeName,
@@ -179,8 +180,9 @@ func (h *AttributeVisibilityHandler) HandleDeleteGroupVisibility(w http.Response
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "attribute_visibility.reset", "node_group", groupID,
-		`{"attribute":"`+attrName+`"}`)
+	h.Audit.Record(ctx, userID, "pi:"+userID, "attribute_visibility.reset",
+		"node_group", groupID, "",
+		nil, map[string]string{"attribute": attrName})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -230,8 +232,9 @@ func (h *AttributeVisibilityHandler) HandleUpdateVisibilityDefault(w http.Respon
 		return
 	}
 
-	h.Audit.Log(ctx, actorID, "attribute_visibility.default_updated", "system", attrName,
-		`{"visibility":"`+body.Visibility+`"}`)
+	h.Audit.Record(ctx, actorID, "admin:"+actorID, "attribute_visibility.default_updated",
+		"system", attrName, "",
+		nil, map[string]string{"visibility": body.Visibility})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"attribute_name": attrName,
 		"visibility":     body.Visibility,

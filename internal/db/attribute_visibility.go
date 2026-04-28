@@ -44,9 +44,9 @@ func CanSee(visibility AttributeVisibilityLevel, role string, isPI, isMember boo
 
 // AttributeVisibilityDefault is one row from the global defaults table.
 type AttributeVisibilityDefault struct {
-	AttributeName string
-	Visibility    AttributeVisibilityLevel
-	Description   string
+	AttributeName string                  `json:"attribute_name"`
+	Visibility    AttributeVisibilityLevel `json:"default_visibility"`
+	Description   string                  `json:"description"`
 }
 
 // ListAttributeVisibilityDefaults returns all global defaults.

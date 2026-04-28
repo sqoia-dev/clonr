@@ -86,8 +86,9 @@ func (h *NotificationPrefsHandler) HandleSetMyPref(w http.ResponseWriter, r *htt
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "notification_pref.set", "user", userID,
-		`{"event_type":"`+eventType+`","delivery_mode":"`+body.DeliveryMode+`"}`)
+	h.Audit.Record(ctx, userID, "user:"+userID, "notification_pref.set",
+		"user", userID, "",
+		nil, map[string]string{"event_type": eventType, "delivery_mode": body.DeliveryMode})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"user_id":       userID,
 		"event_type":    eventType,
@@ -110,7 +111,8 @@ func (h *NotificationPrefsHandler) HandleResetMyPrefs(w http.ResponseWriter, r *
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "notification_pref.reset", "user", userID, `{}`)
+	h.Audit.Record(ctx, userID, "user:"+userID, "notification_pref.reset",
+		"user", userID, "", nil, nil)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"message": "preferences reset to defaults"})
 }
 

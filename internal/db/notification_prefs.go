@@ -14,11 +14,11 @@ import (
 
 // NotificationPref stores one user's delivery preference for one event type.
 type NotificationPref struct {
-	UserID       string
-	EventType    string
-	DeliveryMode string // immediate | hourly | daily | weekly | disabled
-	Language     string // 'en' in v1.4; scaffold for future i18n
-	UpdatedAt    time.Time
+	UserID       string    `json:"user_id"`
+	EventType    string    `json:"event_type"`
+	DeliveryMode string    `json:"delivery_mode"` // immediate | hourly | daily | weekly | disabled
+	Language     string    `json:"language"`       // 'en' in v1.4; scaffold for future i18n
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // GetNotificationPref returns the delivery mode for a user+event combination.

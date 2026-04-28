@@ -101,7 +101,8 @@ func (h *FOSHandler) HandleAdminCreateFOS(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.Audit.Log(ctx, actorID, "field_of_science.created", "field_of_science", f.ID, `{"name":"`+f.Name+`"}`)
+	h.Audit.Record(ctx, actorID, "admin:"+actorID, "field_of_science.created",
+		"field_of_science", f.ID, "", nil, map[string]string{"name": f.Name})
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -148,7 +149,8 @@ func (h *FOSHandler) HandleAdminUpdateFOS(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.Audit.Log(ctx, actorID, "field_of_science.updated", "field_of_science", fosID, `{"name":"`+existing.Name+`"}`)
+	h.Audit.Record(ctx, actorID, "admin:"+actorID, "field_of_science.updated",
+		"field_of_science", fosID, "", nil, map[string]string{"name": existing.Name})
 	writeJSON(w, http.StatusOK, existing)
 }
 
@@ -194,8 +196,9 @@ func (h *FOSHandler) HandleSetGroupFOS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "node_group.fos_set", "node_group", groupID,
-		`{"field_of_science_id":"`+body.FieldOfScienceID+`"}`)
+	h.Audit.Record(ctx, userID, "pi:"+userID, "node_group.fos_set",
+		"node_group", groupID, "",
+		nil, map[string]string{"field_of_science_id": body.FieldOfScienceID})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"group_id":           groupID,
 		"field_of_science_id": body.FieldOfScienceID,
@@ -214,5 +217,21 @@ func (h *FOSHandler) HandleDirectorFOSUtilization(w http.ResponseWriter, r *http
 	if summary == nil {
 		summary = []db.NodeGroupFOSSummary{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"breakdown": summary})
+	// Separate unclassified groups from the classified breakdown.
+	var classified []db.NodeGroupFOSSummary
+	unclassified := 0
+	for _, s := range summary {
+		if s.FOSID == "unclassified" {
+			unclassified = s.GroupCount
+		} else {
+			classified = append(classified, s)
+		}
+	}
+	if classified == nil {
+		classified = []db.NodeGroupFOSSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"summary":      classified,
+		"unclassified": unclassified,
+	})
 }

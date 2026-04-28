@@ -13,12 +13,12 @@ import (
 
 // FieldOfScience represents an NSF FOS taxonomy entry.
 type FieldOfScience struct {
-	ID        string
-	Name      string
-	ParentID  string // empty for top-level
-	NSFCode   string // e.g. "11.01"
-	Enabled   bool
-	SortOrder int
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ParentID  string `json:"parent_id"` // empty for top-level
+	NSFCode   string `json:"nsf_code"`  // e.g. "11.01"
+	Enabled   bool   `json:"enabled"`
+	SortOrder int    `json:"sort_order"`
 }
 
 // ListFieldsOfScience returns all enabled FOS entries, optionally filtered to
@@ -142,12 +142,12 @@ func (db *DB) SetNodeGroupFOS(ctx context.Context, groupID, fosID string) error 
 
 // NodeGroupFOSSummary is used by the director view to aggregate by field of science.
 type NodeGroupFOSSummary struct {
-	FOSID       string
-	FOSName     string
-	ParentName  string
-	GroupCount  int
-	NodeCount   int
-	MemberCount int
+	FOSID       string `json:"fos_id"`
+	FOSName     string `json:"fos_name"`
+	ParentName  string `json:"parent_name"`
+	GroupCount  int    `json:"group_count"`
+	NodeCount   int    `json:"node_count"`
+	MemberCount int    `json:"member_count"`
 }
 
 // GetFOSUtilizationSummary returns utilization aggregated by FOS for the director view.

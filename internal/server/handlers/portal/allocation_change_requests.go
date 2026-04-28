@@ -147,8 +147,9 @@ func (h *AllocationChangeRequestHandler) HandleCreateChangeRequest(w http.Respon
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "allocation_change_request.created", "allocation_change_request", acr.ID,
-		`{"request_type":"`+body.RequestType+`","group_id":"`+groupID+`"}`)
+	h.Audit.Record(ctx, userID, "pi:"+userID, "allocation_change_request.created",
+		"allocation_change_request", acr.ID, "",
+		nil, map[string]string{"request_type": body.RequestType, "group_id": groupID})
 
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":      acr.ID,
@@ -170,7 +171,8 @@ func (h *AllocationChangeRequestHandler) HandleWithdrawChangeRequest(w http.Resp
 		return
 	}
 
-	h.Audit.Log(ctx, userID, "allocation_change_request.withdrawn", "allocation_change_request", reqID, `{}`)
+	h.Audit.Record(ctx, userID, "pi:"+userID, "allocation_change_request.withdrawn",
+		"allocation_change_request", reqID, "", nil, nil)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"id": reqID, "status": "withdrawn"})
 }
 
@@ -244,9 +246,9 @@ func (h *AllocationChangeRequestHandler) HandleAdminReviewChangeRequest(w http.R
 		return
 	}
 
-	h.Audit.Log(ctx, adminID, "allocation_change_request."+body.Status,
-		"allocation_change_request", reqID,
-		`{"status":"`+body.Status+`","request_type":"`+acr.RequestType+`"}`)
+	h.Audit.Record(ctx, adminID, "admin:"+adminID, "allocation_change_request."+body.Status,
+		"allocation_change_request", reqID, "",
+		nil, map[string]string{"status": body.Status, "request_type": acr.RequestType})
 
 	// Fire-and-forget email to PI.
 	if h.Notifier != nil {
