@@ -1,14 +1,16 @@
-# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.1.1 → v1.2 → v2.0)
+# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.1.1 → v1.2 → v1.2.5 → v1.3 → v1.4 → v2.0+)
 
-**Date:** 2026-04-27 (original) — **Updated 2026-04-27 (D21 re-rule + Sprint B.5 inserted + framework adoption now in Sprint C)**
+**Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C below are committed. Sprint D is directional, not committed.
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E below are committed. Sprint Z (v2.0+ horizon) is directional, not committed.
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
 - `docs/webui-review-personas.md` (Monica, commit `20d92dc`) — 6 personas, 1 served today
+**Active source inputs (preserved):**
+- `docs/coldfront-feature-mapping.md` (Monica, commit `2a25fd0`) — 40 ColdFront features inventoried; powerhouse thesis; persona model expanded (PI promoted to first-class). Ruled into D24 (positioning) and D25 (customer-pull gate). Drives v1.2 scope expansion and Sprints C.5, D, E.
 
-This plan supersedes any informal webui v1.1 backlog. Every finding from the three source reviews is addressed (mapped to a sprint or explicitly deferred with rationale) in the traceability table at the end. New cross-cutting principles in Phase 3 are also written into `docs/decisions.md` as D19–D23.
+This plan supersedes any informal webui v1.1 backlog. Every finding from the three source reviews is addressed (mapped to a sprint or explicitly deferred with rationale) in the traceability table at the end. Every ColdFront feature (CF-01 through CF-40) from Monica's mapping is also addressed in the ColdFront traceability table. New cross-cutting principles in Phase 3 are also written into `docs/decisions.md` as D19–D25.
 
 ## Standing principles (founder directives, baked in)
 
@@ -285,13 +287,13 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 ### Sprint C — v1.2.0 "Researcher Portal MVP + Framework Introduction"
 
 **Tag target:** `v1.2.0` 6-8 weeks after v1.1.1 ships (target window: 2026-08-10 to 2026-09-07). Note: 2-week shift later than original plan because Sprint B.5 sits between B and C.
-**Goal:** Deliver the researcher portal that creates the institutional-buyer wedge against Bright Computing, AND introduce Alpine.js + HTMX (per D23) on the researcher portal greenfield surface and on selected v1.1 pages (audit log, anomaly card).
+**Goal:** Deliver the researcher portal that creates the institutional-buyer wedge against Bright Computing, AND introduce Alpine.js + HTMX (per D23) on the researcher portal greenfield surface and on selected v1.1 pages (audit log, anomaly card). **Scope expanded 2026-04-27 per ColdFront integration: adds OnDemand portal link (CF-26) and storage quota display (CF-28) — both trivially small adds that ride the researcher portal greenfield work.**
 **Personas served:**
 - Persona 3 (Researcher) — first time they have any UI surface
 - Persona 1 (Sysadmin) — better long-term maintainability via clean modules (B.5) + reactive UI on audit/anomaly surfaces (C)
 - Persona 2 (Junior Ops) — quality-of-life fixes from v1.1 P2 backlog
 **Owner:** Dinesh (engineering lead), Monica (researcher-portal copy + competitive positioning validation), Jared (LDAP self-service ops doc), Richard (architecture review on framework integration patterns).
-**Estimate:** 6-8 weeks across the three workstreams.
+**Estimate:** 6-8 weeks across the three workstreams (OnDemand link + storage quota fold-in adds ~1-2 days, absorbed in C1 budget).
 **Dependencies:** Sprint B.5 complete and v1.1.1 tagged. Module-split MUST be done before this sprint starts — framework introduction onto a 9,388-LOC monolith is not feasible.
 
 **Workstream C1 — Researcher portal MVP (greenfield Alpine.js proof case per D23)**
@@ -306,6 +308,8 @@ The Researcher portal is the FIRST production surface using Alpine. Greenfield =
 | C1-4 | Monica Persona 3 / Section D / D23 | Slurm partition status surface: `GET /api/v1/slurm/partitions/status` returns array of `{partition, state, total_nodes, available_nodes}`. Rendered as cards on /portal/ via HTMX `hx-trigger="every 60s"` for live refresh (content negotiation returns HTML partial for HTMX, JSON for API). |
 | C1-5 | Monica positioning | Hide /admin/ entirely from `viewer` role logins — they only see /portal/. Hide /portal/ from admin/operator role logins (they see /admin/ only). Login redirect logic dispatches by role. |
 | C1-6 | new | Tests: viewer login lands on /portal/, cannot navigate to /admin/, cannot mutate any data, can change own LDAP password. Alpine `x-data` state hydration is testable via DOM inspection in headless browser. |
+| C1-7 | CF-26 (Monica) | OnDemand portal link. If `CLUSTR_ONDEMAND_URL` env var is set, render an "Open OnDemand" link/card in the /portal/ "My Account" panel. Single env var read at server start, single Alpine `x-show` on a static link. Zero backend logic. High institutional value for university deployments running OnDemand. |
+| C1-8 | CF-28 (Monica) | Storage quota display. New `GET /api/v1/ldap/me/quota` endpoint reads configurable LDAP attributes (`CLUSTR_LDAP_QUOTA_USED_ATTR`, `CLUSTR_LDAP_QUOTA_LIMIT_ATTR`) for the logged-in user. Renders as a quota card on /portal/ "My Account" panel via Alpine. If attributes unmapped, card hidden. No new storage-system integration — purely surfaces what LDAP already exposes. |
 
 **Workstream C2 — Framework introduction (Alpine.js + HTMX, per D23)**
 
@@ -354,6 +358,8 @@ The C2 module-split workstream from the original plan moved to Sprint B.5 (v1.1.
 **Acceptance criteria for Sprint C:**
 - A `viewer`-role login redirects to `/portal/` and cannot reach any `/admin/` route (verified by test).
 - Researcher can change own LDAP password from /portal/ "My Account" without admin involvement.
+- OnDemand portal link visible in /portal/ when `CLUSTR_ONDEMAND_URL` is set; hidden otherwise (CF-26).
+- Storage quota card visible in /portal/ when LDAP quota attributes mapped; hidden otherwise (CF-28).
 - Alpine.js + HTMX vendored under `internal/server/ui/static/vendor/` with pinned versions documented in `VENDOR.md`.
 - Audit log page (rewritten in HTMX) loads + filters + paginates without full-page reload.
 - Dashboard Anomalies card refreshes every 30s via HTMX without reloading the dashboard.
@@ -367,28 +373,240 @@ The C2 module-split workstream from the original plan moved to Sprint B.5 (v1.1.
 
 ---
 
-### Sprint D — v2.0+ Horizon (directional, NOT committed)
+### Sprint C.5 — v1.2.5 "PI Governance Scaffolding" (NEW — added 2026-04-27 per ColdFront integration)
 
-**Goal:** Persona-specific dashboards, multi-tenancy, federated identity, leadership reporting. High-level only — no commits, no estimates, gated on customer signal.
-**Persona served:** Personas 4 (PI), 5 (IT Director), 6 (Federated User).
-**Trigger conditions (D6 / D8 / D15 — already locked):**
-- First paying design partner with >50 nodes signs LOI
+**Tag target:** `v1.2.5` 3-4 weeks after v1.2.0 ships (target window: 2026-09-07 to 2026-10-05).
+**Goal:** Promote the PI persona to first-class. Add the PI role + the PI self-service surface + the NodeGroup utilization view. This sprint operationalizes Monica's Persona 4A (PI/Research Group Lead) and absorbs the structural primitives from ColdFront's CF-08 / CF-09 / CF-02 / CF-14 governance model — but at clustr's physical-resource abstraction level, NOT ColdFront's abstract-quota model (per coldfront-feature-mapping.md Risk 4).
+**Why a v1.2.5 micro-sprint instead of folding into v1.2 or v1.3:** v1.2 (Sprint C) is already large (researcher portal + framework adoption). PI governance is a new persona — it deserves a clean release boundary so the ColdFront-aware audience knows when to look. v1.3 should focus on IT Director + notifications (different persona); bundling PI work into v1.3 conflates two persona expansions.
+**Personas served:**
+- Persona 4A (PI / Research Group Lead) — first-class for the first time, gets a PI portal at `/portal/pi/`
+- Persona 1 (Sysadmin) — fewer "add a student to my group" tickets thanks to PI self-service
+- Persona 3 (Researcher) — improved "you're in this group" surface in /portal/ as a side-effect
+**Owner:** Dinesh (engineering lead), Monica (PI portal copy + member-management UX validation), Jared (LDAP integration ops doc), Richard (RBAC schema review + NodeGroup-as-allocation framing review).
+**Estimate:** 3-4 weeks engineering across the three workstreams.
+**Dependencies:** Sprint C complete and v1.2.0 tagged. Viewer role + /portal/ scaffolding from C1 is the foundation we extend.
+
+**Workstream C5-1 — PI role + RBAC primitives (CF-09)**
+
+| ID | Source | Description |
+|---|---|---|
+| C5-1-1 | CF-09 (Monica) | Add `pi` role to RBAC. Migration `054_add_pi_role.sql`. Per D1, role enum extended; `pi` is more privileged than `viewer` but more restricted than `operator`. Documented in `docs/rbac.md`. |
+| C5-1-2 | CF-09 (Monica) | NodeGroup ownership: add `pi_user_id` nullable FK on `node_groups` table. Migration `055_node_group_pi.sql`. A NodeGroup can have one PI; one PI can own multiple NodeGroups. Admin assigns PI; PI cannot transfer ownership. |
+| C5-1-3 | CF-09 (Monica) | Auth middleware: `pi` role gates `/portal/pi/` and PI-scoped API endpoints. PI can read/write only their owned NodeGroups; cannot touch nodes/images/Slurm/LDAP-admin. |
+| C5-1-4 | CF-09 (Monica) | Login redirect dispatch updated: `pi` role lands on `/portal/pi/` (default), can navigate to `/portal/` (researcher view) but NOT `/admin/`. |
+| C5-1-5 | new | Tests: PI login can list owned NodeGroups, cannot list non-owned NodeGroups, cannot reach `/admin/`, cannot mutate node config. RBAC audit-log entries written for all PI actions. |
+
+**Workstream C5-2 — PI self-service member management (CF-08)**
+
+| ID | Source | Description |
+|---|---|---|
+| C5-2-1 | CF-08 (Monica) | New endpoint `GET /api/v1/portal/pi/groups` returns owned NodeGroups with member list (LDAP usernames + display names from LDAP attributes). |
+| C5-2-2 | CF-08 (Monica) | New endpoint `POST /api/v1/portal/pi/groups/{id}/members` accepts a username; if `CLUSTR_PI_AUTO_APPROVE=true` (config), creates LDAP account + adds to group immediately; else creates a pending request that admin approves from `/admin/` "Pending PI Requests" panel. |
+| C5-2-3 | CF-08 (Monica) | New endpoint `DELETE /api/v1/portal/pi/groups/{id}/members/{username}` removes user from NodeGroup; LDAP account deactivated (not deleted) if no other group memberships remain. |
+| C5-2-4 | CF-08 (Monica) | `/portal/pi/` "My Groups" panel built with Alpine: list owned groups, expandable member list per group, "Add member" modal (Alpine `x-data` form state), "Remove member" confirmation modal. Pending-request status displayed if auto-approve disabled. |
+| C5-2-5 | CF-08 (Monica) | `/admin/` gets new "Pending PI Requests" surface (admin only) — list of pending member-add requests with PI name, target group, requested user, timestamps, "Approve" / "Deny" actions. Audit-logged. |
+| C5-2-6 | new | Tests: PI can add members to owned group, cannot add members to non-owned group, removal triggers expected LDAP state transitions. Auto-approve mode tested separately from admin-approval mode. |
+
+**Workstream C5-3 — NodeGroup utilization view for PIs (CF-02 + CF-14, structural primitive only)**
+
+Per D25, this is the "low cost, low risk" structural primitive — read-only aggregation of existing data, no new metrics schema. Custom metrics defer to v1.3+/v1.4 once a customer specifies them.
+
+| ID | Source | Description |
+|---|---|---|
+| C5-3-1 | CF-02 (Monica) | New endpoint `GET /api/v1/portal/pi/groups/{id}/utilization` returns aggregated stats from existing tables: `node_count`, `deployed_count`, `undeployed_count`, `last_deploy_at`, `failed_deploys_30d`, `partition_state` (from existing Slurm partition status), `member_count`. NO new schema; pure SQL over `nodes`, `reimages`, `node_groups`, `audit_log`, `slurm_partitions`. |
+| C5-3-2 | CF-02 / CF-14 (Monica) | `/portal/pi/groups/{id}` detail view: utilization summary card (Alpine for tab state), member list, partition health card (HTMX `hx-trigger="every 60s"` for live refresh — reuses C1-4 partition status pattern). Read-only, non-technical language ("Your group has 8 nodes; 7 deployed; 1 awaiting reimage"). |
+| C5-3-3 | CF-02 (Monica) | "Request more nodes" CTA on group detail view — opens a textarea modal (Alpine), POST to `/api/v1/portal/pi/groups/{id}/expansion-requests`. Stored in new `pi_expansion_requests` table (migration `056`). Admin sees pending requests in `/admin/`. NO automatic node assignment — admin reviews and acts manually. (Lightweight CF-20 allocation-change-request precursor.) |
+| C5-3-4 | new | Tests: utilization endpoint returns correct counts for fixtured data, expansion request creates row, admin can list/dismiss requests. |
+
+**Acceptance criteria for Sprint C.5:**
+- `pi` role exists in RBAC, login dispatches to `/portal/pi/`, cannot reach `/admin/`.
+- PI can view all owned NodeGroups, see member list, add/remove members (per `CLUSTR_PI_AUTO_APPROVE` mode).
+- PI cannot interact with non-owned NodeGroups (403 enforced server-side, UI hides).
+- Admin sees pending PI member-add requests and PI expansion requests in `/admin/`.
+- NodeGroup utilization view loads in <500ms for fixtures with 100 nodes (no rollup tables; pure SQL aggregation).
+- All actions audit-logged with PI user_id, action, target group_id, target username (where applicable).
+- Researcher view (Persona 3) gets a "Your group is owned by Dr. <PI name>; ask them about access" string when applicable — graceful surfacing of PI role to researchers.
+- CI green on v1.2.5 tag. Cloner autodeploy picks up the new bundle.
+- `docs/pi-portal.md` authored by Monica + Dinesh (PI persona + how-to + auto-approve vs manual-approve mode).
+- `docs/rbac.md` updated to document the 5-role model (admin / operator / pi / viewer / readonly).
+
+**Out of scope for v1.2.5:**
+- Grant/publication tracking (v1.3 — CF-12, CF-13)
+- Annual project review workflow (v1.4 — CF-11)
+- IT Director read-only view (v1.3 — CF-17)
+- Email notifications on PI member-add events (v1.3 — bundled with general SMTP work)
+- Custom utilization metrics defined by customer (v2.0+ per D25, gated on customer pull)
+- Allocation change requests with full approval-history workflow (v1.4 — CF-20 full version)
+- Manager delegation (PI promotes member to manager) — defer to v1.3 only if a customer asks; CF-09 mentions it but Monica's v1.2 list does not require it for the wedge
+
+---
+
+### Sprint D — v1.3.0 "IT Director View + Notifications + Grants/Publications" (NEW — added 2026-04-27 per ColdFront integration)
+
+**Tag target:** `v1.3.0` 5-7 weeks after v1.2.5 ships (target window: 2026-10-12 to 2026-11-23).
+**Goal:** Promote the IT Director persona (Persona 5) to first-class with a read-only summary view. Add the SMTP scaffolding that unblocks email notifications. Add structural primitives for grant tracking and publication tracking. This sprint absorbs the bulk of Monica's v1.3-v1.4 follow-on bucket (CF-11, CF-12, CF-13, CF-15, CF-17) — sequenced as the natural next layer after the PI is first-class.
+**Personas served:**
+- Persona 5 (IT Director) — first surface ever; read-only summary view at `/portal/director/`
+- Persona 4A (PI) — gains grant + publication entry surface; gets email when their group changes
+- Persona 3 (Researcher) — gets email when their LDAP account is created or NodeGroup membership changes
+- Persona 1 (Sysadmin) — gains "broadcast to NodeGroup" admin tool (CF-18 precursor)
+**Owner:** Dinesh (engineering lead), Gilfoyle (SMTP infra + deliverability validation), Monica (Director-portal copy + grant/publication form UX), Jared (notification template review + ops doc), Richard (schema review for grant/publication tables).
+**Estimate:** 5-7 weeks engineering across the four workstreams.
+**Dependencies:** Sprint C.5 complete and v1.2.5 tagged. PI role and `/portal/pi/` scaffolding extended for grants/publications input.
+
+**Workstream D1 — IT Director read-only view (CF-17 + CF-14 reporting primitive)**
+
+| ID | Source | Description |
+|---|---|---|
+| D1-1 | CF-17 (Monica) | Add `director` role to RBAC. Migration `057_add_director_role.sql`. Read-only across all NodeGroups, all members, all utilization data. Cannot mutate anything. Cannot view node internals (BMC, Slurm config) — only aggregated summaries. |
+| D1-2 | CF-17 (Monica) | New `/portal/director/` route. Alpine-built dashboard: total nodes, total deployed, total NodeGroups, total active researchers, deploy success rate (last 30d), per-NodeGroup utilization summary table (paginated). All read from existing tables — NO new metric rollup tables (per D25). |
+| D1-3 | CF-17 / CF-14 (Monica) | Per-NodeGroup detail view: PI name, member count, node count, deploy stats, grants list (D3-1), publications list (D3-2). Linked from D1-2 summary table. |
+| D1-4 | CF-14 (Monica) | CSV export endpoint `GET /api/v1/portal/director/export.csv?range=quarter` returns flat row-per-NodeGroup with all summary columns. Director can download for institutional reporting. |
+| D1-5 | new | Tests: director login lands on `/portal/director/`, cannot mutate, cannot reach `/admin/` or `/portal/pi/`, can view all NodeGroups regardless of PI ownership. CSV export generates valid CSV against fixtures. |
+
+**Workstream D2 — Email notifications (CF-15, SMTP scaffolding)**
+
+| ID | Source | Description |
+|---|---|---|
+| D2-1 | CF-15 (Monica) | New `internal/notifications/smtp.go` with `Send(to, subject, body)` interface. Config via env: `CLUSTR_SMTP_HOST`, `CLUSTR_SMTP_PORT`, `CLUSTR_SMTP_USER`, `CLUSTR_SMTP_PASS` (encrypted at rest per D4 — extend the encryption migration), `CLUSTR_SMTP_FROM`. Graceful degradation: if SMTP unset, all notification calls are no-ops with INFO-level log. |
+| D2-2 | CF-15 (Monica) | Notification templates in `internal/notifications/templates/`: `ldap_account_created.txt`, `nodegroup_membership_added.txt`, `nodegroup_membership_removed.txt`, `pi_request_approved.txt`, `pi_request_denied.txt`. Plain text only (no HTML in v1.3 — keep it simple). |
+| D2-3 | CF-15 (Monica) | Notification triggers wired into existing event paths: LDAP module `CreateUser` → send `ldap_account_created`. PI member-add (auto-approve or admin-approve) → send `nodegroup_membership_added`. PI member-remove → send `nodegroup_membership_removed`. |
+| D2-4 | CF-15 (Monica) | `/admin/` Settings → Notifications tab: shows SMTP config status (configured/not), template preview, "Send test email" button (admin only). Audit-logged. |
+| D2-5 | new | Tests: notification dispatch with mocked SMTP server (testcontainers MailHog or equivalent); template rendering with fixture data; no-op behavior when SMTP unset. |
+
+**Workstream D3 — Grant + Publication tracking (CF-12 + CF-13)**
+
+| ID | Source | Description |
+|---|---|---|
+| D3-1 | CF-12 (Monica) | Schema: `grants` table (migration `058`) with columns `id, node_group_id (FK), title, funding_agency, grant_number, amount, start_date, end_date, status, created_by_user_id, created_at`. PI can CRUD grants on owned NodeGroups via `/portal/pi/` "Grants" panel. Director and admin can read. |
+| D3-2 | CF-13 (Monica) | Schema: `publications` table (migration `059`) with columns `id, node_group_id (FK), doi, title, authors, journal, year, created_by_user_id, created_at`. PI can CRUD publications on owned NodeGroups via `/portal/pi/` "Publications" panel. Director and admin can read. |
+| D3-3 | CF-13 (Monica) | DOI auto-fill: new endpoint `GET /api/v1/portal/pi/publications/lookup?doi=<doi>` calls Crossref API (`api.crossref.org/works/<doi>`) to fetch metadata. Server-side outbound (one of the few clustr outbound calls — explicitly opt-in via `CLUSTR_DOI_LOOKUP_ENABLED=true`; off by default to preserve air-gap). Returns title, authors, journal, year for PI to confirm before save. |
+| D3-4 | CF-12 / CF-13 (Monica) | `/portal/pi/groups/{id}` detail view extended: "Grants" tab (CRUD via Alpine modals) and "Publications" tab (CRUD + DOI lookup via HTMX). |
+| D3-5 | CF-14 (Monica) | Director view (D1-3) renders grants list and publications list per NodeGroup, included in CSV export (D1-4). |
+| D3-6 | new | Tests: PI can CRUD grants on owned group, cannot touch non-owned group's grants. DOI lookup works (mocked Crossref response) and gracefully fails when feature disabled or network unavailable. |
+
+**Workstream D4 — Annual review (lightweight CF-11) + admin broadcast (CF-18)**
+
+| ID | Source | Description |
+|---|---|---|
+| D4-1 | CF-11 (Monica) | Lightweight annual review: admin can trigger a "review cycle" via `POST /api/v1/admin/review-cycles` with a deadline date. All PIs receive an email + see a `/portal/pi/` banner: "Annual review due by <date>; click to affirm your group is active." PI clicks → "Affirm Active" or "Request Archive". Admin sees results in a `/admin/review-cycles/{id}` page. |
+| D4-2 | CF-11 (Monica) | Schema: `review_cycles` (id, deadline, created_at) + `review_responses` (cycle_id, node_group_id, status [affirmed/archived/no-response], pi_user_id, responded_at). Migration `060`. |
+| D4-3 | CF-18 (Monica) | Admin broadcast: `/admin/nodegroups/{id}` gets a "Send message" button. Modal with subject + body. Sends email to all NodeGroup members via D2-1 SMTP. Audit-logged with subject + recipient count (NOT body — privacy). |
+| D4-4 | new | Tests: review cycle creation triggers expected email count; PI affirmation updates response row; admin broadcast hits expected member count. |
+
+**Acceptance criteria for Sprint D:**
+- `director` role exists; `/portal/director/` summary view loads with per-NodeGroup utilization for all groups.
+- CSV export downloads valid CSV with grants/publications/utilization columns per NodeGroup.
+- SMTP configured via env vars; "Send test email" works from `/admin/` Settings → Notifications.
+- LDAP account creation, NodeGroup member-add, and PI request approval all trigger expected emails (verified with MailHog in CI).
+- PI can create/edit/delete grants and publications on owned NodeGroups; cannot on non-owned.
+- DOI lookup works when enabled, gracefully fails (form remains usable) when disabled or offline.
+- Admin can trigger an annual review cycle; all PIs receive notification email + banner; affirm/archive responses tracked.
+- Admin can broadcast a message to a NodeGroup's members; audit log records the broadcast event.
+- CI green on v1.3.0 tag.
+- `docs/director-portal.md` authored by Monica + Dinesh.
+- `docs/notifications.md` authored by Jared (SMTP setup + template customization).
+
+**Out of scope for v1.3:**
+- Custom utilization metrics defined per-customer (v2.0+ per D25)
+- Full CF-20 allocation change request workflow with multi-step approval (v1.4)
+- XDMoD integration (deferred per D25 — high cost, customer-pull gated)
+- HTML email templates (v1.4 polish)
+- Email notification preferences per user (v1.4 — opt-in/opt-out)
+- Real institutional review workflow with multiple reviewers (v2.0+ — CF-11 full)
+- Publication impact metrics / citation counts (v2.0+ — third-party API integration)
+
+---
+
+### Sprint E — v1.4.0 "Allocation Workflow Maturity + Field of Science + Visibility" (NEW — added 2026-04-27 per ColdFront integration)
+
+**Tag target:** `v1.4.0` 5-6 weeks after v1.3.0 ships (target window: 2026-11-30 to 2027-01-11).
+**Goal:** Round out the governance surface with the remaining v1.3-v1.4 follow-ons from Monica's mapping (CF-16 Field of Science, CF-20 allocation change requests, CF-39 attribute visibility, plus polish). This sprint completes the "structural primitives" portion of the ColdFront-inspired roadmap; everything beyond v1.4 either requires customer-defined metrics (D25 gates) or external system integration (XDMoD, FreeIPA per D25 hard defer).
+**Personas served:** All five personas; primarily depth on Persona 4A (PI) and Persona 5 (Director).
+**Owner:** Dinesh (engineering lead), Monica (FOS taxonomy + visibility flag UX), Jared (allocation request workflow ops doc), Richard (schema + RBAC review).
+**Estimate:** 5-6 weeks across four workstreams.
+**Dependencies:** Sprint D complete and v1.3.0 tagged.
+
+**Workstream E1 — Allocation change request workflow (CF-20 full)**
+
+| ID | Source | Description |
+|---|---|---|
+| E1-1 | CF-20 (Monica) | Promote `pi_expansion_requests` (from C5-3-3) to a richer `allocation_requests` table (migration `061`): adds `request_type` enum (expand_nodes / change_partition / change_attributes / decommission), `justification` text, `status` enum (pending / approved / denied / withdrawn), `decided_by_user_id`, `decided_at`, `decision_note`. Backfill existing expansion requests. |
+| E1-2 | CF-20 (Monica) | PI flow: `/portal/pi/groups/{id}/requests` shows request history; "New request" modal with type selector + justification field. PI can withdraw their own pending requests. |
+| E1-3 | CF-20 (Monica) | Admin flow: `/admin/allocation-requests` paginated list (filter by status, PI, group). Approve/Deny modals capture decision_note. Email to PI on decision (D2 SMTP). Audit-logged. |
+| E1-4 | CF-20 (Monica) | Director view (D1) shows pending request count per group. |
+
+**Workstream E2 — Field of Science classification (CF-16)**
+
+| ID | Source | Description |
+|---|---|---|
+| E2-1 | CF-16 (Monica) | Schema: `fields_of_science` table (migration `062`) seeded with NSF FOS list (admin can extend via `/admin/`). `node_groups.field_of_science_id` nullable FK. |
+| E2-2 | CF-16 (Monica) | PI can set FOS on owned NodeGroup via `/portal/pi/groups/{id}` settings. Optional field. |
+| E2-3 | CF-16 (Monica) | Director view aggregates utilization by FOS (additional CSV export column + summary card on `/portal/director/`). |
+| E2-4 | CF-16 (Monica) | Admin can manage FOS list (add/edit/disable entries) at `/admin/fields-of-science`. |
+
+**Workstream E3 — Per-attribute visibility controls (CF-39)**
+
+| ID | Source | Description |
+|---|---|---|
+| E3-1 | CF-39 (Monica) | Generalize the existing implicit visibility (BMC creds private, node count public): introduce a per-attribute `visibility` enum (`admin_only`, `pi_visible`, `member_visible`, `public_within_director`). Apply to `node_configs` columns and to grant/publication fields. |
+| E3-2 | CF-39 (Monica) | Server-side filter at API layer: queries return only attributes the requesting role + relationship (PI of group, member of group, etc.) is allowed to see. |
+| E3-3 | CF-39 (Monica) | Admin UI: `/admin/visibility-policy` lets admin override defaults for any attribute (e.g., "expose grant amount to all members" vs "PI-only"). |
+
+**Workstream E4 — Polish + deferred items pulled forward**
+
+| ID | Source | Description |
+|---|---|---|
+| E4-1 | CF-15 (deferred from D2) | Per-user notification preferences: each user can opt out of categories (membership changes, account events, review notifications). Stored in `user_notification_prefs` (migration `063`). |
+| E4-2 | CF-11 (deferred from D4) | Multi-reviewer annual review workflow: admin can designate review approvers; review cycle results aggregated across approver responses. |
+| E4-3 | new | HTML email templates (alongside text) for D2 templates. Plain-text remains the fallback. |
+| E4-4 | new | `/admin/audit-log` filter by NodeGroup (cross-cuts the existing actor/action/date filters from B3-3). |
+| E4-5 | Jared G-3 (deferred from prior plan) | Hidden SYSTEM section discoverability fix: pin SYSTEM as a top-level expanded section in nav for admin role. |
+| E4-6 | Jared D-1 (deferred) | DHCP pool config in UI (read-only display first; mutation requires runtime reconfig + restart story — keep mutation CLI-only for v1.4). |
+
+**Acceptance criteria for Sprint E:**
+- PI can submit allocation change requests of all 4 types; admin can approve/deny with notes; PI receives email on decision.
+- FOS can be set on NodeGroups; director CSV export includes FOS column; admin can manage the FOS list.
+- Per-attribute visibility enforced at API layer; admin can override defaults.
+- Per-user notification preferences honored; opt-out users do not receive opted-out categories.
+- DHCP pool config visible (read-only) in admin UI.
+- CI green on v1.4.0 tag.
+- `docs/allocation-requests.md` authored by Jared.
+
+**Out of scope for v1.4 (rolls to v2.0+ horizon):**
+- All items in the Sprint Z (v2.0+) horizon list below.
+
+---
+
+### Sprint Z — v2.0+ Horizon (directional, NOT committed)
+
+**Goal:** Multi-tenancy, federated identity, customer-defined reporting metrics, framework escalation. High-level only — no commits, no estimates, gated on customer signal OR technical-scale triggers (per D6 / D8 / D15).
+**Persona served:** Persona 6 (Federated User), enhanced surfaces for all existing personas.
+**Trigger conditions (D1 / D6 / D8 / D15 / D25 — already locked):**
+- First paying design partner with >50 nodes signs LOI (per D15)
 - AND/OR first institutional/regulated customer requests SSO, SOC 2, or multi-tenant scoping
+- AND/OR per D25 customer-pull gate fires for governance items below
 
 **Directional deliverables (write the plan when triggered, not before):**
 
-1. **PI / Group Lead dashboard** (`/portal/group/{id}`) — group-scoped utilization summary. Requires `utilization_events` table or rollup query against `reimages` + `audit_log`. Customer-driven metric set.
-2. **IT Director quarterly summary export** — read-only reporting endpoint, CSV-exportable. Same data backbone as #1.
-3. **OIDC / SAML federation** (D1 re-decision trigger) — adds external IdP support. Keeps local sessions + API keys for sysadmins.
-4. **Multi-tenant data isolation** — schema-wide tenant_id; per-tenant NodeGroup scoping. Major undertaking. Only for federated/external user persona.
-5. **Persona-specific dashboards** — sysadmin operational dashboard distinct from PI utilization dashboard distinct from IT director quarterly view. Three different IAs sharing the same data layer.
-6. **Webui framework migration to a heavier framework (Preact / Vue / Svelte with build step)** — only if Alpine + HTMX (per D23, adopted v1.2) hit a complexity ceiling on a v2.0+ feature. Default v2.0+ stays on the D23 stack.
-7. **CSP headers + inline-handler removal** (E-3) — sequenced after framework decision because CSP migration touches every onclick.
-8. **SIEM export** (D13 re-decision trigger) — JSONL export endpoint for audit log. Gated on a regulated customer.
-9. **Two-tier hot/cold log archive** (D2 re-decision trigger) — gated on customer reporting evicted-log incident.
-10. **Reporting data model for PIs/IT directors** (Monica Q3 — answered C8) — built when first paying customer specifies metrics.
+1. **OIDC / SAML federation** (CF-25, D1 re-decision trigger) — adds external IdP support. Keeps local sessions + API keys for sysadmins.
+2. **FreeIPA HBAC bridge** (CF-22) — allocation membership drives FreeIPA HBAC rules. High cost, customer-pull-gated per D25.
+3. **OpenLDAP project plugin** (CF-24) — automatic posixGroup creation in LDAP for each NodeGroup. Useful in environments without FreeIPA.
+4. **Auto-compute allocation** (CF-29) — automatic NodeGroup creation when new PI is onboarded; auto-assigns partitions. Requires PI onboarding workflow first (have it from C.5).
+5. **Multi-tenant data isolation** — schema-wide tenant_id; per-tenant NodeGroup scoping. Major undertaking. Only for Persona 6 or for hosted-clustr-as-service if that materializes.
+6. **Resource access restriction by group** (CF-40) — restrict which LDAP groups can request allocation to a NodeGroup. Multi-tenancy prerequisite.
+7. **PostgreSQL migration** (CF-38) — gated on SQLite write contention OR multi-tenant requirement (per D6).
+8. **XDMoD integration** (CF-27) — customer-pull-gated per D25; only ships when first customer with XDMoD signs.
+9. **Customer-defined utilization metrics + reporting model** — gated on first paying customer specifying metrics (per D25 + original C8 ruling).
+10. **Webui framework migration to a heavier framework** (Preact / Vue / Svelte with build step) — only if Alpine + HTMX hit complexity ceiling on a v2.0+ feature. Default v2.0+ stays on D23 stack.
+11. **CSP headers + inline-handler removal** (E-3) — sequenced after framework decision because CSP migration touches every onclick.
+12. **SIEM export** (D13 re-decision trigger) — JSONL export endpoint for audit log. Gated on a regulated customer.
+13. **Two-tier hot/cold log archive** (D2 re-decision trigger) — gated on customer reporting evicted-log incident.
+14. **Cloud resource allocation** (CF-30) — out of scope unless clustr expands to hybrid HPC+cloud. Explicit non-goal for v2.0; revisit at v3.0+.
 
-**No estimates. No owners. No deliverables list.** This horizon exists only so that v1.1 and v1.2 decisions don't accidentally close off these doors.
+**Powerhouse alignment (D24 framing):** Sprint Z items 1-9 complete the unified-platform vision from D24. Items 10-13 are infrastructure/operability investments. Item 14 is an explicit defer of cloud scope — clustr stays bare-metal-first through v2.0.
+
+**No estimates. No owners. No deliverables list.** This horizon exists only so that v1.1-v1.4 decisions don't accidentally close off these doors. Per D25, structural primitives (Persona 6 framing, multi-tenant schema design) may be sketched speculatively in design docs, but no implementation work commits without customer pull or technical-scale trigger firing.
 
 ---
 
@@ -489,7 +707,7 @@ Each of these is written once, applied everywhere, and locked into `docs/decisio
 
 ## Traceability Table — Every Finding from Every Review
 
-Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B.5 (v1.1.1, module-split), **C** = Sprint C (v1.2.0, framework + researcher portal), **D** = Sprint D horizon (v2.0+), **DEFER** = explicit defer with rationale, **N/A** = not a webui finding.
+Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B.5 (v1.1.1, module-split), **C** = Sprint C (v1.2.0, framework + researcher portal), **C.5** = Sprint C.5 (v1.2.5, PI governance), **D** = Sprint D (v1.3.0, director + notifications + grants/pubs), **E** = Sprint E (v1.4.0, allocation workflow + visibility), **Z** = Sprint Z horizon (v2.0+, gated), **DEFER** = explicit defer with rationale, **N/A** = not a webui finding.
 
 ### Engineering review (Dinesh, `webui-review-engineering.md`)
 
@@ -524,7 +742,7 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B
 | C-4 group reimage count preview | P2 | C | C3-8 |
 | C-5 DHCP refresh countdown | P3 | DEFER | Cosmetic; reconsider if operators report confusion |
 | C-6 global search / Ctrl+K | P3 | DEFER | Real value at 200+ nodes; revisit if first design partner has large fleet |
-| C-7 Slurm rollback UI | P2 | C | C3-9 (version column); rollback flow itself defers to D when backend supports |
+| C-7 Slurm rollback UI | P2 | C | C3-9 (version column); rollback flow itself defers to Z when backend supports |
 | D-1 session expiry countdown | P2 | C | C3-10 |
 | D-2 node detail dirty-state nav warn | P2 | C | C3-11 |
 | D-3 toast dedup | P3 | C | C3-12 |
@@ -589,31 +807,111 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B
 | Gap 2: Researcher has no surface | High | C | C1-1 through C1-6 |
 | Gap 3: Trust story invisible in UI | High | B | B3-4, B3-5 |
 | Gap 4: Bright Computing user-portal threat | Medium | C | Closed by C1 researcher portal MVP |
-| Gap 5: Multi-tenancy / federated user | Defer | D | Per D6/D15 — gated on customer signal |
+| Gap 5: Multi-tenancy / federated user | Defer | Z | Per D6/D15 — gated on customer signal; in Sprint Z horizon |
 | Q1: Researcher portal vs operator-scoped nav priority | DEFERRED→ANSWERED | C6 ruling | Operator-scoped nav v1.1, researcher portal v1.2 |
 | Q2: LDAP self-service password scope | DEFERRED→ANSWERED | C7 ruling | v1.2 — change own password only, gated on `viewer` role |
-| Q3: Reporting data model for PIs/IT directors | DEFERRED→ANSWERED | C8 ruling | Wait for first paying customer to specify metrics; v2.0+ horizon |
-| Persona 1 missing scheduled deploys UI | Sysadmin gap | DEFER | `scheduled_at` field exists; surfacing is v1.3 polish. Not blocking institutional pitch. |
+| Q3: Reporting data model for PIs/IT directors | DEFERRED→ANSWERED (REVISED 2026-04-27) | C8 ruling + D25 | Structural primitives (PI utilization view, director summary view) ship speculatively in C.5/D per D25. Customer-defined custom metrics still gated to v2.0+. |
+| Persona 1 missing scheduled deploys UI | Sysadmin gap | DEFER | `scheduled_at` field exists; surfacing is v1.3 polish. Not blocking institutional pitch. Revisit in E if room. |
 | Persona 1 missing searchable 200-node list | Sysadmin gap | DEFER | Same as Dinesh C-6; revisit when first ≥100-node design partner appears. |
-| Persona 4 (PI) — group utilization summary | Strategic | D | Gated on customer-defined metrics |
-| Persona 5 (IT Director) — quarterly summary | Strategic | D | Gated on customer-defined metrics |
-| Persona 6 (Federated / external) | Strategic defer | D | Per D1 — OIDC is v1.1+ when customer asks |
+| Persona 4 (PI) — group utilization summary | Strategic | C.5 | Promoted to first-class via ColdFront integration (D25 hybrid rule); ships speculatively in C.5 (C5-3 workstream) |
+| Persona 5 (IT Director) — quarterly summary | Strategic | D | Read-only summary view + CSV export ships in D (D1 workstream); ColdFront integration promoted ahead of customer-pull gate per D25 |
+| Persona 6 (Federated / external) | Strategic defer | Z | Per D1 — OIDC is v2.0+ horizon item, gated on customer signal |
 
-**Persona totals: 5 strategic gaps, 3 deferred questions, 4-6 persona-specific affordances = ~13 findings. B: 4. C: 3. D: 3. DEFER: 3 (with rationale).**
+**Persona totals: 5 strategic gaps, 3 deferred questions, 4-6 persona-specific affordances = ~13 findings. B: 4. C: 3. C.5: 1. D: 2. Z: 2. DEFER: 3 (with rationale).** (Updated 2026-04-27 per ColdFront integration: Persona 4 moved C.5; Persona 5 moved D; Q3 partially answered — primitives now build speculatively per D25.)
 
 ---
 
 ## Summary
 
 - **Total findings across 3 reviews:** ~72 (33 engineering + 26 ops + 13 persona, deduplicating overlap)
+- **Total ColdFront features inventoried (Monica `coldfront-feature-mapping.md`):** 40 (32 actionable + 5 not applicable + 3 conditional)
 - **Sprint A (v1.0.1 hotfix):** 2 findings (the two truly broken-in-prod items)
-- **Sprint B (v1.1.0):** 30 findings (12 engineering + 14 ops + 4 persona)
-- **Sprint B.5 (v1.1.1 module-split, NEW per D21 re-rule):** 8 findings (engineering refactor only — pure foundation work for Sprint C framework adoption)
-- **Sprint C (v1.2.0 framework + researcher portal):** 19 findings (5 engineering + 14 ops + 3 persona, plus Alpine/HTMX adoption per D23)
-- **Sprint D (v2.0+ horizon, NOT committed):** 8 directional themes
-- **DEFERRED with explicit rationale:** ~16 findings (each row above with DEFER includes the why)
+- **Sprint B (v1.1.0):** 30 findings (12 engineering + 14 ops + 4 persona) + ColdFront CF-10 prerequisite (role-aware nav)
+- **Sprint B.5 (v1.1.1 module-split):** 8 findings (engineering refactor only — pure foundation work for Sprint C framework adoption)
+- **Sprint C (v1.2.0 researcher portal + framework):** 19 review findings + 4 ColdFront features (CF-08 partial, CF-10, CF-26, CF-28)
+- **Sprint C.5 (v1.2.5 PI governance, NEW per ColdFront integration):** 3 ColdFront features (CF-02 partial, CF-08 full, CF-09)
+- **Sprint D (v1.3.0 director view + notifications + grants/pubs, NEW):** 5 ColdFront features (CF-11 lite, CF-12, CF-13, CF-14 partial, CF-15, CF-17, CF-18)
+- **Sprint E (v1.4.0 allocation workflow + visibility, NEW):** 4 ColdFront features (CF-16, CF-20, CF-39, plus CF-11 + CF-15 enhancements)
+- **Sprint Z (v2.0+ horizon, NOT committed):** 14 directional themes (was 8; expanded with CF-22, CF-24, CF-25, CF-27, CF-29, CF-30, CF-38, CF-40)
+- **DEFERRED with explicit rationale:** ~16 review findings + 5 ColdFront features marked Skip (CF-30 OpenStack, CF-31 Keycloak search, CF-32 Starfish, CF-34/CF-35 Django-specific, CF-03 strict mandatory expiration)
 
 Nothing is silently dropped.
+
+---
+
+## ColdFront Traceability Table — every CF-XX from `coldfront-feature-mapping.md`
+
+Source: `docs/coldfront-feature-mapping.md` (Monica, commit `2a25fd0`).
+
+Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5** = v1.2.5, **D** = v1.3.0, **E** = v1.4.0, **Z** = v2.0+ horizon (gated), **SKIP** = explicit non-goal with rationale, **PARTIAL-EXISTING** = clustr already covers this in current code.
+
+### Core Platform (CF-01 through CF-20)
+
+| CF-# | Feature | Sprint | Notes |
+|---|---|---|---|
+| CF-01 | Project management | C.5 | Implemented as NodeGroup-as-Project (single primitive per coldfront-feature-mapping.md Risk 2) — PI ownership added in C.5 |
+| CF-02 | Allocation management | C.5 + E | NodeGroup-as-Allocation in C.5; expansion-request workflow in C.5 (lightweight) → E (full CF-20) |
+| CF-03 | Allocation expiration + renewal | SKIP (strict) / Z (optional) | Strict mandatory expiration is wrong for bare-metal HPC (per Monica Bucket 5); optional expiration field can land in Z if a customer asks |
+| CF-04 | Allocation attributes (custom) | Z | Custom attributes are a multi-tenant / extensibility concern — defer to v2.0+ |
+| CF-05 | Resource management | PARTIAL-EXISTING + Z | clustr Nodes + Images + Hardware Profiles already cover compute resource; storage/license/cloud resource types defer to Z |
+| CF-06 | Resource attributes (custom + inherited) | Z | Same as CF-04 — multi-tenant / extensibility, defer to v2.0+ |
+| CF-07 | Linked resources (parent-child) | PARTIAL-EXISTING | Nodes link to NodeGroups already; partition resources implicit via Slurm config |
+| CF-08 | User management | C + C.5 | Researcher role added in C; PI self-service member management in C.5 |
+| CF-09 | PI / Manager delegation | C.5 (PI) / D (manager — if pulled) / Z (full delegation) | PI role is C.5; manager-delegation deferred to D only if customer asks |
+| CF-10 | Self-service user portal | C | Researcher portal MVP at /portal/ |
+| CF-11 | Annual project review workflow | D (lite) + E (multi-reviewer) | Lightweight version in D; multi-reviewer enhancement in E |
+| CF-12 | Grant tracking | D | Grants table + PI CRUD + director read |
+| CF-13 | Publication tracking + DOI search | D | Publications table + Crossref DOI lookup (opt-in for air-gap deployments) |
+| CF-14 | Research output / impact reporting | D | Director view + CSV export — read-only aggregation, no new metric rollups (per D25) |
+| CF-15 | Email notifications | D + E | SMTP scaffolding + LDAP/membership/PI templates in D; per-user prefs + HTML templates in E |
+| CF-16 | Field of Science classification | E | NSF FOS table + per-NodeGroup tag + director aggregation |
+| CF-17 | Read-only center director view | D | `director` role + /portal/director/ |
+| CF-18 | System admin messaging to project users | D | Admin broadcast to NodeGroup members (uses D2 SMTP) |
+| CF-19 | User status tracking | PARTIAL-EXISTING + E | Active/inactive exists in user table; visibility filtering aligned with E3 visibility-policy work |
+| CF-20 | Allocation change requests | C.5 (lite) + E (full) | Lightweight expansion-request in C.5; full multi-type workflow in E |
+
+### Plugin Ecosystem (CF-21 through CF-32)
+
+| CF-# | Plugin | Sprint | Notes |
+|---|---|---|---|
+| CF-21 | Slurm plugin (sacctmgr) | PARTIAL-EXISTING | clustr's Slurm module installs/configures Slurm; sacctmgr-driven account governance is the ColdFront layer — clustr's NodeGroup-driven model is the equivalent abstraction |
+| CF-22 | FreeIPA plugin | Z | High cost + customer-pull gated per D25 |
+| CF-23 | LDAP user search | PARTIAL-EXISTING + C.5 | clustr's LDAP module already has user lookup; C.5 PI member-add uses it for the autocomplete UX |
+| CF-24 | OpenLDAP project plugin | Z | Useful in non-FreeIPA environments; Z item |
+| CF-25 | Mokey/OIDC plugin | Z | OIDC is D1 re-decision trigger; Z item |
+| CF-26 | OnDemand plugin | C | OnDemand portal link via env var (C1-7) |
+| CF-27 | XDMoD plugin | Z | Customer-pull gated per D25 (high cost, not all customers run XDMoD) |
+| CF-28 | iQuota plugin | C | Storage quota display via LDAP attribute mapping (C1-8) |
+| CF-29 | Auto-compute allocation | Z | Requires PI onboarding workflow first (have it from C.5); Z item |
+| CF-30 | OpenStack plugin | SKIP | Out of scope unless clustr expands to hybrid HPC+cloud (Sprint Z item 14 — explicit defer to v3.0+) |
+| CF-31 | Keycloak user search | SKIP | Per Monica Bucket 5 — Keycloak not common in clustr target market; OIDC (Z) covers the use case generically |
+| CF-32 | Starfish plugin | SKIP | Per Monica Bucket 5 — CCR-specific niche tooling |
+
+### Technical / Architectural (CF-33 through CF-40)
+
+| CF-# | Feature | Sprint | Notes |
+|---|---|---|---|
+| CF-33 | REST API | PARTIAL-EXISTING | clustr has full REST API at `/api/v1/`; new endpoints land per sprint as needed (PI/director endpoints in C.5 + D) |
+| CF-34 | Django admin interface | SKIP | Not applicable — clustr is Go, not Django; webui already serves this function |
+| CF-35 | Django signals / event hooks | SKIP | Not applicable — Go module-plugin pattern already implements this |
+| CF-36 | Multiple auth backends | PARTIAL-EXISTING + Z | Sessions + API keys today; OIDC/LDAP-bind defer to Z (per D1) |
+| CF-37 | Custom attribute types | Z | Same as CF-04 — multi-tenant extensibility, Z item |
+| CF-38 | PostgreSQL data store | Z | Per D6 — defer until SQLite write contention or multi-tenant requirement |
+| CF-39 | Allocation visibility controls | E | Per-attribute visibility policy (E3 workstream) |
+| CF-40 | Resource access restriction by group | Z | Multi-tenancy prerequisite; Z item |
+
+### ColdFront Traceability Summary
+
+| Bucket | Count | Verifiable in sprint |
+|---|---|---|
+| Already covered by clustr (PARTIAL-EXISTING) | 7 | CF-05, CF-07, CF-19 partial, CF-21, CF-23, CF-33, CF-36 |
+| Sprint C (v1.2.0) — ColdFront integration adds | 4 | CF-08 partial, CF-10, CF-26, CF-28 |
+| Sprint C.5 (v1.2.5) — NEW PI governance | 4 | CF-01 (via NodeGroup), CF-02 partial, CF-08 full, CF-09 |
+| Sprint D (v1.3.0) — NEW director + notifications + grants/pubs | 7 | CF-11 lite, CF-12, CF-13, CF-14, CF-15, CF-17, CF-18 |
+| Sprint E (v1.4.0) — NEW allocation workflow + visibility | 4 | CF-16, CF-20, CF-39, plus CF-11/CF-15 enhancements |
+| Sprint Z (v2.0+ horizon, gated) | 13 | CF-04, CF-06, CF-22, CF-24, CF-25, CF-27, CF-29, CF-30 (qualified), CF-37, CF-38, CF-40, CF-03 optional, CF-09 manager-delegation |
+| Skip with rationale | 5 | CF-30 (cloud, deferred to v3.0+), CF-31, CF-32, CF-34, CF-35 |
+| **Total** | **40** | (Some CF-#s span multiple buckets; counts above may sum >40) |
 
 ---
 
@@ -627,6 +925,8 @@ Nothing is silently dropped.
 
 Everything else in the plan matters. These three are the ones that, if the next 90 days went sideways and we only got these out, would still leave clustr materially better positioned for institutional adoption than v1.0 is today.
 
+**The longer arc (added 2026-04-27 per ColdFront integration):** The 90-day window above gets us through Sprint A, B, B.5, and into early Sprint C. The full ColdFront-aware roadmap runs through v1.4 (Sprint E, ~2027-01) before reaching the v2.0+ horizon. Per D24 (powerhouse positioning) and D25 (hybrid customer-pull rule), the v1.2 → v1.4 arc speculatively builds the structural primitives (researcher portal, PI governance, director read-only view, grants/publications, allocation workflow) that operationalize the "unified bare-metal-to-governance platform" thesis. Customer-defined custom metrics, OIDC, FreeIPA, multi-tenant, and PostgreSQL all defer to Sprint Z (v2.0+) — gated on customer pull or technical-scale triggers, NOT on revenue or headcount (per founder standing rule). Sprints do not stop; dispatch is automatic.
+
 ---
 
-*End of plan. Sprints A, B, B.5, C are committed. Sprint D is directional. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E are committed. Sprint Z (v2.0+ horizon) is directional. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*

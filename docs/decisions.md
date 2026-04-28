@@ -40,6 +40,9 @@ Reversibility legend:
 | D20 | CLI/UI parity policy | Routine ops (more than once per cluster lifetime) MUST have webui surface. CLI-only acceptable for Day-0 bootstrap and post-disaster recovery only. | costly |
 | D21 | JS framework threshold | Vanilla JS + ES6 modules through v1.2. Re-evaluate framework adoption ONLY when (a) total LOC >5000 across all `pages/*.js` + `app.js`, (b) frontend hire with framework expertise lands, (c) feature requires complex state machines vanilla can't handle, OR (d) CSP enforcement becomes priority. Evaluate Alpine+HTMX first; React/Vue/Svelte only if Alpine/HTMX insufficient. | costly |
 | D22 | Raw config editor pattern | Structured form for the 80% case + "Advanced: edit raw" disclosure + server-side validation on every save (regardless of which surface produced the input). Applies to all current and future config surfaces (slurm.conf, kickstart, network profiles, BMC). | cheap (per-surface) |
+| D23 | JS framework choice | Alpine.js 3 + HTMX 2, vendored under `internal/server/ui/static/vendor/`, no build step. Adopted Sprint C (v1.2.0) on greenfield Researcher portal. Mixing with vanilla supported indefinitely. | costly |
+| D24 | Powerhouse positioning thesis | clustr is the only open-source platform that unifies bare-metal HPC provisioning with allocation governance in a single Go binary. Closes the decade-old gap between node provisioners (xCAT/Warewulf) and allocation managers (ColdFront). Self-hosted, air-gap native, cryptographically verified trust chain from allocation decision to running job. Standing positioning statement; all sprint plans align to this. | one-way (positioning, not code) |
+| D25 | Customer-pull gate (governance features) | NO blanket customer-pull gate on governance features (founder directive: no revenue/headcount gating, sprints don't stop). Hybrid prioritization: build structural primitives (roles, surfaces, conceptual model) speculatively in v1.2-v1.4; defer customer-specific metric definitions, schema-heavy additions, and integrations gated on external systems (XDMoD, FreeIPA) until validated demand. Richard owns the speculative-vs-pulled call per sprint. | cheap |
 
 ---
 
@@ -1000,6 +1003,127 @@ These edits land in the sprint plan in the next pass.
 - Operator complaints about page weight / load time — measure before re-deciding; expect this trigger to never fire.
 
 **Out of scope for this decision:** TypeScript (still no), JSX (still no), bundlers (still no), Tailwind/PostCSS (still no — vanilla CSS in the vendored stylesheet stays). If any of those become desirable, that's a new D-number and a new fight.
+
+---
+
+## D24 — Powerhouse Positioning Thesis (standing statement)
+
+**Date:** 2026-04-27
+**Author:** Richard (synthesizing Monica's `coldfront-feature-mapping.md` Phase 3)
+**Context:** Monica's ColdFront feature mapping (commit `2a25fd0`) articulated a one-paragraph positioning statement after inventorying 40 ColdFront features and assessing clustr's complementary surface. The statement frames clustr as the unified bare-metal-to-governance platform that does not currently exist in open-source HPC. Founder directive on this work was "powerhouse of an application" — Monica's framing operationalizes that directive into a defensible market position.
+
+**Question:** Adopt Monica's positioning statement as a standing reference for all subsequent sprint plans, marketing copy, and architecture decisions?
+
+**Decision:** **Adopted as-is, lightly edited for compactness. This is the standing positioning statement going forward.**
+
+**The positioning statement (locked):**
+
+> The HPC platform market has a decade-old gap: node provisioning tools (xCAT, Warewulf) handle bare metal but ignore governance, while allocation management tools (ColdFront) handle governance but ignore bare metal — leaving every HPC center to maintain a fragile custom bridge between them. clustr closes that gap in a single open-source Go binary that provisions nodes, installs and configures Slurm with a GPG-signed bundle, manages LDAP accounts, gives researchers a self-service status portal, gives PIs a utilization dashboard, and gives IT directors the impact reporting they need to justify compute spend — all self-hosted, all air-gap compatible, all with zero egress and a cryptographically verified trust chain from allocation decision to running job. The window is open because the major incumbents (Bright Computing) are proprietary and expensive, the open-source alternatives (xCAT, Warewulf, ColdFront) are siloed, and no single team has shipped a unified platform.
+
+**The three load-bearing differentiators (locked):**
+1. **Single binary, single data model.** Cluster state and allocation state are the same SQLite database. No separate Django, no PostgreSQL, no worker queue, no separate allocation DB. NodeGroup is the unified primitive (Project + Allocation + Resource collapsed into one entity).
+2. **Signed-bundle trust chain.** Provisioning-to-governance is cryptographically bound end-to-end. PI's allocation maps to a NodeGroup; that group drives Slurm partition config; that config is GPG-signed. ColdFront + xCAT cannot tell this story.
+3. **Air-gap native.** Embedded Slurm repo, static binary distribution, zero outbound, no Python ecosystem. Works in classified environments and research networks without internet routing.
+
+**Three competitive positions (this is how we frame against each in pitches):**
+- **vs. xCAT / Warewulf:** "We do everything they do plus governance — turn an operational tool into a platform department heads can justify to their CFO."
+- **vs. ColdFront:** "We absorb their governance surface; you don't run two systems anymore." Genuine displacement play, not a "we do it better" argument.
+- **vs. Bright Computing:** "80% of Bright's feature surface at 0% of the license cost; open-source, truly self-hosted, no vendor lock-in." The remaining 20% (HA failover, enterprise GPU scheduling) is a future paid-tier upsell — not v1.x scope.
+
+**Why adopted as-is (not edited or deferred):**
+- Monica's analysis is grounded in 40-feature inventory, not slideware.
+- The market gap is real and decade-old — competing claim by anyone else would be checkable and false.
+- The three differentiators are genuinely defensible (single binary, crypto trust chain, air-gap) — none of these are easy to retrofit into an existing competitor's stack.
+- Founder directive ("powerhouse of an application") aligns with the positioning. Deferring would be hedge-for-hedging's-sake.
+
+**What this commits us to (operationally):**
+- All subsequent sprint plans are framed against this positioning. v1.2 researcher portal, v1.2.5 PI governance, v1.3 IT director reporting, v1.4 impact reporting, v2.0 multi-tenant — every sprint is a step toward the unified platform described above.
+- All marketing copy (Show HN, README, docs landing) leads with the gap-closing frame, not "another HPC tool."
+- All competitive positioning conversations (institutional pitches, conference talks) lean on the three differentiators.
+
+**What this does NOT commit us to (be honest about scope):**
+- We do not commit to building all 40 ColdFront features. D25 governs that prioritization.
+- We do not commit to displacing ColdFront in their existing customer base. We commit to being the natural choice for new institutional procurements where the choice is "ColdFront + xCAT vs. clustr."
+- We do not commit to the paid tier roadmap (the "remaining 20% upsell" line) — that's a v3.0+ business model conversation, not a v1.x technical commitment.
+
+**Reversibility:** **one-way for positioning purposes** (you cannot un-say a market position once you've launched on it), **cheap at the code level** (positioning shifts don't force code changes; the code already supports the positioning). The asymmetry is the point: making this call is high-stakes for messaging, low-stakes for engineering.
+
+**Re-decision triggers:**
+- A second open-source project ships a unified provisioning + governance platform before our v1.2 (kills the "no single team has shipped" claim) — re-frame against the new entrant.
+- A paying customer materially redefines what "governance" means (e.g., they want allocation-as-budget rather than allocation-as-physical-resource) — re-frame Risk 4 from coldfront-feature-mapping.md.
+- Bright Computing or another commercial incumbent open-sources their governance layer — major re-eval.
+
+**See:** `docs/coldfront-feature-mapping.md` Phase 3 for the full thesis writeup, competitive positioning details, and the "Why clustr Now" pitch.
+
+---
+
+## D25 — Customer-Pull Gate for Governance Features
+
+**Date:** 2026-04-27
+**Author:** Richard (resolving Monica's Risk 1 from `coldfront-feature-mapping.md`)
+**Context:** Monica flagged in her Phase 5 risk analysis: "every ColdFront-inspired feature in the backlog must have a named customer persona waiting for it before development starts. No speculative governance features." Her concern is that ColdFront's 40-feature surface represents 12-18 months of engineering for a 2-person team if built to ColdFront's depth, and the founder's "powerhouse" directive could absorb all available velocity into governance work that nobody asked for. Founder's standing rule (memory: `feedback_no_headcount_gating.md` + `feedback_continuous_sprints.md`): no revenue or headcount gating; sprints do not stop. These two framings are in genuine tension.
+
+**Question:** Do we adopt Monica's customer-pull gate as a hard constraint on governance feature work, or does the founder's "sprints don't stop" directive override it, or is there a synthesis?
+
+**Decision:** **Hybrid. NO blanket customer-pull gate. Build structural primitives speculatively (roles, surfaces, conceptual model) where the marginal cost is low and the optionality value is high. DEFER specific implementations that have high implementation cost AND require external validation to define correctly. Richard owns the speculative-vs-pulled call per sprint, applying the prioritization rule below.**
+
+**The prioritization rule (locked):**
+
+For every ColdFront-inspired feature considered for any sprint, classify by two axes:
+
+| Axis 1: Implementation Cost | Axis 2: Customer-Definition Risk | Verdict |
+|---|---|---|
+| Low (≤1 sprint) | Low (we know what to build) | **BUILD SPECULATIVELY** in next available sprint |
+| Low (≤1 sprint) | High (customer must define metrics/shape) | **BUILD THE PRIMITIVE SPECULATIVELY**; defer customer-specific shape |
+| High (≥2 sprints) | Low (we know what to build) | **BUILD WHEN SEQUENCED**; sprint plan governs |
+| High (≥2 sprints) | High (customer must define) | **DEFER until first named customer pulls** |
+
+**Concrete v1.2-v1.4 application:**
+- **PI role + RBAC primitive** → low cost, low risk → **build speculatively in v1.2.5**
+- **PI self-service member management** → low cost, low risk (UX is well-understood) → **build speculatively in v1.2.5**
+- **NodeGroup utilization view (read-only aggregation of existing data)** → low cost, low risk → **build speculatively in v1.2.5**
+- **IT Director read-only summary view (existing data, no new metrics)** → low cost, low risk → **build speculatively in v1.3**
+- **Email notifications for LDAP events** → medium cost (SMTP infra), low risk → **build in v1.3 once SMTP scaffolding lands**
+- **Grant tracking (CF-12)** → medium cost (new schema), low risk (well-defined model from ColdFront) → **build speculatively in v1.3**
+- **Publication tracking + DOI search (CF-13)** → medium cost, low risk → **build speculatively in v1.3**
+- **Annual project review workflow (CF-11)** → medium cost, MEDIUM risk (workflow shape varies by institution) → **build minimal version v1.4; full workflow gated on customer pull**
+- **XDMoD integration (CF-27)** → high cost (external system dependency), HIGH risk (only ~half the target market runs XDMoD) → **DEFER until first named customer with XDMoD pulls**
+- **FreeIPA HBAC bridge (CF-22)** → high cost, high risk (FreeIPA shape varies wildly by deployment) → **DEFER until first named customer with FreeIPA pulls**
+- **Custom impact reporting metrics** → low code cost but HIGH definition risk (wrong metrics = throwaway work) → **DEFER until first paying customer specifies first 3 metrics**
+
+**Why hybrid (rejection of both pure positions):**
+
+**Why we reject pure customer-pull gate (Monica's stated framing):**
+- Open-source product with no revenue gate means there are zero paying customers to pull. Customer-pull-only would freeze governance work indefinitely.
+- The structural primitives (roles, surfaces, conceptual NodeGroup-as-allocation framing) have high optionality value and low cost. Building them speculatively pre-positions us for the first institutional conversation; not building them means the first institutional pitch hits a "we'd need to build that" wall.
+- Founder directive is explicit: "if we can do it in house with the team we have we do it. this is opensource so right now there is no revenue loss." Customer-pull gating contradicts this directly.
+
+**Why we reject pure speculative build (founder's literal directive):**
+- Monica's risk is correct: the 40-feature surface IS too large to build to ColdFront's depth speculatively. The two-person agent team plus operator review bandwidth is bounded even though hiring and revenue aren't.
+- Some features (custom metrics, customer-specific workflow shapes, external system integrations) are 100% wasted work if built wrong, and they CANNOT be built right without customer input. These are the genuine "wait for pull" cases.
+- Building everything speculatively risks a v1.5 codebase carrying 30 features of governance code where 5 features get used. The maintenance burden compounds.
+
+**The synthesis:** Speculative build is the default for cheap structural work. Customer-pull is the gate for expensive, customer-shaped work. Richard makes the per-sprint call applying the rule above.
+
+**Standing meta-rule (founder directive baked in):** If Richard is genuinely on the fence, default to BUILD over DEFER. Cost of speculative build is engineering time only (no revenue at risk). Cost of deferral is missing the institutional pitch window. Asymmetry favors building.
+
+**What this means for the sprint plan:**
+- v1.2 (Sprint C): Researcher portal MVP + Alpine/HTMX framework adoption — already locked, unchanged.
+- v1.2.5 (Sprint C.5, NEW): PI role + PI self-service + NodeGroup utilization view — speculative but cheap and high-optionality.
+- v1.3 (Sprint D, NEW): IT Director read-only + email notifications + grants + publications — speculative; structural primitives that ColdFront proves users want.
+- v1.4 (Sprint E, NEW): Impact reporting + annual review (minimal) + allocation change requests + admin messaging — speculative but at the boundary; revisit if v1.3 governance features see no use after 6 months.
+- v2.0+: OIDC, FreeIPA, multi-tenant, PostgreSQL, OpenLDAP project plugin — gated by D1, D6, D15-style external triggers (which are about technical scale, NOT revenue gating).
+
+**Reversibility:** **cheap**. This is a prioritization principle, not a code commitment. Re-deciding the rule re-prioritizes the next sprint, no migration needed.
+
+**Re-decision triggers:**
+- v1.3 ships and 6 months in, no operator (free or paid) is using the governance features → tighten the gate; pause v1.4 scope, divert to provisioning depth or framework polish.
+- A named institutional customer LOIs with a governance feature request that doesn't fit our prioritization → re-shuffle the sprint queue to pull their request forward.
+- Monica revisits the risk and judges the speculative bets are accumulating without payoff → tighten the gate.
+
+**Supersedes:** Implicit "wait for first paying customer" gates from C8 in `webui-sprint-plan.md` and from `coldfront-feature-mapping.md` Phase 5 Risk 1. Both narrowed: the wait-for-customer gate now applies only to customer-definition-risk features (per the table above), not to governance work as a whole.
+
+**See:** `docs/coldfront-feature-mapping.md` Phase 5 for Monica's original risk framing; `docs/webui-sprint-plan.md` Sprints C.5, D, E for the concrete sprint application of this rule.
 
 ---
 
