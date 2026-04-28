@@ -186,7 +186,7 @@ func (m *SMTPMailer) sendSMTP(addr string, to []string, msg []byte) error {
 			return fmt.Errorf("smtp: dial: %w", err)
 		}
 		defer c.Close()
-		if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host}); err != nil { //#nosec G402 -- operator-configured; TLS used
+		if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
 			return fmt.Errorf("smtp: starttls: %w", err)
 		}
 		if auth != nil {
@@ -216,7 +216,7 @@ func (m *SMTPMailer) sendSMTP(addr string, to []string, msg []byte) error {
 }
 
 func (m *SMTPMailer) sendImplicitTLS(addr string, to []string, msg []byte) error {
-	tlsCfg := &tls.Config{ServerName: m.cfg.Host} //#nosec G402 -- operator-configured host
+	tlsCfg := &tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}
 	conn, err := tls.Dial("tcp", addr, tlsCfg)
 	if err != nil {
 		return fmt.Errorf("smtp: tls dial: %w", err)
