@@ -157,6 +157,28 @@ func (db *DB) DisableUser(ctx context.Context, id string) error {
 	return requireOneRow(res, "users", id)
 }
 
+// EnableUser clears disabled_at, allowing the user to log in again.
+func (db *DB) EnableUser(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE users SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("db: enable user: %w", err)
+	}
+	return requireOneRow(res, "users", id)
+}
+
+// HardDeleteUser permanently removes a user record from the database.
+// Callers must apply the last-admin guard before calling this.
+func (db *DB) HardDeleteUser(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("db: hard delete user: %w", err)
+	}
+	return requireOneRow(res, "users", id)
+}
+
 // SetUserPassword updates the bcrypt hash for a user and optionally clears the
 // must_change_password flag. The caller supplies the already-hashed value.
 func (db *DB) SetUserPassword(ctx context.Context, id, hash string, clearForceChange bool) error {

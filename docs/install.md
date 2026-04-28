@@ -35,7 +35,12 @@ Kernel modules required for ISO build pipeline (loaded automatically if installe
 ls /dev/kvm || echo "WARN: /dev/kvm not found — ISO builds will be slow (no hardware virtualisation)"
 
 # Loop device module (for rootfs extraction)
-modprobe loop
+# Most modern kernels load loop automatically. Only run this manually if you see
+# "loop: module not found" or "losetup: /dev/loop0: No such file or directory"
+# in ISO build logs. On many cloud VMs this requires CAP_SYS_MODULE and may fail
+# silently or with "Operation not permitted" — that is safe to ignore if loop
+# devices are already available.
+modprobe loop 2>/dev/null || true
 ```
 
 ### Software dependencies
@@ -71,6 +76,8 @@ dnf install -y sqlite rsync curl qemu-kvm qemu-img genisoimage dracut \
 ## 2. Network Setup
 
 clustr requires a **dedicated provisioning interface** on the same L2 segment as the nodes you intend to image. This interface runs the built-in DHCP and TFTP server that delivers the PXE boot environment.
+
+> **Single-NIC hosts:** If your server has only one network interface (common in cloud VMs and some homelab setups), you cannot run a separate provisioning interface. The recommended workaround is to use the host's single NIC for both management and provisioning by assigning two IP addresses — one for management access, one as the DHCP server endpoint — and restricting the DHCP range to a subnet that does not overlap with your management network. This configuration is functional but means the built-in DHCP server answers on the same NIC as your management traffic. Ensure your DHCP range does not conflict with other DHCP servers on the network. For fully air-gapped single-NIC lab setups, configure `CLUSTR_PXE_INTERFACE` to your single NIC name and set `CLUSTR_PXE_RANGE` to a range within a dedicated subnet (e.g. `10.99.0.100-10.99.0.200`) that you statically route to the NIC. **Two NICs are strongly recommended for production deployments.**
 
 ### Management IP and operator access
 
@@ -307,35 +314,42 @@ chmod 600 /etc/clustr/clustr.env
 
 ### 3.4 docker-compose.yml
 
+Download the Compose file from the repo (recommended — always current):
+
 ```bash
-# Using the compose file from the repo:
 curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/docker-compose.yml \
   -o /etc/clustr/docker-compose.yml
-
-# Or write it manually:
-cat > /etc/clustr/docker-compose.yml <<'EOF'
-version: "3.9"
-services:
-  clustr:
-    image: ghcr.io/sqoia-dev/clustr-server:latest
-    restart: unless-stopped
-    network_mode: host      # Required: DHCP/TFTP must bind on the host network
-    env_file:
-      - /etc/clustr/clustr.env
-      - /etc/clustr/secrets.env
-    volumes:
-      - /var/lib/clustr:/var/lib/clustr
-      - /dev/kvm:/dev/kvm   # Optional: hardware-accelerated ISO builds
-    cap_add:
-      - NET_BIND_SERVICE    # Bind ports 67 (DHCP) and 69 (TFTP)
-      - SYS_ADMIN           # Required for systemd-nspawn chroot sessions
-      - SYS_CHROOT
-      - MKNOD
-    devices:
-      - /dev/kvm:/dev/kvm
-      - /dev/net/tun:/dev/net/tun
-EOF
 ```
+
+> **No internet access?** Alternatively write the file manually (pinned to this doc version — may lag the repo):
+> ```bash
+> cat > /etc/clustr/docker-compose.yml <<'EOF'
+> version: "3.9"
+> services:
+>   clustr:
+>     image: ghcr.io/sqoia-dev/clustr-server:latest
+>     restart: unless-stopped
+>     network_mode: host      # Required: DHCP/TFTP must bind on the host network
+>     env_file:
+>       - /etc/clustr/clustr.env
+>       - /etc/clustr/secrets.env
+>     volumes:
+>       - /var/lib/clustr:/var/lib/clustr
+>       - /dev/kvm:/dev/kvm   # Optional: hardware-accelerated ISO builds
+>     cap_add:
+>       - NET_BIND_SERVICE    # Bind ports 67 (DHCP) and 69 (TFTP)
+>       - SYS_ADMIN           # Required for systemd-nspawn chroot sessions
+>       - SYS_CHROOT
+>       - MKNOD
+>     devices:
+>       - /dev/kvm:/dev/kvm
+>       - /dev/net/tun:/dev/net/tun
+> EOF
+> ```
+>
+> **Why `network_mode: host`?** The built-in DHCP server must bind to UDP port 67 on the provisioning interface — Docker's bridged networking prevents this. `host` mode gives the container direct access to host network interfaces. This is intentional and required; it is not a security shortcut.
+
+
 
 ### 3.5 Start
 
@@ -601,9 +615,11 @@ You will be immediately redirected to a password-change screen. Set a strong pas
 Once logged in, do not use the `clustr` account for day-to-day work:
 
 1. Navigate to **Settings > Users**.
-2. Click **Create user**, set a strong password, and assign role **Admin**.
+2. Click **+ Create User**, set a strong password (8+ chars, at least one uppercase letter, one lowercase letter, one digit), and assign role **Admin**.
 3. Log out and log back in with the new personal credentials.
 4. Disable or demote the `clustr` bootstrap account.
+
+**Adding cluster users (researchers / operators):** To provision HPC users who submit Slurm jobs, see [docs/user-management.md](user-management.md). For a researcher's perspective on getting started after accounts are provisioned, see [docs/first-job.md](first-job.md).
 
 ### Capturing the bootstrap API key
 
@@ -731,7 +747,14 @@ Then in the web UI navigate to **Images > Build from ISO**:
 
 ### Step 3: Register a test node
 
-Replace `aa:bb:cc:dd:ee:ff` with the MAC address of your test node's provisioning NIC:
+Replace `aa:bb:cc:dd:ee:ff` with the MAC address of your test node's provisioning NIC.
+
+> **Finding the MAC address:**
+> - **Proxmox VM:** Open the VM in the Proxmox web UI → Hardware tab → Network Device row. The MAC address is shown next to the bridge name (e.g. `virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1`). Alternatively: `qm config <vmid> | grep net0`
+> - **Bare-metal server:** Run `ip link show` on the node, or check the IPMI/BMC web interface.
+> - **PXE auto-register:** PXE-boot the node with auto-provisioning enabled (`POST /api/v1/config/auto-registration`) to have clustr register it automatically when it first boots — no MAC lookup required.
+>
+> **Proxmox boot order:** VM must be set to **disk first, then network** (`scsi0;net0` — see Proxmox VM Options → Boot Order). clustr's reimage trigger flips the boot order to PXE-first via the Proxmox API for the deploy run and restores it afterward. A disk-first default is required for the node to boot normally after deployment. See Step 5 for more detail.
 
 ```bash
 curl -s -X POST http://10.99.0.1:8080/api/v1/nodes \

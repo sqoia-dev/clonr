@@ -536,6 +536,7 @@ batch*       up   infinite      1   idle slurm-compute
 
 For full Slurm operator docs, see [docs/slurm-module.md](docs/slurm-module.md).
 For user provisioning, see [docs/user-management.md](docs/user-management.md).
+For the researcher's perspective — getting an account and submitting the first job — see [docs/first-job.md](docs/first-job.md).
 
 ---
 
@@ -1367,6 +1368,8 @@ For a production install — covering Docker Compose (primary), bare-metal / Ans
 - **Upgrade procedure:** [docs/upgrade.md](docs/upgrade.md) — how migrations work, which env vars invalidate sessions on rotation, rollback procedure
 - **TLS setup:** [docs/tls-provisioning.md](docs/tls-provisioning.md) — Caddy TLS termination, initramfs HTTPS configuration, air-gapped guidance
 - **RBAC:** [docs/rbac.md](docs/rbac.md) — role model, group-scoped operators, bootstrap admin flow
+- **User management:** [docs/user-management.md](docs/user-management.md) — local sysaccounts, LDAP, and external IdP
+- **Researcher getting started:** [docs/first-job.md](docs/first-job.md) — account setup to first submitted Slurm job
 
 ---
 

@@ -332,7 +332,59 @@ func (h *UsersHandler) HandleResetPassword(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// HandleDelete handles DELETE /api/v1/admin/users/{id} — soft delete.
+// HandleEnable handles POST /api/v1/admin/users/{id}/enable — re-enables a disabled user.
+func (h *UsersHandler) HandleEnable(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeValidationError(w, "user id is required")
+		return
+	}
+
+	user, err := h.DB.GetUser(r.Context(), id)
+	if errors.Is(err, db.ErrUserNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found", "code": "not_found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+	if !user.IsDisabled() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "user is already enabled", "code": "already_enabled"})
+		return
+	}
+
+	if err := h.DB.EnableUser(r.Context(), id); err != nil {
+		if errors.Is(err, db.ErrUserNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found", "code": "not_found"})
+			return
+		}
+		log.Error().Err(err).Msg("users: enable failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error", "code": "internal_error"})
+		return
+	}
+
+	updated, err := h.DB.GetUser(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"id": id})
+		return
+	}
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionUserUpdate, "user", id,
+			r.RemoteAddr,
+			map[string]string{"disabled": "true"},
+			map[string]string{"disabled": "false"},
+		)
+	}
+	writeJSON(w, http.StatusOK, toUserResponse(updated))
+}
+
+// HandleDelete handles DELETE /api/v1/admin/users/{id} — hard delete.
+// The user cannot be the last active admin (last-admin guard applies).
 func (h *UsersHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -350,13 +402,13 @@ func (h *UsersHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if user.Role == db.UserRoleAdmin {
+	if user.Role == db.UserRoleAdmin && !user.IsDisabled() {
 		if err := h.enforceLastAdminGuard(r, w); err != nil {
 			return
 		}
 	}
 
-	if err := h.DB.DisableUser(r.Context(), id); err != nil {
+	if err := h.DB.HardDeleteUser(r.Context(), id); err != nil {
 		if errors.Is(err, db.ErrUserNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found", "code": "not_found"})
 			return

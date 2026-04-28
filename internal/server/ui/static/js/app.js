@@ -3826,13 +3826,21 @@ const Pages = {
     // Power actions and deploy actions shown only to admin/operator; readonly sees View only.
     // S5-5: Adds "Re-deploy last image" and "Retry" quick-action buttons.
     // B2-1: "Configure and Deploy" CTA for Registered nodes (has hardware_profile, no base_image_id).
+    // K-FN-2: "Register first" hint for nodes that haven't been registered yet.
     _nodeRowActions(n) {
         const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
         // B2-1: show "Configure and Deploy" CTA for nodes registered but not yet assigned an image.
         const isRegistered = n.hardware_profile && !n.base_image_id;
+        // K-FN-2: a node visible in the list but without hardware_profile has not completed registration
+        // (it appeared via DHCP or was manually added). Surface a tooltip so the admin knows what to do next.
+        const notRegistered = canMutate && !n.hardware_profile;
         const configureBtn = (canMutate && isRegistered)
             ? `<button class="btn btn-primary btn-sm" data-on-click="Pages._configureAndDeployModal('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Assign an image and deploy this node">Configure &amp; Deploy</button>`
-            : '';
+            : notRegistered
+                ? `<span style="font-size:12px;color:var(--text-secondary);display:inline-flex;align-items:center;gap:4px;" title="Complete node registration before deploying: provide MAC address, hostname, and hardware profile via the node detail page.">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px;flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    Register first</span>`
+                : '';
         // S5-5: "Retry" appears for nodes in Failed state.
         const isFailed = n._deployStatus === 'error' || (n.last_deploy_failed_at && (!n.last_deploy_succeeded_at || n.last_deploy_failed_at > n.last_deploy_succeeded_at));
         const retryBtn = (canMutate && isFailed)
@@ -4199,6 +4207,7 @@ const Pages = {
                             <div class="form-group">
                                 <label>Primary MAC *</label>
                                 <input type="text" name="primary_mac" value="${isEdit ? escHtml(node.primary_mac) : ''}" placeholder="aa:bb:cc:dd:ee:ff" required>
+                                ${!isEdit ? `<div class="form-hint">On Proxmox: visible in the VM's Hardware tab (Network Device row). On bare-metal: run <code>ip link</code> on the node or check IPMI/BMC. Alternatively, PXE-boot the node with <code>clustr deploy --auto</code> to let it self-register.</div>` : ''}
                             </div>
                             <div class="form-group">
                                 <label>Base Image</label>
@@ -9962,21 +9971,33 @@ reboot</pre>
             const groupMap = Object.fromEntries(groups.map(g => [g.id, g]));
 
             const adminCount = users.filter(u => u.role === 'admin' && !u.disabled).length;
+            // Detect fresh install: only one user, never logged in → show bootstrap callout.
+            const showBootstrap = users.length === 1 && users[0].role === 'admin' && !users[0].last_login_at;
+
+            const bootstrapBanner = showBootstrap ? `
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:18px;height:18px;flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <div>
+                        <div style="font-weight:600;color:#1e40af;font-size:13px;">Bootstrap admin account active</div>
+                        <div style="color:#1e3a8a;font-size:12px;margin-top:2px;">This is your initial admin account. Create additional users for daily operations, then consider rotating the bootstrap admin password. Researchers and operators need their own accounts — create them here.</div>
+                    </div>
+                </div>` : '';
 
             const rows = users.length === 0
-                ? `<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:24px">No users</td></tr>`
+                ? `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:24px">No users</td></tr>`
                 : users.map(u => {
-                    const roleBadge = u.role === 'admin'
-                        ? `<span class="badge badge-info">admin</span>`
+                    const roleBadgeStyle = u.role === 'admin'
+                        ? 'badge-info'
                         : u.role === 'operator'
-                            ? `<span class="badge badge-neutral">operator</span>`
-                            : `<span class="badge" style="background:var(--bg-secondary);color:var(--text-secondary)">readonly</span>`;
+                            ? 'badge-neutral'
+                            : '';
+                    const roleBadge = `<span class="badge ${roleBadgeStyle}" style="${!roleBadgeStyle ? 'background:var(--bg-secondary);color:var(--text-secondary)' : ''}">${escHtml(u.role)}</span>`;
                     const disabledBadge = u.disabled ? `<span class="badge" style="background:#fee2e2;color:#dc2626;margin-left:4px">disabled</span>` : '';
                     const lastLogin = u.last_login_at ? fmtRelative(u.last_login_at) : '<span class="text-dim">never</span>';
-                    const mustChange = u.must_change_password ? '<span title="Must change password" style="color:var(--warning)">&#9888;</span>' : '';
-                    // Disable delete/disable for the last admin.
+                    const mustChange = u.must_change_password ? ' <span title="Must change password on next login" style="color:var(--warning)">&#9888;</span>' : '';
+                    // Last-active-admin guard — cannot disable/delete the only remaining enabled admin.
                     const isLastAdmin = u.role === 'admin' && !u.disabled && adminCount <= 1;
-                    const actionDisabled = isLastAdmin ? 'disabled title="Cannot disable/delete the last admin"' : '';
+                    const guardTitle = 'title="Cannot disable or delete the last active admin"';
 
                     // Group memberships column — only meaningful for operators.
                     let groupCell = '<span class="text-dim">—</span>';
@@ -9992,28 +10013,40 @@ reboot</pre>
                         groupCell = `<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">${chips.length ? chips.join('') : '<span class="text-dim">none</span>'}${editBtn}</div>`;
                     }
 
-                    return `<tr>
-                        <td>${escHtml(u.username)} ${mustChange}</td>
+                    const resetPwBtn = `<button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsResetUserPassword('${u.id}')">Reset PW</button>`;
+                    const roleBtn   = `<button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsChangeUserRole('${u.id}','${escHtml(u.role)}')">Role</button>`;
+                    const disableBtn = !u.disabled
+                        ? `<button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsDisableUser('${u.id}','${escHtml(u.username)}')" ${isLastAdmin ? `disabled ${guardTitle}` : ''}>Disable</button>`
+                        : `<button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsEnableUser('${u.id}','${escHtml(u.username)}')">Enable</button>`;
+                    const deleteBtn = `<button class="btn btn-danger btn-sm" data-on-click="Pages._settingsDeleteUser('${u.id}','${escHtml(u.username)}')" ${isLastAdmin ? `disabled ${guardTitle}` : ''}>Delete</button>`;
+
+                    return `<tr ${u.disabled ? 'style="opacity:0.6"' : ''}>
+                        <td>${escHtml(u.username)}${mustChange}</td>
                         <td>${roleBadge}${disabledBadge}</td>
                         <td class="text-sm text-secondary">${fmtDate(u.created_at)}</td>
                         <td class="text-sm text-secondary">${lastLogin}</td>
                         <td>${groupCell}</td>
                         <td>
                             <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                                <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsResetUserPassword('${u.id}')">Reset PW</button>
-                                <button class="btn btn-secondary btn-sm" data-on-click="Pages._settingsChangeUserRole('${u.id}','${u.role}')">Role</button>
-                                <button class="btn btn-danger btn-sm" data-on-click="Pages._settingsDisableUser('${u.id}','${escHtml(u.username)}')" ${!u.disabled ? actionDisabled : 'disabled title="Already disabled"'}>${u.disabled ? 'Disabled' : 'Disable'}</button>
+                                ${resetPwBtn}
+                                ${roleBtn}
+                                ${disableBtn}
+                                ${deleteBtn}
                             </div>
                         </td>
                     </tr>`;
                 }).join('');
 
             return `
+                ${bootstrapBanner}
                 <div class="card">
                     <div class="card-header">
-                        <h2 class="card-title">Users</h2>
+                        <h2 class="card-title">System Users</h2>
                         <button class="btn btn-primary btn-sm" data-on-click="Pages._settingsCreateUserModal()">+ Create User</button>
                     </div>
+                    <p style="padding:0 20px 12px;margin:0;font-size:13px;color:var(--text-secondary);">
+                        These are the accounts that log in to the clustr web UI. They are separate from POSIX cluster accounts (managed under <a href="#/system/accounts" style="color:var(--accent)">System &rsaquo; Accounts</a>).
+                    </p>
                     <table class="table">
                         <thead>
                             <tr>
@@ -10207,49 +10240,57 @@ reboot</pre>
     _settingsCreateUserModal() {
         const modal = document.createElement('div');
         modal.id = 'create-user-modal';
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;';
+        modal.className = 'modal-overlay';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
         modal.innerHTML = `
-            <div class="card" style="width:480px;max-width:95vw;">
-                <div class="card-header">
-                    <h2 class="card-title">Create User</h2>
-                    <button class="btn btn-ghost btn-sm" data-on-click="document.getElementById('create-user-modal').remove()">×</button>
+            <div class="modal" style="max-width:500px" aria-labelledby="cum-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="cum-title">Create User</span>
+                    <button class="modal-close" aria-label="Close" data-on-click="document.getElementById('create-user-modal').remove()">&#215;</button>
                 </div>
-                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
                     <label class="form-label">Username
-                        <input id="cum-username" class="form-input" type="text" placeholder="alice" style="margin-top:4px;">
+                        <input id="cum-username" class="form-input" type="text" placeholder="alice" autocomplete="off" style="margin-top:4px;">
+                        <span class="form-hint">Lowercase letters, digits, hyphens. Used to log in.</span>
                     </label>
-                    <label class="form-label">Password (min 8 chars)
-                        <input id="cum-password" class="form-input" type="password" style="margin-top:4px;">
+                    <label class="form-label">Password
+                        <input id="cum-password" class="form-input" type="password" autocomplete="new-password" style="margin-top:4px;">
+                        <span class="form-hint">Min 8 chars, at least one uppercase letter, one lowercase letter, and one digit.</span>
                     </label>
                     <label class="form-label">Role
                         <select id="cum-role" class="form-input" style="margin-top:4px;">
-                            <option value="admin">admin — full access</option>
-                            <option value="operator" selected>operator — nodes/deploys, no user management</option>
-                            <option value="readonly">readonly — read-only access</option>
+                            <option value="admin">admin — full access, user management</option>
+                            <option value="operator" selected>operator — nodes and deploys, no user management</option>
+                            <option value="readonly">readonly — read-only across the entire UI</option>
                         </select>
+                        <span class="form-hint">Researchers and cluster end-users log in to the Researcher Portal — they do not need a clustr admin account.</span>
                     </label>
-                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                        <button class="btn btn-secondary" data-on-click="document.getElementById('create-user-modal').remove()">Cancel</button>
-                        <button class="btn btn-primary" data-on-click="Pages._settingsCreateUserSubmit()">Create</button>
-                    </div>
+                    <div id="cum-error" style="color:var(--error);font-size:13px;display:none;"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" data-on-click="document.getElementById('create-user-modal').remove()">Cancel</button>
+                    <button class="btn btn-primary" data-on-click="Pages._settingsCreateUserSubmit()">Create User</button>
                 </div>
             </div>`;
         document.body.appendChild(modal);
+        modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+        trapModalFocus(modal, () => modal.remove());
+        document.getElementById('cum-username').focus();
     },
 
     async _settingsCreateUserSubmit() {
         const username = document.getElementById('cum-username').value.trim();
         const password = document.getElementById('cum-password').value;
         const role     = document.getElementById('cum-role').value;
+        const errEl    = document.getElementById('cum-error');
 
-        if (!username || !password) {
-            App.toast('Username and password are required', 'error');
-            return;
-        }
-        if (password.length < 8) {
-            App.toast('Password must be at least 8 characters', 'error');
-            return;
-        }
+        const showErr = msg => { errEl.textContent = msg; errEl.style.display = ''; };
+        errEl.style.display = 'none';
+
+        if (!username) { showErr('Username is required.'); return; }
+        if (!password) { showErr('Password is required.'); return; }
+        if (password.length < 8) { showErr('Password must be at least 8 characters.'); return; }
 
         try {
             await API.users.create({ username, password, role });
@@ -10257,7 +10298,7 @@ reboot</pre>
             App.toast('User created', 'success');
             Pages._settingsRender('users');
         } catch (err) {
-            App.toast('Create failed: ' + err.message, 'error');
+            showErr('Create failed: ' + err.message);
         }
     },
 
@@ -10356,7 +10397,7 @@ reboot</pre>
     async _settingsDisableUser(id, username) {
         Pages.showConfirmModal({
             title: 'Disable User',
-            message: `Disable user <strong>${escHtml(username)}</strong>? They will not be able to log in.`,
+            message: `Disable user <strong>${escHtml(username)}</strong>? They will not be able to log in until re-enabled.`,
             confirmText: 'Disable',
             danger: true,
             onConfirm: async () => {
@@ -10366,6 +10407,42 @@ reboot</pre>
                     Pages._settingsRender('users');
                 } catch (err) {
                     App.toast('Disable failed: ' + err.message, 'error');
+                }
+            },
+        });
+    },
+
+    async _settingsEnableUser(id, username) {
+        Pages.showConfirmModal({
+            title: 'Re-enable User',
+            message: `Re-enable user <strong>${escHtml(username)}</strong>? They will be able to log in again.`,
+            confirmText: 'Enable',
+            danger: false,
+            onConfirm: async () => {
+                try {
+                    await API.users.enable(id);
+                    App.toast('User enabled', 'success');
+                    Pages._settingsRender('users');
+                } catch (err) {
+                    App.toast('Enable failed: ' + err.message, 'error');
+                }
+            },
+        });
+    },
+
+    async _settingsDeleteUser(id, username) {
+        Pages.showConfirmModal({
+            title: 'Delete User',
+            message: `Permanently delete user <strong>${escHtml(username)}</strong>? This cannot be undone. Their audit log entries are preserved.`,
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.users.deleteUser(id);
+                    App.toast(`User ${username} deleted`, 'success');
+                    Pages._settingsRender('users');
+                } catch (err) {
+                    App.toast('Delete failed: ' + err.message, 'error');
                 }
             },
         });

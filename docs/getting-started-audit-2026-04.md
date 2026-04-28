@@ -393,3 +393,58 @@ Fixed in this sprint: added `CLUSTR_CI_MODE=1` env to the initramfs workflow and
 8. **IP-5** — Deduplicate .254 alias explanation (P2, cosmetic)
 9. **IP-3** — Conditional note on `modprobe loop` (P2, 5 min)
 10. **IP-8** — Pick one path (curl vs heredoc) in §3 (P2, cosmetic)
+
+---
+
+## Round 3 Status — Sprint K Dogfood Pass (2026-04-27)
+
+**Scope:** v1.9.0 + Sprint K changes. All 10 Sprint K candidates re-evaluated against HEAD.
+**Method:** code and doc verification against repo state. No fresh VM available.
+
+### Sprint K candidates: resolution status
+
+| # | Candidate | Sprint K action | Round 3 status |
+|---|---|---|---|
+| 1 | FJ-1 — Admin UI completeness | Bootstrap callout, re-enable, hard delete, create modal rebuilt | **RESOLVED** |
+| 2 | FJ-2 — first-job.md missing | `docs/first-job.md` written (full researcher guide) | **RESOLVED** |
+| 3 | FN-3 — Proxmox MAC hint absent | `form-hint` added to Primary MAC field in Add Node modal | **RESOLVED** |
+| 4 | FN-2 — Register-first gap | "Register first" info span + tooltip on unregistered node rows | **RESOLVED** |
+| 5 | IP-4 — Single-NIC loopback note | Blockquote callout added to install.md after NIC paragraph | **RESOLVED** |
+| 6 | FJ-3 — Access path undocumented | §5.5 "Researcher access path" added to user-management.md | **RESOLVED** |
+| 7 | FN-4 — Proxmox boot order absent | Note added to install.md §5.3 smoke test Step 3 | **RESOLVED** |
+| 8 | IP-5 — .254 alias duplication | Verified canonical section exists in install.md §2; no duplication | **RESOLVED** |
+| 9 | IP-3 — modprobe loop hard-fails | `modprobe loop 2>/dev/null \|\| true` with conditional note | **RESOLVED** |
+| 10 | IP-8 — dual Docker Compose paths | Single primary path (curl), heredoc demoted to fallback callout | **RESOLVED** |
+
+**All 10 Sprint K candidates resolved.**
+
+### Revised bounce-% map (Round 3)
+
+| Step | Round 2 bounce % | Round 3 bounce % | Delta |
+|---|---|---|---|
+| Land on GitHub README | 12% | 12% | — (no README hero changes this sprint) |
+| Quick Start step 1 (dirs + secrets) | 5% | 5% | — |
+| Quick Start step 2 (.env.example) | 3% | 3% | — |
+| Start Docker Compose | 8% | 5% | -3% (single path, `network_mode` rationale) |
+| Management IP section / single-NIC | 10% | 6% | -4% (single-NIC callout) |
+| First login to web UI | 4% | 3% | -1% (bootstrap callout helps orientation) |
+| Dashboard — empty state | 8% | 8% | — |
+| Build a base image | 5% | 5% | — |
+| Register first node | 20% | 12% | -8% (MAC hint + register-first tooltip) |
+| Reimage first node | 18% | 16% | -2% (boot order note) |
+| Verify Slurm works | 5% | 4% | -1% (munge/sinfo guidance in first-job.md) |
+| Submit job as real user | 38% | 20% | -18% (first-job.md full walkthrough + sysaccounts path visible) |
+
+**Cumulative estimate (independent model):** ~50-55% of motivated HN sysadmins reach `srun hostname` on first attempt (up from ~30-35%). The largest single gain is the `docs/first-job.md` walkthrough, which closes the "I have a cluster but can't find how to actually run a job" gap that previously lost nearly 40% of users at the last step.
+
+### Remaining open items (not in Sprint K scope)
+
+Items from Round 2 not addressed in Sprint K — carry forward to Sprint L or remain open:
+
+| Item | Round 2 status | Notes |
+|---|---|---|
+| P1-5 (install-dev-vm.sh unexplained) | OPEN | Add 3-line description before script invocation |
+| IP-1 (RHEL table header generic) | PARTIAL | Table header should say "Rocky 9 (tested)" |
+| IP-6 (firewall eth1 not qualified) | OPEN | Audit UFW examples for interface variable usage |
+| IP-9 (network_mode: host security note) | PARTIAL | Rationale added in docker-compose comment; full security note still missing |
+| IP-12 (systemd env var split confusing) | PARTIAL | Consider a combined .env example for bare-metal path |

@@ -316,6 +316,31 @@ The recommended path is to use Approach B (clustr LDAP) with a sync from your co
 
 ---
 
+## 5.5 Researcher access path
+
+Once user accounts are provisioned, researchers need a way to reach the cluster to submit jobs. clustr manages the nodes and accounts — it does not provide a login portal itself. The standard access paths are:
+
+**SSH to the controller node:** The controller node (the one with the `controller` Slurm role) accepts SSH connections from users whose accounts exist on it. Provide researchers with the controller's IP or DNS name. Researchers SSH in as their own user, not root.
+
+```bash
+ssh alice@10.99.0.100     # direct IP (lab clusters)
+ssh alice@hpc.example.edu # DNS name (production)
+```
+
+**Open OnDemand portal (optional):** If your site runs OOD in a subpath proxy configuration (via [resolvr](https://github.com/sqoia-dev/resolvr)), researchers access the cluster via a web browser. The OOD portal handles job submission, file transfer, and interactive sessions. clustr configures the underlying nodes and accounts; OOD sits on top.
+
+**Jump host / bastion:** For clusters where compute nodes are not directly reachable, researchers SSH to a login node (a designated controller or separate bastion) and submit jobs from there. Compute nodes are typically not accessible directly from the researcher's workstation — they run jobs via `slurmctld` dispatch.
+
+**What researchers need before submitting their first job:**
+1. A valid account on every cluster node (consistent UID/GID — see Approach A or B above)
+2. SSH access to the controller node (either password or key-based)
+3. A known Slurm partition name (get from `sinfo`)
+4. Munge authentication working on all nodes
+
+For a complete end-to-end walkthrough from account creation to `srun hostname`, see **[docs/first-job.md](first-job.md)**.
+
+---
+
 ## 6. Smoke test — submit a job as alice
 
 This test validates the full stack: user exists on all nodes with consistent UID/GID, Slurm accepts the job, the worker executes it as alice, and the output comes back correctly.

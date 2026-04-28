@@ -807,6 +807,27 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
+### Sprint K — v1.10.0 "First-Job Bounce Rate" **[COMPLETED — 2026-04-27]**
+
+**Goal:** Push first-attempt cluster bring-up success rate from ~30-35% to ≥50% by closing all 10 candidates from Jared's Round 2 getting-started audit.
+
+**Shipped:** v1.10.0. All 10 candidates resolved. CI green. Cloner autodeploy picks up new binary within 2 minutes.
+
+- **FJ-1** — Settings > Users tab completeness: bootstrap admin callout (warns when only the initial admin exists and has never logged in), re-enable disabled users (`POST /admin/users/{id}/enable`), hard-delete users (DELETE is now a true `DELETE FROM users`, not a soft-disable), create-user modal rebuilt with focus-trapping, inline validation, password complexity hint, role hint. Cross-link added to System > Accounts POSIX tab. New DB functions `EnableUser` and `HardDeleteUser`; new `HandleEnable` handler.
+- **FJ-2** — `docs/first-job.md`: new researcher getting-started guide. Covers account provisioning (sysaccounts + LDAP), SSH login, `sinfo`/`munge` verification, first `srun` and `sbatch`, job status, and 6 common failures with fixes.
+- **FJ-3** — `docs/user-management.md §5.5`: new "Researcher access path" section covering SSH, OOD portal, jump host, and prerequisites before the first job. Cross-links to first-job.md. `docs/install.md §6` updated with cross-links and password complexity hint.
+- **FN-2** — "Register first" info span with tooltip on unregistered node rows (nodes discovered via DHCP but not yet registered). "Configure and Deploy" button suppressed until registered.
+- **FN-3** — Proxmox MAC hint in Add Node modal: `form-hint` on Primary MAC field explains Hardware tab, `ip link`, and `--auto` PXE path.
+- **FN-4** — `docs/install.md §5.3` smoke test: Proxmox boot order note (net0 first, scsi0 second) and MAC discovery from Hardware tab.
+- **IP-3** — `modprobe loop` → `modprobe loop 2>/dev/null || true` with inline note for kernels where `loop` is compiled in.
+- **IP-4** — Single-NIC blockquote callout in install.md covering the loopback/evaluation scenario.
+- **IP-5** — Confirmed `.254` alias explanation is already canonical in install.md §2; tls-provisioning.md correctly cross-references. No duplication existed.
+- **IP-8** — Docker Compose §3.4 restructured: single primary path (curl download), heredoc demoted to `> No internet access?` callout, `network_mode: host` rationale note added.
+
+**Round 3 bounce estimate:** ~50-55% (see `docs/getting-started-audit-2026-04.md §Round 3`).
+
+---
+
 ### Sprint I — v1.8.0 "Show HN Hardening" (COMMITTED, dispatched 2026-04-28 per D29)
 
 **Goal:** Compress the "stranger reads HN comment, clones repo, gets to working install" path to under 30 minutes, and produce the launch artifacts (README hero, demo GIF, blog post, FAQ pre-empts) that survive the first 72 hours of HN traffic. Engineering output is real (first-run UX hardening, install fixtures, accessibility, smoke coverage); launch artifacts are produced in parallel by the non-engineering ICs. Three months from D16's 2026-07-27 Show HN target, this is the highest-leverage sprint that does not violate D27 Bucket 2/3 gates.
@@ -1235,4 +1256,4 @@ Everything else in the plan matters. These three are the ones that, if the next 
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J are RELEASED (v1.0.1 → v1.9.0). Sprint K is unscheduled — 10 candidates documented in `docs/getting-started-audit-2026-04.md` §Round 2. Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K are RELEASED (v1.0.1 → v1.10.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*

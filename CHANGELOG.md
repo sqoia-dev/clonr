@@ -5,6 +5,107 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.10.0] — 2026-04-27 (Sprint K — First-Job Bounce Rate)
+
+**Sprint K — First-Job Bounce Rate Reduction (10 candidates from Round 2 audit)**
+
+All changes are additive and non-breaking per D28. No schema changes. New API
+route `/admin/users/{id}/enable` is additive (new endpoint, no removals).
+
+### Added (FJ-1 — Settings > Users tab completeness)
+
+- **Re-enable disabled users** — "Enable" button appears per row when a user is
+  disabled. Calls new `POST /admin/users/{id}/enable` endpoint. Last-admin guard
+  prevents re-disabling the only active admin.
+- **Hard-delete users** — "Delete" button calls `DELETE /admin/users/{id}` which
+  now performs a true `DELETE FROM users` (previously was a soft-disable). Audit
+  log rows are preserved. Last-admin guard fires on enabled admins only.
+- **Bootstrap admin callout** — when only one admin exists and has never logged
+  in, a blue info banner prompts the operator to create a personal admin account
+  before handing the cluster to users. Cross-links to user-management.md.
+- **Create User modal improvements** — rebuilt as a proper focus-trapped modal
+  overlay with inline validation errors (no toast), password complexity hint
+  ("min 8 chars, upper + lower + digit"), and role hint noting researcher portal
+  vs. this admin UI.
+- **Cross-link to System Accounts** — explanatory paragraph added below the
+  Settings > Users header linking to the System > Accounts tab for POSIX cluster
+  accounts (the two are frequently confused).
+- **`internal/db/users.go`** — new `EnableUser` and `HardDeleteUser` functions.
+- **`internal/server/handlers/users.go`** — new `HandleEnable` handler with
+  last-admin guard and audit logging; `HandleDelete` rewritten to call
+  `HardDeleteUser`.
+- **`internal/server/server.go`** — route `POST /admin/users/{id}/enable` wired
+  under the `requireRole("admin")` middleware group.
+- **`internal/server/ui/static/js/api.js`** — `API.users.enable(id)`,
+  `API.users.deleteUser(id)` added; `API.users.disable(id)` corrected to PUT
+  with `{disabled: true}` instead of DELETE.
+
+### Added (FJ-2 — Researcher getting-started guide)
+
+- **`docs/first-job.md`** — new document for researchers covering: account
+  provisioning (sysaccounts Approach A + LDAP Approach B), SSH login, access
+  verification (`id`, `sinfo`, `munge -n | unmunge`), first interactive job
+  (`srun`) and batch job (`sbatch`), job status commands (`squeue`, `sacct`,
+  `scontrol`), and 6 common failures with causes and fixes (slurmd unreachable,
+  invalid partition, Slurm accounting, PD queue, SSH refused, missing home dir).
+- **`README.md`** — cross-link to `docs/first-job.md` added in docs reference
+  list alongside user-management.md.
+
+### Added (FJ-3 — Researcher access path in user-management.md)
+
+- **`docs/user-management.md` §5.5 Researcher access path** — new section
+  explaining how researchers reach the cluster after their account is created:
+  SSH to controller, Open OnDemand portal (if configured), jump host pattern,
+  prerequisites checklist before first job, and cross-link to first-job.md.
+- **`docs/install.md` §6** — Step 2 "Create a personal admin account" now
+  cross-links to user-management.md and first-job.md; password complexity hint
+  added inline.
+
+### Added (FN-2 — "Register first" tooltip on unregistered nodes)
+
+- Node rows in the Nodes tab now show a "Register first" info span with tooltip
+  text when a node has been discovered via DHCP but not yet registered (no
+  `hardware_profile`). The "Configure and Deploy" button is suppressed until
+  registration is complete. Prevents the common confusion of trying to deploy an
+  unregistered node.
+
+### Added (FN-3 — Proxmox MAC hint in Add Node modal)
+
+- The Primary MAC field in the Add/Register Node modal now has a `form-hint`
+  explaining where to find the MAC address: Proxmox Hardware tab (Network Device
+  column), `ip link show` on the node, or leave blank to use `--auto` for PXE
+  boot matching.
+
+### Fixed (FN-4 — Proxmox boot order cross-reference in install.md)
+
+- **`docs/install.md` §5.3 smoke test Step 3** — added note: Proxmox VMs must
+  have boot order set to `net0` (PXE) first, `scsi0` (disk) second. Explains how
+  to find the MAC address from the Proxmox Hardware tab to use during node
+  registration.
+
+### Fixed (IP-3 — Conditional modprobe loop)
+
+- **`docs/install.md`** — `modprobe loop` changed to
+  `modprobe loop 2>/dev/null || true` with an inline note that the `loop` module
+  is compiled in on some kernels (e.g., Ubuntu 22.04 HWE) and `modprobe` will
+  return an error in that case; the `|| true` prevents the script from aborting.
+
+### Fixed (IP-4 — Single-NIC loopback note)
+
+- **`docs/install.md`** — added a blockquote callout after the "dedicated
+  provisioning interface" paragraph explaining that a single-NIC setup works for
+  evaluation: assign the `.254` alias to the same interface, expect no DHCP
+  isolation between admin and provisioning traffic.
+
+### Fixed (IP-8 — Single Docker Compose path)
+
+- **`docs/install.md` §3.4** — restructured to present one canonical Docker
+  Compose path: `curl -fsSL` to download `docker-compose.yml`. The heredoc is
+  moved into a `> **No internet access?**` callout so it is clearly a fallback,
+  not an alternative flow. Added `network_mode: host` rationale note.
+
+---
+
 ## [v1.9.0] — 2026-04-28 (Sprint J — Show HN Final Polish)
 
 **Sprint J — Show HN Final Polish (J1–J5)**
