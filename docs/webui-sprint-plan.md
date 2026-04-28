@@ -244,10 +244,20 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 
 ---
 
-### Sprint B.5 — v1.1.1 "Module Split Refactor" (NEW — added 2026-04-27 per D21 re-rule)
+### Sprint B.5 — v1.1.1 "Framework Adoption Pilot + Module Split" (NEW — added 2026-04-27 per D21 re-rule) **[FRAMEWORK PILOT COMPLETE — 2026-04-27; module split pending]**
 
 **Tag target:** `v1.1.1` 2 weeks after v1.1.0 ships (target window: 2026-06-15 to 2026-06-29).
-**Goal:** Decompose monolithic `app.js` (9,388 LOC) and `slurm.js` (2,033 LOC) into ES6 module-per-page structure. Pure mechanical refactor. ZERO new features. ZERO framework adoption (that's Sprint C). This sprint exists solely to give Sprint C clean seams to layer Alpine + HTMX onto.
+**Goal:** Two parts: (A) Vendor Alpine.js + HTMX, establish the pattern on a pilot page (DHCP Leases), document conventions for Sprint C. (B) Decompose monolithic `app.js` (9,388 LOC) and `slurm.js` (2,033 LOC) into ES6 module-per-page structure. Pure mechanical refactor. Part A is complete. Part B is pending.
+
+**Part A — Alpine+HTMX adoption pilot — COMPLETED 2026-04-27:**
+- Alpine.js 3.15.11 + HTMX 2.0.9 vendored under `internal/server/ui/static/vendor/`
+- SHA256 verified against two CDNs; manifest at `VENDOR-CHECKSUMS.txt`
+- DHCP Leases page (`#/network/allocations`) migrated to Alpine: `dhcpLeasesComponent()` factory, `x-data`/`x-init`/`x-show`/`x-for`/`x-text`/`:class`/`@click` demonstrated
+- Migration target rationale: small read-only list, no mutation surface, low blast radius, representative of the most common pattern
+- Pattern playbook: `docs/frontend-patterns.md`
+- D23 updated with vendored versions + checksums
+
+**Goal (original):** Decompose monolithic `app.js` (9,388 LOC) and `slurm.js` (2,033 LOC) into ES6 module-per-page structure. Pure mechanical refactor. ZERO new features. This sprint exists solely to give Sprint C clean seams to layer Alpine + HTMX onto.
 **Personas served:** None directly. This is a foundation sprint. Persona benefit lands in Sprint C+.
 **Owner:** Dinesh (engineering lead, sole author), Gilfoyle (CI verification, autodeploy), Richard (PR review on module-boundary decisions).
 **Estimate:** 2 weeks engineering. No external dependencies. No design questions to resolve.

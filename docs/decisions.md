@@ -988,8 +988,31 @@ These edits land in the sprint plan in the next pass.
 - **Alpine is CSP-friendly via Alpine 3's CSP build** (`alpinejs-csp`) — when E-3 (CSP enforcement) trigger fires, we swap the vendored file for the CSP build. Mitigates D21 trigger 4 risk.
 - **HTMX has explicit support for server-side rendering of partials** — we already render JSON, switching specific endpoints to also render HTML partials is additive (new endpoint or content-negotiation, not a rewrite).
 
+**Sprint B.5 update (2026-04-27 — pilot complete):**
+
+Status: **in-progress — pilot page migrated, pattern documented**.
+
+Vendored versions:
+- Alpine.js **3.15.11** — `internal/server/ui/static/vendor/alpinejs/alpine-3.15.11.min.js`
+  - SHA256: `beeba63d08956f64fa060f6b6a29c87a341bf069fb96c9459c222c6fd42e58ae`
+  - Verified against jsdelivr + unpkg on 2026-04-27
+- HTMX **2.0.9** — `internal/server/ui/static/vendor/htmx/htmx-2.0.9.min.js`
+  - SHA256: `57d9191515339922bd1356d7b2d80b1ee3b29f1b3a2c65a078bb8b2e8fd9ae5f`
+  - Verified against jsdelivr + unpkg on 2026-04-27
+
+Integrity manifest: `internal/server/ui/static/vendor/VENDOR-CHECKSUMS.txt`
+
+Pilot migration: **DHCP Leases page** (`#/network/allocations`) — chosen because it is
+a small, clean, read-only list with no mutation buttons (low blast radius) and representative
+of the most common pattern (fetch JSON → render table). `Pages.dhcpLeases()` now renders an
+Alpine `x-data` component; the vanilla string-building pattern is fully replaced.
+
+Pattern documentation: `docs/frontend-patterns.md` — the Sprint C playbook.
+
 **Concrete v1.2 deliverables (reflected in webui-sprint-plan.md updates):**
-- Vendor Alpine 3 + HTMX 2 in C2 alongside module-split.
+- [DONE in B.5] Vendor Alpine 3.15.11 + HTMX 2.0.9.
+- [DONE in B.5] Pilot migration: DHCP Leases page to Alpine.
+- [DONE in B.5] Pattern documentation in `docs/frontend-patterns.md`.
 - Researcher portal `/portal/` (C1 workstream) built with Alpine for reactive state.
 - Audit log page (already shipped vanilla in v1.1) rewritten to HTMX for filter/paginate UX.
 - Anomaly card (already shipped vanilla in v1.1) rewritten to HTMX for periodic refresh.

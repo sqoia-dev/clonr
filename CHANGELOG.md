@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased — v1.1.1] — Sprint B.5 Alpine+HTMX adoption
+
+**Sprint B.5 — Framework adoption pilot**
+
+### Added
+
+- **Alpine.js 3.15.11 + HTMX 2.0.9 vendored** — both libraries are embedded
+  in the server binary via Go `embed.FS`. Served from `/ui/vendor/`. No CDN,
+  no build step, no npm. Integrity manifest at
+  `internal/server/ui/static/vendor/VENDOR-CHECKSUMS.txt` (SHA256 verified
+  against two independent CDNs). Decision reference: D23.
+
+- **DHCP Leases page migrated to Alpine.js** — `#/network/allocations` is the
+  pilot surface for the Alpine+HTMX framework adoption (D23). The vanilla
+  string-building render is replaced with a declarative `x-data` component
+  (`dhcpLeasesComponent()`). Functional parity: same data, same columns, same
+  auto-refresh cadence. Demonstrates: `x-data` / `x-init`, `x-show`, `x-for`
+  with `:key`, `x-text`, `:href`, `:class`, `@click`, factory function pattern.
+
+- **Frontend patterns playbook** — `docs/frontend-patterns.md` documents the
+  Alpine+HTMX conventions, when to use each tool, coexistence with vanilla,
+  common gotchas (CSP, Alpine init order, `x-for` in `<template>`), and two
+  annotated examples. Sprint C uses this as its migration ramp.
+
+### Changed
+
+- `internal/server/ui/static/index.html` — two `<script>` tags added before
+  `app.js` for Alpine and HTMX. Vanilla pages are unaffected.
+
+---
+
 ## [v1.1.0] — 2026-04-27
 
 **Sprint B — Trustworthy Admin UI**

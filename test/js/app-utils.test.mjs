@@ -305,3 +305,118 @@ describe('_phaseLabel', () => {
         }
     });
 });
+
+// ─── Alpine component helpers (Sprint B.5 — dhcpLeasesComponent) ─────────────
+// These functions are inlined from the dhcpLeasesComponent() factory in app.js.
+// If the factory implementation changes, update these copies accordingly.
+
+function dhcpLeasesStateBadgeClass(state) {
+    const map = {
+        'deployed_verified':     'badge badge-deployed',
+        'deploy_verify_timeout': 'badge badge-error',
+        'deployed_preboot':      'badge badge-warning',
+        'failed':                'badge badge-error',
+        'reimage_pending':       'badge badge-info',
+        'configured':            'badge badge-info',
+        'registered':            'badge badge-warning',
+    };
+    return map[state] || 'badge badge-neutral';
+}
+
+function dhcpLeasesStateBadgeLabel(state) {
+    const map = {
+        'deployed_verified':     'Verified',
+        'deploy_verify_timeout': 'Verify Timeout',
+        'deployed_preboot':      'Unverified',
+        'failed':                'Failed',
+        'reimage_pending':       'Reimaging',
+        'configured':            'Configured',
+        'registered':            'Registered',
+    };
+    return map[state] || (state || 'Unknown');
+}
+
+describe('dhcpLeasesComponent — stateBadgeClass', () => {
+    test('deployed_verified → badge-deployed', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('deployed_verified'), 'badge badge-deployed');
+    });
+
+    test('failed → badge-error', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('failed'), 'badge badge-error');
+    });
+
+    test('deploy_verify_timeout → badge-error', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('deploy_verify_timeout'), 'badge badge-error');
+    });
+
+    test('deployed_preboot → badge-warning', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('deployed_preboot'), 'badge badge-warning');
+    });
+
+    test('registered → badge-warning', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('registered'), 'badge badge-warning');
+    });
+
+    test('reimage_pending → badge-info', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('reimage_pending'), 'badge badge-info');
+    });
+
+    test('configured → badge-info', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('configured'), 'badge badge-info');
+    });
+
+    test('unknown state → badge-neutral (safe fallback)', () => {
+        assert.equal(dhcpLeasesStateBadgeClass('some_unknown_state'), 'badge badge-neutral');
+        assert.equal(dhcpLeasesStateBadgeClass(''), 'badge badge-neutral');
+        assert.equal(dhcpLeasesStateBadgeClass(undefined), 'badge badge-neutral');
+        assert.equal(dhcpLeasesStateBadgeClass(null), 'badge badge-neutral');
+    });
+
+    test('all mapped states produce a non-empty class string', () => {
+        const states = [
+            'deployed_verified', 'deploy_verify_timeout', 'deployed_preboot',
+            'failed', 'reimage_pending', 'configured', 'registered',
+        ];
+        for (const s of states) {
+            const cls = dhcpLeasesStateBadgeClass(s);
+            assert.ok(cls && cls.startsWith('badge'), `state ${s} should produce a badge class, got ${cls}`);
+        }
+    });
+});
+
+describe('dhcpLeasesComponent — stateBadgeLabel', () => {
+    test('deployed_verified → Verified', () => {
+        assert.equal(dhcpLeasesStateBadgeLabel('deployed_verified'), 'Verified');
+    });
+
+    test('failed → Failed', () => {
+        assert.equal(dhcpLeasesStateBadgeLabel('failed'), 'Failed');
+    });
+
+    test('deploy_verify_timeout → Verify Timeout', () => {
+        assert.equal(dhcpLeasesStateBadgeLabel('deploy_verify_timeout'), 'Verify Timeout');
+    });
+
+    test('unknown state → returns the raw state string', () => {
+        assert.equal(dhcpLeasesStateBadgeLabel('some_future_state'), 'some_future_state');
+    });
+
+    test('null/empty state → Unknown', () => {
+        assert.equal(dhcpLeasesStateBadgeLabel(''), 'Unknown');
+        assert.equal(dhcpLeasesStateBadgeLabel(null), 'Unknown');
+        assert.equal(dhcpLeasesStateBadgeLabel(undefined), 'Unknown');
+    });
+
+    test('label + class are in sync — every mapped state has both a class and a label', () => {
+        const states = [
+            'deployed_verified', 'deploy_verify_timeout', 'deployed_preboot',
+            'failed', 'reimage_pending', 'configured', 'registered',
+        ];
+        for (const s of states) {
+            const cls   = dhcpLeasesStateBadgeClass(s);
+            const label = dhcpLeasesStateBadgeLabel(s);
+            assert.ok(cls !== 'badge badge-neutral', `${s} should have a specific class`);
+            assert.ok(label !== s, `${s} should have a human-readable label, not the raw state`);
+        }
+    });
+});

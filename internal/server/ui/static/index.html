@@ -256,6 +256,15 @@
 <script src="/ui/js/sysaccounts.js"></script>
 <script src="/ui/js/network.js"></script>
 <script src="/ui/js/slurm.js"></script>
+<!-- Alpine.js 3.15.11 — vendored, no CDN.
+     Loaded as a regular (non-defer) script so Alpine is available on `window`
+     when app.js executes and when page components mount on DOMContentLoaded.
+     Alpine auto-initialises on DOMContentLoaded; our vanilla code does the same. -->
+<script src="/ui/vendor/alpinejs/alpine-3.15.11.min.js"></script>
+<!-- HTMX 2.0.9 — vendored, no CDN.
+     Used for server-driven partial HTML swaps (audit log, anomaly card, etc.).
+     Load before app.js so hx-* attributes are processed at component mount time. -->
+<script src="/ui/vendor/htmx/htmx-2.0.9.min.js"></script>
 <script src="/ui/js/app.js"></script>
 </body>
 </html>

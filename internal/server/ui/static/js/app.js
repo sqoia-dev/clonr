@@ -362,6 +362,8 @@ function nodeBadge(node) {
 // dhcpStateBadge maps a node deploy_state string (as returned by the DHCP
 // leases endpoint) to a coloured badge. Mirrors the labels from nodeBadge
 // but takes a plain string rather than a full node object.
+// Retained for any vanilla callers; the Alpine component uses stateBadgeClass/
+// stateBadgeLabel instead (see dhcpLeasesComponent below).
 function dhcpStateBadge(state) {
     switch (state) {
         case 'deployed_verified':        return `<span class="badge badge-deployed">Verified</span>`;
@@ -373,6 +375,96 @@ function dhcpStateBadge(state) {
         case 'registered':               return `<span class="badge badge-warning">Registered</span>`;
         default:                         return `<span class="badge badge-neutral">${escHtml(state || 'Unknown')}</span>`;
     }
+}
+
+// ─── Alpine.js component: DHCP Leases page (Sprint B.5 pilot) ────────────
+//
+// dhcpLeasesComponent() is the Alpine data factory for the DHCP Allocations
+// page. It is called via x-data="dhcpLeasesComponent()" in the HTML rendered
+// by Pages.dhcpLeases(). Alpine looks this up on window automatically.
+//
+// State shape:
+//   loading  — true while the API call is in-flight (shows spinner)
+//   error    — non-null string when the fetch fails (shows alert)
+//   leases   — array of DHCPLease objects from API.dhcp.leases().leases
+//   count    — total count from the API response
+//
+// Methods:
+//   init()            — called by Alpine's x-init; kicks off the first fetch
+//   refresh()         — manual refresh (Refresh button @click)
+//   stateBadgeClass() — maps deploy_state → CSS class string for :class binding
+//   stateBadgeLabel() — maps deploy_state → human label for x-text binding
+//   fmtRelative()     — re-exposes the global helper inside Alpine scope
+//
+// Alpine notes:
+//   - x-text and attribute bindings (:href, :title) are safe by default —
+//     Alpine never calls innerHTML. No manual escaping needed.
+//   - x-show uses display:none; elements are NOT removed from the DOM.
+//     This is intentional — it avoids re-rendering the table on refresh.
+//   - x-for uses :key="lease.mac" so Alpine diffs only changed rows.
+function dhcpLeasesComponent() {
+    return {
+        loading: true,
+        error:   null,
+        leases:  [],
+        count:   0,
+
+        // init() is the Alpine lifecycle hook called after x-data is mounted.
+        // Kick off the first data fetch immediately.
+        async init() {
+            await this.refresh();
+        },
+
+        async refresh() {
+            this.loading = true;
+            this.error   = null;
+            try {
+                const data  = await API.dhcp.leases();
+                this.leases = (data && Array.isArray(data.leases)) ? data.leases : [];
+                this.count  = (data && data.count != null) ? data.count : this.leases.length;
+            } catch (err) {
+                this.error = 'Failed to load DHCP allocations: ' + err.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        // stateBadgeClass returns the CSS class string for a deploy_state value.
+        // Used via :class="stateBadgeClass(lease.deploy_state)" in the template.
+        stateBadgeClass(state) {
+            const map = {
+                'deployed_verified':     'badge badge-deployed',
+                'deploy_verify_timeout': 'badge badge-error',
+                'deployed_preboot':      'badge badge-warning',
+                'failed':                'badge badge-error',
+                'reimage_pending':       'badge badge-info',
+                'configured':            'badge badge-info',
+                'registered':            'badge badge-warning',
+            };
+            return map[state] || 'badge badge-neutral';
+        },
+
+        // stateBadgeLabel returns the human-readable label for a deploy_state.
+        // Used via x-text="stateBadgeLabel(lease.deploy_state)" in the template.
+        stateBadgeLabel(state) {
+            const map = {
+                'deployed_verified':     'Verified',
+                'deploy_verify_timeout': 'Verify Timeout',
+                'deployed_preboot':      'Unverified',
+                'failed':                'Failed',
+                'reimage_pending':       'Reimaging',
+                'configured':            'Configured',
+                'registered':            'Registered',
+            };
+            return map[state] || (state || 'Unknown');
+        },
+
+        // fmtRelative re-exposes the global helper so Alpine templates can call
+        // it as fmtRelative(ts) inside expressions without breaking scope.
+        fmtRelative(ts) {
+            return fmtRelative(ts);
+        },
+    };
 }
 
 function fmtBytes(bytes) {
@@ -9910,105 +10002,144 @@ reboot</pre>
         Pages._auditLogRender({ actor, action, since: toRFC(since), until: toRFC(until), offset: 0 });
     },
 
-    // ─── DHCP Allocations ─────────────────────────────────────────────────
+    // ─── DHCP Allocations (Alpine.js pilot — Sprint B.5) ──────────────────
+    //
+    // This is the first production surface using Alpine.js (D23). The vanilla
+    // string-building pattern is replaced with a declarative x-data component.
+    //
+    // Why Alpine here (not HTMX):
+    //   - The data is already JSON from API.dhcp.leases(); no server-rendered
+    //     HTML partial is needed. Alpine's x-for is ideal for JSON → table rows.
+    //   - HTMX shines when the server returns partial HTML. That pattern is used
+    //     on the audit log and anomaly card (Sprint C). Here we stay in Alpine.
+    //
+    // Alpine conventions used:
+    //   x-data   — component state + methods scoped to the root div
+    //   x-show   — conditional visibility (loading / error / empty / filled)
+    //   x-for    — iterate leases array into <tr> rows (keyed by lease.mac)
+    //   x-text   — safe interpolation (auto-escapes; no manual escHtml needed)
+    //   :href    — safe attribute binding
+    //   :title   — safe attribute binding
+    //   x-on:click (shorthand @click) — event binding on the Refresh button
+    //
+    // The App.setAutoRefresh wrapper is retained so the router's navigation
+    // cleanup (clearInterval on hash change) keeps working unchanged.
 
-    async dhcpLeases() {
-        App.render(loading('Loading DHCP allocations…'));
-
-        let data;
-        try {
-            data = await API.dhcp.leases();
-        } catch (err) {
-            App.render(alertBox('Failed to load DHCP allocations: ' + err.message));
-            return;
-        }
-
-        const leases = (data && Array.isArray(data.leases)) ? data.leases : [];
-        const count  = (data && data.count != null) ? data.count : leases.length;
-
-        const tableRows = leases.length === 0 ? '' : leases.map(l => {
-            const lastSeen = l.last_seen_at
-                ? `<span title="${escHtml(l.last_seen_at)}">${fmtRelative(l.last_seen_at)}</span>`
-                : '<span style="color:var(--text-secondary)">—</span>';
-
-            const ip = l.ip
-                ? `<code style="font-family:var(--font-mono);font-size:12px;">${escHtml(l.ip)}</code>`
-                : '<span style="color:var(--text-secondary)">—</span>';
-
-            const mac = `<code style="font-family:var(--font-mono);font-size:12px;">${escHtml(l.mac)}</code>`;
-
-            // Deep-link to node detail if we have a node_id.
-            const hostname = l.node_id
-                ? `<a href="#/nodes/${escHtml(l.node_id)}" style="color:var(--accent);text-decoration:none;">${escHtml(l.hostname)}</a>`
-                : escHtml(l.hostname);
-
-            const role = l.role
-                ? `<span class="badge badge-neutral badge-sm">${escHtml(l.role)}</span>`
-                : '<span style="color:var(--text-secondary)">—</span>';
-
-            const stateBadge = dhcpStateBadge(l.deploy_state);
-
-            return `<tr>
-                <td>${hostname}</td>
-                <td>${mac}</td>
-                <td>${ip}</td>
-                <td>${role}</td>
-                <td>${stateBadge}</td>
-                <td>${lastSeen}</td>
-            </tr>`;
-        }).join('');
-
-        const tableBody = leases.length === 0
-            ? `<tr><td colspan="6">
-                <div class="empty-state" style="padding:40px">
-                    <div class="empty-state-icon">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="40" height="40">
-                            <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-                            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
-                        </svg>
-                    </div>
-                    <div class="empty-state-title">No DHCP allocations yet</div>
-                    <div class="empty-state-text">Nodes appear here once they PXE-boot and register with the server. The management network layout will be visible once nodes are online.</div>
-                </div>
-              </td></tr>`
-            : tableRows;
-
+    dhcpLeases() {
+        // Render the Alpine root — a single div with x-data. Alpine picks it up
+        // on the next microtask tick because it watches for DOM mutations.
+        // The `init()` method is called automatically by Alpine after mounting.
         App.render(`
-            <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-                <div>
-                    <h1 class="page-title">DHCP Allocations</h1>
-                    <p class="page-subtitle" style="color:var(--text-secondary);margin:4px 0 0;">
-                        MAC→IP mappings from the management network — ${count} node${count === 1 ? '' : 's'}
-                    </p>
+            <div x-data="dhcpLeasesComponent()" x-init="init()">
+
+                <!-- Loading state -->
+                <div x-show="loading" class="loading">
+                    <div class="spinner"></div>Loading DHCP allocations&hellip;
                 </div>
-                <button class="btn btn-secondary btn-sm" onclick="Pages.dhcpLeases()" title="Refresh">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="14" height="14" style="margin-right:4px;">
-                        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
-                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                    </svg>
-                    Refresh
-                </button>
-            </div>
-            <div class="card">
-                <div class="table-wrapper" style="overflow-x:auto;">
-                    <table class="table" style="width:100%;">
-                        <thead>
-                            <tr>
-                                <th>Hostname</th>
-                                <th>MAC</th>
-                                <th>IP</th>
-                                <th>Role</th>
-                                <th>State</th>
-                                <th>Last Seen</th>
-                            </tr>
-                        </thead>
-                        <tbody>${tableBody}</tbody>
-                    </table>
-                </div>
-            </div>
+
+                <!-- Error state -->
+                <div x-show="!loading && error" class="alert alert-error" role="alert" x-text="error"></div>
+
+                <!-- Loaded state -->
+                <div x-show="!loading && !error">
+
+                    <!-- Page header -->
+                    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                        <div>
+                            <h1 class="page-title">DHCP Allocations</h1>
+                            <p class="page-subtitle" style="color:var(--text-secondary);margin:4px 0 0;">
+                                MAC&rarr;IP mappings from the management network &mdash;
+                                <span x-text="count + ' node' + (count === 1 ? '' : 's')"></span>
+                            </p>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" @click="refresh()" title="Refresh">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="14" height="14" style="margin-right:4px;">
+                                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+
+                    <!-- Empty state -->
+                    <div x-show="leases.length === 0" class="card">
+                        <div class="empty-state" style="padding:40px">
+                            <div class="empty-state-icon">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="40" height="40">
+                                    <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
+                                </svg>
+                            </div>
+                            <div class="empty-state-title">No DHCP allocations yet</div>
+                            <div class="empty-state-text">Nodes appear here once they PXE-boot and register with the server. The management network layout will be visible once nodes are online.</div>
+                        </div>
+                    </div>
+
+                    <!-- Lease table -->
+                    <div x-show="leases.length > 0" class="card">
+                        <div class="table-wrapper" style="overflow-x:auto;">
+                            <table class="table" style="width:100%;">
+                                <thead>
+                                    <tr>
+                                        <th>Hostname</th>
+                                        <th>MAC</th>
+                                        <th>IP</th>
+                                        <th>Role</th>
+                                        <th>State</th>
+                                        <th>Last Seen</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- x-for iterates the leases array reactively.
+                                         :key is Alpine's hint for efficient DOM diffing.
+                                         x-text auto-escapes — no manual escHtml needed. -->
+                                    <template x-for="lease in leases" :key="lease.mac">
+                                        <tr>
+                                            <!-- Hostname: deep-link when node_id is present -->
+                                            <td>
+                                                <a x-show="lease.node_id"
+                                                   :href="'#/nodes/' + lease.node_id"
+                                                   style="color:var(--accent);text-decoration:none;"
+                                                   x-text="lease.hostname"></a>
+                                                <span x-show="!lease.node_id" x-text="lease.hostname"></span>
+                                            </td>
+                                            <!-- MAC: monospace code -->
+                                            <td><code style="font-family:var(--font-mono);font-size:12px;" x-text="lease.mac"></code></td>
+                                            <!-- IP: monospace code or dash -->
+                                            <td>
+                                                <code x-show="lease.ip" style="font-family:var(--font-mono);font-size:12px;" x-text="lease.ip"></code>
+                                                <span x-show="!lease.ip" style="color:var(--text-secondary)">&#8212;</span>
+                                            </td>
+                                            <!-- Role badge or dash -->
+                                            <td>
+                                                <span x-show="lease.role" class="badge badge-neutral badge-sm" x-text="lease.role"></span>
+                                                <span x-show="!lease.role" style="color:var(--text-secondary)">&#8212;</span>
+                                            </td>
+                                            <!-- Deploy state badge — class bound to stateBadgeClass() -->
+                                            <td>
+                                                <span :class="stateBadgeClass(lease.deploy_state)"
+                                                      x-text="stateBadgeLabel(lease.deploy_state)"></span>
+                                            </td>
+                                            <!-- Last seen: relative time with full ISO as tooltip -->
+                                            <td>
+                                                <span x-show="lease.last_seen_at"
+                                                      :title="lease.last_seen_at"
+                                                      x-text="fmtRelative(lease.last_seen_at)"></span>
+                                                <span x-show="!lease.last_seen_at" style="color:var(--text-secondary)">&#8212;</span>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                </div><!-- /loaded state -->
+            </div><!-- /x-data -->
         `);
 
-        // Auto-refresh every 30s so operators see live changes.
+        // Auto-refresh every 30s. The router clears this timer on navigation so
+        // the Alpine component is not called after the page is unmounted.
         App.setAutoRefresh(() => Pages.dhcpLeases(), 30000);
     },
 };
