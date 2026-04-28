@@ -20,10 +20,19 @@ contract changes.
   are deprecated; forced migration to Node.js 24 takes effect 2026-06-02 on
   GitHub-hosted runners.
 - Bumped `actions/setup-node@v4` → `actions/setup-node@v5` in `ci.yml`
-  (five jobs: test, a11y, lighthouse, link-check; all Node.js 20 consumer jobs).
-- `actions/setup-go@v5`, `actions/upload-artifact@v4`,
-  `actions/download-artifact@v4`, `softprops/action-gh-release@v2`, and all
-  `docker/*` actions are already at current versions — no change.
+  (five jobs: test, a11y, lighthouse, link-check).
+- Bumped `actions/setup-go@v5` → `actions/setup-go@v6` in `ci.yml`,
+  `release.yml`, `initramfs.yml`, `lab-validate.yml`.
+- Bumped `github/codeql-action/upload-sarif@v3` → `@v4` in `ci.yml` (gosec
+  and trivy SARIF upload steps).
+- Bumped `docker/setup-buildx-action@v3` → `@v4` in `ci.yml` and `docker.yml`.
+- Bumped `docker/build-push-action@v5` → `@v7` in `ci.yml` and `docker.yml`.
+- Bumped `docker/setup-qemu-action@v3` → `@v4` in `docker.yml`.
+- Bumped `docker/login-action@v3` → `@v4` in `docker.yml`.
+- Bumped `docker/metadata-action@v5` → `@v6` in `docker.yml`.
+- `actions/upload-artifact@v4`, `actions/download-artifact@v4`,
+  `softprops/action-gh-release@v2`, `aquasecurity/trivy-action@v0.36.0` are
+  already at current versions — no change.
 
 ### Added (J2 — Smoke flake-threshold tracker)
 
