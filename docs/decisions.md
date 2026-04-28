@@ -36,6 +36,10 @@ Reversibility legend:
 | D16 | Show HN timing | Independent from tunnl. Post-v1.0 ship (Sprint 6 + 1 week buffer). No pre-launch beta announcement. | cheap |
 | D17 | Slurm controller dual-role default | Controller runs slurmd by default (dual-role `["controller","compute"]`). Operator opts out by editing role list. Documented as small-cluster-friendly default. | cheap |
 | D18 | Template -> DB sync mechanism | `is_clustr_default` boolean on `slurm_config_files` (default true for seed-time rows, false for API writes). Admin endpoint `POST /api/v1/slurm/configs/reseed-defaults` re-seeds only rows where current version is still flagged default. Operator-edited rows never touched. | cheap |
+| D19 | Customizability default (webui) | Lock the knob, ship the recommendation, expose under "Advanced" disclosure. NOT "expose every knob with a sensible default." | cheap |
+| D20 | CLI/UI parity policy | Routine ops (more than once per cluster lifetime) MUST have webui surface. CLI-only acceptable for Day-0 bootstrap and post-disaster recovery only. | costly |
+| D21 | JS framework threshold | Vanilla JS + ES6 modules through v1.2. Re-evaluate framework adoption ONLY when (a) total LOC >5000 across all `pages/*.js` + `app.js`, (b) frontend hire with framework expertise lands, (c) feature requires complex state machines vanilla can't handle, OR (d) CSP enforcement becomes priority. Evaluate Alpine+HTMX first; React/Vue/Svelte only if Alpine/HTMX insufficient. | costly |
+| D22 | Raw config editor pattern | Structured form for the 80% case + "Advanced: edit raw" disclosure + server-side validation on every save (regardless of which surface produced the input). Applies to all current and future config surfaces (slurm.conf, kickstart, network profiles, BMC). | cheap (per-surface) |
 
 ---
 
@@ -797,6 +801,140 @@ Concrete edits to `docs/90-day-sprint-plan.md` as a result of these decisions:
 10. **Risk Register:** Add new row — "Real OpenLDAP via testcontainers in CI fails on slow CI runners" (low/medium, mitigation: budget 60s startup or fall back to a Go fake).
 
 These edits land in the sprint plan in the next pass.
+
+---
+
+## D19 — Customizability Default (WebUI)
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** Founder directive on v1.1+ webui sprint planning explicitly called out "items that are too open for customizability" alongside "lack of automation where manual processes are too customizable." Three reviews surfaced this from different angles: Jared C-2/C-3/C-4/C-5 (too-open custom kickstart, custom variables, network freeform fields, freeform disk layout), Monica's new-admin friendliness theme, Dinesh's note that the v1.0 form surfaces are dense.
+
+**Question:** When in doubt about whether to expose a configuration knob in the webui, do we lean "lock the knob, ship the recommendation" or "expose the knob with a sensible default"?
+
+**Decision:** **Lock the knob, ship the recommendation, expose under an "Advanced" disclosure.** The default surface for any config is the recommended value, not the editable field.
+
+**Concrete v1.x application:**
+- Slurm Module Setup form: 4 visible fields (controller node, cluster name, version, default partition). Everything else under "Advanced".
+- Node Group disk layout: defaults to "Inherit from image". "Customize layout" is collapsed.
+- Reimage modal: defaults to "Use image default kickstart". Custom kickstart under "Advanced".
+- ISO build modal: defaults to recommended distro/version. Custom kernel/cmdline under "Advanced".
+
+**Why this default (not the opposite):**
+- New-admin friendliness is the v1.x guiding theme per founder directive.
+- Every visible knob is a decision the new admin must make or research before clicking save.
+- The 5-knob form scares new admins; the "click Deploy with sensible defaults" form gets them to first success.
+- Power users who need the knob can find it under Advanced — one extra click is much cheaper than every new admin staring at 12 fields.
+
+**Tradeoff acknowledged:** Power users will occasionally feel patronized. The cost (one extra click for them) is much lower than the cost of every new admin facing a wall of optional fields.
+
+**Reversibility:** **cheap**. Promoting a field out of Advanced is a 1-line UI change. Demoting after exposure is also cheap.
+
+**Re-decision triggers:**
+- Power-user customer reports that "Advanced" is consistently the first thing they click — at that point, expose top-N most-clicked-Advanced fields by default.
+- A specific persona (e.g., AI/ML lab) needs different defaults than the general HPC operator — then do persona-specific defaults, not "expose everything."
+
+---
+
+## D20 — CLI/UI Parity Policy
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** Jared's ops review flagged multiple CLI-only operations that operators routinely need (B-1 reseed-defaults, B-6 bundle install, E-5 password recovery). Monica's persona review noted that the LDAP module exposes operations only via admin curl. Founder directive emphasized "lack of automation where manual processes are too customizable" — operationally this maps to "if the operator has to drop to SSH for a routine action, that's a positioning failure."
+
+**Question:** Do all CLI ops get a webui equivalent in v1.1, or do some stay CLI-first?
+
+**Decision:** **Routine operator actions (anything done more than once per cluster lifetime) MUST have a webui surface. Initial bootstrap and disaster-recovery operations MAY remain CLI-only with a documented path.**
+
+**Categorization (locked):**
+
+**Must have webui surface:**
+- Reseed Slurm defaults — v1.1 (B2-3 in webui sprint plan)
+- Bundle install / version display — v1.2 (C3-26)
+- Change own LDAP password — v1.2 (C1-3)
+- Audit log query — v1.1 (B3-3)
+- Webhook subscriptions — v1.1 (B3-1)
+- Any future "I do this every cluster" action
+
+**CLI-only acceptable indefinitely (with docs):**
+- `clustr-serverd apikey bootstrap` (Day-0 only)
+- Force-decrypt rollback after D4 encryption error (post-disaster, once)
+- DB compaction / vacuum (operational maintenance, not UI-routine)
+- Autodeploy circuit breaker reset (post-failure, once)
+- Direct SQL queries for support escalation (never UI-exposed)
+
+**Why this policy:** Self-hosted product positioning requires that operators don't need to SSH for routine work. SSH for first-install or post-incident is acceptable; SSH for "I want to see my audit log" is a positioning failure that undermines the institutional pitch.
+
+**Reversibility:** **costly**. Once we ship a webui surface for an action, removing it later is a regression. Adding webui surface for a CLI-only action later is cheap.
+
+**Re-decision triggers:**
+- A CLI operation we marked "Day-0 only" turns out to be a regular operation (e.g., bootstrap is run weekly because operators are doing fresh installs constantly) — promote to webui.
+- A webui operation we shipped turns out to be ineffective in the UI form (too dangerous, too many footguns) — demote back to CLI with appropriate operator warnings.
+
+---
+
+## D21 — JS Framework Threshold
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** D10 locked vanilla JS through v1.0. Dinesh E-1 raised the question for v1.1+ given `app.js` is 9,350 LOC. Monica's persona analysis projects v2.0+ persona dashboards that could push complexity higher. Founder directive did not address tech stack but the implicit question is: at what threshold do we commit to a framework?
+
+**Question:** At what threshold (lines of JS, page count, interaction complexity) do we commit to a small framework like Alpine/HTMX/Lit? Or are we vanilla forever?
+
+**Decision:** **Vanilla JS + ES6 modules through v1.2 minimum. Re-evaluate framework adoption ONLY when ANY of four explicit triggers fires.**
+
+**Triggers (any one fires the re-evaluation):**
+1. Total LOC across all `pages/*.js` modules + `app.js` exceeds **5,000** (post-C2 module-split target = ~3,500; this gives ~1,500 LOC growth headroom).
+2. Frontend engineer hire (D15 trigger) lands AND has framework expertise + a track record of shipping in vanilla.
+3. A specific feature requires complex form state machines (e.g., the v2.0 PI dashboard with cross-filtering charts) that vanilla makes painful.
+4. CSP enforcement (E-3) becomes priority — CSP migration is the natural moment to revisit framework choice because the inline-handler refactor touches every page anyway.
+
+**Until any trigger fires:** Vanilla JS, ES6 `<script type="module">`, no build step. Explicitly NO bundlers (webpack/vite/esbuild/rollup), NO TypeScript, NO JSX.
+
+**When a trigger fires:** Evaluate **Alpine + HTMX** (lowest cognitive cost, no build step) FIRST. Only escalate to React/Vue/Svelte if Alpine/HTMX cannot meet the requirement.
+
+**Why this principle:** "One binary, one container, no build step" is load-bearing positioning per D10. The v1.0/v1.1 webui works without a framework; adding a framework for the sake of it costs CI complexity, deploy artifact complexity, and contradicts the self-hosted simplicity pitch. The C2 module-split (Sprint C of webui sprint plan) gets us 80% of framework benefits at 10% of the cost. Module-split is committed for v1.2 specifically because it's the cheapest organizational improvement that delays the framework question.
+
+**Reversibility:** **costly**. Once we adopt a framework, we don't rip it out. The thresholds above are conservative on purpose. Crossing into a framework should be a deliberate, well-resourced project — not a default.
+
+**Re-decision triggers:** see 4 conditions above.
+
+---
+
+## D22 — Raw Config Editor Pattern
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** Jared C-1 flagged the raw `slurm.conf` editor as a Blocker (no validation). Jared C-2 raised the same shape for custom kickstart. C-4 for network freeform fields. Multiple config surfaces in v1.0 expose raw textareas. The pattern decision needs to be made once and applied everywhere.
+
+**Question:** For all config surfaces that today expose raw textareas (slurm.conf, kickstart, network profiles, BMC config): do we use structured forms with "advanced: edit raw" escape hatch, OR keep raw with validation?
+
+**Decision:** **Both, in this exact pattern: structured form for the 80% case, raw editor as an "Advanced: edit raw" escape hatch, server-side validation on every save (regardless of which surface produced the input).**
+
+**The pattern (locked):**
+1. **Structured form** for the 8-15 most common directives — covers ~80% of operator use cases. New admins never leave this.
+2. **"Advanced: edit raw" disclosure** that reveals a textarea pre-populated with what the structured form would render. Operator can edit freely.
+3. **Server-side validation on save** — for Slurm: `slurmd -C` or AST parse. For kickstart: `pykickstart` parse. For network: `nm-online` config dry-run or equivalent. Validation runs regardless of which surface (form or raw) the operator used.
+4. **Inline error display** with line numbers and structured messages. Hard-block on parse errors. "Save anyway" button only for high-confidence-but-non-fatal warnings (e.g., deprecated directive still works).
+5. **Default templates always re-renderable** via D18 reseed mechanism (operator never permanently loses the recommended starting point).
+
+**Concrete sequencing:**
+- v1.1: Slurm.conf gets validation (B5-1, B5-2 in webui sprint plan). Custom Kickstart gets "View default template" link (B5-3). Raw editor stays as-is for both.
+- v1.2 / v1.3: Quick Settings structured form layered above the raw editor for slurm.conf. Same pattern applied to kickstart and network profiles.
+- v2.0+: BMC/IPMI config gets the same treatment.
+
+**Why this principle (not "remove the raw editor" or "keep raw without form"):**
+- New-admin onboarding (Jared's #1 theme, founder priority) requires that the default path is "fill in the form, click Deploy".
+- Power-user flexibility (Persona 1 sysadmin) requires that the raw editor is never taken away — there are too many edge cases that don't fit any structured form.
+- Structured form + raw escape + validation is the only pattern that satisfies both audiences without feature loss.
+
+**Tradeoff acknowledged:** Building structured forms is real work. We do it incrementally — slurm.conf in v1.1 (validation only) and v1.3 (full structured form). Other config surfaces follow as time permits.
+
+**Reversibility:** **cheap** at the per-surface level. Adding a structured form on top of an existing raw editor is purely additive. Removing the raw editor is the call we never make.
+
+**Re-decision triggers:**
+- A specific config surface turns out to be 100% covered by the structured form (operators never use the raw escape) — at that point we can consider removing the raw escape for that surface only. Unlikely.
+- A new config surface comes online that has no sensible structured-form shape (e.g., custom Lua hooks) — use raw-only with validation as the pattern, document why structured form was skipped.
 
 ---
 
