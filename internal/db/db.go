@@ -142,6 +142,18 @@ func (db *DB) SQL() *sql.DB {
 	return db.sql
 }
 
+// SchemaVersion returns the number of applied migrations, which serves as a
+// monotonic schema version number. Used by "clustr-serverd version" to report
+// the DB schema state alongside the binary version.
+func (db *DB) SchemaVersion(ctx context.Context) (int, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("db: schema version: %w", err)
+	}
+	return n, nil
+}
+
 // migrate applies all SQL migration files in order. Each file is applied once;
 // applied migrations are tracked in the schema_migrations table.
 //

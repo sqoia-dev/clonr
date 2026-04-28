@@ -982,6 +982,23 @@ func (s *Server) buildRouter() chi.Router {
 	// without managing API keys. Restrict at the network/reverse-proxy level if needed.
 	r.Get("/metrics", (&handlers.MetricsHandler{}).ServeHTTP)
 
+	// I4: pprof profiling endpoints — gated by admin session or API key.
+	// Enable with CLUSTR_PPROF_ENABLED=true. Not exposed by default to reduce
+	// the attack surface on production installs.
+	if os.Getenv("CLUSTR_PPROF_ENABLED") == "true" {
+		r.Route("/debug/pprof", func(r chi.Router) {
+			r.Use(requireScope(true))
+			r.Use(requireRole("admin"))
+			r.HandleFunc("/", pprofIndex)
+			r.HandleFunc("/cmdline", pprofCmdline)
+			r.HandleFunc("/profile", pprofProfile)
+			r.HandleFunc("/symbol", pprofSymbol)
+			r.HandleFunc("/trace", pprofTrace)
+			r.HandleFunc("/{name}", pprofHandler)
+		})
+		log.Info().Msg("pprof profiling endpoints enabled at /debug/pprof (admin only)")
+	}
+
 	// Embedded web UI — served without bearer auth.
 	// The UI JavaScript talks to /api/v1 which enforces auth when a token is set.
 	staticFS, _ := fs.Sub(ui.StaticFiles, "static")

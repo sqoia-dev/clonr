@@ -61,7 +61,11 @@ The two-node Slurm cluster walk-through (controller + worker, `srun -N2 hostname
 
 ## Quick Start
 
+**Prerequisites:** a Linux server with **two network interfaces** (one for management/admin access, one for the provisioning network — nodes PXE-boot on this), Docker Compose installed, and `openssl` available. Single-NIC hosts can run the server but cannot use the built-in PXE DHCP server.
+
 The fastest path is Docker Compose. For bare-metal installs (needed for PXE/DHCP on the host network), see [docs/install.md](docs/install.md).
+
+### Server Setup (5 minutes)
 
 ```bash
 # 1. Create directories and generate secrets
@@ -72,24 +76,30 @@ echo "CLUSTR_SECRET_KEY=$(openssl rand -hex 32)"     > /etc/clustr/secrets.env
 echo "CLUSTR_SESSION_SECRET=$(openssl rand -hex 64)" >> /etc/clustr/secrets.env
 chmod 400 /etc/clustr/secrets.env
 
-# 2. Download Compose file and start
+# 2. Download Compose file and environment config, then start
 curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/docker-compose.yml \
   -o /etc/clustr/docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/.env.example \
   -o /etc/clustr/clustr.env
-# Edit clustr.env: set CLUSTR_PXE_INTERFACE and CLUSTR_PXE_SERVER_IP
+# IMPORTANT: edit clustr.env now — set CLUSTR_PXE_INTERFACE to your provisioning NIC name
+# (run "ip link" to list interfaces; common names: eth1, ens3, enp3s0)
 cd /etc/clustr && docker compose up -d
 
-# 3. Get your bootstrap admin API key (printed once at first start)
-docker compose logs -f clustr 2>&1 | grep -A2 "Bootstrap admin"
+# 3. Get your bootstrap admin API key (printed ONCE at first start — copy it now)
+docker compose logs clustr | grep -A5 "Bootstrap admin"
 
-# 4. Verify health
+# 4. Verify the server is healthy
 curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
+# Expected: { "status": "ready", "checks": { "db": "ok", ... } }
+
+# 5. Open the web UI and log in
+# Browse to: http://<your-management-ip>/
+# Username: clustr   Password: clustr   (you will be prompted to change on first login)
 ```
 
-Open `http://<your-server-ip>/` and log in with the bootstrap credentials.
-
 For the complete walk-through — images, node registration, first deploy smoke test — see **[docs/install.md](docs/install.md)**.
+
+### First Use: pull an image, register a node, deploy (after server is running)
 
 For the two-node Slurm cluster quickstart (Rocky 9, `srun -N2 hostname` verified), see the [2-Node Slurm Cluster](#quick-start-2-node-slurm-cluster) section below.
 

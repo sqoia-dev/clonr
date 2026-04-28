@@ -1218,42 +1218,47 @@ const Pages = {
 
                 ${staleInitramfsWarning}
 
-                ${/* B2-6: show wizard until at least one node has deploy_verified_booted_at set */
+                ${/* B2-6 / FN-1 (I1): Show getting-started checklist until at least one node has
+                     deploy_verified_booted_at set. Shows on every fresh install regardless of
+                     whether images or nodes exist — guides the operator through the correct sequence. */
                   !nodes.some(n => n.deploy_verified_booted_at) ? `
-                <!-- S5-9: First-deploy wizard — shown when there are no images and no nodes. -->
-                <div class="card" style="margin-bottom:24px;border:1px solid var(--accent);background:linear-gradient(135deg,var(--surface-secondary) 0%,var(--bg-primary) 100%)">
-                    <div class="card-header">
+                <!-- I1/FN-1: Getting-started checklist card — visible on every fresh install -->
+                <div class="card" id="gs-wizard" style="margin-bottom:24px;border:2px solid var(--accent);background:linear-gradient(135deg,var(--surface-secondary) 0%,var(--bg-primary) 100%)">
+                    <div class="card-header" style="border-bottom:1px solid var(--border)">
                         <h2 class="card-title" style="display:flex;align-items:center;gap:10px">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:20px;height:20px"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg>
-                            Getting Started
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:20px;height:20px"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                            Getting Started — deploy your first node
                         </h2>
-                        <span class="text-dim text-sm">Complete these steps to deploy your first node</span>
+                        <span class="text-dim text-sm">This card disappears once a node has booted into its deployed image.</span>
                     </div>
-                    <div style="padding:16px 20px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
+                    <div style="padding:16px 20px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
                         <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
                             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                                 <span style="width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">1</span>
-                                <span style="font-weight:600;font-size:14px">Build an Image</span>
+                                <span style="font-weight:600;font-size:14px">Build a Base Image</span>
                             </div>
-                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">Use <em>Build from ISO</em> to create a rootfs image from a standard Linux installer. This is the recommended starting point.</p>
-                            <a href="#/images" class="btn btn-primary btn-sm">Go to Images</a>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">Use <em>Build from ISO</em> on the Images page to create a Rocky Linux 9 rootfs. Takes 20-35 min on first build; cached thereafter.</p>
+                            <a href="#/images" class="btn btn-primary btn-sm">Go to Images →</a>
                         </div>
                         <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
                             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                                 <span style="width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-secondary);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">2</span>
                                 <span style="font-weight:600;font-size:14px">Register a Node</span>
                             </div>
-                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">PXE-boot a physical or virtual machine. clustr's iPXE menu will auto-register the node when it phones home.</p>
-                            <a href="#/nodes" class="btn btn-secondary btn-sm">Go to Nodes</a>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">PXE-boot a physical or virtual machine with disk-first boot order. The node self-registers via clustr's iPXE menu and appears in the Nodes list.</p>
+                            <a href="#/nodes" class="btn btn-secondary btn-sm">Go to Nodes →</a>
                         </div>
                         <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px">
                             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                                 <span style="width:24px;height:24px;border-radius:50%;background:var(--border);color:var(--text-secondary);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">3</span>
-                                <span style="font-weight:600;font-size:14px">Deploy</span>
+                                <span style="font-weight:600;font-size:14px">Deploy (Reimage)</span>
                             </div>
-                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">Assign the image to the node and trigger a reimage. Live progress appears here on the dashboard.</p>
-                            <a href="#/deploys" class="btn btn-secondary btn-sm">View Deployments</a>
+                            <p style="margin:0 0 12px;font-size:12px;color:var(--text-secondary)">From the Nodes list, use "Configure and Deploy" to assign your image and trigger a reimage. Live progress streams here.</p>
+                            <a href="#/deploys" class="btn btn-secondary btn-sm">View Deployments →</a>
                         </div>
+                    </div>
+                    <div style="padding:0 20px 16px;font-size:12px;color:var(--text-secondary)">
+                        Need help? Run <code style="background:var(--bg-secondary);padding:2px 5px;border-radius:3px;font-family:monospace">clustr-serverd doctor</code> on the server host to check your environment. Full walkthrough: <a href="https://github.com/sqoia-dev/clustr/blob/main/docs/install.md" target="_blank" rel="noopener" style="color:var(--accent)">docs/install.md</a>
                     </div>
                 </div>` : ''}
 

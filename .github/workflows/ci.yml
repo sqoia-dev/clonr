@@ -59,6 +59,27 @@ jobs:
       - name: JS app-utils unit tests
         run: node --test test/js/app-utils.test.mjs
 
+  # I9: Link checker — fails on broken markdown links / fragment refs in docs/*.md.
+  # Uses markdown-link-check via npx (no npm install required).
+  # External URLs are skipped (--config) to avoid flaky network failures in CI;
+  # only relative file links and fragment anchors are checked.
+  link-check:
+    name: Link check (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check markdown links in docs/
+        run: |
+          npx --yes markdown-link-check \
+            --config .github/mlc-config.json \
+            $(find docs -name "*.md" | sort) \
+            README.md CHANGELOG.md
+
   build:
     name: Build
     runs-on: ubuntu-latest

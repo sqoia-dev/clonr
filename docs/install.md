@@ -46,9 +46,12 @@ modprobe loop
 # Ubuntu
 apt install -y docker.io docker-compose-plugin sqlite3 rsync
 
-# Rocky Linux 9
-dnf install -y docker docker-compose-plugin sqlite rsync
+# Rocky Linux 9 — the official Docker CE package is "docker-ce", not "docker".
+# You must add the Docker CE repository first:
+dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin sqlite rsync
 systemctl enable --now docker
+# Full instructions: https://docs.docker.com/engine/install/rhel/
 ```
 
 **Bare-metal path:**
@@ -287,6 +290,9 @@ CLUSTR_LOG_ARCHIVE_DIR=/var/lib/clustr/log-archive
 
 # PXE server (enable if nodes PXE boot via this host)
 CLUSTR_PXE_ENABLED=true
+# REQUIRED: set to your actual provisioning interface name — run "ip link" to list interfaces.
+# Common names: eth1, ens3, enp3s0, eno2. There is no safe default; leaving this
+# unset means clustr will attempt auto-detection, which may choose the wrong NIC.
 CLUSTR_PXE_INTERFACE=eth1
 CLUSTR_PXE_RANGE=10.99.0.100-10.99.0.200
 CLUSTR_PXE_SERVER_IP=10.99.0.1
@@ -356,14 +362,15 @@ curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
 
 Bare-metal installation is preferred for production HPC environments. Running directly on the host avoids Docker networking constraints and gives DHCP/TFTP full access to the host network stack. This is what Persona A (HPC sysadmin) will use.
 
-The Ansible role is delivered in Sprint 6. Until then, use the manual steps below, which are what the Ansible role automates.
+An Ansible role is planned for a future release. The manual steps below document exactly what the role will automate.
 
 ### 4.1 Download binaries
 
 ```bash
-# Replace <version> with the desired release tag, e.g. v0.9.0
+# Detect the latest release tag and translate uname -m → release arch name.
+# Release filenames use "amd64" / "arm64", not "x86_64" / "aarch64".
 VERSION="$(curl -s https://api.github.com/repos/sqoia-dev/clustr/releases/latest | grep '"tag_name"' | cut -d'"' -f4)"
-ARCH="$(uname -m)"  # x86_64 or aarch64
+ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
 
 curl -fsSL "https://github.com/sqoia-dev/clustr/releases/download/${VERSION}/clustr-serverd-linux-${ARCH}" \
   -o /usr/local/bin/clustr-serverd

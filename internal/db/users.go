@@ -173,6 +173,17 @@ func (db *DB) SetUserPassword(ctx context.Context, id, hash string, clearForceCh
 	return requireOneRow(res, "users", id)
 }
 
+// DeleteAllUsers removes every user record from the database.
+// Used only by "clustr-serverd bootstrap-admin --force" for emergency credential reset.
+// Call this before re-creating the admin account.
+func (db *DB) DeleteAllUsers(ctx context.Context) error {
+	_, err := db.sql.ExecContext(ctx, `DELETE FROM users`)
+	if err != nil {
+		return fmt.Errorf("db: delete all users: %w", err)
+	}
+	return nil
+}
+
 // SetLastLogin updates last_login_at to now. Called on successful login.
 func (db *DB) SetLastLogin(ctx context.Context, id string) error {
 	_, err := db.sql.ExecContext(ctx,

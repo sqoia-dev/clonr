@@ -1,0 +1,19 @@
+{
+  "ignorePatterns": [
+    {
+      "pattern": "^https?://",
+      "comment": "Skip external URLs — avoids flaky CI failures from temporary network issues or rate limiting"
+    },
+    {
+      "pattern": "^mailto:",
+      "comment": "Skip email links"
+    }
+  ],
+  "replacementPatterns": [],
+  "httpHeaders": [],
+  "timeout": "10s",
+  "retryOn429": true,
+  "retryCount": 3,
+  "fallbackRetryDelay": "30s",
+  "aliveStatusCodes": [200, 206]
+}
