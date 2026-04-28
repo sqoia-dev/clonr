@@ -47,6 +47,11 @@ type AuthHandler struct {
 	// May be nil — if nil, HandleMe omits the assigned_groups field.
 	GetUserGroups func(userID string) ([]string, error)
 
+	// GetUsername returns the username string for a user ID.
+	// May be nil — if nil, HandleMe omits the username field.
+	// Used by the PI portal to display "Signed in as <username>".
+	GetUsername func(userID string) (string, error)
+
 	// CookieName is the cookie name (e.g. "clustr_session").
 	CookieName string
 
@@ -236,6 +241,13 @@ func (h *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 		resp["assigned_groups"] = groups
 	} else {
 		resp["assigned_groups"] = []string{}
+	}
+
+	// C5-1-4: include username for PI portal display.
+	if h.GetUsername != nil {
+		if username, err := h.GetUsername(sub); err == nil {
+			resp["username"] = username
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

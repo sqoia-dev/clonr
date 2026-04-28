@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>clustr — PI Portal</title>
+    <link rel="stylesheet" href="/ui/css/app.css">
+    <style>
+        .portal-shell {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-base, #0d1117);
+            color: var(--text-primary, #e6edf3);
+        }
+        .portal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 24px;
+            border-bottom: 1px solid var(--border, #30363d);
+            background: var(--bg-elevated, #161b22);
+        }
+        .portal-header-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary, #e6edf3);
+        }
+        .brand-badge {
+            font-size: 11px;
+            font-weight: 500;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: rgba(163,113,247,0.15);
+            color: #a371f7;
+            border: 1px solid #a371f7;
+        }
+        .portal-user-badge {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 13px;
+            color: var(--text-secondary, #8b949e);
+        }
+        .portal-content {
+            flex: 1;
+            max-width: 1100px;
+            margin: 0 auto;
+            width: 100%;
+            padding: 24px 16px;
+        }
+        .pi-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border, #30363d);
+            margin-bottom: 20px;
+        }
+        .pi-tab {
+            padding: 8px 18px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: var(--text-secondary, #8b949e);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            transition: color 0.15s;
+        }
+        .pi-tab.active {
+            color: var(--text-primary, #e6edf3);
+            border-bottom-color: var(--accent, #1f6feb);
+        }
+        .pi-tab:hover:not(.active) { color: var(--text-primary, #e6edf3); }
+        .logout-btn {
+            background: none;
+            border: 1px solid var(--border, #30363d);
+            color: var(--text-secondary, #8b949e);
+            padding: 5px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .logout-btn:hover { border-color: var(--error, #f85149); color: var(--error, #f85149); }
+        .group-card {
+            border: 1px solid var(--border, #30363d);
+            border-radius: 8px;
+            margin-bottom: 14px;
+            overflow: hidden;
+        }
+        .group-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: var(--bg-elevated, #161b22);
+            cursor: pointer;
+        }
+        .group-card-header:hover { background: var(--bg-hover, #21262d); }
+        .group-card-body {
+            padding: 14px 16px;
+            border-top: 1px solid var(--border, #30363d);
+        }
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .stat-box {
+            background: var(--bg-elevated, #161b22);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 6px;
+            padding: 10px 14px;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary, #8b949e);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 22px;
+            font-weight: 600;
+        }
+        .member-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border, #30363d);
+            font-size: 14px;
+        }
+        .member-row:last-child { border-bottom: none; }
+        .member-status-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .member-status-badge.pending {
+            background: rgba(210,153,34,0.15);
+            border: 1px solid #d29922;
+            color: #d29922;
+        }
+        .member-status-badge.approved {
+            background: rgba(35,134,54,0.15);
+            border: 1px solid #238636;
+            color: #3fb950;
+        }
+        .member-status-badge.denied {
+            background: rgba(248,81,73,0.1);
+            border: 1px solid #f85149;
+            color: #f85149;
+        }
+        .form-row { margin-bottom: 14px; }
+        .form-row label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary, #8b949e);
+            margin-bottom: 4px;
+        }
+        .form-row input[type=text],
+        .form-row textarea {
+            width: 100%;
+            padding: 8px 10px;
+            background: var(--bg-base, #0d1117);
+            border: 1px solid var(--border, #30363d);
+            border-radius: 6px;
+            color: var(--text-primary, #e6edf3);
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        .form-row input:focus, .form-row textarea:focus {
+            outline: none;
+            border-color: var(--accent, #1f6feb);
+        }
+        .form-row textarea { min-height: 80px; resize: vertical; }
+        .alert-inline {
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+        .alert-inline.success {
+            background: rgba(35,134,54,0.15);
+            border: 1px solid #238636;
+            color: #3fb950;
+        }
+        .alert-inline.error {
+            background: rgba(248,81,73,0.1);
+            border: 1px solid #f85149;
+            color: #f85149;
+        }
+        .data-gap-note {
+            font-size: 11px;
+            color: var(--text-secondary, #8b949e);
+            font-style: italic;
+            margin-top: 8px;
+        }
+        .utilization-summary { font-size: 13px; }
+        .util-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid var(--border, #30363d);
+        }
+        .util-row:last-child { border-bottom: none; }
+        .util-label { color: var(--text-secondary, #8b949e); }
+        .util-value { font-weight: 500; }
+    </style>
+</head>
+<body>
+
+<script src="/ui/vendor/alpinejs/alpine-3.15.11.min.js"></script>
+<script src="/ui/vendor/htmx/htmx-2.0.9.min.js"></script>
+
+<div class="portal-shell" x-data="piPortalApp()" x-init="init()">
+
+    <!-- Header -->
+    <header class="portal-header">
+        <div class="portal-header-brand">
+            <span>clustr</span>
+            <span class="brand-badge">PI Portal</span>
+        </div>
+        <div class="portal-user-badge">
+            <span x-show="username" x-text="'Signed in as ' + username"></span>
+            <button class="logout-btn" @click="logout()">Sign out</button>
+        </div>
+    </header>
+
+    <!-- Loading -->
+    <div x-show="loading" style="display:flex;align-items:center;justify-content:center;flex:1;gap:10px;color:var(--text-secondary)">
+        <div class="spinner"></div>
+        <span>Loading your PI portal…</span>
+    </div>
+
+    <!-- Error -->
+    <div x-show="!loading && error" style="display:flex;align-items:center;justify-content:center;flex:1;">
+        <div class="alert alert-error" x-text="error"></div>
+    </div>
+
+    <!-- Main content -->
+    <main class="portal-content" x-show="!loading && !error">
+
+        <div style="margin-bottom:20px">
+            <h1 style="margin:0 0 4px;font-size:20px;font-weight:600">PI Dashboard</h1>
+            <p style="margin:0;color:var(--text-secondary);font-size:14px">
+                Manage your research groups, members, and view utilization.
+            </p>
+        </div>
+
+        <!-- Tabs -->
+        <div class="pi-tabs">
+            <button class="pi-tab" :class="{ active: tab === 'groups' }" @click="tab = 'groups'">My Groups</button>
+            <button class="pi-tab" :class="{ active: tab === 'utilization' }" @click="tab = 'utilization'">Utilization</button>
+        </div>
+
+        <!-- ── My Groups tab ─────────────────────────────────────────── -->
+        <div x-show="tab === 'groups'">
+
+            <div x-show="groups.length === 0" class="empty-state">
+                <div class="empty-state-text">You have no NodeGroups assigned to you yet. Contact your system administrator.</div>
+            </div>
+
+            <template x-for="group in groups" :key="group.id">
+                <div class="group-card">
+                    <!-- Group header (click to expand/collapse) -->
+                    <div class="group-card-header" @click="toggleGroup(group.id)">
+                        <div>
+                            <strong x-text="group.name"></strong>
+                            <span x-show="group.role" style="margin-left:8px;font-size:12px;color:var(--text-secondary)" x-text="group.role"></span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:12px">
+                            <span style="font-size:13px;color:var(--text-secondary)" x-text="group.node_count + ' nodes'"></span>
+                            <span style="font-size:18px;color:var(--text-secondary)" x-text="expandedGroups[group.id] ? '▲' : '▼'"></span>
+                        </div>
+                    </div>
+
+                    <!-- Group body (expanded) -->
+                    <div class="group-card-body" x-show="expandedGroups[group.id]">
+
+                        <!-- Stats -->
+                        <div class="stat-grid">
+                            <div class="stat-box">
+                                <div class="stat-label">Nodes</div>
+                                <div class="stat-value" x-text="group.node_count"></div>
+                            </div>
+                            <div class="stat-box">
+                                <div class="stat-label">Deployed</div>
+                                <div class="stat-value" x-text="group.deployed_count"></div>
+                            </div>
+                        </div>
+
+                        <!-- Members section -->
+                        <div style="margin-bottom:16px">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                                <span style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary)">Members</span>
+                                <button class="btn btn-secondary" style="font-size:12px;padding:4px 12px"
+                                    @click="openAddMember(group)">+ Add member</button>
+                            </div>
+
+                            <div x-show="groupMembers[group.id] == null" style="font-size:13px;color:var(--text-secondary)">
+                                <span @click="loadMembers(group.id)" style="cursor:pointer;color:var(--accent)">Load members</span>
+                            </div>
+                            <div x-show="groupMembers[group.id] != null && groupMembers[group.id].length === 0"
+                                 style="font-size:13px;color:var(--text-secondary)">
+                                No members yet. Add someone with the button above.
+                            </div>
+                            <template x-if="groupMembers[group.id] && groupMembers[group.id].length > 0">
+                                <div>
+                                    <template x-for="m in groupMembers[group.id]" :key="m.request_id">
+                                        <div class="member-row">
+                                            <span x-text="m.ldap_username"></span>
+                                            <div style="display:flex;align-items:center;gap:8px">
+                                                <span class="member-status-badge" :class="m.status" x-text="m.status"></span>
+                                                <button x-show="m.status === 'approved'"
+                                                    class="btn btn-danger" style="font-size:12px;padding:3px 10px"
+                                                    @click="removeMember(group.id, m.ldap_username)">Remove</button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Request more nodes -->
+                        <div>
+                            <button class="btn btn-secondary" style="font-size:12px;padding:4px 12px"
+                                @click="openExpansionRequest(group)">Request more nodes</button>
+                        </div>
+
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- ── Utilization tab ───────────────────────────────────────── -->
+        <div x-show="tab === 'utilization'">
+            <div x-show="groups.length === 0" class="empty-state">
+                <div class="empty-state-text">No groups assigned.</div>
+            </div>
+            <template x-for="group in groups" :key="'util-' + group.id">
+                <div class="card" style="margin-bottom:14px">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+                        <strong x-text="group.name"></strong>
+                        <span style="font-size:12px;color:var(--text-secondary)">Auto-refreshes every 60s</span>
+                    </div>
+                    <div class="card-body">
+                        <!-- HTMX polls utilization every 60s -->
+                        <div :id="'util-' + group.id"
+                             :hx-get="'/api/v1/portal/pi/groups/' + group.id + '/utilization'"
+                             hx-trigger="load, every 60s"
+                             hx-swap="innerHTML"
+                             hx-headers='{"HX-Request": "true"}'>
+                            <div style="color:var(--text-secondary);font-size:13px">Loading utilization…</div>
+                        </div>
+                        <div class="data-gap-note">
+                            Node counts from provisioning data. Member counts from PI requests only — may not reflect direct LDAP changes made by admin.
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+    </main>
+
+    <!-- ── Add Member Modal ──────────────────────────────────────────── -->
+    <div x-show="addMember.open" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;display:flex;align-items:center;justify-content:center"
+         @click.self="addMember.open = false">
+        <div class="card" style="width:420px;max-width:95vw">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+                <strong>Add Member</strong>
+                <button @click="addMember.open = false" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:18px">×</button>
+            </div>
+            <div class="card-body">
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 14px">
+                    Adding to group: <strong x-text="addMember.groupName"></strong>
+                </p>
+                <div class="form-row">
+                    <label>LDAP username (HPC account)</label>
+                    <input type="text" x-model="addMember.username" placeholder="e.g. jsmith" autocomplete="off">
+                </div>
+                <button class="btn btn-primary" style="width:100%" :disabled="addMember.saving" @click="submitAddMember()">
+                    <span x-show="!addMember.saving">Add member</span>
+                    <span x-show="addMember.saving">Submitting…</span>
+                </button>
+                <div x-show="addMember.success" class="alert-inline success" x-text="addMember.success"></div>
+                <div x-show="addMember.error" class="alert-inline error" x-text="addMember.error"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Expansion Request Modal ───────────────────────────────────── -->
+    <div x-show="expansion.open" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;display:flex;align-items:center;justify-content:center"
+         @click.self="expansion.open = false">
+        <div class="card" style="width:480px;max-width:95vw">
+            <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+                <strong>Request More Nodes</strong>
+                <button @click="expansion.open = false" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:18px">×</button>
+            </div>
+            <div class="card-body">
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 14px">
+                    For group: <strong x-text="expansion.groupName"></strong>
+                </p>
+                <div class="form-row">
+                    <label>Justification</label>
+                    <textarea x-model="expansion.justification" placeholder="Briefly describe why you need additional nodes (e.g. grant-funded project, upcoming deadline, expected workload increase)"></textarea>
+                </div>
+                <button class="btn btn-primary" style="width:100%" :disabled="expansion.saving" @click="submitExpansion()">
+                    <span x-show="!expansion.saving">Submit request</span>
+                    <span x-show="expansion.saving">Submitting…</span>
+                </button>
+                <div x-show="expansion.success" class="alert-inline success" x-text="expansion.success"></div>
+                <div x-show="expansion.error" class="alert-inline error" x-text="expansion.error"></div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+function piPortalApp() {
+    return {
+        loading: true,
+        error:   null,
+        username: '',
+        tab:     'groups',
+
+        groups:        [],
+        expandedGroups: {},  // groupID → bool
+        groupMembers:  {},   // groupID → array of member objects (null = not loaded)
+
+        // Add member modal state.
+        addMember: {
+            open:      false,
+            groupID:   '',
+            groupName: '',
+            username:  '',
+            saving:    false,
+            success:   null,
+            error:     null,
+        },
+
+        // Expansion request modal state.
+        expansion: {
+            open:          false,
+            groupID:       '',
+            groupName:     '',
+            justification: '',
+            saving:        false,
+            success:       null,
+            error:         null,
+        },
+
+        async init() {
+            // Auth check.
+            try {
+                const me = await apiFetch('/api/v1/auth/me');
+                if (!me.ok) { window.location.href = '/login'; return; }
+                const meData = await me.json();
+                if (meData.role !== 'pi' && meData.role !== 'admin') {
+                    // Wrong role — dispatch to the right portal.
+                    if (meData.role === 'viewer') { window.location.href = '/portal/'; return; }
+                    window.location.href = '/';
+                    return;
+                }
+                this.username = meData.username || '';
+            } catch (_) {
+                window.location.href = '/login';
+                return;
+            }
+
+            await this.loadGroups();
+            this.loading = false;
+
+            // After Alpine renders, init HTMX on the utilization divs.
+            this.$nextTick(() => {
+                if (window.htmx) { htmx.process(document.body); }
+            });
+        },
+
+        async loadGroups() {
+            try {
+                const r = await apiFetch('/api/v1/portal/pi/groups');
+                if (!r.ok) {
+                    const e = await r.json().catch(() => ({ error: 'Failed to load groups' }));
+                    this.error = e.error || 'Failed to load groups';
+                    return;
+                }
+                const data = await r.json();
+                this.groups = data.groups || [];
+                // Pre-expand the first group.
+                if (this.groups.length === 1) {
+                    this.expandedGroups[this.groups[0].id] = true;
+                }
+            } catch (err) {
+                this.error = 'Network error: ' + err.message;
+            }
+        },
+
+        toggleGroup(groupID) {
+            this.expandedGroups[groupID] = !this.expandedGroups[groupID];
+            if (this.expandedGroups[groupID] && this.groupMembers[groupID] == null) {
+                this.loadMembers(groupID);
+            }
+        },
+
+        async loadMembers(groupID) {
+            try {
+                const r = await apiFetch(`/api/v1/portal/pi/groups/${groupID}/members`);
+                if (r.ok) {
+                    const data = await r.json();
+                    this.groupMembers[groupID] = data.members || [];
+                } else {
+                    this.groupMembers[groupID] = [];
+                }
+            } catch (_) {
+                this.groupMembers[groupID] = [];
+            }
+        },
+
+        openAddMember(group) {
+            this.addMember = {
+                open:      true,
+                groupID:   group.id,
+                groupName: group.name,
+                username:  '',
+                saving:    false,
+                success:   null,
+                error:     null,
+            };
+        },
+
+        async submitAddMember() {
+            this.addMember.success = null;
+            this.addMember.error   = null;
+            const username = (this.addMember.username || '').trim().toLowerCase();
+            if (!username) {
+                this.addMember.error = 'Please enter an LDAP username.';
+                return;
+            }
+            this.addMember.saving = true;
+            try {
+                const r = await apiFetch(`/api/v1/portal/pi/groups/${this.addMember.groupID}/members`, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({ ldap_username: username }),
+                });
+                const data = await r.json();
+                if (r.ok) {
+                    if (data.status === 'approved') {
+                        this.addMember.success = `${username} has been added to the group.`;
+                    } else {
+                        this.addMember.success = `Request submitted for ${username}. An admin will review it shortly.`;
+                    }
+                    this.addMember.username = '';
+                    // Reload members.
+                    await this.loadMembers(this.addMember.groupID);
+                } else {
+                    this.addMember.error = data.error || 'Failed to add member.';
+                }
+            } catch (err) {
+                this.addMember.error = 'Network error: ' + err.message;
+            } finally {
+                this.addMember.saving = false;
+            }
+        },
+
+        async removeMember(groupID, username) {
+            if (!confirm(`Remove ${username} from this group? This will remove them from the LDAP group.`)) return;
+            try {
+                const r = await apiFetch(`/api/v1/portal/pi/groups/${groupID}/members/${encodeURIComponent(username)}`, {
+                    method: 'DELETE',
+                });
+                if (r.ok) {
+                    await this.loadMembers(groupID);
+                } else {
+                    const data = await r.json().catch(() => ({}));
+                    alert('Failed to remove member: ' + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Network error: ' + err.message);
+            }
+        },
+
+        openExpansionRequest(group) {
+            this.expansion = {
+                open:          true,
+                groupID:       group.id,
+                groupName:     group.name,
+                justification: '',
+                saving:        false,
+                success:       null,
+                error:         null,
+            };
+        },
+
+        async submitExpansion() {
+            this.expansion.success = null;
+            this.expansion.error   = null;
+            const j = (this.expansion.justification || '').trim();
+            if (!j) {
+                this.expansion.error = 'Please provide a justification.';
+                return;
+            }
+            this.expansion.saving = true;
+            try {
+                const r = await apiFetch(`/api/v1/portal/pi/groups/${this.expansion.groupID}/expansion-requests`, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({ justification: j }),
+                });
+                if (r.ok) {
+                    this.expansion.success = 'Request submitted. An admin will review it.';
+                    this.expansion.justification = '';
+                } else {
+                    const data = await r.json().catch(() => ({}));
+                    this.expansion.error = data.error || 'Failed to submit request.';
+                }
+            } catch (err) {
+                this.expansion.error = 'Network error: ' + err.message;
+            } finally {
+                this.expansion.saving = false;
+            }
+        },
+
+        async logout() {
+            try { await apiFetch('/api/v1/auth/logout', { method: 'POST' }); } catch (_) {}
+            window.location.href = '/login';
+        },
+    };
+}
+
+function apiFetch(url, opts) {
+    return fetch(url, Object.assign({ credentials: 'same-origin' }, opts || {}));
+}
+</script>
+</body>
+</html>

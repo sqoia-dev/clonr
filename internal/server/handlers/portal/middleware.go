@@ -35,3 +35,31 @@ func ViewerMiddleware(database *db.DB, userIDFromCtx func(context.Context) strin
 		})
 	}
 }
+
+// PIMiddleware enriches the request context for the PI portal:
+//   - sets ctxKeyPortalUID (clustr user ID)
+//   - sets ctxKeyPIRole (role string: "pi" or "admin") for PI-scoped auth checks
+//
+// This must run after the server-level apiKeyAuth middleware.
+// userIDFromCtx and roleFromCtx are closures from the server package that read
+// the respective context keys set by apiKeyAuth.
+func PIMiddleware(
+	database *db.DB,
+	userIDFromCtx func(context.Context) string,
+	roleFromCtx func(context.Context) string,
+) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+
+			userID := userIDFromCtx(ctx)
+			role := roleFromCtx(ctx)
+			if userID != "" {
+				ctx = context.WithValue(ctx, ctxKeyPortalUID{}, userID)
+				ctx = context.WithValue(ctx, ctxKeyPIRole{}, role)
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}

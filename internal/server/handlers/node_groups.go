@@ -362,3 +362,54 @@ func jobToStatus(j db.GroupReimageJob) api.GroupReimageJobStatus {
 		UpdatedAt:         j.UpdatedAt,
 	}
 }
+
+// SetNodeGroupPI handles PUT /api/v1/node-groups/{id}/pi.
+// Admin-only. Assigns or clears the PI user for a NodeGroup.
+// Body: { "pi_user_id": "<user-id>" } — pass "" to clear the PI.
+func (h *NodeGroupsHandler) SetNodeGroupPI(w http.ResponseWriter, r *http.Request) {
+	groupID := chi.URLParam(r, "id")
+
+	var body struct {
+		PIUserID string `json:"pi_user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: "invalid request body", Code: "bad_request"})
+		return
+	}
+
+	// Verify the group exists.
+	if _, err := h.DB.GetNodeGroup(r.Context(), groupID); err != nil {
+		writeError(w, fmt.Errorf("%w: node group not found", api.ErrNotFound))
+		return
+	}
+
+	// If a PI user ID is provided, verify the user exists and has pi role.
+	if body.PIUserID != "" {
+		user, err := h.DB.GetUser(r.Context(), body.PIUserID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: "user not found", Code: "bad_request"})
+			return
+		}
+		if user.Role != db.UserRolePI && user.Role != db.UserRoleAdmin {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+				Error: "user must have pi or admin role to be assigned as PI",
+				Code:  "bad_request",
+			})
+			return
+		}
+	}
+
+	if err := h.DB.SetNodeGroupPI(r.Context(), groupID, body.PIUserID); err != nil {
+		log.Error().Err(err).Str("group_id", groupID).Str("pi_user_id", body.PIUserID).Msg("node_groups: set PI failed")
+		writeJSON(w, http.StatusInternalServerError, api.ErrorResponse{Error: "failed to set group PI", Code: "internal_error"})
+		return
+	}
+
+	// Audit.
+	h.Audit.Record(r.Context(), "", "admin", "node_group.pi_assigned",
+		"node_group", groupID, r.RemoteAddr,
+		nil, map[string]string{"pi_user_id": body.PIUserID},
+	)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

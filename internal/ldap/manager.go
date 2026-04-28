@@ -1182,3 +1182,24 @@ type PortalQuota struct {
 	LimitRaw   string `json:"limit_raw,omitempty"`
 	Configured bool   `json:"configured"`
 }
+
+// AddUserToGroup adds uid to the POSIX group identified by groupCN.
+// Used by PI self-service member management (Sprint C.5 CF-08).
+// Returns an error if the LDAP module is not ready or the group does not exist.
+func (m *Manager) AddUserToGroup(ctx context.Context, uid, groupCN string) error {
+	dit, err := m.DIT(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: get DIT for group member add: %w", err)
+	}
+	return dit.AddGroupMember(groupCN, uid)
+}
+
+// RemoveUserFromGroup removes uid from the POSIX group identified by groupCN.
+// Used by PI self-service member management (Sprint C.5 CF-08).
+func (m *Manager) RemoveUserFromGroup(ctx context.Context, uid, groupCN string) error {
+	dit, err := m.DIT(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: get DIT for group member remove: %w", err)
+	}
+	return dit.RemoveGroupMember(groupCN, uid)
+}

@@ -171,6 +171,10 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 							// viewer is more restricted than readonly — portal-only access.
 							// Maps to a distinct sentinel so requireScope blocks viewer on /admin/ routes.
 							roleScope = api.KeyScope("viewer")
+						case "pi":
+							// pi is more privileged than viewer but restricted to PI portal routes.
+							// Maps to a distinct sentinel so requireScope blocks pi on /admin/ routes.
+							roleScope = api.KeyScope("pi")
 						}
 						ctx := context.WithValue(r.Context(), ctxKeyScope{}, roleScope)
 						ctx = context.WithValue(ctx, ctxKeyUserID{}, result.payload.Sub)
@@ -277,7 +281,8 @@ func requireScope(adminOnly bool) func(http.Handler) http.Handler {
 				return
 			}
 			if scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator && scope != api.KeyScopeNode &&
-				scope != api.KeyScope("readonly") && scope != api.KeyScope("viewer") {
+				scope != api.KeyScope("readonly") && scope != api.KeyScope("viewer") &&
+				scope != api.KeyScope("pi") {
 				writeForbidden(w, "unrecognized scope")
 				return
 			}
@@ -296,8 +301,9 @@ func requireRole(minimum string) func(http.Handler) http.Handler {
 	roleRank := map[string]int{
 		"viewer":   0,
 		"readonly": 1,
-		"operator": 2,
-		"admin":    3,
+		"pi":       2,
+		"operator": 3,
+		"admin":    4,
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,8 +348,39 @@ func requireViewer() func(http.Handler) http.Handler {
 				writeUnauthorized(w, "authentication required")
 				return
 			}
-			// Any recognised scope passes — viewer, readonly, operator, admin, node.
+			// Any recognised scope passes — viewer, readonly, pi, operator, admin, node.
 			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requirePI returns a middleware that allows only pi, operator, and admin roles.
+// Used for /api/v1/portal/pi/* routes. viewer and readonly are blocked.
+// API keys (Bearer token, non-session) are treated as admin and always pass.
+func requirePI() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+			// admin and operator scopes always pass.
+			if scope == api.KeyScopeAdmin || scope == api.KeyScopeOperator {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// pi scope passes.
+			if scope == api.KeyScope("pi") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Bearer token admin key passes.
+			if scope == api.KeyScopeAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeForbidden(w, "this route requires pi, operator, or admin role")
 		})
 	}
 }

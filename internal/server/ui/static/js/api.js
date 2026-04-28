@@ -445,4 +445,13 @@ const API = {
         // Optional params.role filters by HPC role tag.
         leases(params = {})  { return API.get('/dhcp/leases', params); },
     },
+    pi: {
+        // Admin-facing PI request management (C.5 — CF-08 approval workflow).
+        listMemberRequests(status)          { return API.get('/admin/pi/member-requests', status ? { status } : {}); },
+        resolveMemberRequest(id, action)    { return API.post(`/admin/pi/member-requests/${encodeURIComponent(id)}/resolve`, { action }); },
+        listExpansionRequests(status)       { return API.get('/admin/pi/expansion-requests', status ? { status } : {}); },
+        resolveExpansionRequest(id, action) { return API.post(`/admin/pi/expansion-requests/${encodeURIComponent(id)}/resolve`, { action }); },
+        // Node group PI ownership management.
+        setGroupPI(groupId, piUserId)       { return API.put(`/node-groups/${encodeURIComponent(groupId)}/pi`, { pi_user_id: piUserId }); },
+    },
 };

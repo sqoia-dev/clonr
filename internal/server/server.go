@@ -781,6 +781,11 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/portal", servePortalPage(staticFS))
 	r.Get("/portal/", servePortalPage(staticFS))
 
+	// /portal/pi/ — PI portal (pi role). Serves portal_pi.html from static FS.
+	// PI-role users land here after login; admin can also access for testing.
+	r.Get("/portal/pi", servePIPortalPage(staticFS))
+	r.Get("/portal/pi/", servePIPortalPage(staticFS))
+
 	// /repo/* — public, unauthenticated Slurm package repository served from
 	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
 	// Must be mounted BEFORE /api/v1 and outside apiKeyAuth so deployed nodes
@@ -830,6 +835,36 @@ func (s *Server) buildRouter() chi.Router {
 		// Admin-only: portal config management.
 		r.With(requireScope(true)).With(requireRole("admin")).Get("/portal/config", portalH.HandleGetConfig)
 		r.With(requireScope(true)).With(requireRole("admin")).Put("/portal/config", portalH.HandleUpdateConfig)
+
+		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
+		// PI-scoped routes: PI can only access their own NodeGroups.
+		// Admin can access all PI data. operator, readonly, viewer are blocked.
+		piH := s.buildPIHandler()
+		piMW := portalhandler.PIMiddleware(s.db, userIDFromContext, userRoleFromContext)
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			// List owned NodeGroups.
+			r.Get("/portal/pi/groups", piH.HandleListGroups)
+			// Per-group utilization view (CF-02 partial).
+			r.Get("/portal/pi/groups/{id}/utilization", piH.HandleGetGroupUtilization)
+			// Member management (CF-08).
+			r.Get("/portal/pi/groups/{id}/members", piH.HandleListMembers)
+			r.Post("/portal/pi/groups/{id}/members", piH.HandleAddMember)
+			r.Delete("/portal/pi/groups/{id}/members/{username}", piH.HandleRemoveMember)
+			// Expansion requests (C5-3-3).
+			r.Post("/portal/pi/groups/{id}/expansion-requests", piH.HandleRequestExpansion)
+		})
+
+		// Admin-only: PI request management ("Pending PI Requests" panel).
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/pi/member-requests", piH.HandleListPendingMemberRequests)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/pi/member-requests/{id}/resolve", piH.HandleResolveMemberRequest)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/pi/expansion-requests", piH.HandleListPendingExpansionRequests)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/pi/expansion-requests/{id}/resolve", piH.HandleResolveExpansionRequest)
 
 		// B2-2: Bootstrap status probe — unauthenticated. Returns whether the default
 		// admin credentials hint should be shown on the login page. Safe to expose
@@ -1064,6 +1099,8 @@ func (s *Server) buildRouter() chi.Router {
 			// Group membership management.
 			r.Post("/node-groups/{id}/members", nodeGroups.AddGroupMembers)
 			r.Delete("/node-groups/{id}/members/{node_id}", nodeGroups.RemoveGroupMember)
+			// C5-1-2: PI ownership assignment (admin-only).
+			r.With(requireRole("admin")).Put("/node-groups/{id}/pi", nodeGroups.SetNodeGroupPI)
 			// Rolling group reimage — requires admin or group-scoped operator access.
 			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
 			// Group reimage job status polling.
@@ -1271,6 +1308,44 @@ func (s *Server) buildPortalHandler() *portalhandler.Handler {
 	return h
 }
 
+// buildPIHandler constructs the PI portal handler with LDAP closures.
+func (s *Server) buildPIHandler() *portalhandler.PIHandler {
+	h := &portalhandler.PIHandler{
+		DB:    s.db,
+		Audit: s.audit,
+	}
+
+	// Wire LDAP group membership helpers — best-effort, nil-safe.
+	h.AddLDAPMember = func(ctx context.Context, groupName, username string) error {
+		return s.ldapMgr.AddUserToGroup(ctx, username, groupName)
+	}
+	h.RemoveLDAPMember = func(ctx context.Context, groupName, username string) error {
+		return s.ldapMgr.RemoveUserFromGroup(ctx, username, groupName)
+	}
+
+	return h
+}
+
+// servePIPortalPage serves portal_pi.html from the embedded static FS.
+func servePIPortalPage(staticFS fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open("portal_pi.html")
+		if err != nil {
+			// Fall back to login if PI portal page not found.
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			http.Error(w, "PI portal page not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		serveHTMLFile(w, r, f, "portal_pi.html", stat.ModTime())
+	}
+}
+
 // buildAuthHandler constructs the AuthHandler with closures that call into
 // the server's DB and session-signing functions. This avoids the handlers
 // package importing the server package (which would be circular).
@@ -1397,6 +1472,15 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		return s.db.GetUserGroupMemberships(context.Background(), userID)
 	}
 
+	// C5-1-4: GetUsername returns the username for a user ID (PI portal display).
+	getUsernameFn := func(userID string) (string, error) {
+		user, err := s.db.GetUser(context.Background(), userID)
+		if err != nil {
+			return "", err
+		}
+		return user.Username, nil
+	}
+
 	return &handlers.AuthHandler{
 		LoginWithKey:      loginWithKeyFn,
 		LoginWithPassword: loginWithPasswordFn,
@@ -1405,6 +1489,7 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		Validate:          validateFn,
 		SetPassword:       setPasswordFn,
 		GetUserGroups:     getUserGroupsFn,
+		GetUsername:       getUsernameFn,
 		CookieName:        cookieName,
 		Secure:            s.cfg.SessionSecure,
 	}

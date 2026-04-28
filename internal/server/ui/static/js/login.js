@@ -72,12 +72,17 @@
                 if (body.force_password_change) {
                     window.location.href = '/set-password';
                 } else {
-                    // C1-5: Route by role.
+                    // C1-5 / C5-1-4: Route by role.
                     // viewer role → /portal/ (researcher portal, no access to /admin/).
+                    // pi role → /portal/pi/ (PI portal, no access to /admin/).
                     // admin/operator/readonly → / (admin UI).
                     const role = body.role || '';
                     if (role === 'viewer') {
                         window.location.href = '/portal/';
+                        return;
+                    }
+                    if (role === 'pi') {
+                        window.location.href = '/portal/pi/';
                         return;
                     }
 
