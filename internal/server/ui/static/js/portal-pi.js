@@ -9,6 +9,24 @@ function piPortalApp() {
         username: '',
         tab:     'groups',
 
+        // H2 — First-project wizard (auto-compute allocation).
+        wizard: {
+            show:            false,      // display the overlay?
+            step:            1,          // 1 = form, 2 = success
+            projectName:     '',
+            nodegroupTemplate: '',       // leave empty for default
+            initialMembers:  '',         // comma-separated LDAP usernames
+            slurmPartition:  '',         // leave empty for default
+            ldapSyncEnabled: true,
+            autoCompute:     true,
+            saving:          false,
+            error:           null,
+            result:          null,       // ProjectCreateResponse.auto_alloc_result
+        },
+
+        // H3 — Per-group undo banner state (groupID → {available, hours, deadline, partition}).
+        undoBanners: {},
+
         groups:        [],
         expandedGroups: {},  // groupID → bool
         groupMembers:  {},   // groupID → array of member objects (null = not loaded)
@@ -54,11 +72,18 @@ function piPortalApp() {
             }
 
             await Promise.all([this.loadGroups(), this.loadFOSOptions()]);
+
+            // H2: Check whether to show the first-project wizard.
+            await this.checkOnboardingStatus();
+
             this.loading = false;
 
-            // After Alpine renders, init HTMX on the utilization divs.
-            this.$nextTick(() => {
+            // H3: Load undo banner state for each owned group.
+            this.$nextTick(async () => {
                 if (window.htmx) { htmx.process(document.body); }
+                for (const g of this.groups) {
+                    await this.loadUndoBanner(g.id);
+                }
             });
         },
 
@@ -695,6 +720,114 @@ function piPortalApp() {
         async logout() {
             try { await apiFetch('/api/v1/auth/logout', { method: 'POST' }); } catch (_) {}
             window.location.href = '/login';
+        },
+
+        // ─── H2: First-project wizard ───────────────────────────────────────────
+
+        async checkOnboardingStatus() {
+            try {
+                const r = await apiFetch('/api/v1/portal/pi/onboarding-status');
+                if (!r.ok) return;
+                const data = await r.json();
+                if (data.show_wizard) {
+                    this.wizard.show = true;
+                }
+            } catch (_) { /* non-fatal */ }
+        },
+
+        async submitWizard() {
+            if (!this.wizard.projectName.trim()) {
+                this.wizard.error = 'Project name is required.';
+                return;
+            }
+            this.wizard.saving = true;
+            this.wizard.error  = null;
+            try {
+                const members = this.wizard.initialMembers
+                    .split(',')
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+
+                const body = {
+                    project_name:      this.wizard.projectName.trim(),
+                    auto_compute:      this.wizard.autoCompute,
+                    nodegroup_template: this.wizard.nodegroupTemplate.trim() || undefined,
+                    initial_members:   members.length ? members : undefined,
+                    slurm_partition:   this.wizard.slurmPartition.trim() || undefined,
+                    ldap_sync_enabled: this.wizard.ldapSyncEnabled,
+                };
+                const r = await apiFetch('/api/v1/projects', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await r.json();
+                if (!r.ok) {
+                    this.wizard.error = data.error || 'Failed to create project.';
+                    return;
+                }
+                this.wizard.result = data.auto_alloc_result || null;
+                this.wizard.step   = 2;
+
+                // Reload groups so the new one appears.
+                await this.loadGroups();
+                // Load undo banner for the new group.
+                if (this.wizard.result) {
+                    await this.loadUndoBanner(this.wizard.result.node_group_id);
+                }
+            } catch (e) {
+                this.wizard.error = e.message || 'Unexpected error.';
+            } finally {
+                this.wizard.saving = false;
+            }
+        },
+
+        async dismissWizard() {
+            // Mark onboarding as dismissed (skip path).
+            try {
+                await apiFetch('/api/v1/portal/pi/onboarding-complete', { method: 'POST' });
+            } catch (_) {}
+            this.wizard.show = false;
+        },
+
+        closeWizard() {
+            this.wizard.show = false;
+        },
+
+        // ─── H3: Undo banner ─────────────────────────────────────────────────────
+
+        async loadUndoBanner(groupID) {
+            try {
+                const r = await apiFetch(`/api/v1/node-groups/${groupID}/auto-policy-state`);
+                if (!r.ok) return;
+                const data = await r.json();
+                if (data.auto_compute && data.undo_available) {
+                    this.undoBanners[groupID] = {
+                        available:  true,
+                        hours:      Math.ceil(data.hours_remaining),
+                        deadline:   data.undo_deadline,
+                        partition:  data.slurm_partition_name || '',
+                        groupName:  data.node_group_name || groupID,
+                    };
+                }
+            } catch (_) { /* non-fatal */ }
+        },
+
+        async undoAutoPolicy(groupID) {
+            if (!confirm('Undo the auto-allocation? This will delete the NodeGroup and its Slurm partition entry. This cannot be undone.')) return;
+            try {
+                const r = await apiFetch(`/api/v1/node-groups/${groupID}/undo-auto-policy`, { method: 'POST' });
+                const data = await r.json();
+                if (!r.ok) {
+                    alert(data.error || 'Undo failed.');
+                    return;
+                }
+                // Remove banner and reload groups.
+                delete this.undoBanners[groupID];
+                await this.loadGroups();
+            } catch (e) {
+                alert(e.message || 'Unexpected error during undo.');
+            }
         },
     };
 }

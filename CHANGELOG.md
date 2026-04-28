@@ -5,6 +5,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.7.0] — 2026-04-27
+
+**Sprint H — Allocation Automation (CF-01, CF-26, CF-33)**
+
+Adds an auto-compute allocation policy engine, a PI onboarding wizard, and a
+24-hour undo window so the first-login experience for PIs is hands-off and
+reversible without admin intervention.
+
+### Added
+
+- **Auto-compute allocation engine (H1 / CF-01)** — New `internal/allocation`
+  package with `Engine.Run()` that executes a 7-step pipeline: create NodeGroup,
+  assign PI ownership, sync LDAP project group (non-fatal), apply access
+  restriction (non-fatal), add Slurm partition, persist `auto_policy_state` JSON,
+  audit event. Fatal failures roll back the NodeGroup. `Engine.Undo()` reverses
+  all actions within the 24-hour window. `ParseStateView()` computes the
+  remaining undo window and is used by both the API and background finalizer.
+
+- **DB migrations 072–073** — Migration 072 adds `auto_compute`, `auto_policy_state`,
+  and `auto_policy_finalized_at` to `node_groups`, adds `onboarding_completed` to
+  `users`, and creates `idx_node_groups_auto_policy_pending` for the pending-group
+  scanner. Migration 073 creates the `auto_policy_config` singleton table (disabled
+  by default) with knobs: `enabled`, `default_node_count`, `default_hardware_profile`,
+  `default_partition_template`, `default_role`, `notify_admins_on_create`.
+
+- **PI onboarding wizard (H2 / CF-33)** — Single-screen overlay shown to PIs
+  who have no projects on first login. Fields: project name, partition name template,
+  initial members (comma-separated), LDAP sync toggle, auto-compute toggle. Submits
+  to `POST /api/v1/projects`, which invokes the allocation engine when
+  `auto_compute=true`. Wizard is dismissed permanently after first project creation
+  or by explicit skip. `GET /api/v1/portal/pi/onboarding-status` drives the
+  show/hide logic; `POST /api/v1/portal/pi/onboarding-complete` records completion.
+
+- **24-hour undo window (H3 / CF-26)** — `POST /api/v1/node-groups/{id}/undo-auto-policy`
+  reverses all engine actions and sends the PI a notification email. Returns 409 when
+  the window is closed. `GET /api/v1/node-groups/{id}/auto-policy-state` returns
+  `undo_available`, `hours_remaining`, and metadata for the PI portal banner. A
+  background worker (`runAutoPolicyFinalizer`) ticks hourly and finalizes all groups
+  whose 24-hour window has elapsed, closing the undo opportunity and auditing each
+  finalization.
+
+- **Slurm auto-partition helper** — `SlurmManager.AddAutoPartition()` appends a
+  `PartitionName=<name> Nodes=ALL State=UP Default=NO` stanza to `slurm.conf` via
+  the existing versioned config pipeline. Idempotent (no-op if partition already
+  present). Validates new config via `validateSlurmConf` (logs warnings, does not
+  block).
+
+- **Admin config CRUD** — `GET /api/v1/admin/auto-policy-config` and
+  `PUT /api/v1/admin/auto-policy-config` expose the singleton config for enabling
+  auto-allocation and tuning defaults without a server restart.
+
+- **Notification templates** — `auto_allocation_created.txt` (admin summary on
+  NodeGroup creation) and `auto_allocation_undone.txt` (PI notification on undo).
+
+- **PI portal undo banner** — PI portal card for each auto-compute group shows a
+  dismissible banner with hours remaining and an Undo button while the window is
+  open.
+
+### Changed
+
+- `POST /api/v1/projects` now accepts `auto_compute`, `partition_template`,
+  `initial_members`, and `ldap_sync_enabled` fields. When `auto_compute=true` the
+  allocation engine runs automatically after group creation.
+
+---
+
 ## [v1.6.0] — 2026-04-27
 
 **Sprint G — Identity & Access Primitives (CF-24, CF-40, CF-09)**

@@ -915,3 +915,70 @@ func parseInt(s string) (int, error) {
 func sinfoCommand(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, "sinfo", "--noheader", "--format=%P %a %D %A")
 }
+
+// AddAutoPartition appends a minimal PartitionName entry to slurm.conf for
+// the given NodeGroup and partition name. Called by the auto-policy engine
+// (Sprint H, H2). The appended entry uses safe defaults; the operator can
+// refine it via the Slurm config editor.
+//
+// If Slurm is not enabled or slurm.conf does not exist, returns nil
+// (non-fatal — the engine records the partition name in auto_policy_state and
+// the operator can add it manually).
+func (m *Manager) AddAutoPartition(ctx context.Context, groupID, partitionName string) error {
+	// Validate partition name — must be non-empty and contain only safe chars.
+	for _, ch := range partitionName {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+			return fmt.Errorf("slurm: partition name %q contains invalid characters", partitionName)
+		}
+	}
+	if partitionName == "" {
+		return fmt.Errorf("slurm: partition name must not be empty")
+	}
+
+	if !m.IsEnabled() {
+		// Slurm not enabled — no-op. The engine will record the partition name for
+		// manual wiring; this is not an error.
+		return nil
+	}
+
+	// Read the current slurm.conf content (latest version).
+	current, err := m.db.SlurmGetCurrentConfig(ctx, "slurm.conf")
+	if err != nil {
+		// No slurm.conf yet — not an error, return nil (operator must create it first).
+		return nil
+	}
+
+	// Check whether a partition with this name is already defined.
+	if strings.Contains(current.Content, "PartitionName="+partitionName) {
+		// Already present — idempotent.
+		return nil
+	}
+
+	// Append the new partition entry.
+	partitionLine := fmt.Sprintf(
+		"\n# Auto-added by clustr auto-policy engine (NodeGroup: %s)\nPartitionName=%s Nodes=ALL State=UP Default=NO\n",
+		groupID, partitionName,
+	)
+	newContent := strings.TrimRight(current.Content, "\n") + partitionLine
+
+	// Validate the new content using the internal rule-checker (per D22 step 3).
+	// Validation issues are warnings in the context of an append-only operation;
+	// we log them but do not block (the operator can fix via the editor).
+	if issues := validateSlurmConf(newContent); len(issues) > 0 {
+		for _, issue := range issues {
+			log.Warn().Str("partition", partitionName).Str("msg", issue.Message).
+				Msg("slurm: AddAutoPartition: validation issue (non-blocking)")
+		}
+	}
+
+	// Persist as a new version.
+	_, saveErr := m.db.SlurmSaveConfigVersion(ctx, "slurm.conf", newContent,
+		"auto-policy-engine", fmt.Sprintf("auto-policy: add partition %s for NodeGroup %s", partitionName, groupID),
+		false,
+	)
+	if saveErr != nil {
+		return fmt.Errorf("slurm: AddAutoPartition: save version: %w", saveErr)
+	}
+	return nil
+}

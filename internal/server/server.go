@@ -40,6 +40,7 @@ import (
 	proxmoxpower "github.com/sqoia-dev/clustr/internal/power/proxmox"
 	"github.com/sqoia-dev/clustr/internal/reimage"
 	"github.com/sqoia-dev/clustr/internal/notifications"
+	"github.com/sqoia-dev/clustr/internal/allocation"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	"github.com/sqoia-dev/clustr/internal/server/ui"
@@ -242,6 +243,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	}
 	// F3: Allocation expiration scanner — sends warnings at 30/14/7 days.
 	go s.runExpirationScanner(ctx)
+	// H3: Auto-policy finalizer — closes the 24h undo window.
+	go s.runAutoPolicyFinalizer(ctx)
 }
 
 // runDigestProcessor polls the notification digest queue every hour and sends
@@ -678,6 +681,53 @@ func (s *Server) scanExpirations(ctx context.Context) {
 	}
 }
 
+// runAutoPolicyFinalizer ticks every hour and finalizes the 24-hour undo window
+// for NodeGroups created by the auto-compute policy engine (H3, Sprint H).
+// After 24 hours, the undo endpoint returns 409 for the group.
+func (s *Server) runAutoPolicyFinalizer(ctx context.Context) {
+	log.Info().Msg("auto-policy finalizer: started (hourly)")
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	s.finalizeAutoPolicies(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("auto-policy finalizer: stopping")
+			return
+		case <-ticker.C:
+			s.finalizeAutoPolicies(ctx)
+		}
+	}
+}
+
+// finalizeAutoPolicies scans pending auto-compute groups and finalizes those
+// whose 24-hour window has elapsed.
+func (s *Server) finalizeAutoPolicies(ctx context.Context) {
+	groups, err := s.db.ListPendingAutoComputeGroups(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("auto-policy finalizer: list pending failed")
+		return
+	}
+	for _, g := range groups {
+		if time.Since(g.CreatedAt) < 24*time.Hour {
+			continue // window still open
+		}
+		if err := s.db.FinalizeAutoComputeState(ctx, g.GroupID); err != nil {
+			log.Error().Err(err).Str("group_id", g.GroupID).
+				Msg("auto-policy finalizer: finalize failed")
+			continue
+		}
+		if s.audit != nil {
+			s.audit.Record(ctx, "system", "system",
+				"auto_allocation.window_closed", "node_group", g.GroupID, "",
+				nil, map[string]string{"group_id": g.GroupID},
+			)
+		}
+		log.Info().Str("group_id", g.GroupID).
+			Msg("auto-policy finalizer: undo window closed")
+	}
+}
+
 // diskSpaceThresholds are the disk usage fractions at which we warn / error / fatal.
 const (
 	diskWarnThreshold  = 0.80
@@ -1086,6 +1136,32 @@ func (s *Server) buildRouter() chi.Router {
 			// List all groups where the caller is a delegated manager.
 			r.Get("/portal/pi/managed-groups", managerDelegH.HandleListManagedGroups)
 		})
+
+		// ─── Sprint H — Auto-compute allocation policy engine (H1/H2/H3 / CF-29) ──
+		autoPolicyH := s.buildAutoPolicyHandler(notifierEarly, getActorInfo)
+		// PI: create a project (with optional auto_compute=true for wizard submit).
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			r.Post("/projects", autoPolicyH.HandleCreateProject)
+			// Onboarding wizard status (H2).
+			r.Get("/portal/pi/onboarding-status", autoPolicyH.HandleGetOnboardingStatus)
+			r.Post("/portal/pi/onboarding-complete", autoPolicyH.HandleCompleteOnboarding)
+			// Undo auto-policy on a group the PI owns (H3).
+			r.Post("/node-groups/{id}/undo-auto-policy", autoPolicyH.HandleUndoAutoPolicy)
+			// Read undo window state for the PI portal banner.
+			r.Get("/node-groups/{id}/auto-policy-state", autoPolicyH.HandleGetAutoPolicyState)
+		})
+		// Admin: undo on any group + read/write policy config.
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/node-groups/{id}/undo-auto-policy", autoPolicyH.HandleUndoAutoPolicy)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/auto-policy", autoPolicyH.HandleGetAutoPolicyConfig)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Put("/admin/auto-policy", autoPolicyH.HandleUpdateAutoPolicyConfig)
+		// Read-only state available to admin (no PI middleware needed).
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/node-groups/{id}/auto-policy-state", autoPolicyH.HandleGetAutoPolicyState)
 
 		// ─── Sprint D — Director portal API (director or admin) ──────────────────
 		directorH := &portalhandler.DirectorHandler{DB: s.db, Audit: s.audit}
@@ -1668,6 +1744,45 @@ func (s *Server) buildPIHandler() *portalhandler.PIHandler {
 	}
 
 	return h
+}
+
+// buildAutoPolicyHandler constructs the AutoPolicyHandler for Sprint H.
+func (s *Server) buildAutoPolicyHandler(notifier *notifications.Notifier, getActorInfo func(r *http.Request) (string, string)) *portalhandler.AutoPolicyHandler {
+	engine := &allocation.Engine{
+		DB:    s.db,
+		Audit: s.audit,
+	}
+
+	// Wire LDAP sync hook (G1) — ensures a posixGroup exists for the NodeGroup.
+	// EnsureProjectGroup is non-blocking; it queues on LDAP unavailability.
+	// We need the group name so look it up, then call the plugin.
+	engine.SyncLDAPGroup = func(ctx context.Context, groupID string) error {
+		ng, err := s.db.GetNodeGroupFull(ctx, groupID)
+		if err != nil {
+			return fmt.Errorf("auto-policy ldap sync: get group: %w", err)
+		}
+		s.ldapMgr.EnsureProjectGroup(ctx, groupID, ng.Name)
+		return nil
+	}
+
+	// Wire G2 restriction setter — noop for now (default is open / membership-based).
+	// A future sprint can wire the node_group_restrictions insert here.
+	engine.SetGroupRestriction = nil
+
+	// Wire Slurm partition auto-assignment — nil if Slurm module not active.
+	if s.slurmMgr != nil {
+		engine.AddSlurmPartition = func(ctx context.Context, groupID, partitionName string) error {
+			return s.slurmMgr.AddAutoPartition(ctx, groupID, partitionName)
+		}
+	}
+
+	return &portalhandler.AutoPolicyHandler{
+		DB:           s.db,
+		Audit:        s.audit,
+		Engine:       engine,
+		Notifier:     notifier,
+		GetActorInfo: getActorInfo,
+	}
 }
 
 // serveDirectorPortalPage serves portal_director.html from the embedded static FS.

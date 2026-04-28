@@ -70,6 +70,51 @@ The PI can now log in. After authentication, they are redirected to `/portal/pi/
 
 ---
 
+## PI Onboarding Wizard (v1.7.0+)
+
+On first login, a PI with no existing projects sees a one-screen wizard overlay
+in the PI portal. The wizard guides the PI through creating their first compute
+group automatically.
+
+### What the wizard collects
+
+| Field | Required | Description |
+|---|---|---|
+| Project name | Yes | Human-readable name; slugified to derive NodeGroup name and Slurm partition |
+| Partition name template | No | Overrides admin default; supports `{{.ProjectSlug}}` variable |
+| Initial members | No | Comma-separated usernames added to the group at creation time |
+| Enable LDAP sync | Toggle | Mirror group membership to LDAP posixGroup |
+| Auto-compute | Toggle | Run the allocation engine (create NodeGroup + Slurm partition automatically) |
+
+Submitting the wizard POSTs to `POST /api/v1/projects`. If auto-compute is on,
+the engine fires immediately and a success screen shows the created NodeGroup
+and Slurm partition name.
+
+### Wizard dismissal
+
+The wizard is permanently dismissed when the PI:
+- Successfully creates a project (wizard or API)
+- Explicitly clicks "Skip for now"
+
+Dismissed state is stored per-user in `users.onboarding_completed`.
+
+### Undo Banner (v1.7.0+)
+
+After auto-allocation, each auto-compute group card in the PI portal shows an
+undo banner while the 24-hour window is open. The banner displays hours
+remaining and an Undo button.
+
+Clicking Undo:
+1. Prompts the PI to confirm
+2. Calls `POST /api/v1/node-groups/{id}/undo-auto-policy`
+3. On success, removes the group from the portal and sends the PI an email
+4. On failure (window closed), shows an error message
+
+See [Auto-Allocation Engine](auto-allocation.md) for full technical details on
+the engine, config knobs, and undo behavior.
+
+---
+
 ## Member management modes
 
 There are two modes for the "add member" operation. Which mode is active
@@ -220,3 +265,10 @@ is surfaced to the PI as "LDAP is not configured — contact admin").
 | GET | `/api/v1/admin/pi/expansion-requests` | admin | List all expansion requests |
 | POST | `/api/v1/admin/pi/expansion-requests/{id}/resolve` | admin | Acknowledge or dismiss expansion request |
 | PUT | `/api/v1/node-groups/{id}/pi` | admin | Assign or clear PI for a group |
+| POST | `/api/v1/projects` | pi / admin | Create project (with optional auto-compute engine) |
+| GET | `/api/v1/portal/pi/onboarding-status` | pi / admin | Returns `show_wizard` and `completed` flags |
+| POST | `/api/v1/portal/pi/onboarding-complete` | pi / admin | Mark onboarding wizard dismissed |
+| GET | `/api/v1/node-groups/{id}/auto-policy-state` | pi / admin | Returns undo window state for an auto-compute group |
+| POST | `/api/v1/node-groups/{id}/undo-auto-policy` | pi / admin | Undo auto-allocation within 24-hour window |
+| GET | `/api/v1/admin/auto-policy-config` | admin | Read auto-policy configuration singleton |
+| PUT | `/api/v1/admin/auto-policy-config` | admin | Update auto-policy configuration |

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G are RELEASED (v1.0.1 → v1.6.0). Sprint H is COMMITTED (v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -754,7 +754,7 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
-### Sprint H — v1.7.0 "Allocation Automation" (COMMITTED, AFTER G)
+### Sprint H — v1.7.0 "Allocation Automation" **[COMPLETED — 2026-04-27]**
 
 **Goal:** Auto-compute allocation — NodeGroup auto-creation + Slurm partition auto-assignment when a new PI is onboarded. The structural payoff of the C.5 PI onboarding work. Single-theme sprint because it touches NodeGroup creation + Slurm partition wiring + PI onboarding integration; bundling with G's identity work would mix risk profiles.
 
@@ -1140,4 +1140,4 @@ Everything else in the plan matters. These three are the ones that, if the next 
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G are RELEASED (v1.0.1 → v1.6.0). Sprint H is COMMITTED (v1.7.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
