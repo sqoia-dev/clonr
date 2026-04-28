@@ -190,6 +190,7 @@ const App = {
         Router.register('/system/groups',   () => {
             if (typeof SysAccountsPages !== 'undefined') SysAccountsPages.groups();
         });
+        Router.register('/network/allocations', () => Pages.dhcpLeases());
         Router.register('/network/switches', () => {
             if (typeof NetworkPages !== 'undefined') NetworkPages.switches();
         });
@@ -353,6 +354,22 @@ function nodeBadge(node) {
     if (node.base_image_id)               return `<span class="badge badge-info">Configured</span>`;
     if (node.hardware_profile)            return `<span class="badge badge-warning">Registered</span>`;
     return `<span class="badge badge-neutral">Unconfigured</span>`;
+}
+
+// dhcpStateBadge maps a node deploy_state string (as returned by the DHCP
+// leases endpoint) to a coloured badge. Mirrors the labels from nodeBadge
+// but takes a plain string rather than a full node object.
+function dhcpStateBadge(state) {
+    switch (state) {
+        case 'deployed_verified':        return `<span class="badge badge-deployed">Verified</span>`;
+        case 'deploy_verify_timeout':    return `<span class="badge badge-error">Verify Timeout</span>`;
+        case 'deployed_preboot':         return `<span class="badge badge-warning">Unverified</span>`;
+        case 'failed':                   return `<span class="badge badge-error">Failed</span>`;
+        case 'reimage_pending':          return `<span class="badge badge-info">Reimaging</span>`;
+        case 'configured':               return `<span class="badge badge-info">Configured</span>`;
+        case 'registered':               return `<span class="badge badge-warning">Registered</span>`;
+        default:                         return `<span class="badge badge-neutral">${escHtml(state || 'Unknown')}</span>`;
+    }
 }
 
 function fmtBytes(bytes) {
@@ -9067,6 +9084,108 @@ const Pages = {
                 </div>
             </div>`;
         document.body.appendChild(modal);
+    },
+
+    // ─── DHCP Allocations ─────────────────────────────────────────────────
+
+    async dhcpLeases() {
+        App.render(loading('Loading DHCP allocations…'));
+
+        let data;
+        try {
+            data = await API.dhcp.leases();
+        } catch (err) {
+            App.render(alertBox('Failed to load DHCP allocations: ' + err.message));
+            return;
+        }
+
+        const leases = (data && Array.isArray(data.leases)) ? data.leases : [];
+        const count  = (data && data.count != null) ? data.count : leases.length;
+
+        const tableRows = leases.length === 0 ? '' : leases.map(l => {
+            const lastSeen = l.last_seen_at
+                ? `<span title="${escHtml(l.last_seen_at)}">${fmtRelative(l.last_seen_at)}</span>`
+                : '<span style="color:var(--text-secondary)">—</span>';
+
+            const ip = l.ip
+                ? `<code style="font-family:var(--font-mono);font-size:12px;">${escHtml(l.ip)}</code>`
+                : '<span style="color:var(--text-secondary)">—</span>';
+
+            const mac = `<code style="font-family:var(--font-mono);font-size:12px;">${escHtml(l.mac)}</code>`;
+
+            // Deep-link to node detail if we have a node_id.
+            const hostname = l.node_id
+                ? `<a href="#/nodes/${escHtml(l.node_id)}" style="color:var(--accent);text-decoration:none;">${escHtml(l.hostname)}</a>`
+                : escHtml(l.hostname);
+
+            const role = l.role
+                ? `<span class="badge badge-neutral badge-sm">${escHtml(l.role)}</span>`
+                : '<span style="color:var(--text-secondary)">—</span>';
+
+            const stateBadge = dhcpStateBadge(l.deploy_state);
+
+            return `<tr>
+                <td>${hostname}</td>
+                <td>${mac}</td>
+                <td>${ip}</td>
+                <td>${role}</td>
+                <td>${stateBadge}</td>
+                <td>${lastSeen}</td>
+            </tr>`;
+        }).join('');
+
+        const tableBody = leases.length === 0
+            ? `<tr><td colspan="6">
+                <div class="empty-state" style="padding:40px">
+                    <div class="empty-state-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="40" height="40">
+                            <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+                            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
+                        </svg>
+                    </div>
+                    <div class="empty-state-title">No DHCP allocations yet</div>
+                    <div class="empty-state-text">Nodes appear here once they PXE-boot and register with the server. The management network layout will be visible once nodes are online.</div>
+                </div>
+              </td></tr>`
+            : tableRows;
+
+        App.render(`
+            <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+                <div>
+                    <h1 class="page-title">DHCP Allocations</h1>
+                    <p class="page-subtitle" style="color:var(--text-secondary);margin:4px 0 0;">
+                        MAC→IP mappings from the management network — ${count} node${count === 1 ? '' : 's'}
+                    </p>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="Pages.dhcpLeases()" title="Refresh">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" width="14" height="14" style="margin-right:4px;">
+                        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+            <div class="card">
+                <div class="table-wrapper" style="overflow-x:auto;">
+                    <table class="table" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th>Hostname</th>
+                                <th>MAC</th>
+                                <th>IP</th>
+                                <th>Role</th>
+                                <th>State</th>
+                                <th>Last Seen</th>
+                            </tr>
+                        </thead>
+                        <tbody>${tableBody}</tbody>
+                    </table>
+                </div>
+            </div>
+        `);
+
+        // Auto-refresh every 30s so operators see live changes.
+        App.setAutoRefresh(() => Pages.dhcpLeases(), 30000);
     },
 };
 

@@ -623,6 +623,7 @@ Pages:
 - **Dashboard** — cluster summary: node count, image count, recent activity
 - **Images** — browse and inspect base images, monitor pull/build status
 - **Nodes** — view and manage node configurations
+- **Allocations** — DHCP allocations view: MAC→IP mapping for every node on the management network, sortable and linked to node detail
 - **Logs** — searchable log viewer with live SSE streaming; filter by node, level, or component
 
 ---

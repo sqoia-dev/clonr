@@ -952,6 +952,11 @@ func (s *Server) buildRouter() chi.Router {
 			// Active deploy detection (for shell modal warning)
 			r.Get("/images/{id}/active-deploys", factory.ActiveDeploys)
 
+			// DHCP allocations — read-only view of MAC→IP mappings from node_configs.
+			// No dnsmasq lease files are read; source of truth is the node table.
+			dhcpH := &handlers.DHCPHandler{DB: s.db}
+			r.Get("/dhcp/leases", dhcpH.ListLeases)
+
 			// Nodes — by-mac must be before /{id} to avoid chi match ambiguity.
 			// nodes/connected must be before nodes/{id} to avoid chi match ambiguity.
 			r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)

@@ -1549,6 +1549,27 @@ type SlurmBinaryPushPayload struct {
 	Checksum    string `json:"checksum"`
 }
 
+// DHCPLease is a single row in the DHCP allocations view.
+// Fields are derived entirely from the node_configs table — no dnsmasq lease
+// files are read. IP is stored as a CIDR in node interfaces; we surface the
+// plain IP (no prefix length) here for readability.
+type DHCPLease struct {
+	NodeID      string     `json:"node_id"`
+	Hostname    string     `json:"hostname"`
+	MAC         string     `json:"mac"`
+	IP          string     `json:"ip"`           // plain dotted-decimal, no CIDR suffix
+	Role        string     `json:"role,omitempty"`
+	DeployState string     `json:"deploy_state"`
+	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`
+	FirstSeenAt time.Time  `json:"first_seen_at"` // node created_at
+}
+
+// DHCPLeasesResponse is returned by GET /api/v1/dhcp/leases.
+type DHCPLeasesResponse struct {
+	Leases []DHCPLease `json:"leases"`
+	Count  int         `json:"count"`
+}
+
 // NetworkNodeConfig carries the resolved per-node network configuration
 // injected into NodeConfig during the deploy pipeline.
 type NetworkNodeConfig struct {

@@ -436,4 +436,9 @@ const API = {
         // IB status
         getIBStatus()                       { return API.get('/network/ib-status'); },
     },
+    dhcp: {
+        // leases returns all DHCP allocations derived from the node table.
+        // Optional params.role filters by HPC role tag.
+        leases(params = {})  { return API.get('/dhcp/leases', params); },
+    },
 };
