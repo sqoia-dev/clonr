@@ -1,14 +1,23 @@
-# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.2 → v2.0)
+# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.1.1 → v1.2 → v2.0)
 
-**Date:** 2026-04-27
+**Date:** 2026-04-27 (original) — **Updated 2026-04-27 (D21 re-rule + Sprint B.5 inserted + framework adoption now in Sprint C)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, C below are committed. Sprint D is directional, not committed.
+**Status:** LOCKED. Sprints A, B, B.5, C below are committed. Sprint D is directional, not committed.
 **Source reviews:**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
 - `docs/webui-review-personas.md` (Monica, commit `20d92dc`) — 6 personas, 1 served today
 
-This plan supersedes any informal webui v1.1 backlog. Every finding from the three source reviews is addressed (mapped to a sprint or explicitly deferred with rationale) in the traceability table at the end. New cross-cutting principles in Phase 3 are also written into `docs/decisions.md` as D19–D22.
+This plan supersedes any informal webui v1.1 backlog. Every finding from the three source reviews is addressed (mapped to a sprint or explicitly deferred with rationale) in the traceability table at the end. New cross-cutting principles in Phase 3 are also written into `docs/decisions.md` as D19–D23.
+
+## Standing principles (founder directives, baked in)
+
+These apply to ALL sprints in this plan and any future sprint plan. Do not re-litigate.
+
+1. **Sprints do not stop.** Sprint dispatch is automatic. When a sprint closes (tag shipped, CI green, autodeploy verified), the next sprint begins on schedule without operator approval. Founder explicitly directed: "they should not stop."
+2. **No headcount or revenue gating.** Open-source product, no SaaS, no billing. There is no "we'd need to hire" framing. We staff from the agent fleet (Dinesh leads frontend; Gilfoyle owns infra; Richard rules architecture; Monica owns positioning; Jared owns ops). All technical work is in-house and proceeds on technical merits alone. Founder directive: "if we can do it in house with the team we have we do it."
+3. **No revenue loss to optimize against.** Cost of churn is engineering time only. This raises our risk tolerance for refactors and framework adoption — we are NOT protecting paying customers from change.
+4. **Re-rule routes through Richard, but does not block sprint dispatch.** Founder can override at any time with a written directive (as happened 2026-04-27 for D21).
 
 ---
 
@@ -89,15 +98,19 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 
 **Ruling:** **Deferred to v1.2 backlog (not committed).** Critical frontend logic that Dinesh flagged for testing (F-1: `fmtBytes`, `fmtRelative`, `_phasePercent`) gets minimal node:test coverage in v1.1 as a small Sprint B side task. Full Vitest harness + CSP migration deferred until D10 webui module-split happens (post-v1.0 plan in decisions.md).
 
-**Rationale:** Adding a JS test framework + CSP refactor is a multi-sprint slog that delivers zero new operator-visible value. The 5 helper functions can be tested with `node:test` (zero deps) inside Sprint B. Full migration waits for the framework decision (see D21 below).
+**Rationale:** Adding a JS test framework + CSP refactor is a multi-sprint slog that delivers zero new operator-visible value. The 5 helper functions can be tested with `node:test` (zero deps) inside Sprint B. Full migration sequenced with framework adoption (see D21 re-rule + D23).
 
 ---
 
-### C10. Tech debt — module-split `app.js` (E-1) in v1.1 or v1.2?
+### C10. Tech debt — module-split `app.js` (E-1) in v1.1, v1.1.1, or v1.2? (RE-RULED 2026-04-27)
 
-**Ruling:** **Deferred to v1.2. v1.1 keeps adding to monolithic `app.js`.**
+**Original ruling (2026-04-27 AM):** Deferred to v1.2 (Sprint C C2 workstream). Module-split between feature waves to avoid merge collision with role-aware nav.
 
-**Rationale:** Module-splitting `app.js` while simultaneously adding the role-aware nav, anomaly card, audit log UI, and webhooks UI is a recipe for merge-conflict hell. Ship v1.1 features first against the monolith. Module-split immediately after v1.1 GA, before the v1.2 researcher portal work starts. This sequences the refactor between two feature waves rather than during one. See D21 below for the JS framework decision boundary.
+**RE-RULED (2026-04-27 PM, after founder directive on D21):** **Module-split moves to a dedicated Sprint B.5 (v1.1.1) between Sprint B and Sprint C.** Sprint C uses the clean module boundaries to introduce the framework (D23: Alpine + HTMX) on the Researcher portal greenfield surface.
+
+**Rationale (re-rule):** Founder lifted the framework deferral. Two prerequisites now must happen for Sprint C: module-split AND framework introduction. Doing both inside Sprint C blows the v1.2 timeline AND violates the principle of "one big change at a time per surface" (refactoring code AND swapping in a framework on the same files is a recipe for unreviewable PRs). Splitting into B.5 (refactor only, no framework) → C (framework on new modules + greenfield Researcher portal) gives clean reviewable seams. Cost: adds 2 weeks of calendar time before v1.2. Benefit: drastically lower risk on the framework introduction. Net win.
+
+**See:** D21 (re-rule) and D23 (framework choice) in `docs/decisions.md`.
 
 ---
 
@@ -212,50 +225,100 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 - CI green on `main` for the v1.1.0 tag commit. Cloner autodeploy picks up the new bundle.
 - `docs/upgrade.md` v1.1 release notes section authored by Jared.
 
-**Explicitly out of scope for v1.1 (rolls to v1.2 or later):**
-- New `viewer` role
-- `/portal/` researcher route
-- Full module-split of `app.js`
-- CSP headers / inline-handler migration
+**Explicitly out of scope for v1.1 (rolls to v1.1.1, v1.2, or later):**
+- New `viewer` role (v1.2)
+- `/portal/` researcher route (v1.2)
+- Full module-split of `app.js` (**v1.1.1 — Sprint B.5**)
+- Alpine.js / HTMX adoption (**v1.2 — Sprint C, see D23**)
+- CSP headers / inline-handler migration (deferred — Alpine 3 CSP build mitigates when needed)
 - Vitest harness (we get `node:test` coverage of helpers only)
 - LDAP self-service password change (v1.2)
-- Per-node verify_timeout override
-- DHCP pool config in UI
-- Reporting dashboards for PIs
+- Per-node verify_timeout override (v1.2)
+- DHCP pool config in UI (v1.3+)
+- Reporting dashboards for PIs (v2.0+, gated on customer-defined metrics)
+
+**Sprint B framework note (D21 re-rule baked in):** Sprint B explicitly stays vanilla. Audit log UI (B3-3) and Webhooks UI (B3-1/B3-2) ship in vanilla. They will be rewritten to HTMX in Sprint C as the second wave of framework adoption (Researcher portal is the first). Do NOT introduce Alpine or HTMX in Sprint B — that work is Sprint C's responsibility on top of Sprint B.5's clean module boundaries.
 
 ---
 
-### Sprint C — v1.2.0 "Researcher Portal MVP + Refactor Foundation"
+### Sprint B.5 — v1.1.1 "Module Split Refactor" (NEW — added 2026-04-27 per D21 re-rule)
 
-**Tag target:** `v1.2.0` 6-8 weeks after v1.1.0 ships (target window: 2026-07-20 to 2026-08-10).
-**Goal:** Deliver the researcher portal that creates the institutional-buyer wedge against Bright Computing, AND complete the `app.js` module-split that v1.1 deferred.
-**Personas served:**
-- Persona 3 (Researcher) — first time they have any UI surface
-- Persona 1 (Sysadmin) — better long-term maintainability via module-split (no day-1 UX change)
-- Persona 2 (Junior Ops) — quality-of-life fixes from v1.1 P2 backlog
-**Owner:** Dinesh (engineering lead), Monica (researcher-portal copy + competitive positioning validation), Jared (LDAP self-service ops doc).
-**Estimate:** 6-8 weeks across the three workstreams.
+**Tag target:** `v1.1.1` 2 weeks after v1.1.0 ships (target window: 2026-06-15 to 2026-06-29).
+**Goal:** Decompose monolithic `app.js` (9,388 LOC) and `slurm.js` (2,033 LOC) into ES6 module-per-page structure. Pure mechanical refactor. ZERO new features. ZERO framework adoption (that's Sprint C). This sprint exists solely to give Sprint C clean seams to layer Alpine + HTMX onto.
+**Personas served:** None directly. This is a foundation sprint. Persona benefit lands in Sprint C+.
+**Owner:** Dinesh (engineering lead, sole author), Gilfoyle (CI verification, autodeploy), Richard (PR review on module-boundary decisions).
+**Estimate:** 2 weeks engineering. No external dependencies. No design questions to resolve.
 **Dependencies:** Sprint B complete and v1.1.0 tagged.
 
-**Workstream C1 — Researcher portal MVP**
+**Why a dedicated micro-sprint instead of bundling into Sprint C:** D21 re-rule (2026-04-27) opened framework adoption. D23 chose Alpine + HTMX. Doing module-split AND framework adoption in the same sprint produces unreviewable PRs and conflates two unrelated changes (refactor vs. framework introduction). Splitting them into B.5 (refactor) → C (framework on clean modules) costs 2 weeks of calendar time and buys clean review surface + clear rollback boundaries.
+
+**Deliverables:**
+
+| ID | Source | Description |
+|---|---|---|
+| B5R-1 | Dinesh E-1 | Extract `Pages.deploys`, `Pages.images`, `Pages.nodes`, `Pages.dhcp`, `Pages.audit`, `Pages.webhooks`, `Pages.settings` into `internal/server/ui/static/js/pages/*.js`. Each module exports a single `render(container, route)` function + a `cleanup()` hook. ES6 modules via `<script type="module">`. No build step. |
+| B5R-2 | Dinesh E-1 | `app.js` retains: Router, App state, global helpers (`fmtBytes`, `escHtml`, `App.toast`), Auth bootstrap, page-cleanup dispatch. Target: 9,388 → ≤3,500 LOC. |
+| B5R-3 | Dinesh A-13, E-4 | Extract `escHtml`, `fmtBytes`, `fmtRelative`, `fmtDate` into `utils.js`. Single source of truth. Add `'` escaping (E-4 fix). |
+| B5R-4 | Dinesh F-1 | Expand `node:test` coverage on `utils.js` to ≥80% line coverage. Wire to CI. |
+| B5R-5 | new | Each extracted page module gets a `cleanup()` hook that closes any SSE streams, clears any timers. Router calls `cleanup()` on route change. Resolves D-4 (ISO SSE leak) and D-13 (page cleanup hook) from Dinesh's review preemptively. |
+| B5R-6 | new | Document module conventions in `internal/server/ui/static/js/README.md`: file naming, export shape, lifecycle hooks, dependency rules (page modules import from `utils.js` and `api.js` only — never from each other; never from `app.js`). |
+
+**Acceptance criteria:**
+- `app.js` LOC ≤3,500 (verified by `wc -l`).
+- All routes that worked in v1.1.0 still work in v1.1.1 — verified by full manual smoke (Dinesh) on cloner dev host across all 3 RBAC roles.
+- No new features. No new endpoints. No new behavior. Bytes-on-the-wire identical for any given API call.
+- `node:test` suite covers `utils.js` at ≥80% line coverage.
+- CI green on `main` for the v1.1.1 tag commit.
+- Cloner autodeploy picks up the new bundle without operator action.
+- `internal/server/ui/static/js/README.md` exists and documents the module conventions.
+
+**Out of scope for B.5:**
+- Any framework introduction (Alpine, HTMX, Lit, etc.) — Sprint C only.
+- Any TypeScript / build step / bundler — explicitly forbidden per D10.
+- Any new feature, even small — feature creep here defeats the entire point.
+- Any CSP work — sequenced with framework adoption.
+
+**Risk:** Pure refactors are deceptively easy to ship broken. Mitigation: ship in small PRs (one page module per PR), run full smoke after each merge, never bundle two page extractions into one PR.
+
+---
+
+### Sprint C — v1.2.0 "Researcher Portal MVP + Framework Introduction"
+
+**Tag target:** `v1.2.0` 6-8 weeks after v1.1.1 ships (target window: 2026-08-10 to 2026-09-07). Note: 2-week shift later than original plan because Sprint B.5 sits between B and C.
+**Goal:** Deliver the researcher portal that creates the institutional-buyer wedge against Bright Computing, AND introduce Alpine.js + HTMX (per D23) on the researcher portal greenfield surface and on selected v1.1 pages (audit log, anomaly card).
+**Personas served:**
+- Persona 3 (Researcher) — first time they have any UI surface
+- Persona 1 (Sysadmin) — better long-term maintainability via clean modules (B.5) + reactive UI on audit/anomaly surfaces (C)
+- Persona 2 (Junior Ops) — quality-of-life fixes from v1.1 P2 backlog
+**Owner:** Dinesh (engineering lead), Monica (researcher-portal copy + competitive positioning validation), Jared (LDAP self-service ops doc), Richard (architecture review on framework integration patterns).
+**Estimate:** 6-8 weeks across the three workstreams.
+**Dependencies:** Sprint B.5 complete and v1.1.1 tagged. Module-split MUST be done before this sprint starts — framework introduction onto a 9,388-LOC monolith is not feasible.
+
+**Workstream C1 — Researcher portal MVP (greenfield Alpine.js proof case per D23)**
+
+The Researcher portal is the FIRST production surface using Alpine. Greenfield = no vanilla code to migrate, no risk of regression, contained blast radius. If Alpine works here, we have proof to backfill into existing pages. If Alpine fails here, we revert to vanilla and revisit D23 — the risk is bounded to one new page.
 
 | ID | Source | Description |
 |---|---|---|
 | C1-1 | Monica Persona 3 / new | Add `viewer` role to RBAC. Migration `053_add_viewer_role.sql`. Documented in `docs/rbac.md`. |
-| C1-2 | Monica Persona 3 | New route `/portal/` (separate from `/admin/`). Single page: cluster status (partition health from Slurm), available images, "My HPC Account" panel. |
-| C1-3 | Monica C7 ruling / new | LDAP self-service password change. New endpoint `POST /api/v1/ldap/me/password` accepting current+new password, callable by `viewer` or above. Modal in /portal/ "My Account" panel. |
-| C1-4 | Monica Persona 3 / Section D | Slurm partition status surface: `GET /api/v1/slurm/partitions/status` returns array of `{partition, state, total_nodes, available_nodes}`. Rendered as cards on /portal/. |
+| C1-2 | Monica Persona 3 / D23 | New route `/portal/` (separate from `/admin/`). Single page built with Alpine.js: cluster status (partition health from Slurm), available images, "My HPC Account" panel. Uses `x-data` for top-level state, `x-show`/`x-if` for conditional panels, `x-on:click` for modal triggers. |
+| C1-3 | Monica C7 ruling / new | LDAP self-service password change. New endpoint `POST /api/v1/ldap/me/password` accepting current+new password, callable by `viewer` or above. Alpine modal in /portal/ "My Account" panel — `x-data` tracks form state (current password, new password, confirm, validation errors). |
+| C1-4 | Monica Persona 3 / Section D / D23 | Slurm partition status surface: `GET /api/v1/slurm/partitions/status` returns array of `{partition, state, total_nodes, available_nodes}`. Rendered as cards on /portal/ via HTMX `hx-trigger="every 60s"` for live refresh (content negotiation returns HTML partial for HTMX, JSON for API). |
 | C1-5 | Monica positioning | Hide /admin/ entirely from `viewer` role logins — they only see /portal/. Hide /portal/ from admin/operator role logins (they see /admin/ only). Login redirect logic dispatches by role. |
-| C1-6 | new | Tests: viewer login lands on /portal/, cannot navigate to /admin/, cannot mutate any data, can change own LDAP password. |
+| C1-6 | new | Tests: viewer login lands on /portal/, cannot navigate to /admin/, cannot mutate any data, can change own LDAP password. Alpine `x-data` state hydration is testable via DOM inspection in headless browser. |
 
-**Workstream C2 — `app.js` module-split (foundation for v2.0+ persona-specific dashboards)**
+**Workstream C2 — Framework introduction (Alpine.js + HTMX, per D23)**
+
+The C2 module-split workstream from the original plan moved to Sprint B.5 (v1.1.1). This C2 workstream is now framework introduction. Module-split is a prerequisite (must be done first in B.5) and is NOT a deliverable here.
 
 | ID | Source | Description |
 |---|---|---|
-| C2-1 | Dinesh E-1 | Extract `Pages.deploys`, `Pages.images`, `Pages.nodes`, `Pages.dhcp`, `Pages.audit`, `Pages.webhooks` into `pages/*.js` files. ES6 modules via `<script type="module">`. No build step. |
-| C2-2 | Dinesh E-1 | `app.js` retains: Router, App state, global helpers (`fmtBytes`, `escHtml`, `App.toast`), Auth bootstrap. Target shrink: 9,350 → ≤3,500 LOC. |
-| C2-3 | Dinesh A-13, E-4 | Extract `escHtml`, `fmtBytes`, `fmtRelative`, `fmtDate` into `utils.js`. Single source of truth. Add `'` escaping (E-4). |
-| C2-4 | Dinesh F-1 | Expand `node:test` coverage now that helpers are in `utils.js`. Target: 80% line coverage on `utils.js`. |
+| C2-1 | D23 | Vendor Alpine.js 3 (latest stable) and HTMX 2 (latest stable) into `internal/server/ui/static/vendor/`. Pin exact version in `internal/server/ui/static/vendor/VENDOR.md` (record version, source URL, SHA256, license text). Served via existing `embed.FS`. |
+| C2-2 | D23 | Add `<script src="/static/vendor/alpine.min.js" defer></script>` and `<script src="/static/vendor/htmx.min.js" defer></script>` to the layout HTML. Verify pages load with no console errors and existing vanilla code keeps working. |
+| C2-3 | D23 | Document framework usage conventions in `internal/server/ui/static/js/README.md` (extending B5R-6): when to reach for Alpine vs HTMX vs vanilla; `x-data` scope rules; `hx-target`/`hx-swap` patterns; how to mix on the same page. |
+| C2-4 | D23, B3-3 | Rewrite Audit log page (`pages/audit.js`, originally vanilla in v1.1) using HTMX for filter/paginate. Server adds an HTML-partial response variant to `GET /api/v1/audit` (content negotiation: `Accept: text/html` returns `<tr>...</tr>` rows; `Accept: application/json` unchanged for API consumers). |
+| C2-5 | D23, B2-4 | Rewrite Dashboard Anomalies card (originally vanilla in v1.1) using HTMX `hx-trigger="every 30s"` for periodic refresh. Same content-negotiation pattern. |
+| C2-6 | D23 | Add a `node:test` smoke test that asserts Alpine and HTMX are loaded on the layout page (catches accidental removal in future PRs). |
 
 **Workstream C3 — v1.1 P2 backlog**
 
@@ -291,11 +354,16 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 **Acceptance criteria for Sprint C:**
 - A `viewer`-role login redirects to `/portal/` and cannot reach any `/admin/` route (verified by test).
 - Researcher can change own LDAP password from /portal/ "My Account" without admin involvement.
-- `app.js` LOC ≤3,500. All extracted page modules import `utils.js`.
+- Alpine.js + HTMX vendored under `internal/server/ui/static/vendor/` with pinned versions documented in `VENDOR.md`.
+- Audit log page (rewritten in HTMX) loads + filters + paginates without full-page reload.
+- Dashboard Anomalies card refreshes every 30s via HTMX without reloading the dashboard.
+- Researcher portal `/portal/` is built with Alpine and demonstrates `x-data` reactive state on at least 3 distinct interactive components (account panel, partition status, image catalog).
+- All other v1.0/v1.1 pages still work in vanilla — framework adoption is purely additive.
 - All 14 P2 findings from engineering review FIXED.
 - All 8 Medium findings from ops review FIXED (or explicitly deferred with rationale).
 - CI green on the v1.2.0 tag.
 - `docs/researcher-portal.md` authored by Monica + Dinesh (positioning + how-to).
+- `internal/server/ui/static/js/README.md` updated with Alpine + HTMX usage conventions.
 
 ---
 
@@ -314,7 +382,7 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 3. **OIDC / SAML federation** (D1 re-decision trigger) — adds external IdP support. Keeps local sessions + API keys for sysadmins.
 4. **Multi-tenant data isolation** — schema-wide tenant_id; per-tenant NodeGroup scoping. Major undertaking. Only for federated/external user persona.
 5. **Persona-specific dashboards** — sysadmin operational dashboard distinct from PI utilization dashboard distinct from IT director quarterly view. Three different IAs sharing the same data layer.
-6. **Webui framework migration** (D10/D21 re-decision) — only if a frontend hire lands or the module-split (C2) hits a complexity ceiling.
+6. **Webui framework migration to a heavier framework (Preact / Vue / Svelte with build step)** — only if Alpine + HTMX (per D23, adopted v1.2) hit a complexity ceiling on a v2.0+ feature. Default v2.0+ stays on the D23 stack.
 7. **CSP headers + inline-handler removal** (E-3) — sequenced after framework decision because CSP migration touches every onclick.
 8. **SIEM export** (D13 re-decision trigger) — JSONL export endpoint for audit log. Gated on a regulated customer.
 9. **Two-tier hot/cold log archive** (D2 re-decision trigger) — gated on customer reporting evicted-log incident.
@@ -372,24 +440,23 @@ Each of these is written once, applied everywhere, and locked into `docs/decisio
 
 ---
 
-### D21 — JS Framework Threshold: "Vanilla JS until app.js module-split hits 5,000 LOC across modules OR a frontend hire wants a framework. Whichever first."
+### D21 — JS Framework Threshold (RE-RULED 2026-04-27 — see `docs/decisions.md` D21 for full audit trail)
 
-**Principle:** Stay in vanilla JS + `<script type="module">` ES modules through v1.2. Re-evaluate framework adoption (Alpine, HTMX, Lit, or — if scope warrants — React/Vue/Svelte) when ANY ONE of the following triggers fires:
+**Principle (re-rule):** Trigger 1 (>5,000 LOC) has fired (actual: 15,248 LOC). Trigger 2 (frontend hire) is invalid per founder directive — we staff in-house from the agent fleet. The ruling is now: **module-split first (Sprint B.5, v1.1.1), framework adoption second (Sprint C, v1.2.0).** Framework choice is locked in D23 below.
 
-1. Total LOC across all `pages/*.js` modules + `app.js` exceeds 5,000 (post-C2 we expect ~3,500; growth headroom = ~1,500 LOC over 6 months).
-2. A frontend engineer hire (D15 trigger) lands AND has framework expertise + a track record of shipping in vanilla.
-3. A specific feature requires complex form state machines (e.g., the v2.0 PI dashboard with cross-filtering charts) that vanilla JS makes painful.
-4. We need CSP enforcement (E-3) — CSP migration is the natural moment to revisit framework choice because the inline-handler refactor is touching every page anyway.
+**Active triggers going forward (3 + 4 from original; 1 already fired and resolved; 2 invalid):**
+1. ~~LOC threshold — FIRED 2026-04-27, resolved by Sprint B.5 + Sprint C.~~
+2. ~~Frontend hire — INVALID per founder.~~
+3. A specific feature requires complex form state machines beyond Alpine's reactive ergonomics → escalate to Preact or Vue (with build step, accepting D10 hit).
+4. CSP enforcement priority → swap vendored Alpine for Alpine 3 CSP-safe build.
 
-**Until any trigger fires:** Vanilla JS, ES6 modules, no build step. Explicitly NO bundlers (webpack/vite/esbuild/rollup), NO TypeScript, NO JSX.
+**Standing constraints (unchanged from original):** no bundlers, no TypeScript, no JSX, no npm/package.json. D10 stays load-bearing.
 
-**When a trigger fires:** Evaluate Alpine + HTMX (lowest cognitive cost, no build step) FIRST. Only escalate to React/Vue/Svelte if Alpine/HTMX cannot meet the requirement.
+**Why the re-rule:** Founder explicitly opened the door ("if we can do it in house with the team we have we do it. this is opensource so right now there is no revenue loss"). Trigger 2 was the implicit gate; with it gone and Trigger 1 long since fired, deferring further was hedging for hedging's sake. The risk-bounded path: module-split first (mechanical, no behavior change), framework on greenfield Researcher portal second (contained blast radius, demonstrably reversible if Alpine doesn't fit).
 
-**Why this principle:** "One binary, one container, no build step" is load-bearing positioning per D10. The v1.0/v1.1 webui works without a framework; adding a framework for the sake of it costs CI complexity, deploy artifact complexity, and the contradicts the self-hosted simplicity pitch. The C2 module-split (Sprint C) gets us 80% of framework benefits at 10% of the cost.
+**Reversibility:** Per-page reversible (rip Alpine out of any single page in an afternoon); codebase-wide costly. Mitigation: incremental adoption, never bulk migrations.
 
-**Reversibility:** **costly**. Once we adopt a framework, we don't rip it out. The threshold above is conservative on purpose.
-
-**Re-decision triggers explicit:** see 4 conditions above.
+**See `docs/decisions.md` D21 (re-rule) and D23 (framework choice) for full rationale, options considered, and adoption rules.**
 
 ---
 
@@ -416,13 +483,13 @@ Each of these is written once, applied everywhere, and locked into `docs/decisio
 
 ---
 
-**Phase 3 summary:** 4 principles ruled (D19–D22). Most strategically-loaded: **D21** (the JS framework threshold). It's the call that, if wrong in either direction, costs the most: too aggressive (adopt framework) and we burn weeks on a migration that delivers no operator value AND violates the self-hosted simplicity positioning; too conservative (vanilla forever) and we eventually hit a complexity ceiling that limits what we can build for personas 4-6. The 4 explicit re-decision triggers are the safety valve.
+**Phase 3 summary:** 5 principles ruled (D19–D23). D21 re-ruled same day after founder directive (see audit trail in `docs/decisions.md` D21 and D23). D23 locks Alpine.js + HTMX as the chosen framework, vendored, no build step. D21's original "vanilla until 4 triggers fire" stance was correct as of the morning of 2026-04-27; founder's directive that afternoon ("if we can do it in house with the team we have we do it. this is opensource so right now there is no revenue loss") removed the implicit hire-gate and made deferral hedge-for-hedging's-sake. Re-ruled accordingly. The framework decision is now bound, sequenced, and reversible at the per-page level.
 
 ---
 
 ## Traceability Table — Every Finding from Every Review
 
-Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **C** = Sprint C (v1.2.0), **D** = Sprint D horizon (v2.0+), **DEFER** = explicit defer with rationale, **N/A** = not a webui finding.
+Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B.5 (v1.1.1, module-split), **C** = Sprint C (v1.2.0, framework + researcher portal), **D** = Sprint D horizon (v2.0+), **DEFER** = explicit defer with rationale, **N/A** = not a webui finding.
 
 ### Engineering review (Dinesh, `webui-review-engineering.md`)
 
@@ -440,15 +507,15 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **C** = Sprint C (
 | A-10 Auth role default to admin | P1 | A | A-HF-2 (HOTFIX) |
 | A-11 prompt() for password | P2 | B | B4-5 |
 | A-12 prompt() for role | P2 | B | B4-5 |
-| A-13 escHtml duplicated | P2 | C | C2-3 |
+| A-13 escHtml duplicated | P2 | B.5 | B5R-3 (moved from C2-3 per D21 re-rule) |
 | A-14 ISO cancel uses delete | P2 | C | C3-5 |
-| B-1 showShellHint dead code | P3 | C | Bundled into C2 module-split cleanup |
-| B-2 _updateIsoBuildProgress no-op | P3 | C | Bundled into C2 cleanup |
+| B-1 showShellHint dead code | P3 | B.5 | Bundled into B.5 module-split cleanup (was C2) |
+| B-2 _updateIsoBuildProgress no-op | P3 | B.5 | Bundled into B.5 cleanup (was C2) |
 | B-3 confirm() in slurm.js | P3 | B | Folded into B5 work |
 | B-4 sysbage ReferenceError | P1 | A | A-HF-1 (HOTFIX) |
 | B-5 webhooks no UI | P1 | B | B3-1, B3-2 |
 | B-6 audit no UI | P1 | B | B3-3 |
-| B-7 /nodes/connected unused | P3 | C | Add badge to node list during C2 split |
+| B-7 /nodes/connected unused | P3 | B.5 | Add badge to node list during B.5 module-split (was C2) |
 | B-8 /repo/health unused | P3 | C | Add to Settings → System tab during C3-26 |
 | B-9 Rediscover misleading label | P2 | B | B4-7 |
 | C-1 webhook delivery history | P1 | B | B3-2 |
@@ -461,19 +528,19 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **C** = Sprint C (
 | D-1 session expiry countdown | P2 | C | C3-10 |
 | D-2 node detail dirty-state nav warn | P2 | C | C3-11 |
 | D-3 toast dedup | P3 | C | C3-12 |
-| D-4 ISO SSE not closed on nav | P2 | C | C3-13 |
+| D-4 ISO SSE not closed on nav | P2 | B.5 | B5R-5 (page cleanup hooks resolve this preemptively; was C3-13) |
 | D-5 Settings tab loses log state | P3 | C | C3-14 |
-| E-1 monolithic app.js | P2 | C | C2-1, C2-2 |
-| E-2 template-literal HTML pervasive | P3 | DEFER | Document grep CI rule in v1.2; full migration tied to D21 framework decision |
-| E-3 no CSP | P2 | DEFER | D horizon — sequenced with framework migration (D21 trigger 4) |
-| E-4 escHtml missing apostrophe | P3 | C | C2-3 |
-| E-5 XHR upload bypasses 401 redirect | P3 | C | Folded into C2 cleanup with auth.js extraction |
-| F-1 no JS unit tests | P2 | B+C | B4-8 (helpers via node:test); C2-4 (expand) |
-| F-2 no SSE integration test | P2 | DEFER | Tied to D21 framework decision; node:test of `_phasePercent` covered in B4-8 |
+| E-1 monolithic app.js | P2 | B.5 | B5R-1, B5R-2 (moved to B.5 per D21 re-rule; was C2-1, C2-2) |
+| E-2 template-literal HTML pervasive | P3 | C | Largely resolved by Alpine adoption (D23) on touched pages; vanilla pages stay until they're touched |
+| E-3 no CSP | P2 | DEFER | Mitigated by D23 (Alpine 3 has CSP-safe build); revisit when first regulated customer demands CSP enforcement |
+| E-4 escHtml missing apostrophe | P3 | B.5 | B5R-3 (was C2-3) |
+| E-5 XHR upload bypasses 401 redirect | P3 | B.5 | Folded into B.5 module-split with auth.js extraction (was C2 cleanup) |
+| F-1 no JS unit tests | P2 | B+B.5 | B4-8 (helpers via node:test in Sprint B); B5R-4 (expand to ≥80% on utils.js in B.5) |
+| F-2 no SSE integration test | P2 | DEFER | Page cleanup hooks (B5R-5) close the leak class; full SSE integration test deferred — revisit if SSE-related operator bug reports surface |
 | F-3 no node-editor dirty-flag test | P2 | C | Add when C3-11 lands |
-| F-4 dhcp_test response shape | P3 | C | Add during C2 (10-line test) |
+| F-4 dhcp_test response shape | P3 | B.5 | Add during B.5 module-split (was C2; 10-line test) |
 
-**Engineering totals: 8 P1, 14 P2, 11 P3 = 33 findings. A: 2. B: 12. C: 13. DEFER: 6.**
+**Engineering totals: 8 P1, 14 P2, 11 P3 = 33 findings. A: 2. B: 12. B.5: 8. C: 5. DEFER: 6.** (Reflects D21 re-rule reshuffling code-quality + module-split work into B.5.)
 
 ### Ops review (Jared, `webui-review-ops.md`)
 
@@ -541,7 +608,8 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **C** = Sprint C (
 - **Total findings across 3 reviews:** ~72 (33 engineering + 26 ops + 13 persona, deduplicating overlap)
 - **Sprint A (v1.0.1 hotfix):** 2 findings (the two truly broken-in-prod items)
 - **Sprint B (v1.1.0):** 30 findings (12 engineering + 14 ops + 4 persona)
-- **Sprint C (v1.2.0):** 27 findings (13 engineering + 14 ops + 3 persona, including the researcher portal MVP)
+- **Sprint B.5 (v1.1.1 module-split, NEW per D21 re-rule):** 8 findings (engineering refactor only — pure foundation work for Sprint C framework adoption)
+- **Sprint C (v1.2.0 framework + researcher portal):** 19 findings (5 engineering + 14 ops + 3 persona, plus Alpine/HTMX adoption per D23)
 - **Sprint D (v2.0+ horizon, NOT committed):** 8 directional themes
 - **DEFERRED with explicit rationale:** ~16 findings (each row above with DEFER includes the why)
 
@@ -561,4 +629,4 @@ Everything else in the plan matters. These three are the ones that, if the next 
 
 ---
 
-*End of plan. Sprints A, B, C are committed. Sprint D is directional. Re-decision routes through Richard.*
+*End of plan. Sprints A, B, B.5, C are committed. Sprint D is directional. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*

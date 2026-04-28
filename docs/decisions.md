@@ -873,31 +873,38 @@ These edits land in the sprint plan in the next pass.
 
 ---
 
-## D21 — JS Framework Threshold
+## D21 — JS Framework Threshold (RE-RULED 2026-04-27)
 
-**Date:** 2026-04-27
+**Date:** 2026-04-27 (original) / **Re-ruled:** 2026-04-27 (same day, founder directive)
 **Author:** Richard
-**Context:** D10 locked vanilla JS through v1.0. Dinesh E-1 raised the question for v1.1+ given `app.js` is 9,350 LOC. Monica's persona analysis projects v2.0+ persona dashboards that could push complexity higher. Founder directive did not address tech stack but the implicit question is: at what threshold do we commit to a framework?
+**Context (original):** D10 locked vanilla JS through v1.0. Dinesh E-1 raised the question for v1.1+ given `app.js` is 9,350 LOC. Original ruling deferred adoption pending 4 triggers, one of which was a frontend engineer hire.
+**Context (re-rule):** Founder explicit directive: "do not worry about hiring someone or number of locations, expect that it's worth looking at framework re-eval, if we can do it in house with the team we have we do it. this is opensource so right now there is no revenue loss." This invalidates Trigger 2 (hire) and lowers the bar for the in-house re-eval. Verified state: `app.js` = 9,388 LOC; total static JS = 15,248 LOC across 8 files. **Trigger 1 (>5,000 LOC) has fired and was already firing at original rule time.** The original ruling was effectively gated on Trigger 2 in spirit; with Trigger 2 invalid, Trigger 1's firing demands action.
 
-**Question:** At what threshold (lines of JS, page count, interaction complexity) do we commit to a small framework like Alpine/HTMX/Lit? Or are we vanilla forever?
+**Question:** Adopt a framework now (Sprint B/C window) or keep deferring?
 
-**Decision:** **Vanilla JS + ES6 modules through v1.2 minimum. Re-evaluate framework adoption ONLY when ANY of four explicit triggers fires.**
+**New decision:** **Adopt a framework, but on a deliberate sequencing — module-split first, framework second, on the clean module boundaries. Framework choice ruled in D23.**
 
-**Triggers (any one fires the re-evaluation):**
-1. Total LOC across all `pages/*.js` modules + `app.js` exceeds **5,000** (post-C2 module-split target = ~3,500; this gives ~1,500 LOC growth headroom).
-2. Frontend engineer hire (D15 trigger) lands AND has framework expertise + a track record of shipping in vanilla.
-3. A specific feature requires complex form state machines (e.g., the v2.0 PI dashboard with cross-filtering charts) that vanilla makes painful.
-4. CSP enforcement (E-3) becomes priority — CSP migration is the natural moment to revisit framework choice because the inline-handler refactor touches every page anyway.
+**Revised triggers (drop #2; keep the rest as ongoing health checks):**
+1. ~~Total LOC across all `pages/*.js` modules + `app.js` exceeds **5,000**~~ — **FIRED 2026-04-27** (15,248 LOC actual). Re-eval done; outcome below.
+2. ~~Frontend engineer hire — INVALID per founder directive 2026-04-27.~~ Removed. We staff from the agent fleet (Dinesh leads frontend) and proceed in-house.
+3. A specific feature requires complex form state machines (e.g., the v2.0 PI dashboard with cross-filtering charts) that vanilla makes painful. **Still active** as a future re-eval trigger for escalating beyond Alpine.
+4. CSP enforcement (E-3) becomes priority — CSP migration is the natural moment to revisit framework choice. **Still active** but largely subsumed by D23's Alpine adoption (Alpine is CSP-friendly with `unsafe-eval` workaround documented).
 
-**Until any trigger fires:** Vanilla JS, ES6 `<script type="module">`, no build step. Explicitly NO bundlers (webpack/vite/esbuild/rollup), NO TypeScript, NO JSX.
+**Re-eval outcome (this is the new ruling):**
+1. **Module-split first (Sprint B.5, v1.1.1).** Refactor `app.js` (9,388 LOC) and `slurm.js` (2,033 LOC) into `pages/*.js` ES6 modules. Pure mechanical refactor. No framework yet. Goal: clean module boundaries we can layer onto.
+2. **Framework adoption second (Sprint C, v1.2.0).** Researcher portal is the greenfield proof case for Alpine — small surface, contained blast radius, zero risk of regressing v1.1 admin/operator UI. Backfill Alpine into existing pages opportunistically as we touch them (audit log table is the obvious second candidate).
+3. **Choice locked in D23 below: Alpine.js (vendored, no build step) + minimal HTMX for table-driven pages.** Not Preact/Vue/Svelte — those need a build step and violate D10's "one binary, one container, no build step" positioning.
 
-**When a trigger fires:** Evaluate **Alpine + HTMX** (lowest cognitive cost, no build step) FIRST. Only escalate to React/Vue/Svelte if Alpine/HTMX cannot meet the requirement.
+**Standing principle (founder directive baked in):** Sprints do not stop. Sprint dispatch is automatic — when one sprint closes, the next begins on schedule. No headcount/revenue/commercial gating. We are open-source; cost of churn is engineering time only.
 
-**Why this principle:** "One binary, one container, no build step" is load-bearing positioning per D10. The v1.0/v1.1 webui works without a framework; adding a framework for the sake of it costs CI complexity, deploy artifact complexity, and contradicts the self-hosted simplicity pitch. The C2 module-split (Sprint C of webui sprint plan) gets us 80% of framework benefits at 10% of the cost. Module-split is committed for v1.2 specifically because it's the cheapest organizational improvement that delays the framework question.
+**Reversibility:** **costly**. Once Alpine is in `vendor/`, it stays. The mitigation: Alpine can be removed from any single page by reverting that page to vanilla — incremental adoption is incrementally reversible. Full removal across the codebase would be a multi-week project; we accept that cost.
 
-**Reversibility:** **costly**. Once we adopt a framework, we don't rip it out. The thresholds above are conservative on purpose. Crossing into a framework should be a deliberate, well-resourced project — not a default.
+**Re-decision triggers (going forward):**
+- Trigger 3 (form state-machine feature) fires → re-eval whether Alpine is sufficient or we need a real reactive framework. Lit and Preact remain the escalation candidates (in that order; Lit if web-components ergonomics fit, Preact if we need React ecosystem).
+- Trigger 4 (CSP) fires → confirm Alpine-CSP plan is still viable (Alpine 3 supports CSP-safe build).
+- New trigger 5: if Alpine adoption stalls or causes operator-visible regressions in 3 consecutive releases, fall back to vanilla-only and accept the LOC ceiling.
 
-**Re-decision triggers:** see 4 conditions above.
+**Supersedes:** Original D21 (same date, earlier in day). Original triggers retained above with strikethrough for audit trail.
 
 ---
 
@@ -935,6 +942,64 @@ These edits land in the sprint plan in the next pass.
 **Re-decision triggers:**
 - A specific config surface turns out to be 100% covered by the structured form (operators never use the raw escape) — at that point we can consider removing the raw escape for that surface only. Unlikely.
 - A new config surface comes online that has no sensible structured-form shape (e.g., custom Lua hooks) — use raw-only with validation as the pattern, document why structured form was skipped.
+
+---
+
+## D23 — Framework Choice: Alpine.js + minimal HTMX, vendored, no build step
+
+**Date:** 2026-04-27
+**Author:** Richard
+**Context:** D21 re-rule fired the framework re-evaluation. This decision picks the actual framework. Constraints (per D10 + founder directive): no build step if avoidable, must work in standard Go embed flow, must allow incremental adoption (one page at a time, old vanilla pages keep working), must align with self-hosted simplicity.
+
+**Question:** Which framework — Alpine, HTMX, Lit, Preact, Vue, or stay vanilla and just modularize?
+
+**Options considered:**
+
+| Option | Size | Build step? | DX for our shape of work | Verdict |
+|---|---|---|---|---|
+| **Alpine.js 3** | ~15 KB min+gzip | No | Excellent for declarative reactivity on top of server-rendered HTML — `x-data`, `x-show`, `x-on:click`, `x-for` cover 90% of what we hand-roll today | **CHOSEN** |
+| **HTMX** | ~14 KB | No | Excellent for table-driven pages (audit log, deploy progress) — `hx-get`, `hx-trigger="every 2s"`, `hx-swap` replaces our hand-rolled SSE/poll boilerplate | **CHOSEN** for specific surfaces (audit, deploy progress, anomaly card) |
+| Lit (web components) | ~6 KB | No (but needs lit-html template literals) | Web components ergonomics are heavy for our needs; shadow-DOM scoping is a foot-gun for our existing CSS; no clear win over Alpine | Rejected |
+| Preact + htm | ~5 KB | No (with htm) but realistically yes (JSX preferred) | React mental model is overkill for our CRUD pages; htm is awkward; ecosystem pull will eventually drag a build step | Rejected |
+| Vue 3 (no-build, ESM) | ~50 KB | Optional but real-world yes | Heavier than Alpine for the same job; SFC ecosystem drags in build tooling | Rejected |
+| Svelte | ~5 KB runtime | **Required** | Compiler-driven; violates D10 explicitly | Rejected |
+| React + Vite | ~45 KB + build | **Required** | Violates D10; massive ecosystem pull; we'd be the only Go-embedded webui shipping a Vite build | Rejected |
+| Vanilla + ES6 modules only (no framework) | 0 KB | No | Module-split helps maintainability but does nothing for reactive state, role-aware rendering, or form state machines — we'd keep hand-rolling these badly | Insufficient — module-split is necessary but not sufficient |
+
+**Decision:** **Alpine.js 3 + HTMX 2 (latest stable at adoption time). Both vendored under `internal/server/ui/static/vendor/`. Both served via Go's `embed.FS`. No CDN. No build step. No bundler. No npm/package.json.**
+
+**Adoption rules:**
+1. **Vendored only.** Drop `alpine.min.js` and `htmx.min.js` into `internal/server/ui/static/vendor/`. Pin exact version in a `VENDOR.md` alongside (record version, source URL, SHA256, license). Re-vendor only via deliberate PR.
+2. **Loaded via standard `<script>` tags** in the layout HTML — no module imports for the framework itself (Alpine attaches globally; HTMX same).
+3. **Alpine for in-page reactive state** — role-aware rendering, modal show/hide, dirty-flag tracking, form validation, conditional disabling of mutation buttons.
+4. **HTMX for server-driven swaps** — audit log filter/paginate, deploy progress polling, anomaly card refresh, webhook delivery history. Anywhere we'd otherwise write `setInterval(fetch(...).then(render(...)))` boilerplate.
+5. **Vanilla retained** for: app router (#/route hash routing), Auth bootstrap, SSE log streams (HTMX SSE extension is optional but not adopted v1.2 — re-eval v1.3), API wrapper module (`api.js`).
+6. **No framework on existing v1.0/v1.1 pages until they're touched for other reasons.** Researcher portal is the greenfield introduction. Audit log (Sprint B B3-3) is the SECOND adoption — but for the v1.2 cycle, not retroactively in Sprint B (Sprint B keeps vanilla; B3-3 ships in vanilla; the Alpine/HTMX rewrite of audit log is a Sprint C deliverable bundled with Researcher portal work).
+7. **Mixing vanilla and Alpine on the same page is supported and expected during the transition.** Alpine `x-data` attaches scoped state to a DOM subtree; surrounding vanilla code continues to work.
+
+**Why this combo (rationale on the choice):**
+- **Alpine + HTMX is the only no-build option that gives us BOTH client reactivity AND server-driven swaps without a heavyweight runtime.** Most frameworks pick one of those two; we need both for our shape of work.
+- **Both are mature, MIT, single-vendor-file, and have stable APIs.** Alpine has been at v3 since 2021; HTMX at v1+ since 2020.
+- **Both sources are tiny** (~30 KB combined min+gzip). Pages stay snappy on the operator's laptop in a server room over a flaky LAN.
+- **No build step** preserves D10's "one binary, one container, no build step" positioning intact. CI stays simple. Deploy stays simple. Operator running `clustr-serverd` on a Rocky 9 box never needs Node installed.
+- **Alpine is CSP-friendly via Alpine 3's CSP build** (`alpinejs-csp`) — when E-3 (CSP enforcement) trigger fires, we swap the vendored file for the CSP build. Mitigates D21 trigger 4 risk.
+- **HTMX has explicit support for server-side rendering of partials** — we already render JSON, switching specific endpoints to also render HTML partials is additive (new endpoint or content-negotiation, not a rewrite).
+
+**Concrete v1.2 deliverables (reflected in webui-sprint-plan.md updates):**
+- Vendor Alpine 3 + HTMX 2 in C2 alongside module-split.
+- Researcher portal `/portal/` (C1 workstream) built with Alpine for reactive state.
+- Audit log page (already shipped vanilla in v1.1) rewritten to HTMX for filter/paginate UX.
+- Anomaly card (already shipped vanilla in v1.1) rewritten to HTMX for periodic refresh.
+- All other v1.0/v1.1 pages remain vanilla until touched.
+
+**Reversibility:** **per-page reversible, codebase-wide costly.** A single page can be reverted to vanilla in an afternoon (rip out `x-data`/`x-on`/`hx-get`, write the equivalent JS). Removing Alpine + HTMX everywhere would be a multi-week project after v1.2 adoption. Mitigation: every Alpine/HTMX adoption PR must demonstrate clear value over the vanilla equivalent in the PR description.
+
+**Re-decision triggers:**
+- A v2.0 feature (PI cross-filtering charts, multi-pane dashboards) blows past Alpine's complexity ceiling — escalate to Preact or Vue with a build step, accepting the D10 hit.
+- Alpine or HTMX hits an EOL / abandonment signal (no commits in 18 months, security CVE unpatched > 30 days) — fall back to vanilla on affected surfaces, evaluate replacements.
+- Operator complaints about page weight / load time — measure before re-deciding; expect this trigger to never fire.
+
+**Out of scope for this decision:** TypeScript (still no), JSX (still no), bundlers (still no), Tailwind/PostCSS (still no — vanilla CSS in the vendored stylesheet stays). If any of those become desirable, that's a new D-number and a new fight.
 
 ---
 
