@@ -167,6 +167,10 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 							// readonly maps to a sentinel string that requireScope(adminOnly=true) will block.
 							// We keep the real role in ctxKeyUserRole for requireRole checks.
 							roleScope = api.KeyScope("readonly")
+						case "viewer":
+							// viewer is more restricted than readonly — portal-only access.
+							// Maps to a distinct sentinel so requireScope blocks viewer on /admin/ routes.
+							roleScope = api.KeyScope("viewer")
 						}
 						ctx := context.WithValue(r.Context(), ctxKeyScope{}, roleScope)
 						ctx = context.WithValue(ctx, ctxKeyUserID{}, result.payload.Sub)
@@ -272,7 +276,8 @@ func requireScope(adminOnly bool) func(http.Handler) http.Handler {
 				writeForbidden(w, "this route requires an admin-scope API key or admin/operator user")
 				return
 			}
-			if scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator && scope != api.KeyScopeNode && scope != api.KeyScope("readonly") {
+			if scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator && scope != api.KeyScopeNode &&
+				scope != api.KeyScope("readonly") && scope != api.KeyScope("viewer") {
 				writeForbidden(w, "unrecognized scope")
 				return
 			}
@@ -289,6 +294,7 @@ func requireScope(adminOnly bool) func(http.Handler) http.Handler {
 // minimum: "admin" | "operator" | "readonly"
 func requireRole(minimum string) func(http.Handler) http.Handler {
 	roleRank := map[string]int{
+		"viewer":   0,
 		"readonly": 1,
 		"operator": 2,
 		"admin":    3,
@@ -320,6 +326,24 @@ func requireRole(minimum string) func(http.Handler) http.Handler {
 			}
 
 			writeForbidden(w, "insufficient permissions")
+		})
+	}
+}
+
+// requireViewer returns a middleware that allows any authenticated session
+// (viewer, readonly, operator, admin) to proceed. Used for /api/v1/portal/*
+// routes that a researcher (viewer role) can call.
+// API keys (Bearer token, non-session) are treated as admin and always pass.
+func requireViewer() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+			// Any recognised scope passes — viewer, readonly, operator, admin, node.
+			next.ServeHTTP(w, r)
 		})
 	}
 }

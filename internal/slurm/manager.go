@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"text/template"
@@ -800,4 +801,117 @@ func validateSlurmRepoURL(ctx context.Context, repoURL string) {
 		log.Warn().Str("slurm_repo_url", repoURL).Int("status", resp.StatusCode).
 			Msg("slurm: enable: slurm_repo_url returned unexpected status — verify the URL is correct")
 	}
+}
+
+// ─── Portal / researcher-facing methods ───────────────────────────────────────
+
+// PartitionStatus holds the health summary for one Slurm partition.
+type PartitionStatus struct {
+	Partition      string `json:"partition"`
+	State          string `json:"state"`
+	TotalNodes     int    `json:"total_nodes"`
+	AvailableNodes int    `json:"available_nodes"`
+}
+
+// GetPartitionStatus calls `sinfo` to retrieve current partition health.
+// Returns nil, nil when the Slurm module is not enabled or sinfo is unavailable.
+// Parsing is best-effort — malformed lines are skipped.
+func (m *Manager) GetPartitionStatus(ctx context.Context) ([]PartitionStatus, error) {
+	// Only return data when the module is enabled.
+	row, err := m.db.SlurmGetConfig(ctx)
+	if err != nil {
+		return nil, nil //nolint:nilerr — module not configured yet
+	}
+	if !row.Enabled {
+		return nil, nil
+	}
+
+	out, err := runSinfo(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("slurm: GetPartitionStatus: sinfo failed")
+		return nil, nil
+	}
+	return parseSinfoOutput(string(out)), nil
+}
+
+// runSinfo executes `sinfo --noheader --format="%P %a %D %A"` and returns stdout.
+// %P = partition name, %a = state (up/down/drain/inact), %D = total nodes, %A = available/total.
+func runSinfo(ctx context.Context) ([]byte, error) {
+	cmd := sinfoCommand(ctx)
+	return cmd.Output()
+}
+
+// parseSinfoOutput parses lines from `sinfo --noheader --format="%P %a %D %A"`.
+// Each line: "partition state total avail/total"
+func parseSinfoOutput(output string) []PartitionStatus {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	seen := make(map[string]*PartitionStatus)
+	var order []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		partition := strings.TrimSuffix(fields[0], "*") // strip default-partition marker
+		state := fields[1]
+
+		// %D is total node count.
+		total := 0
+		if n, err := parseInt(fields[2]); err == nil {
+			total = n
+		}
+
+		// %A is "available/total" — we want available.
+		avail := 0
+		parts := strings.SplitN(fields[3], "/", 2)
+		if len(parts) >= 1 {
+			if n, err := parseInt(parts[0]); err == nil {
+				avail = n
+			}
+		}
+
+		if existing, ok := seen[partition]; ok {
+			// Multiple sinfo lines for the same partition (multiple node sets) —
+			// aggregate counts.
+			existing.TotalNodes += total
+			existing.AvailableNodes += avail
+			// If any partition state is "up", report "up".
+			if state == "up" {
+				existing.State = "up"
+			}
+			continue
+		}
+
+		ps := &PartitionStatus{
+			Partition:      partition,
+			State:          state,
+			TotalNodes:     total,
+			AvailableNodes: avail,
+		}
+		seen[partition] = ps
+		order = append(order, partition)
+	}
+
+	result := make([]PartitionStatus, 0, len(order))
+	for _, p := range order {
+		result = append(result, *seen[p])
+	}
+	return result
+}
+
+func parseInt(s string) (int, error) {
+	var n int
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
+}
+
+// sinfoCommand returns an exec.Cmd for `sinfo --noheader --format="%P %a %D %A"`.
+// Extracted for testability — tests can override via execCommandContext.
+func sinfoCommand(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, "sinfo", "--noheader", "--format=%P %a %D %A")
 }

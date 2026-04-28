@@ -7,12 +7,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -1037,4 +1040,145 @@ func (m *Manager) AdminRepair(ctx context.Context, adminPassword string) (AdminR
 
 	log.Info().Msg("ldap: admin repair complete — service bind verified OK")
 	return AdminRepairResult{Status: "ok", Repaired: true}, nil
+}
+
+// ─── Portal / self-service methods ────────────────────────────────────────────
+
+// PortalUserInfo holds the minimal LDAP user attributes surfaced to a researcher.
+type PortalUserInfo struct {
+	UID         string   `json:"uid"`
+	DisplayName string   `json:"display_name"`
+	Email       string   `json:"email,omitempty"`
+	Groups      []string `json:"groups"`
+}
+
+// GetPortalUserInfo returns the LDAP account info for uid using the reader bind.
+// Returns nil, nil when the LDAP module is not ready.
+func (m *Manager) GetPortalUserInfo(ctx context.Context, uid string) (*PortalUserInfo, error) {
+	dit, err := m.ReaderDIT(ctx)
+	if err != nil {
+		// Module not ready — return nil gracefully.
+		return nil, nil //nolint:nilerr
+	}
+
+	user, err := dit.GetUser(uid)
+	if err != nil {
+		return nil, fmt.Errorf("ldap: get portal user %s: %w", uid, err)
+	}
+
+	// Resolve group memberships for this user.
+	groups, err := dit.ListGroups()
+	var memberOf []string
+	if err == nil {
+		for _, g := range groups {
+			for _, m := range g.MemberUIDs {
+				if m == uid {
+					memberOf = append(memberOf, g.CN)
+					break
+				}
+			}
+		}
+	}
+	if memberOf == nil {
+		memberOf = []string{}
+	}
+
+	info := &PortalUserInfo{
+		UID:         user.UID,
+		DisplayName: user.GivenName + " " + user.SN,
+		Email:       user.Mail,
+		Groups:      memberOf,
+	}
+	// Trim display name in case either part is empty.
+	info.DisplayName = strings.TrimSpace(info.DisplayName)
+	if info.DisplayName == "" {
+		info.DisplayName = user.UID
+	}
+	return info, nil
+}
+
+// ChangeOwnPassword verifies currentPassword against the user's LDAP bind,
+// then uses the admin DIT to set newPassword. This is the self-service password
+// change for the researcher portal — the user must know their current password.
+func (m *Manager) ChangeOwnPassword(ctx context.Context, uid, currentPassword, newPassword string) error {
+	row, err := m.db.LDAPGetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: read config: %w", err)
+	}
+	if !row.Enabled || row.Status != statusReady {
+		return fmt.Errorf("ldap module is not ready (status=%s)", row.Status)
+	}
+
+	// Step 1: verify the current password by binding as the user.
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(row.CACertPEM)) {
+		return fmt.Errorf("ldap: failed to parse CA cert for user bind")
+	}
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+		ServerName: "127.0.0.1",
+	}
+
+	conn, err := goldap.DialURL("ldaps://127.0.0.1:636", goldap.DialWithTLSConfig(tlsCfg))
+	if err != nil {
+		return fmt.Errorf("ldap: dial for user bind: %w", err)
+	}
+	defer conn.Close()
+
+	userDN := fmt.Sprintf("uid=%s,ou=people,%s", goldap.EscapeDN(uid), row.BaseDN)
+	if bindErr := conn.Bind(userDN, currentPassword); bindErr != nil {
+		return fmt.Errorf("invalid credentials")
+	}
+	conn.Close()
+
+	// Step 2: use admin DIT to set the new password.
+	dit, err := m.DIT(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: get admin DIT for password change: %w", err)
+	}
+	return dit.SetPassword(uid, newPassword, false)
+}
+
+// GetPortalQuota reads LDAP quota attributes for uid.
+// usedAttr and limitAttr are the LDAP attribute names configured by the operator.
+// Returns nil when the attributes are not configured or not present on the entry.
+func (m *Manager) GetPortalQuota(ctx context.Context, uid, usedAttr, limitAttr string) (*PortalQuota, error) {
+	if usedAttr == "" && limitAttr == "" {
+		return nil, nil
+	}
+
+	dit, err := m.ReaderDIT(ctx)
+	if err != nil {
+		return nil, nil //nolint:nilerr
+	}
+
+	usedRaw, limitRaw, err := dit.GetQuotaAttrs(uid, usedAttr, limitAttr)
+	if err != nil {
+		// Non-fatal — quota attributes may not exist.
+		return nil, nil //nolint:nilerr
+	}
+
+	quota := &PortalQuota{
+		Configured: true,
+		UsedRaw:    usedRaw,
+		LimitRaw:   limitRaw,
+	}
+	// Try to parse as int64 bytes for structured rendering.
+	if n, err := strconv.ParseInt(strings.TrimSpace(usedRaw), 10, 64); err == nil {
+		quota.UsedBytes = &n
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(limitRaw), 10, 64); err == nil {
+		quota.LimitBytes = &n
+	}
+	return quota, nil
+}
+
+// PortalQuota holds storage quota info for a researcher.
+type PortalQuota struct {
+	UsedBytes  *int64 `json:"used_bytes,omitempty"`
+	LimitBytes *int64 `json:"limit_bytes,omitempty"`
+	UsedRaw    string `json:"used_raw,omitempty"`
+	LimitRaw   string `json:"limit_raw,omitempty"`
+	Configured bool   `json:"configured"`
 }

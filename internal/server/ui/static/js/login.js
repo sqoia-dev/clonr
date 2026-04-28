@@ -72,6 +72,15 @@
                 if (body.force_password_change) {
                     window.location.href = '/set-password';
                 } else {
+                    // C1-5: Route by role.
+                    // viewer role → /portal/ (researcher portal, no access to /admin/).
+                    // admin/operator/readonly → / (admin UI).
+                    const role = body.role || '';
+                    if (role === 'viewer') {
+                        window.location.href = '/portal/';
+                        return;
+                    }
+
                     // Honour the ?next= param set by api.js when session expired.
                     // next is a URL-encoded hash like "%23%2Fnodes%2Fabc" so we
                     // redirect to "/" then append it directly as the hash.

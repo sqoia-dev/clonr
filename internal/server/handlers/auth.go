@@ -148,6 +148,7 @@ func (h *AuthHandler) handlePasswordLogin(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                    true,
 		"force_password_change": mustChange,
+		"role":                  role, // C1-5: exposed for client-side role-based redirect
 	})
 }
 

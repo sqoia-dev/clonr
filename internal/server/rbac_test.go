@@ -272,3 +272,87 @@ func TestRequireGroupAccess_UnauthenticatedDenied(t *testing.T) {
 		t.Errorf("unauthenticated: expected 401, got %d", rr.Code)
 	}
 }
+
+// ─── Viewer role RBAC tests (C1-6) ────────────────────────────────────────
+
+// TestRequireScope_ViewerBlockedOnAdminRoutes asserts that a viewer-scope
+// session cannot access admin-only routes (requireScope(adminOnly=true)).
+func TestRequireScope_ViewerBlockedOnAdminRoutes(t *testing.T) {
+	mw := requireScope(true) // adminOnly=true
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Simulate a viewer-scope context.
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/nodes", nil)
+	ctx := context.WithValue(req.Context(), ctxKeyScope{}, api.KeyScope("viewer"))
+	ctx = context.WithValue(ctx, ctxKeyUserRole{}, "viewer")
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("viewer on admin-only route: expected 403, got %d", rr.Code)
+	}
+}
+
+// TestRequireViewer_ViewerAllowed asserts that requireViewer() lets a viewer
+// session through to portal routes.
+func TestRequireViewer_ViewerAllowed(t *testing.T) {
+	mw := requireViewer()
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portal/status", nil)
+	ctx := context.WithValue(req.Context(), ctxKeyScope{}, api.KeyScope("viewer"))
+	ctx = context.WithValue(ctx, ctxKeyUserRole{}, "viewer")
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("viewer on portal route: expected 200, got %d", rr.Code)
+	}
+}
+
+// TestRequireViewer_UnauthBlocked asserts that requireViewer() blocks
+// unauthenticated requests (no scope in context).
+func TestRequireViewer_UnauthBlocked(t *testing.T) {
+	mw := requireViewer()
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/portal/status", nil)
+	// No scope in context.
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated on portal route: expected 401, got %d", rr.Code)
+	}
+}
+
+// TestRequireRole_ViewerBelowReadonly asserts that requireRole("readonly")
+// blocks a viewer (which has rank 0 < 1).
+func TestRequireRole_ViewerBelowReadonly(t *testing.T) {
+	mw := requireRole("readonly")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/nodes", nil)
+	ctx := context.WithValue(req.Context(), ctxKeyScope{}, api.KeyScope("viewer"))
+	ctx = context.WithValue(ctx, ctxKeyUserRole{}, "viewer")
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("viewer blocked from readonly-min route: expected 403, got %d", rr.Code)
+	}
+}

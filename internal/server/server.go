@@ -40,6 +40,7 @@ import (
 	proxmoxpower "github.com/sqoia-dev/clustr/internal/power/proxmox"
 	"github.com/sqoia-dev/clustr/internal/reimage"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
+	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	"github.com/sqoia-dev/clustr/internal/server/ui"
 	"github.com/sqoia-dev/clustr/internal/webhook"
 )
@@ -757,6 +758,10 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/login", serveLoginPage(staticFS))
 	// /set-password — forced first-login password change page.
 	r.Get("/set-password", serveSetPasswordPage(staticFS))
+	// /portal/ — researcher portal (viewer role). Serves portal.html from static FS.
+	// Viewer-role users are redirected here on login (handled in login.js + auth/me).
+	r.Get("/portal", servePortalPage(staticFS))
+	r.Get("/portal/", servePortalPage(staticFS))
 
 	// /repo/* — public, unauthenticated Slurm package repository served from
 	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
@@ -790,6 +795,23 @@ func (s *Server) buildRouter() chi.Router {
 		// and the README Quick Start can all call it without credentials. Returns 200
 		// with JSON if healthy, 503 with reason map if not. (GAP-2)
 		r.Get("/healthz/ready", health.ServeReady)
+
+		// ─── Researcher portal API (C1 — viewer role and above) ───────────────────
+		// These routes are accessible by viewer, readonly, operator, and admin.
+		// Admin-only management routes (/portal/config) are gated by requireRole("admin").
+		portalH := s.buildPortalHandler()
+		viewerMW := portalhandler.ViewerMiddleware(s.db, userIDFromContext)
+		r.Group(func(r chi.Router) {
+			r.Use(requireViewer())
+			r.Use(viewerMW)
+			r.Get("/portal/status", portalH.HandleStatus)
+			r.Post("/portal/me/password", portalH.HandleChangePassword)
+			r.Get("/portal/me/quota", portalH.HandleGetQuota)
+			r.Get("/portal/partitions/status", portalH.HandleGetPartitions)
+		})
+		// Admin-only: portal config management.
+		r.With(requireScope(true)).With(requireRole("admin")).Get("/portal/config", portalH.HandleGetConfig)
+		r.With(requireScope(true)).With(requireRole("admin")).Put("/portal/config", portalH.HandleUpdateConfig)
 
 		// B2-2: Bootstrap status probe — unauthenticated. Returns whether the default
 		// admin credentials hint should be shown on the login page. Safe to expose
@@ -1125,6 +1147,103 @@ func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		serveHTMLFile(w, r, f, "login.html", stat.ModTime())
 	}
+}
+
+// servePortalPage serves portal.html from the embedded static FS.
+// The researcher portal is a separate HTML page from the main admin UI (index.html).
+func servePortalPage(staticFS fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open("portal.html")
+		if err != nil {
+			// Portal page not built yet — redirect to login.
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			http.Error(w, "portal page not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		serveHTMLFile(w, r, f, "portal.html", stat.ModTime())
+	}
+}
+
+// buildPortalHandler constructs the portal.Handler with closures wired to
+// the LDAP and Slurm managers.
+func (s *Server) buildPortalHandler() *portalhandler.Handler {
+	h := &portalhandler.Handler{
+		DB: s.db,
+	}
+
+	// Wire LDAP user info fetcher.
+	h.GetLDAPUser = func(ctx context.Context, uid string) (*portalhandler.LDAPUserInfo, error) {
+		info, err := s.ldapMgr.GetPortalUserInfo(ctx, uid)
+		if err != nil || info == nil {
+			return nil, err
+		}
+		return &portalhandler.LDAPUserInfo{
+			UID:         info.UID,
+			DisplayName: info.DisplayName,
+			Email:       info.Email,
+			Groups:      info.Groups,
+		}, nil
+	}
+
+	// Wire LDAP self-service password change.
+	h.SetLDAPPassword = func(ctx context.Context, uid, currentPassword, newPassword string) error {
+		return s.ldapMgr.ChangeOwnPassword(ctx, uid, currentPassword, newPassword)
+	}
+
+	// Wire storage quota fetcher.
+	h.GetLDAPQuota = func(ctx context.Context, uid string) (*portalhandler.QuotaResponse, error) {
+		cfg, err := s.db.GetPortalConfig(ctx)
+		if err != nil {
+			return &portalhandler.QuotaResponse{Configured: false}, nil
+		}
+		if cfg.LDAPQuotaUsedAttr == "" && cfg.LDAPQuotaLimitAttr == "" {
+			// Also check env vars as override.
+			usedAttr := os.Getenv("CLUSTR_LDAP_QUOTA_USED_ATTR")
+			limitAttr := os.Getenv("CLUSTR_LDAP_QUOTA_LIMIT_ATTR")
+			if usedAttr == "" && limitAttr == "" {
+				return &portalhandler.QuotaResponse{Configured: false}, nil
+			}
+			cfg.LDAPQuotaUsedAttr = usedAttr
+			cfg.LDAPQuotaLimitAttr = limitAttr
+		}
+		quota, err := s.ldapMgr.GetPortalQuota(ctx, uid, cfg.LDAPQuotaUsedAttr, cfg.LDAPQuotaLimitAttr)
+		if err != nil || quota == nil {
+			return &portalhandler.QuotaResponse{Configured: false}, nil
+		}
+		return &portalhandler.QuotaResponse{
+			UsedBytes:  quota.UsedBytes,
+			LimitBytes: quota.LimitBytes,
+			UsedRaw:    quota.UsedRaw,
+			LimitRaw:   quota.LimitRaw,
+			Configured: quota.Configured,
+		}, nil
+	}
+
+	// Wire Slurm partition status.
+	h.GetPartitionStatus = func(ctx context.Context) ([]portalhandler.PartitionStatus, error) {
+		partitions, err := s.slurmMgr.GetPartitionStatus(ctx)
+		if err != nil || partitions == nil {
+			return nil, err
+		}
+		out := make([]portalhandler.PartitionStatus, len(partitions))
+		for i, p := range partitions {
+			out[i] = portalhandler.PartitionStatus{
+				Partition:      p.Partition,
+				State:          p.State,
+				TotalNodes:     p.TotalNodes,
+				AvailableNodes: p.AvailableNodes,
+			}
+		}
+		return out, nil
+	}
+
+	return h
 }
 
 // buildAuthHandler constructs the AuthHandler with closures that call into

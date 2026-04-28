@@ -28,9 +28,11 @@ type LDAPUser struct {
 	GIDNumber     int        `json:"gid_number"`
 	CN            string     `json:"cn"`
 	SN            string     `json:"sn"`
+	GivenName     string     `json:"given_name,omitempty"`
+	Mail          string     `json:"mail,omitempty"`
 	HomeDirectory string     `json:"home_directory"`
 	LoginShell    string     `json:"login_shell"`
-	Locked        bool       `json:"locked"`              // true if shadowExpire=1
+	Locked        bool       `json:"locked"`               // true if shadowExpire=1
 	LastLogin     *time.Time `json:"last_login,omitempty"` // pwdLastSuccess, nil if never
 }
 
@@ -135,7 +137,7 @@ func (c *ditClient) ListUsers() ([]LDAPUser, error) {
 		"(objectClass=posixAccount)",
 		// pwdLastSuccess is an operational attribute — must be named explicitly;
 		// it is NOT returned by a bare "*" wildcard search.
-		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "homeDirectory", "loginShell", "shadowExpire", "pwdLastSuccess"},
+		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire", "pwdLastSuccess"},
 		nil,
 	)
 
@@ -169,7 +171,7 @@ func (c *ditClient) GetUser(uid string) (*LDAPUser, error) {
 		goldap.NeverDerefAliases,
 		1, 0, false,
 		fmt.Sprintf("(uid=%s)", goldap.EscapeFilter(uid)),
-		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "homeDirectory", "loginShell", "shadowExpire"},
+		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire"},
 		nil,
 	)
 
@@ -717,6 +719,55 @@ func (c *ditClient) HealthBind() error {
 }
 
 // entryToUser converts an LDAP entry to an LDAPUser struct.
+// GetQuotaAttrs reads the specified LDAP attribute values for uid.
+// Returns empty strings when the attributes are absent on the entry.
+func (c *ditClient) GetQuotaAttrs(uid, usedAttr, limitAttr string) (usedRaw, limitRaw string, err error) {
+	conn, cerr := c.connect()
+	if cerr != nil {
+		return "", "", cerr
+	}
+	defer conn.Close()
+
+	dn := c.userDN(uid)
+
+	// Build the attribute list — only request non-empty attribute names.
+	attrs := []string{}
+	if usedAttr != "" {
+		attrs = append(attrs, usedAttr)
+	}
+	if limitAttr != "" {
+		attrs = append(attrs, limitAttr)
+	}
+	if len(attrs) == 0 {
+		return "", "", nil
+	}
+
+	req := goldap.NewSearchRequest(
+		dn,
+		goldap.ScopeBaseObject,
+		goldap.NeverDerefAliases,
+		1, 0, false,
+		"(objectClass=*)",
+		attrs,
+		nil,
+	)
+	sr, err := conn.Search(req)
+	if err != nil {
+		return "", "", fmt.Errorf("ldap dit: get quota attrs for %s: %w", uid, err)
+	}
+	if len(sr.Entries) == 0 {
+		return "", "", nil
+	}
+	entry := sr.Entries[0]
+	if usedAttr != "" {
+		usedRaw = entry.GetAttributeValue(usedAttr)
+	}
+	if limitAttr != "" {
+		limitRaw = entry.GetAttributeValue(limitAttr)
+	}
+	return usedRaw, limitRaw, nil
+}
+
 func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 	uid := entry.GetAttributeValue("uid")
 	if uid == "" {
@@ -727,6 +778,8 @@ func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 		UID:           uid,
 		CN:            entry.GetAttributeValue("cn"),
 		SN:            entry.GetAttributeValue("sn"),
+		GivenName:     entry.GetAttributeValue("givenName"),
+		Mail:          entry.GetAttributeValue("mail"),
 		HomeDirectory: entry.GetAttributeValue("homeDirectory"),
 		LoginShell:    entry.GetAttributeValue("loginShell"),
 	}
