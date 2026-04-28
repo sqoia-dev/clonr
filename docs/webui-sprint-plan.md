@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M are RELEASED (v1.0.1 → v1.11.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions monitored via `docs/tech-triggers.md` and admin Tech Triggers UI (Sprint M).
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M, N are RELEASED (v1.0.1 → v1.12.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions monitored via `docs/tech-triggers.md` and admin Tech Triggers UI (Sprint M).
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -807,6 +807,19 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
+### Sprint N — v1.12.0 "Ergonomics + Deprecation Closeout" **[COMPLETED — 2026-04-27]**
+
+**Goal:** Close task #115 (bootstrap-admin bypass flag) and sweep remaining Node 20 GHA actions.
+
+**Shipped:** v1.12.0. CI green. Tag pushed. Cloner autodeploy picks up new binary.
+
+- **N1** — `clustr-serverd bootstrap-admin --bypass-complexity`: emergency recovery flag that skips the password complexity validator. Emits multi-line stderr warning. Writes `auth.bootstrap_admin.bypass_complexity` audit entry. Unit tests for validator + integration tests for bypass/no-bypass/force paths.
+- **N2** — `ci.yml`: bumped all four `actions/setup-node@v5` steps from `node-version: "20"` to `"24"`. Node 20 EOL April 2026; Node 24 is current LTS.
+- **Docs** — `docs/install.md` §7: new "Emergency Credential Recovery" section with Method A (`--bypass-complexity`) and Method B (direct SQLite UPDATE), both copy-pasteable.
+- **CHANGELOG** — v1.12.0 entry.
+
+---
+
 ### Sprint M — v1.11.0 "TECH-TRIG Monitoring" **[COMPLETED — 2026-04-27]**
 
 **Goal:** Wire up the four D27 Bucket 2 TECH-TRIG signals so we know when they fire. Closes the "we'll know when to act" gap identified after Sprint Z re-sequencing (D27, 09c8dc1).
@@ -948,7 +961,7 @@ Per D27, we don't pre-schedule sprints for items that need a trigger. All four T
 - **XDMoD integration** → **v1.x** minor bump (additive plugin) when pulled
 - **Custom metrics / custom attributes (CF-04/06/37)** → **v1.x** minor bump (additive) when pulled
 
-**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I) → v1.9 (Sprint J) → v1.10 (Sprint K) → v1.10.1 (Sprint L, docs) → v1.11 (Sprint M, TECH-TRIG monitoring) → v1.12+ per next sprint cadence.
+**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I) → v1.9 (Sprint J) → v1.10 (Sprint K) → v1.10.1 (Sprint L, docs) → v1.11 (Sprint M, TECH-TRIG monitoring) → v1.12.0 (Sprint N, bootstrap bypass + Node 24 sweep) → v1.13+ per next sprint cadence.
 
 ---
 

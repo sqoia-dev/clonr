@@ -5,6 +5,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.12.0] — 2026-04-27 (Sprint N — Ergonomics + deprecation closeout)
+
+**Sprint N — bootstrap-admin bypass flag + GHA Node 24 sweep**
+
+### Added
+
+- **`clustr-serverd bootstrap-admin --bypass-complexity`** — emergency recovery
+  flag that skips the password complexity validator, allowing simple passwords
+  (e.g. `clustr/clustr`) to be set when locked out. Emits a loud multi-line
+  warning to stderr and writes an `auth.bootstrap_admin.bypass_complexity` audit
+  entry so post-incident reviews can detect weak-password use. `must_change_password`
+  is left `false` (same as normal bootstrap-admin). Change the password immediately
+  after recovery. (`cmd/clustr-serverd/bootstrap_admin.go`)
+- **`AuditActionBootstrapAdminBypassComplexity`** constant —
+  `"auth.bootstrap_admin.bypass_complexity"` — queryable via
+  `GET /api/v1/audit?action=auth.bootstrap_admin.bypass_complexity`.
+- **Emergency credential recovery docs** — new §7 in `docs/install.md`:
+  Method A (`bootstrap-admin --bypass-complexity`) and Method B (direct SQLite
+  UPDATE with bcrypt hash), both with copy-pasteable commands.
+- **Tests** — unit tests for `validateBootstrapPassword` (all failure modes +
+  bypass contract), integration tests for `runBootstrapAdmin` with/without bypass,
+  with/without force, and audit log presence after bypass.
+
+### Changed
+
+- **GHA Node.js 20 → 24** in `ci.yml` (all four `actions/setup-node@v5` steps:
+  test CSP, a11y, lighthouse, link-check). Node 20 reaches EOL April 2026; Node 24
+  is the current LTS targeting Node 24 runtime in `actions/setup-node@v5`.
+
+---
+
 ## [v1.11.0] — 2026-04-27 (Sprint M — TECH-TRIG Monitoring)
 
 **Sprint M — TECH-TRIG monitoring infrastructure (D27 Bucket 2 observability)**

@@ -12,7 +12,8 @@ This guide covers installing `clustr-serverd` on a dedicated provisioning host. 
 4. [Path B — Bare-Metal (Ansible)](#4-path-b--bare-metal-ansible)
 5. [Env Var Reference](#5-env-var-reference)
 6. [Bootstrap Admin Account](#6-bootstrap-admin-account)
-7. [First-Deploy Smoke Test](#7-first-deploy-smoke-test)
+7. [Emergency Credential Recovery](#7-emergency-credential-recovery)
+8. [First-Deploy Smoke Test](#8-first-deploy-smoke-test)
 
 ---
 
@@ -692,7 +693,124 @@ Then use that key with the password-reset curl command above.
 
 ---
 
-## 7. First-Deploy Smoke Test
+## 7. Emergency Credential Recovery
+
+Use this section when you are locked out of clustr and the normal recovery methods (API key + password reset endpoint) are not available — for example, when both the web UI password and the admin API key have been lost, or when the server has never been started and the default `clustr/clustr` account was never set up as expected.
+
+Two methods are documented. Use Method A if the binary is working; fall back to Method B if the binary is broken or unavailable.
+
+### Method A — `bootstrap-admin --bypass-complexity`
+
+The `--bypass-complexity` flag lets you set a simple recovery password (e.g. `clustr/clustr`) that would normally be rejected by the password strength validator. It is **emergency recovery only** — the bypass is recorded in the audit log and you must change the password immediately after regaining access.
+
+**Prerequisites:** `clustr-serverd` binary is installed and the DB file is accessible.
+
+```bash
+# Stop the server first (to avoid write contention on the DB).
+systemctl stop clustr-serverd
+
+# Wipe all existing users and create a recovery admin with a known weak password.
+# --force removes all existing users before creating the new one.
+# --bypass-complexity skips the password strength validator.
+clustr-serverd bootstrap-admin \
+  --username clustr \
+  --password clustr \
+  --force \
+  --bypass-complexity
+
+# Output includes a prominent warning on stderr:
+#   WARNING: --bypass-complexity is set.
+#   Password complexity validation is SKIPPED.
+#   This is for EMERGENCY CREDENTIAL RECOVERY only.
+#   A weak password will be stored in the database.
+#   Change the password immediately after recovery.
+#   This action will be recorded in the audit log.
+
+# Restart the server.
+systemctl start clustr-serverd
+```
+
+Log in with `clustr` / `clustr`, then immediately change the password via the web UI (**Settings > Users**) or via the API:
+
+```bash
+# Get the user ID.
+sqlite3 /var/lib/clustr/db/clustr.db "SELECT id, username FROM users;"
+
+# Reset to a strong password using your new admin API key (printed on server start).
+curl -s -X POST http://10.99.0.1:8080/api/v1/admin/users/USER_ID/reset-password \
+  -H "Authorization: Bearer YOUR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "YourNewStrongP@ss1"}'
+```
+
+**Audit trail:** After recovery, query the audit log to confirm the bypass event was recorded:
+
+```bash
+curl -s "http://10.99.0.1:8080/api/v1/audit?action=auth.bootstrap_admin.bypass_complexity" \
+  -H "Authorization: Bearer YOUR_ADMIN_KEY" | python3 -m json.tool
+```
+
+---
+
+### Method B — Direct SQLite UPDATE (binary broken or unavailable)
+
+Use this method when the `clustr-serverd` binary is broken, unavailable, or you prefer to avoid running it. This is a direct database surgery approach — it bypasses all application logic.
+
+**Prerequisites:** `sqlite3` CLI and `python3` (for bcrypt) or a known bcrypt hash.
+
+**Step 1 — Generate a bcrypt hash for your recovery password:**
+
+```bash
+# Using Python (available on most systems):
+python3 -c "
+import hashlib, base64, os
+# bcrypt via the bcrypt library (pip install bcrypt if not present):
+import bcrypt
+pw = b'clustr'
+hashed = bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12))
+print(hashed.decode())
+"
+# Example output: $2b$12$somehashhere...
+```
+
+If `bcrypt` is not installed, install it:
+
+```bash
+# Rocky Linux 9 / RHEL
+pip3 install bcrypt
+
+# Ubuntu
+apt install -y python3-bcrypt
+```
+
+**Step 2 — Write the hash directly to the DB:**
+
+```bash
+# Stop the server (critical — SQLite does not support concurrent writes).
+systemctl stop clustr-serverd
+
+HASH='$2b$12$your_bcrypt_hash_here'
+USERNAME='clustr'
+
+sqlite3 /var/lib/clustr/db/clustr.db <<SQL
+UPDATE users
+SET password_hash = '${HASH}',
+    must_change_password = 0
+WHERE username = '${USERNAME}';
+SQL
+
+# Verify the update took effect.
+sqlite3 /var/lib/clustr/db/clustr.db "SELECT id, username, role, must_change_password FROM users WHERE username = '${USERNAME}';"
+
+# Restart.
+systemctl start clustr-serverd
+```
+
+> **Note:** The direct SQLite UPDATE does NOT write an audit log entry. Document the recovery action in your incident log manually.
+
+---
+
+## 8. First-Deploy Smoke Test
 
 This procedure verifies a working end-to-end deployment: image created, node registered, node reimaged, node boots and confirms.
 

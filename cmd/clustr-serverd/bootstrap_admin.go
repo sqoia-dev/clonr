@@ -12,12 +12,17 @@ package main
 //   clustr-serverd bootstrap-admin --username ops \
 //                                  --password "S3cr3t!"  # non-interactive
 //   clustr-serverd bootstrap-admin --force               # clobber existing admins
+//   clustr-serverd bootstrap-admin --force \
+//                                  --bypass-complexity   # emergency recovery only
 //
 // Behaviour:
 //   - If admin accounts already exist, refuses to create another unless --force.
 //   - --force deletes ALL existing users and starts fresh. Use with caution.
 //   - Created user has must_change_password=false (operator knows the password
 //     they set). The auto-generated clustr/clustr default (if any) is removed.
+//   - --bypass-complexity skips the password complexity validator. Use ONLY for
+//     emergency credential recovery (e.g. clustr/clustr). The bypass is recorded
+//     in the audit log so post-incident review can detect weak-password use.
 //   - On success, also prints the web UI login URL based on CLUSTR_LISTEN_ADDR.
 //   - Idempotent when called multiple times with --force (always overwrites).
 
@@ -41,6 +46,7 @@ func init() {
 	var flagUsername string
 	var flagPassword string
 	var flagForce bool
+	var flagBypassComplexity bool
 
 	bootstrapAdminCmd := &cobra.Command{
 		Use:   "bootstrap-admin",
@@ -54,9 +60,16 @@ is specified. --force removes all existing users before creating the new one.
 
 The command reads credentials from --username / --password flags, or from
 the CLUSTR_BOOTSTRAP_USERNAME / CLUSTR_BOOTSTRAP_PASSWORD environment
-variables. If neither is provided, you will be prompted interactively.`,
+variables. If neither is provided, you will be prompted interactively.
+
+WARNING: --bypass-complexity skips the password strength validator and allows
+simple passwords such as "clustr/clustr". This flag is for EMERGENCY CREDENTIAL
+RECOVERY ONLY — for example, when the server binary is the only way back in and
+a strong password cannot be typed interactively. Using it leaves a weak password
+in the database. The bypass is recorded in the audit log. Change the password
+immediately after recovery.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBootstrapAdmin(flagUsername, flagPassword, flagForce)
+			return runBootstrapAdmin(flagUsername, flagPassword, flagForce, flagBypassComplexity)
 		},
 	}
 	bootstrapAdminCmd.Flags().StringVar(&flagUsername, "username", "",
@@ -65,11 +78,22 @@ variables. If neither is provided, you will be prompted interactively.`,
 		"Admin password (or set CLUSTR_BOOTSTRAP_PASSWORD; minimum 8 chars)")
 	bootstrapAdminCmd.Flags().BoolVar(&flagForce, "force", false,
 		"Remove all existing users and create the specified admin account")
+	bootstrapAdminCmd.Flags().BoolVar(&flagBypassComplexity, "bypass-complexity", false,
+		"[EMERGENCY RECOVERY ONLY] Skip password complexity validation. Leaves a weak password — change it immediately. Recorded in audit log.")
 
 	rootCmd.AddCommand(bootstrapAdminCmd)
 }
 
-func runBootstrapAdmin(username, password string, force bool) error {
+// AuditActionBootstrapAdminBypassComplexity is written to the audit log whenever
+// bootstrap-admin is invoked with --bypass-complexity. Query with:
+//
+//	GET /api/v1/audit?action=auth.bootstrap_admin.bypass_complexity
+//
+// The new_value JSON contains "username" so post-incident reviews can identify
+// which account was created with a weak password.
+const AuditActionBootstrapAdminBypassComplexity = "auth.bootstrap_admin.bypass_complexity"
+
+func runBootstrapAdmin(username, password string, force, bypassComplexity bool) error {
 	cfg := config.LoadServerConfig()
 
 	// Resolve from env vars if flags not set.
@@ -101,8 +125,20 @@ func runBootstrapAdmin(username, password string, force bool) error {
 		password = pw
 	}
 
-	if err := validateBootstrapPassword(password); err != nil {
-		return err
+	if bypassComplexity {
+		// Loud warning — this is a security tradeoff documented in the audit log.
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "WARNING: --bypass-complexity is set.\n")
+		fmt.Fprintf(os.Stderr, "  Password complexity validation is SKIPPED.\n")
+		fmt.Fprintf(os.Stderr, "  This is for EMERGENCY CREDENTIAL RECOVERY only.\n")
+		fmt.Fprintf(os.Stderr, "  A weak password will be stored in the database.\n")
+		fmt.Fprintf(os.Stderr, "  Change the password immediately after recovery.\n")
+		fmt.Fprintf(os.Stderr, "  This action will be recorded in the audit log.\n")
+		fmt.Fprintf(os.Stderr, "\n")
+	} else {
+		if err := validateBootstrapPassword(password); err != nil {
+			return err
+		}
 	}
 
 	// Open database.
@@ -144,8 +180,9 @@ func runBootstrapAdmin(username, password string, force bool) error {
 		return fmt.Errorf("hash password: %w", err)
 	}
 
+	userID := uuid.New().String()
 	rec := db.UserRecord{
-		ID:                 uuid.New().String(),
+		ID:                 userID,
 		Username:           username,
 		PasswordHash:       string(hash),
 		Role:               db.UserRoleAdmin,
@@ -154,6 +191,36 @@ func runBootstrapAdmin(username, password string, force bool) error {
 	}
 	if err := database.CreateUser(ctx, rec); err != nil {
 		return fmt.Errorf("create user: %w", err)
+	}
+
+	// Audit log — always record the create; additionally record a bypass event
+	// when --bypass-complexity was used so post-incident reviews can find it.
+	auditSvc := db.NewAuditService(database)
+	auditSvc.Record(ctx,
+		"bootstrap-admin",          // actorID — not a real user ID; marks the CLI actor
+		"bootstrap-admin (cli)",    // actorLabel
+		db.AuditActionUserCreate,   // action
+		"user",                     // resourceType
+		userID,                     // resourceID
+		"",                         // ipAddr — not applicable for CLI
+		nil,
+		map[string]string{"username": username, "role": "admin"},
+	)
+
+	if bypassComplexity {
+		auditSvc.Record(ctx,
+			"bootstrap-admin",
+			"bootstrap-admin (cli)",
+			AuditActionBootstrapAdminBypassComplexity,
+			"user",
+			userID,
+			"",
+			nil,
+			map[string]string{
+				"username": username,
+				"warning":  "password complexity bypassed via --bypass-complexity flag; change password immediately",
+			},
+		)
 	}
 
 	// Determine web UI URL from listen addr.
@@ -170,6 +237,9 @@ func runBootstrapAdmin(username, password string, force bool) error {
 	fmt.Printf("  Username: %s\n", username)
 	fmt.Printf("  Role:     admin\n")
 	fmt.Printf("  Web UI:   %s\n", webURL)
+	if bypassComplexity {
+		fmt.Printf("\nACTION REQUIRED: Change the password immediately — it does not meet complexity requirements.\n")
+	}
 	fmt.Printf("\nStart the server with: clustr-serverd\n")
 	fmt.Printf("Then log in at: %s\n\n", webURL)
 
