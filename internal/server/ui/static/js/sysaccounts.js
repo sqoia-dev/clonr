@@ -53,7 +53,7 @@ const SysAccountsPages = {
             : accounts.map(a => {
                 const acctJson = escHtml(JSON.stringify(a));
                 return `<tr>
-                    <td class="text-mono text-sm">${escHtml(a.username)}${sysbage(a)}</td>
+                    <td class="text-mono text-sm">${escHtml(a.username)}${sysBadge(a)}</td>
                     <td class="text-mono text-sm">${a.uid}</td>
                     <td class="text-mono text-sm">${a.primary_gid}</td>
                     <td class="text-mono text-sm">${escHtml(a.shell)}</td>
@@ -519,7 +519,10 @@ const SysAccountsPages = {
 };
 
 // ── Helper: system badge inline ────────────────────────────────────────────────
-function sysbage(a) {
+// sysBadge renders a small "sys" indicator for system accounts.
+// Named sysBadge to follow the camelCase badge-helper convention used throughout
+// the codebase (e.g. dhcpStateBadge in network.js).
+function sysBadge(a) {
     return a.system_account
         ? ' <span class="badge badge-neutral badge-sm">sys</span>'
         : '';
