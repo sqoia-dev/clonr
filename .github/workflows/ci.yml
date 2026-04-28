@@ -162,7 +162,8 @@ jobs:
     name: Smoke test (Docker node registration)
     runs-on: ubuntu-latest
     needs: [build]
-    continue-on-error: true
+    # J2: continue-on-error removed after 3 consecutive green smoke runs on main
+    # (streak tracked in .github/smoke-streak.json). Smoke is now a hard CI gate.
     steps:
       - uses: actions/checkout@v5
 

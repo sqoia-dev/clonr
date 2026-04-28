@@ -1,6 +1,6 @@
 {
-  "consecutive_smoke_passes": 3,
-  "last_updated_sha": "9d4694e",
+  "consecutive_smoke_passes": 0,
+  "last_updated_sha": "a5fc90e",
   "last_updated": "2026-04-28",
-  "note": "Increment consecutive_smoke_passes after each green smoke run on main. Reset to 0 on any failure. When this reaches 3, CI will fail with a human-action message to remove continue-on-error from the smoke job in ci.yml."
+  "note": "Threshold reached at streak=3 on 2026-04-28. continue-on-error removed from smoke job (ci.yml). Streak reset to 0. If smoke flakes again, set this back to 0 and re-add continue-on-error until streak reaches 3 again."
 }
