@@ -102,7 +102,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── Parse versions.yml ────────────────────────────────────────────────
       # Decision: use grep+sed instead of yq to avoid adding a tool dep to
@@ -1107,7 +1107,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4

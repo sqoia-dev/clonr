@@ -43,19 +43,9 @@ The two-node Slurm cluster walk-through (controller + worker, `srun -N2 hostname
 
 ## Show me
 
-<!-- GIF placeholder: clustr-demo.gif -->
-<!--
-  Planned demo sequence (GIF creation is post-sprint I):
-  1. `docker compose up` → server starts, bootstrap API key printed
-  2. Browser opens to web UI dashboard
-  3. ISO build triggered via UI → progress bar advances
-  4. Node PXE boots → appears in Nodes list as "registered"
-  5. Reimage triggered → deploy log streams in real time in web UI
-  6. Node hits "verified booted" → dashboard green
-  Total runtime target: 30–45 seconds, no voiceover needed
--->
+<img src="docs/assets/clustr-demo-static.svg" alt="clustr demo: doctor check → server start → node registration → API verification" width="900"/>
 
-**[Demo GIF — coming Sprint I final week. Static screenshots available at `docs/architecture/`.]**
+_Above: four steps from `git clone` to a registered node — pre-flight check, server start with bootstrap key, PXE node self-registration, API confirmation. [Generate the animated terminal demo](docs/assets/demo.tape) with `vhs docs/assets/demo.tape` (requires [VHS](https://github.com/charmbracelet/vhs))._
 
 ---
 

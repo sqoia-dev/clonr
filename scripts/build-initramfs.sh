@@ -28,14 +28,22 @@ OUTPUT="${2:-initramfs-clustr.img}"
 #   Set up key auth: ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<host>
 #   Then invoke this script without CLUSTR_SERVER_PASS set.
 CLUSTR_SERVER_HOST="${CLUSTR_SERVER_HOST:-192.168.1.151}"
-CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:?ERROR: CLUSTR_SERVER_USER must be set}"
-CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:?ERROR: CLUSTR_SERVER_PASS must be set}"
 
-# Detect local mode — skip SSH when building on the server itself.
-if [[ "$CLUSTR_SERVER_HOST" == "127.0.0.1" || "$CLUSTR_SERVER_HOST" == "localhost" || "$CLUSTR_SERVER_HOST" == "::1" ]]; then
+# Detect local mode — skip SSH when building on the server itself, or in CI
+# (CLUSTR_CI_MODE=1 disables remote SSH; kernel modules are sourced locally).
+if [[ "$CLUSTR_SERVER_HOST" == "127.0.0.1" || "$CLUSTR_SERVER_HOST" == "localhost" || "$CLUSTR_SERVER_HOST" == "::1" || "${CLUSTR_CI_MODE:-0}" == "1" ]]; then
     LOCAL_MODE=1
 else
     LOCAL_MODE=0
+fi
+
+# SSH credentials are only required in remote mode.
+if [[ "$LOCAL_MODE" -eq 0 ]]; then
+    CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:?ERROR: CLUSTR_SERVER_USER must be set (or set CLUSTR_CI_MODE=1 to skip SSH)}"
+    CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:?ERROR: CLUSTR_SERVER_PASS must be set (or set CLUSTR_CI_MODE=1 to skip SSH)}"
+else
+    CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:-}"
+    CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:-}"
 fi
 
 # Binary → package mapping for auto-install of missing tools.

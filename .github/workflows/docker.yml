@@ -13,7 +13,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # QEMU is required to cross-compile arm64 layers during buildx
       - name: Set up QEMU

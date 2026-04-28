@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 580" width="1200" height="580">
+  <defs>
+    <style>
+      .bg { fill: #1e1f29; }
+      .terminal { fill: #282a36; rx: 8; ry: 8; }
+      .prompt { fill: #50fa7b; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 13px; }
+      .cmd { fill: #f8f8f2; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 13px; }
+      .output { fill: #6272a4; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 12px; }
+      .ok { fill: #50fa7b; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 12px; }
+      .key { fill: #ffb86c; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 12px; }
+      .val { fill: #f1fa8c; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; font-size: 12px; }
+      .label { fill: #8be9fd; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+      .arrow { stroke: #6272a4; stroke-width: 2; fill: none; marker-end: url(#ah); }
+      .titlebar { fill: #44475a; }
+      .dot-r { fill: #ff5555; }
+      .dot-y { fill: #f1fa8c; }
+      .dot-g { fill: #50fa7b; }
+    </style>
+    <marker id="ah" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6272a4"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="580" class="bg"/>
+
+  <!-- Title bar area -->
+  <text x="600" y="30" text-anchor="middle" fill="#f8f8f2" font-family="'Inter','Segoe UI',sans-serif" font-size="16" font-weight="700">clustr — from git clone to registered node</text>
+  <text x="600" y="50" text-anchor="middle" fill="#6272a4" font-family="'Inter','Segoe UI',sans-serif" font-size="12">To generate the animated GIF: vhs docs/assets/demo.tape</text>
+
+  <!-- ── Step 1: Server start ─────────────────────────────────────────── -->
+  <rect x="20" y="65" width="350" height="230" rx="8" class="terminal"/>
+  <rect x="20" y="65" width="350" height="28" rx="8" class="titlebar"/>
+  <rect x="20" y="79" width="350" height="14" class="titlebar"/>
+  <circle cx="42" cy="79" r="6" class="dot-r"/>
+  <circle cx="62" cy="79" r="6" class="dot-y"/>
+  <circle cx="82" cy="79" r="6" class="dot-g"/>
+  <text x="175" y="83" text-anchor="middle" fill="#f8f8f2" font-family="'Inter','Segoe UI',sans-serif" font-size="11">Step 1 — Server start</text>
+
+  <text x="32" y="115" class="prompt">$</text>
+  <text x="44" y="115" class="cmd">clustr-serverd doctor</text>
+  <text x="32" y="133" class="ok">✓ config file present + readable</text>
+  <text x="32" y="149" class="ok">✓ secrets.env present (mode 0400)</text>
+  <text x="32" y="165" class="ok">✓ data dir writable (/var/lib/clustr)</text>
+  <text x="32" y="181" class="ok">✓ database accessible</text>
+  <text x="32" y="197" class="ok">✓ dnsmasq reachable (PXE DHCP)</text>
+  <text x="32" y="213" class="ok">✓ TFTP root populated</text>
+  <text x="32" y="235" class="prompt">$</text>
+  <text x="44" y="235" class="cmd">clustr-serverd version</text>
+  <text x="32" y="253" class="output">clustr-serverd v1.9.0 (linux/amd64)</text>
+  <text x="32" y="269" class="output">built 2026-04-28</text>
+  <text x="180" y="310" text-anchor="middle" class="label">pre-flight checks pass</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="375" y1="180" x2="440" y2="180" class="arrow"/>
+
+  <!-- ── Step 2: Bootstrap key ─────────────────────────────────────────── -->
+  <rect x="440" y="65" width="350" height="230" rx="8" class="terminal"/>
+  <rect x="440" y="65" width="350" height="28" rx="8" class="titlebar"/>
+  <rect x="440" y="79" width="350" height="14" class="titlebar"/>
+  <circle cx="462" cy="79" r="6" class="dot-r"/>
+  <circle cx="482" cy="79" r="6" class="dot-y"/>
+  <circle cx="502" cy="79" r="6" class="dot-g"/>
+  <text x="590" y="83" text-anchor="middle" fill="#f8f8f2" font-family="'Inter','Segoe UI',sans-serif" font-size="11">Step 2 — Bootstrap API key</text>
+
+  <text x="452" y="115" class="prompt">$</text>
+  <text x="464" y="115" class="cmd">docker compose up -d</text>
+  <text x="452" y="131" class="output">✓ Network clustr_default created</text>
+  <text x="452" y="147" class="output">✓ Container clustr-clustr-1 started</text>
+  <text x="452" y="165" class="output">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+  <text x="452" y="181" class="ok"> Bootstrap admin key (printed once)</text>
+  <text x="452" y="197" class="key"> clustr_key_a3f8b2...</text>
+  <text x="452" y="213" class="output">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+  <text x="452" y="235" class="prompt">$</text>
+  <text x="464" y="235" class="cmd">export KEY=clustr_key_a3f8b2...</text>
+  <text x="600" y="310" text-anchor="middle" class="label">one-time bootstrap key</text>
+
+  <!-- Arrow 2→3 -->
+  <line x1="795" y1="180" x2="860" y2="180" class="arrow"/>
+
+  <!-- ── Step 3: Node registration ────────────────────────────────────── -->
+  <rect x="860" y="65" width="320" height="230" rx="8" class="terminal"/>
+  <rect x="860" y="65" width="320" height="28" rx="8" class="titlebar"/>
+  <rect x="860" y="79" width="320" height="14" class="titlebar"/>
+  <circle cx="882" cy="79" r="6" class="dot-r"/>
+  <circle cx="902" cy="79" r="6" class="dot-y"/>
+  <circle cx="922" cy="79" r="6" class="dot-g"/>
+  <text x="1000" y="83" text-anchor="middle" fill="#f8f8f2" font-family="'Inter','Segoe UI',sans-serif" font-size="11">Step 3 — Node registers via PXE</text>
+
+  <text x="872" y="115" class="output"># Node PXE boots, clustr static binary</text>
+  <text x="872" y="131" class="output"># runs in initramfs and calls:</text>
+  <text x="872" y="149" class="prompt">$</text>
+  <text x="884" y="149" class="cmd">clustr deploy --auto</text>
+  <text x="872" y="165" class="ok">→ POST /api/v1/nodes/register</text>
+  <text x="872" y="181" class="output">  mac: "52:54:00:aa:bb:01"</text>
+  <text x="872" y="197" class="output">  hostname: "node001"</text>
+  <text x="872" y="213" class="output">  state: "registered"</text>
+  <text x="872" y="231" class="ok">✓ Node appears in dashboard</text>
+  <text x="872" y="247" class="ok">✓ Ready to reimage</text>
+  <text x="1000" y="310" text-anchor="middle" class="label">node self-registers</text>
+
+  <!-- ── Bottom row: API verification ─────────────────────────────────── -->
+  <rect x="20" y="330" width="1160" height="155" rx="8" class="terminal"/>
+  <rect x="20" y="330" width="1160" height="28" rx="8" class="titlebar"/>
+  <rect x="20" y="344" width="1160" height="14" class="titlebar"/>
+  <circle cx="42" cy="344" r="6" class="dot-r"/>
+  <circle cx="62" cy="344" r="6" class="dot-y"/>
+  <circle cx="82" cy="344" r="6" class="dot-g"/>
+  <text x="600" y="348" text-anchor="middle" fill="#f8f8f2" font-family="'Inter','Segoe UI',sans-serif" font-size="11">Step 4 — Verify via API</text>
+
+  <text x="32" y="378" class="prompt">$</text>
+  <text x="44" y="378" class="cmd">curl -s -H "Authorization: Bearer $KEY" http://localhost:8080/api/v1/nodes | python3 -m json.tool</text>
+  <text x="32" y="396" class="output">{</text>
+  <text x="32" y="412" class="output">    "nodes": [</text>
+  <text x="32" y="428" class="output">        {</text>
+  <text x="32" y="444" class="key">            "hostname": </text>
+  <text x="170" y="444" class="val">"node001",</text>
+  <text x="300" y="444" class="key">  "state": </text>
+  <text x="374" y="444" class="val">"registered",</text>
+  <text x="510" y="444" class="key">  "mac": </text>
+  <text x="567" y="444" class="val">"52:54:00:aa:bb:01",</text>
+  <text x="750" y="444" class="key">  "arch": </text>
+  <text x="807" y="444" class="val">"x86_64"</text>
+  <text x="32" y="460" class="output">        }</text>
+  <text x="32" y="476" class="output">    ]</text>
+  <text x="32" y="492" class="ok">}</text>
+
+  <!-- Bottom note -->
+  <text x="600" y="560" text-anchor="middle" fill="#44475a" font-family="'Inter','Segoe UI',sans-serif" font-size="11">
+    clustr — open-source HPC provisioning + governance — github.com/sqoia-dev/clustr
+  </text>
+</svg>

@@ -62,7 +62,7 @@ jobs:
 
     steps:
       - name: Checkout clustr
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── Install iPXE build dependencies ──────────────────────────────────────
       # All packages are version-pinned by Ubuntu 22.04 universe.  If a dep

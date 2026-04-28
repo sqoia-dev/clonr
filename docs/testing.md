@@ -50,18 +50,45 @@ SMOKE_IMAGE=myimage:tag SMOKE_TIMEOUT=120 bash scripts/ci/smoke.sh
 The smoke job runs on every push and PR, declared in `.github/workflows/ci.yml`
 as a separate job with `continue-on-error: true` during the initial flake window.
 
-Acceptance criteria (per sprint plan I2):
-- `make smoke` is green on 3 consecutive main pushes
-- Once that threshold is met, remove `continue-on-error: true` from the CI job
+The flake threshold is tracked in `.github/smoke-streak.json`:
+
+```json
+{
+  "consecutive_smoke_passes": 2,
+  "last_updated_sha": "<sha>",
+  "last_updated": "<date>",
+  "note": "..."
+}
+```
+
+**After each green smoke run on main**, increment `consecutive_smoke_passes` and
+commit the file with the current SHA. Reset to `0` on any smoke failure.
+
+**When the streak reaches 3**, the `Check smoke flake-threshold` CI step fails
+with a message: "HUMAN ACTION REQUIRED: smoke streak threshold reached (3/3)."
+
+To act on that message:
+1. Remove `continue-on-error: true` from the `smoke` job in `.github/workflows/ci.yml`
+2. Reset the streak: set `consecutive_smoke_passes` to `0` in `.github/smoke-streak.json`
+3. Commit both files together
+
+**How to reset manually** (e.g. after a flake regression forces the tracker back to 0):
+```bash
+# Edit .github/smoke-streak.json and set consecutive_smoke_passes to 0
+git add .github/smoke-streak.json
+git commit -m "chore: reset smoke streak after flake regression"
+```
 
 ### Flake policy
 
 If the smoke test flakes (intermittent failure not related to a code regression):
 1. File a GitHub issue tagged `ci:flake` with the run ID
 2. Leave `continue-on-error: true` in place
-3. Investigate the timing or teardown race in `scripts/ci/smoke.sh`
+3. Reset `consecutive_smoke_passes` to `0` in `.github/smoke-streak.json`
+4. Investigate the timing or teardown race in `scripts/ci/smoke.sh`
 
-Do not remove `continue-on-error: true` until the flake is resolved.
+Do not remove `continue-on-error: true` until the flake is resolved and the streak
+reaches 3 again.
 
 ## Go Unit Tests
 

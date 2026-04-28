@@ -289,3 +289,107 @@ Items for Monica (I6 README rewrite):
 - P2-6: add web UI login step to Quick Start
 - P1-3: add prerequisites block at top of Quick Start
 - P2-4: move Server Requirements before install steps
+
+---
+
+## Round 2 Status — Sprint J Dogfood Pass (2026-04-28)
+
+**Scope:** v1.8.1 + Sprint J changes. All 28 paper cuts re-evaluated against current HEAD.
+**Method:** cold read + file verification. No fresh VM available; verified against repo state.
+
+### Top 10 re-status
+
+| # | Item | Sprint I fix | Round 2 status | New bounce % |
+|---|---|---|---|---|
+| 1 | P0-3 — `.env.example` missing | Created in I1 | **RESOLVED** | ~3% (file exists, warning prominent) |
+| 2 | P1-1 — `architecture.md` broken link | Created in I1 | **RESOLVED** | ~1% |
+| 3 | FN-1 — Empty-state dashboard | Getting-started checklist card + `doctor` hint in I1 | **RESOLVED** | ~8% (card present; sequence clear) |
+| 4 | IP-11 — `uname -m` arch mapping | Fixed in I1 | **RESOLVED** | ~1% |
+| 5 | P0-2 — Quick Start number reset | Split into "Server Setup" + "First Use" in I1/I6 | **RESOLVED** | ~2% |
+| 6 | P2-6 — Web UI login step missing | Added in I1/I6 | **RESOLVED** | ~2% |
+| 7 | IP-2 — Rocky Linux Docker package | Fixed in I1 | **RESOLVED** | ~2% |
+| 8 | IP-7 — `CLUSTR_PXE_INTERFACE=eth1` no warning | Warning comment added in I1 | **RESOLVED** | ~3% |
+| 9 | IP-10 — "Sprint 6" internal language | Replaced in I1 | **RESOLVED** | ~0% |
+| 10 | P1-3 — Prerequisites block missing | Added in I1/I6 | **RESOLVED** | ~2% |
+
+**Top 10 resolved: 10/10.**
+
+### Full 28-item re-status
+
+| Item | Round 2 status | Sprint K candidate? |
+|---|---|---|
+| P0-1 (hero pitch) | RESOLVED — Monica's I6 README shipped | No |
+| P0-2 (Quick Start number reset) | RESOLVED | No |
+| P0-3 (.env.example missing) | RESOLVED | No |
+| P1-1 (architecture.md broken) | RESOLVED | No |
+| P1-2 (management IP buried) | PARTIAL — explained earlier in README; still multi-step | K: single NIC warning should link directly to single-NIC mode doc |
+| P1-3 (2-NIC prereq missing) | RESOLVED | No |
+| P1-4 (PXE_INTERFACE guidance absent) | RESOLVED (env.example has prominent warning) | No |
+| P1-5 (install-dev-vm.sh unexplained) | OPEN — script appears without context in bare-metal path | K: add 3-line description before the script invocation |
+| IP-1 (RHEL-compatible caveat) | PARTIAL — Rocky/Ubuntu split documented but table header still generic | K: table header should say "Rocky 9 (tested)" |
+| IP-2 (Rocky Docker package) | RESOLVED | No |
+| IP-3 (modprobe loop on cloud VMs) | OPEN — instruction still present | K: wrap in conditional note |
+| IP-4 (single-NIC no guidance) | PARTIAL — "can run server but no DHCP" in README; no loopback docs | K: add loopback-PXE-mode note or issue reference |
+| IP-5 (.254 alias explained 3x) | OPEN — duplication unchanged | K: deduplicate, link from 2 places to 1 canonical section |
+| IP-6 (firewall eth1 not qualified) | OPEN — parentheticals inconsistent | K: audit all UFW examples for interface variable usage |
+| IP-7 (PXE_INTERFACE placeholder) | RESOLVED | No |
+| IP-8 (heredoc vs curl dual paths) | OPEN — both paths still present | K: pick one path, mark other as "alternative" |
+| IP-9 (network_mode: host security note) | OPEN — no security note | K: add one-line rationale comment in docker-compose.yml |
+| IP-10 (Sprint 6 language) | RESOLVED | No |
+| IP-11 (uname -m arch mapping) | RESOLVED | No |
+| IP-12 (systemd env var split confusing) | PARTIAL — warning box exists but complex | K: consider a combined .env example for bare-metal |
+| IP-13 (bootstrap key capture fragile) | PARTIAL — `clustr-serverd bootstrap-admin` shipped in I1; doc updated | No (has escape hatch now) |
+| IP-14 (password complexity not shown) | RESOLVED — Sprint J adds inline rule to set-password.html | No |
+| FN-1 (empty-state dashboard) | RESOLVED | No |
+| FN-2 (Configure+Deploy requires pre-registered node) | OPEN — still requires PXE or API registration first | K: add "register first" tooltip to Configure+Deploy CTA |
+| FN-3 (first-node needs MAC upfront) | PARTIAL — `clustr deploy --auto` PXE path avoids it; doc clearer | K: add direct sentence: "Proxmox: VM MAC shown in Hardware tab" |
+| FN-4 (Proxmox boot order) | OPEN — mentioned in README; not in install.md | K: add cross-reference |
+| FJ-1 (sysaccounts API-only path) | OPEN — no web UI path for sysaccounts creation | K (Sprint K-UI): add sysaccounts tab to admin panel |
+| FJ-2 (no first-job end-to-end doc) | OPEN — still scattered | K: write single `docs/first-job.md` connecting all steps |
+| FJ-3 (srun from where?) | OPEN — bastion/jump host path undocumented | K: one paragraph in user-management.md on access path |
+
+### New issues found in Round 2 dogfood pass
+
+**J5-1 (P2) — `set-password.html` showed only "8 characters" — not the full rule**
+Fixed in this sprint: now reads "at least one uppercase letter, one lowercase letter, and one digit." Bounce impact: low but trust signal for security-conscious operators.
+
+**J5-2 (P2) — Demo GIF placeholder still visible for HN readers**
+Fixed in this sprint: replaced with static SVG + VHS tape script. The SVG renders on GitHub and shows the 4-step flow. An operator with VHS can generate the animated version.
+
+**J5-3 (P2) — `continue-on-error: true` on smoke job still present after 3 consecutive green runs**
+Tracked in this sprint via `.github/smoke-streak.json`. Streak counter initialized at 2. This J push is run #3; if smoke is green, CI will print the human-action message.
+
+**J5-4 (P1) — Initramfs workflow failing on every tag since v1.5.0**
+Fixed in this sprint: added `CLUSTR_CI_MODE=1` env to the initramfs workflow and restructured the build script to skip SSH in CI mode. v1.9.0 tag will be the first clean initramfs release.
+
+### Revised bounce-% map
+
+| Step | Round 1 bounce % | Round 2 bounce % | Delta |
+|---|---|---|---|
+| Land on GitHub README | 20% | 12% | -8% (better hero + demo asset) |
+| Quick Start step 1 (dirs + secrets) | 5% | 5% | — |
+| Quick Start step 2 (.env.example) | 35% | 3% | -32% |
+| Start Docker Compose | 10% | 8% | -2% |
+| Management IP section | 15% | 10% | -5% |
+| First login to web UI | 10% | 4% | -6% |
+| Dashboard — empty state | 20% | 8% | -12% |
+| Build a base image | 5% | 5% | — |
+| Register first node | 25% | 20% | -5% (slight; MAC discovery still undocumented) |
+| Reimage first node | 20% | 18% | -2% |
+| Verify Slurm works | 5% | 5% | — |
+| Submit job as real user | 40% | 38% | -2% (no web UI path for sysaccounts yet) |
+
+**Cumulative estimate (independent model):** ~30-35% of motivated HN sysadmins reach `srun hostname` on first attempt (up from 15-20%). The biggest remaining lever is the MAC-address discovery gap (FN-3) and the sysaccounts UI path (FJ-1). Both are Sprint K candidates.
+
+### Sprint K candidates (ordered by impact)
+
+1. **FJ-1** — Sysaccounts admin UI tab (P1, ~5% cumulative gain)
+2. **FJ-2** — `docs/first-job.md` end-to-end walkthrough (P1, ~4% gain)
+3. **FN-3** — Add "Proxmox: VM MAC shown in Hardware tab" hint (P2, easy)
+4. **FN-2** — "Register first" tooltip on Configure+Deploy CTA (P2, easy)
+5. **IP-4** — Loopback-PXE-mode note for single-NIC users (P1, doc only)
+6. **FJ-3** — Access path paragraph in user-management.md (P2, 30 min)
+7. **FN-4** — Cross-reference Proxmox boot order in install.md (P2, 5 min)
+8. **IP-5** — Deduplicate .254 alias explanation (P2, cosmetic)
+9. **IP-3** — Conditional note on `modprobe loop` (P2, 5 min)
+10. **IP-8** — Pick one path (curl vs heredoc) in §3 (P2, cosmetic)

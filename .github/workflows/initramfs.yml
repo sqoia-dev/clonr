@@ -39,7 +39,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
@@ -57,6 +57,13 @@ jobs:
               ./cmd/clustr
 
       - name: Build initramfs
+        # CLUSTR_CI_MODE=1 switches the build script to local mode:
+        # kernel modules are sourced from the runner's installed packages
+        # instead of SSH-ing to the lab server (192.168.1.151).
+        # The resulting initramfs is functional but kernel modules may differ
+        # from the production lab build; lab-validate.yml catches regressions.
+        env:
+          CLUSTR_CI_MODE: "1"
         run: bash scripts/build-initramfs.sh bin/clustr
 
       - name: Attach initramfs to release

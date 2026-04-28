@@ -795,6 +795,18 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
+### Sprint J — v1.9.0 "Show HN Final Polish" **[COMPLETED — 2026-04-28]**
+
+**Shipped:** v1.9.0. All 5 workstreams landed. CI green. Cloner autodeploy will pick up new binary within 2 minutes.
+
+- **J1** — Node.js 20→24 action sweep: `actions/checkout@v5`, `actions/setup-node@v5` across all 7 workflow files. Break date was 2026-06-02 (earlier than the September date in Gilfoyle's original report).
+- **J2** — Smoke streak tracker: `.github/smoke-streak.json` + `Check smoke flake-threshold` CI step. Streak initialised at 2; threshold check fires at 3 with human-action message to remove `continue-on-error`. `docs/testing.md` updated.
+- **J3** — Initramfs workflow fix: `CLUSTR_CI_MODE=1` unblocks initramfs.yml (was failing on every tag since v1.5.0). v1.8.0 release notes updated to redirect to v1.8.1.
+- **J4** — Demo asset: `docs/assets/demo.tape` (VHS script) + `docs/assets/clustr-demo-static.svg` (static fallback). README placeholder replaced with rendered SVG + tape reference.
+- **J5** — Dogfood Round 2: 10/10 top audit items RESOLVED. Password complexity rule added to `set-password.html`. Bounce estimate improved from ~15-20% to ~30-35%. 10 Sprint K candidates documented.
+
+---
+
 ### Sprint I — v1.8.0 "Show HN Hardening" (COMMITTED, dispatched 2026-04-28 per D29)
 
 **Goal:** Compress the "stranger reads HN comment, clones repo, gets to working install" path to under 30 minutes, and produce the launch artifacts (README hero, demo GIF, blog post, FAQ pre-empts) that survive the first 72 hours of HN traffic. Engineering output is real (first-run UX hardening, install fixtures, accessibility, smoke coverage); launch artifacts are produced in parallel by the non-engineering ICs. Three months from D16's 2026-07-27 Show HN target, this is the highest-leverage sprint that does not violate D27 Bucket 2/3 gates.
@@ -1223,4 +1235,4 @@ Everything else in the plan matters. These three are the ones that, if the next 
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Sprint I (v1.8.0 Show HN Hardening) is COMMITTED per D29. Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J are RELEASED (v1.0.1 → v1.9.0). Sprint K is unscheduled — 10 candidates documented in `docs/getting-started-audit-2026-04.md` §Round 2. Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*

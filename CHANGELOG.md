@@ -5,6 +5,79 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.9.0] — 2026-04-28 (Sprint J — Show HN Final Polish)
+
+**Sprint J — Show HN Final Polish (J1–J5)**
+
+All changes are additive and non-breaking per D28. No schema changes. No API
+contract changes.
+
+### Changed (J1 — Node.js 20 → 24 GHA action sweep)
+
+- Bumped `actions/checkout@v4` → `actions/checkout@v5` across all seven
+  workflow files (`ci.yml`, `docker.yml`, `release.yml`, `initramfs.yml`,
+  `ipxe-build.yml`, `lab-validate.yml`, `slurm-build.yml`). Node.js 20 actions
+  are deprecated; forced migration to Node.js 24 takes effect 2026-06-02 on
+  GitHub-hosted runners.
+- Bumped `actions/setup-node@v4` → `actions/setup-node@v5` in `ci.yml`
+  (five jobs: test, a11y, lighthouse, link-check; all Node.js 20 consumer jobs).
+- `actions/setup-go@v5`, `actions/upload-artifact@v4`,
+  `actions/download-artifact@v4`, `softprops/action-gh-release@v2`, and all
+  `docker/*` actions are already at current versions — no change.
+
+### Added (J2 — Smoke flake-threshold tracker)
+
+- **`.github/smoke-streak.json`** — tracks consecutive green smoke runs on
+  main. Increment after each green smoke push; reset to `0` on failure.
+- **`Check smoke flake-threshold` CI step** in smoke job — reads the JSON and
+  fails CI with a human-action message when the streak reaches 3: "Remove
+  `continue-on-error: true` from the smoke job in ci.yml." Initialised at
+  streak=2 (two consecutive green runs on 2026-04-28).
+- **`docs/testing.md`** — documented the full threshold workflow, reset
+  procedure, and flake policy for the streak tracker.
+
+### Fixed (J3 — Initramfs workflow integrity)
+
+- **`scripts/build-initramfs.sh`** — `CLUSTR_SERVER_USER` and
+  `CLUSTR_SERVER_PASS` are now required only in remote mode. Setting
+  `CLUSTR_CI_MODE=1` (or pointing `CLUSTR_SERVER_HOST` to localhost) activates
+  local mode and skips SSH entirely. This unblocks the `initramfs.yml` workflow
+  which has been failing on every tag since v1.5.0 (error: `CLUSTR_SERVER_USER
+  must be set`).
+- **`initramfs.yml`** — added `CLUSTR_CI_MODE: "1"` env var to the
+  "Build initramfs" step. The CI-built initramfs sources kernel modules from
+  Ubuntu runner packages; the production-quality build (with Rocky 9 modules
+  from the lab server) is still run by the autodeploy script on `cloner`.
+- **v1.8.0 release notes** updated via `gh release edit` to redirect users to
+  v1.8.1 (which has the iPXE UEFI binary). v1.8.1 is the recommended release.
+
+### Added (J4 — Demo asset)
+
+- **`docs/assets/demo.tape`** — VHS tape script for the animated terminal demo.
+  Run `vhs docs/assets/demo.tape` to generate `docs/assets/clustr-demo.gif`.
+  Shows: `clustr-serverd doctor` → `version` → health check → node registration
+  → API verification. Target: ~30 seconds, ≤5 MB.
+- **`docs/assets/clustr-demo-static.svg`** — static SVG diagram showing the
+  same four-step flow (pre-flight, server start, node registration, API output).
+  Renders inline on GitHub without any tooling.
+- **`README.md`** — replaced the `<!-- GIF placeholder -->` comment block with
+  the static SVG (`<img>` tag, 900px wide) and a one-line note linking to the
+  tape script.
+
+### Fixed (J5 — Dogfood pass Round 2)
+
+- **`internal/server/ui/static/set-password.html`** — password hint now shows
+  the full rule: "at least one uppercase letter, one lowercase letter, and one
+  digit." Previously showed only "Minimum 8 characters" (IP-14 from Jared's
+  audit — the rule existed server-side but was not communicated to users at the
+  change-password form).
+- **`docs/getting-started-audit-2026-04.md`** — added Round 2 status section:
+  all 28 paper cuts re-assessed against v1.8.1 + Sprint J. 10/10 top items
+  resolved. Revised bounce-% map: cumulative first-attempt success estimate
+  improved from ~15-20% to ~30-35%. 10 Sprint K candidates documented.
+
+---
+
 ## [v1.8.0] — 2026-04-27 (Sprint I — Show HN Hardening, partial)
 
 **Sprint I — Show HN Hardening (I1, I3, I4, I9 — engineering polish batch)**

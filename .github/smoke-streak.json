@@ -1,0 +1,6 @@
+{
+  "consecutive_smoke_passes": 2,
+  "last_updated_sha": "7fd5ac8",
+  "last_updated": "2026-04-28",
+  "note": "Increment consecutive_smoke_passes after each green smoke run on main. Reset to 0 on any failure. When this reaches 3, CI will fail with a human-action message to remove continue-on-error from the smoke job in ci.yml."
+}
