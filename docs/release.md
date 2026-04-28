@@ -7,7 +7,9 @@ The release workflow (`release.yml`) gates publication on:
 
 1. `test` — go vet + go test (always required)
 2. `build-client` / `build-server` — cross-platform binary builds
-3. `lab-validate` — Proxmox lab boot validation (currently informational; see below)
+
+`lab-validate` runs in parallel but is NOT in `needs:` — it is informational only
+(GitHub-hosted runners cannot reach the private lab network 192.168.1.x).
 
 The Docker image is published separately by `docker.yml` on the same tag trigger.
 
@@ -62,8 +64,8 @@ vm207) via the clustr API and waits for each to reach a serial console login pro
 ### Current Status: INFORMATIONAL
 
 The lab network (`192.168.1.x`) is behind a private NAT and is not reachable from
-GitHub-hosted runners. The `lab-validate` job in `release.yml` is marked
-`continue-on-error: true`. Failures appear in the run UI but do NOT block release
+GitHub-hosted runners. The `lab-validate` job runs in parallel with the build jobs
+but is NOT in the `release` job's `needs:` list, so failures do not block release
 publication.
 
 **Gap**: The lab gate is not load-bearing. Regressions in PXE boot or image
@@ -106,8 +108,12 @@ mkdir -p /opt/actions-runner && cd /opt/actions-runner
    ```yaml
    runs-on: [self-hosted, proxmox-lab]
    ```
+   Remove `continue-on-error: true` from the job.
 
-3. In `release.yml`, remove `continue-on-error: true` from the `lab-validate` job.
+3. In `release.yml`, add `lab-validate` back to the `release` job's `needs:`:
+   ```yaml
+   needs: [build-client, build-server, lab-validate]
+   ```
 
 4. Remove the SSH key setup step from `lab-validate.yml` (the runner is inside the NAT).
 

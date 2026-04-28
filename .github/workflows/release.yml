@@ -11,12 +11,12 @@ jobs:
     # Calls lab-validate.yml as a reusable workflow.
     #
     # INFORMATIONAL (non-blocking): GitHub-hosted runners cannot reach the
-    # private lab network (192.168.1.x).  This job is continue-on-error until
-    # a self-hosted runner with label "proxmox-lab" is registered on the lab
-    # host.  See lab-validate.yml for the upgrade path.  S1-14 / BUILD-5.
+    # private lab network (192.168.1.x).  Failures here do NOT block release
+    # publication — this job is intentionally removed from `release` needs.
+    # See lab-validate.yml for the upgrade path to a self-hosted runner.
+    # S1-14 / BUILD-5.
     uses: ./.github/workflows/lab-validate.yml
     secrets: inherit
-    continue-on-error: true
 
   test:
     name: Test (release gate)
@@ -108,7 +108,10 @@ jobs:
   release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-client, build-server, lab-validate]
+    # lab-validate intentionally removed from needs — it is informational only
+    # (GitHub-hosted runners cannot reach the private lab network).
+    # Release publishes as long as test + build jobs pass.
+    needs: [build-client, build-server]
     permissions:
       contents: write
     steps:
