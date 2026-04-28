@@ -75,9 +75,13 @@ jobs:
 
       - name: Check markdown links in docs/
         run: |
+          # Exclude internal audit/draft docs — these intentionally quote
+          # broken links verbatim as bug reports and should not be normalized.
+          EXCLUDE_PATTERN="getting-started-audit|SHOW-HN-DRAFT"
+          FILES=$(find docs -name "*.md" | grep -Ev "$EXCLUDE_PATTERN" | sort)
           npx --yes markdown-link-check \
             --config .github/mlc-config.json \
-            $(find docs -name "*.md" | sort) \
+            $FILES \
             README.md CHANGELOG.md
 
   build:
