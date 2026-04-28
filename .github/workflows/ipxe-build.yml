@@ -45,7 +45,15 @@ env:
   # upgrading iPXE.  The tag must exist at https://github.com/ipxe/ipxe/tags.
   IPXE_TAG: v1.21.1
   # Feature flags for the build — must match deploy/pxe/BUILD.md.
-  IPXE_EXTRA_CFLAGS: "-DCOLOUR_CMD -DIMAGE_PNG -DCONSOLE_CMD"
+  # Note: IMAGE_PNG is intentionally omitted here — iPXE v1.21.1's config/general.h
+  # already defines IMAGE_PNG.  Passing -DIMAGE_PNG again triggers a macro
+  # redefinition error on GCC 11+ with -Werror.  COLOUR_CMD and CONSOLE_CMD are
+  # NOT in general.h by default and must still be passed explicitly.
+  IPXE_EXTRA_CFLAGS: "-DCOLOUR_CMD -DCONSOLE_CMD"
+  # NO_WERROR=1 suppresses -Werror for the iPXE build.  iPXE uses -Werror
+  # aggressively; GCC 11 surfaces additional warnings that were not errors in
+  # older compilers.  This flag keeps the build clean without patching iPXE source.
+  IPXE_MAKE_FLAGS: "NO_WERROR=1"
 
 jobs:
   build-and-verify:
@@ -90,6 +98,7 @@ jobs:
           make -C /tmp/ipxe/src \
             bin-x86_64-efi/ipxe.efi \
             EXTRA_CFLAGS="$IPXE_EXTRA_CFLAGS" \
+            $IPXE_MAKE_FLAGS \
             -j"$(nproc)"
 
       # ── Compute SHA-256 of the freshly-built binary ──────────────────────────

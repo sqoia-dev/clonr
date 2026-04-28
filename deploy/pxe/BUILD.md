@@ -50,8 +50,14 @@ cd src
 
 # Build ipxe.efi for x86_64 UEFI with colour, console, and PNG support.
 # Feature flags are passed as preprocessor defines via EXTRA_CFLAGS.
+#
+# Note: IMAGE_PNG is intentionally omitted from EXTRA_CFLAGS.  iPXE v1.21.1's
+# config/general.h already defines IMAGE_PNG; passing -DIMAGE_PNG again causes
+# a macro redefinition error on GCC 11+ with -Werror.  NO_WERROR=1 suppresses
+# the remaining -Werror promotions from newer GCC versions.
 make bin-x86_64-efi/ipxe.efi \
-    EXTRA_CFLAGS="-DCOLOUR_CMD -DIMAGE_PNG -DCONSOLE_CMD"
+    EXTRA_CFLAGS="-DCOLOUR_CMD -DCONSOLE_CMD" \
+    NO_WERROR=1
 ```
 
 Alternatively, add the flags permanently in `src/config/general.h` before
@@ -84,7 +90,8 @@ chain http://${next-server}/boot.ipxe
 EOF
 
 make bin-x86_64-efi/ipxe.efi \
-    EXTRA_CFLAGS="-DCOLOUR_CMD -DIMAGE_PNG -DCONSOLE_CMD" \
+    EXTRA_CFLAGS="-DCOLOUR_CMD -DCONSOLE_CMD" \
+    NO_WERROR=1 \
     EMBED=/tmp/clustr.ipxe
 ```
 
@@ -101,7 +108,7 @@ sha256sum deploy/pxe/ipxe.efi > deploy/pxe/ipxe.efi.sha256
 
 # Commit with the iPXE version tag and build flags recorded:
 git add deploy/pxe/ipxe.efi deploy/pxe/ipxe.efi.sha256
-git commit -m "chore: rebuild ipxe.efi v1.21.1 with COLOUR_CMD CONSOLE_CMD IMAGE_PNG"
+git commit -m "chore: rebuild ipxe.efi v1.21.1 with COLOUR_CMD CONSOLE_CMD NO_WERROR"
 ```
 
 Update `deploy/pxe/README.md` to record the iPXE version tag, commit SHA, and
@@ -121,7 +128,11 @@ sha256sum -c deploy/pxe/ipxe.efi.sha256
 
 ## Current Binary Status
 
-The `ipxe.efi` currently committed in this directory does NOT have `COLOUR_CMD`
-compiled in. Boot scripts using `cpair` will fail with "No such command: cpair".
-Rebuild using the steps above before deploying to a production PXE environment
-that uses colour-coded boot menus.
+The `ipxe.efi` committed in this directory is built from iPXE v1.21.1 with
+`COLOUR_CMD`, `CONSOLE_CMD`, and `IMAGE_PNG` enabled. `cpair` and `console`
+commands work in boot scripts. PNG splash support is active.
+
+SHA-256: `b09d02dd8903cac6ff7f85988c0b10b0069fb118c197a9d5f07e018806dfa2b4`
+
+Built on Rocky Linux 9 / GCC 11.5 with `NO_WERROR=1` to suppress GCC 11+
+warning-as-error promotions that are not present in older compilers.

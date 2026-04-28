@@ -23,7 +23,7 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test test-js a11y
+.PHONY: all client server clientd static clean test test-js a11y smoke
 
 all: client server clientd
 
@@ -52,6 +52,14 @@ test-js:
 # Install deps first: npm install --prefix test/js axe-core jsdom
 a11y:
 	node --test test/js/a11y.test.mjs
+
+# I2: Smoke test fixture — spins up clustr-serverd in Docker, simulates a
+# PXE-booted node registering itself, and asserts it appears in /api/v1/nodes.
+# Requires: Docker daemon running, curl available.
+# Time budget: under 5 minutes wall-clock (typically <30s on GitHub-hosted runners).
+# See scripts/ci/smoke.sh for full docs.  See docs/testing.md for local usage.
+smoke:
+	bash scripts/ci/smoke.sh
 
 clean:
 	rm -rf bin/
