@@ -365,6 +365,7 @@ const API = {
         listConfigs()                       { return API.get('/slurm/configs'); },
         getConfig(filename)                 { return API.get(`/slurm/configs/${encodeURIComponent(filename)}`); },
         saveConfig(filename, body)          { return API.put(`/slurm/configs/${encodeURIComponent(filename)}`, body); },
+        validateConfig(filename, body)      { return API.post(`/slurm/configs/${encodeURIComponent(filename)}/validate`, body); },
         configHistory(filename)             { return API.get(`/slurm/configs/${encodeURIComponent(filename)}/history`); },
         // Sync / drift
         syncStatus()                        { return API.get('/slurm/sync-status'); },

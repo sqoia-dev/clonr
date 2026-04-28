@@ -106,6 +106,20 @@ const SlurmPages = {
                 </form>
             </div>` : '';
 
+        // B2-3: Restore Defaults button — re-seeds clustr default Slurm config files.
+        const restoreDefaultsBtn = st.enabled && isAdmin ? `
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 6px;">Restore Default Config Files</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px;">
+                    Re-seeds the clustr built-in Slurm config templates. Only files that still have clustr default content will be updated —
+                    any files you have manually edited are preserved.
+                </p>
+                <button id="slurm-reseed-btn" class="btn btn-secondary" style="font-size:13px;padding:6px 16px;">
+                    Restore Defaults
+                </button>
+                <span id="slurm-reseed-status" style="margin-left:10px;font-size:12px;color:var(--text-secondary);"></span>
+            </div>` : '';
+
         const disableBtn = st.enabled && isAdmin ? `
             <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);">
                 <h3 style="font-size:14px;font-weight:600;margin:0 0 8px;color:var(--text-secondary);">Danger Zone</h3>
@@ -138,7 +152,7 @@ const SlurmPages = {
                 </div>
             </div>` : '';
 
-        return cardWrap('Slurm', `
+        return cardWrap('Slurm Module Setup', `
             ${quickStats}
             <table style="border-collapse:collapse;width:100%;max-width:540px;margin-bottom:8px;">
                 <tbody>
@@ -167,6 +181,7 @@ const SlurmPages = {
                 </tbody>
             </table>
             ${enableForm}
+            ${restoreDefaultsBtn}
             ${disableBtn}
         `);
     },
@@ -189,18 +204,49 @@ const SlurmPages = {
             });
         }
 
+        // B2-3: Restore Defaults button.
+        const reseedBtn = document.getElementById('slurm-reseed-btn');
+        if (reseedBtn) {
+            reseedBtn.addEventListener('click', () => {
+                Pages.showConfirmModal({
+                    title: 'Restore Default Config Files',
+                    message: 'Re-seed clustr built-in Slurm config templates?<br><br>Only files that still contain clustr default content will be updated. Manually edited files will <strong>not</strong> be changed.',
+                    confirmText: 'Restore Defaults',
+                    onConfirm: async () => {
+                        const status = document.getElementById('slurm-reseed-status');
+                        if (status) status.textContent = 'Restoring…';
+                        try {
+                            await API.request('POST', '/slurm/configs/reseed-defaults');
+                            App.toast('Default config files restored', 'success');
+                            SlurmPages.settings();
+                        } catch (err) {
+                            App.toast('Restore failed: ' + err.message, 'error');
+                            if (status) status.textContent = '';
+                        }
+                    },
+                });
+            });
+        }
+
         const disableBtn = document.getElementById('slurm-disable-btn');
         if (disableBtn) {
-            disableBtn.addEventListener('click', async () => {
-                if (!confirm('Disable the Slurm module? Configs will remain on deployed nodes.')) return;
-                try {
-                    await API.slurm.disable();
-                    App.toast('Slurm module disabled', 'success');
-                    await SlurmPages.bootstrapNav();
-                    SlurmPages.settings();
-                } catch (err) {
-                    App.toast('Disable failed: ' + err.message, 'error');
-                }
+            disableBtn.addEventListener('click', () => {
+                Pages.showConfirmModal({
+                    title: 'Disable Slurm Module',
+                    message: 'Disable the Slurm module? Configs will remain on deployed nodes.',
+                    confirmText: 'Disable',
+                    danger: true,
+                    onConfirm: async () => {
+                        try {
+                            await API.slurm.disable();
+                            App.toast('Slurm module disabled', 'success');
+                            await SlurmPages.bootstrapNav();
+                            SlurmPages.settings();
+                        } catch (err) {
+                            App.toast('Disable failed: ' + err.message, 'error');
+                        }
+                    },
+                });
             });
         }
     },
@@ -328,6 +374,7 @@ const SlurmPages = {
                            background:var(--bg-input,#fff);color:var(--text);">
                 <button id="slurm-save-config-btn" class="btn btn-primary" style="font-size:13px;padding:6px 16px;">Save New Version</button>
             </div>
+            <div id="slurm-validate-result" style="display:none;margin-top:10px;"></div>
             <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
                 <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Preview rendered output for node</div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
@@ -408,9 +455,51 @@ const SlurmPages = {
             btn.addEventListener('click', async () => {
                 const content = document.getElementById('slurm-config-content').value;
                 const message = document.getElementById('slurm-config-message').value.trim();
+                const validateEl = document.getElementById('slurm-validate-result');
                 if (!content.trim()) { App.toast('Content cannot be empty', 'error'); return; }
+
                 try {
                     btn.disabled = true;
+                    btn.textContent = 'Validating…';
+                    if (validateEl) { validateEl.style.display = 'none'; validateEl.innerHTML = ''; }
+
+                    // B5-2: validate before save — show inline errors and block save if issues found.
+                    let validationPassed = true;
+                    try {
+                        const vr = await API.slurm.validateConfig(filename, { content });
+                        if (vr && !vr.valid && vr.issues && vr.issues.length > 0) {
+                            validationPassed = false;
+                            if (validateEl) {
+                                const issueRows = vr.issues.map(issue => {
+                                    const loc = issue.line > 0 ? `<span style="font-family:monospace;font-size:11px;color:var(--text-secondary);">line ${issue.line}</span> ` : '';
+                                    const key = issue.key ? `<strong>${escHtml(issue.key)}</strong>: ` : '';
+                                    return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 0;border-bottom:1px solid rgba(220,38,38,0.12);">
+                                        <span style="color:#dc2626;font-size:14px;flex-shrink:0;">&#9888;</span>
+                                        <span>${loc}${key}${escHtml(issue.message)}</span>
+                                    </div>`;
+                                }).join('');
+                                validateEl.innerHTML = `
+                                    <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:6px;padding:10px 14px;">
+                                        <div style="font-weight:600;font-size:13px;color:#991b1b;margin-bottom:6px;">Validation issues — fix before saving:</div>
+                                        ${issueRows}
+                                    </div>`;
+                                validateEl.style.display = '';
+                            }
+                        } else if (vr && vr.valid && validateEl) {
+                            validateEl.style.display = 'none';
+                            validateEl.innerHTML = '';
+                        }
+                    } catch (_) {
+                        // Validation endpoint unreachable or returned an error — allow save to proceed.
+                        validationPassed = true;
+                    }
+
+                    if (!validationPassed) {
+                        btn.disabled = false;
+                        btn.textContent = 'Save New Version';
+                        return;
+                    }
+
                     btn.textContent = 'Saving…';
                     const result = await API.slurm.saveConfig(filename, { content, message });
                     App.toast(`Saved as version ${result.version}`, 'success');

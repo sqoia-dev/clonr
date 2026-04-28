@@ -197,6 +197,9 @@ const App = {
         Router.register('/network/profiles', () => {
             if (typeof NetworkPages !== 'undefined') NetworkPages.profiles();
         });
+        // B3-3: Audit log route — admin only; non-admins are redirected to dashboard.
+        Router.register('/audit',    ()   => Pages.auditLog());
+
         Router.register('/slurm',    ()   => {
             if (typeof SlurmPages !== 'undefined') SlurmPages.settings();
         });
@@ -626,7 +629,8 @@ const Pages = {
 
                 ${staleInitramfsWarning}
 
-                ${(images.length === 0 && nodes.length === 0) ? `
+                ${/* B2-6: show wizard until at least one node has deploy_verified_booted_at set */
+                  !nodes.some(n => n.deploy_verified_booted_at) ? `
                 <!-- S5-9: First-deploy wizard — shown when there are no images and no nodes. -->
                 <div class="card" style="margin-bottom:24px;border:1px solid var(--accent);background:linear-gradient(135deg,var(--surface-secondary) 0%,var(--bg-primary) 100%)">
                     <div class="card-header">
@@ -712,27 +716,39 @@ const Pages = {
                     </div>
                 </div>
 
+                ${this._buildAnomalyCard(nodes)}
+
                 ${cardWrap('Active Deployments',
                     `<div id="deploy-progress-container">${this._deployProgressTable(deployMap)}</div>`)}
 
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
-                    ${cardWrap('Recent Images',
-                        `<div id="dash-recent-images-wrap">${this._imagesTable(images.slice(0, 6))}</div>`,
-                        `<a href="#/images" class="btn btn-secondary btn-sm">View all</a>`)}
-                    ${cardWrap('Recent Nodes',
-                        `<div id="dash-recent-nodes-wrap">${this._nodesTable(nodes.slice(0, 6))}</div>`,
-                        `<a href="#/nodes" class="btn btn-secondary btn-sm">View all</a>`)}
-                </div>
+                ${Auth._role === 'operator'
+                    // B1-3: Operator dashboard — shows groups and recent deploys instead of images/log stream.
+                    ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+                        ${cardWrap('Your Groups',
+                            `<div id="dash-operator-groups">${this._operatorGroupsPanel(nodes)}</div>`,
+                            `<a href="#/nodes/groups" class="btn btn-secondary btn-sm">All groups</a>`)}
+                        ${cardWrap('Your Recent Deploys',
+                            `<div id="dash-operator-deploys">${this._operatorRecentDeploysPanel(nodes)}</div>`,
+                            `<a href="#/deploys" class="btn btn-secondary btn-sm">All deploys</a>`)}
+                    </div>`
+                    // Admin dashboard — images + nodes + log stream.
+                    : `<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+                        ${cardWrap('Recent Images',
+                            `<div id="dash-recent-images-wrap">${this._imagesTable(images.slice(0, 6))}</div>`,
+                            `<a href="#/images" class="btn btn-secondary btn-sm">View all</a>`)}
+                        ${cardWrap('Recent Nodes',
+                            `<div id="dash-recent-nodes-wrap">${this._nodesTable(nodes.slice(0, 6))}</div>`,
+                            `<a href="#/nodes" class="btn btn-secondary btn-sm">View all</a>`)}
+                    </div>
+                    ${cardWrap('Live Log Stream',
+                        `<div id="dash-log-viewer" class="log-viewer"></div>`,
+                        `<span class="follow-indicator" id="dash-follow-ind">
+                            <span class="follow-dot"></span>connecting…
+                        </span>`)}`}
 
                 ${recentActivity.length > 0 ? cardWrap('Recent Activity',
                     this._activityTimeline(recentActivity),
                     '') : ''}
-
-                ${cardWrap('Live Log Stream',
-                    `<div id="dash-log-viewer" class="log-viewer"></div>`,
-                    `<span class="follow-indicator" id="dash-follow-ind">
-                        <span class="follow-dot"></span>connecting…
-                    </span>`)}
             `);
 
             const viewer = document.getElementById('dash-log-viewer');
@@ -924,13 +940,97 @@ const Pages = {
         for (const [, el] of existing) el.remove();
     },
 
+    // B2-4: _buildAnomalyCard renders an "Anomalies" card with clickable node filter CTAs.
+    // Shows counts for: failed reimages, verify_timeout, never deployed, stale (>90d).
+    _buildAnomalyCard(nodes) {
+        if (!nodes || nodes.length === 0) return '';
+        const now = Date.now();
+        const ninetyDays = 90 * 24 * 3600 * 1000;
+
+        const failed    = nodes.filter(n => n._deployStatus === 'error' || n.deploy_verify_timeout_at).length;
+        const neverDeployed = nodes.filter(n => n.base_image_id && !n.last_deploy_succeeded_at && !n.deploy_completed_preboot_at).length;
+        const stale     = nodes.filter(n => n.last_deploy_succeeded_at && (now - new Date(n.last_deploy_succeeded_at).getTime()) > ninetyDays).length;
+
+        const total = failed + neverDeployed + stale;
+        if (total === 0) return ''; // no anomalies — hide the card
+
+        const items = [
+            failed      > 0 ? `<a href="#/nodes?filter=failed" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;background:var(--error-bg,#fef2f2);border:1px solid #fca5a5;text-decoration:none;color:inherit;">
+                <span style="font-size:20px;font-weight:700;color:#dc2626;">${failed}</span>
+                <span style="font-size:13px;color:#991b1b;">node${failed !== 1 ? 's' : ''} with failed deploy or verify timeout</span>
+            </a>` : '',
+            neverDeployed > 0 ? `<a href="#/nodes?filter=never_deployed" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;background:#fffbeb;border:1px solid #fde68a;text-decoration:none;color:inherit;">
+                <span style="font-size:20px;font-weight:700;color:#d97706;">${neverDeployed}</span>
+                <span style="font-size:13px;color:#92400e;">configured node${neverDeployed !== 1 ? 's' : ''} never deployed</span>
+            </a>` : '',
+            stale > 0 ? `<a href="#/nodes?filter=stale" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border);text-decoration:none;color:inherit;">
+                <span style="font-size:20px;font-weight:700;color:var(--text-secondary);">${stale}</span>
+                <span style="font-size:13px;color:var(--text-secondary);">node${stale !== 1 ? 's' : ''} with no successful deploy in >90 days</span>
+            </a>` : '',
+        ].filter(Boolean).join('');
+
+        return cardWrap('Anomalies',
+            `<div style="display:flex;flex-direction:column;gap:8px;">${items}</div>`,
+            `<a href="#/nodes" class="btn btn-secondary btn-sm">View Nodes</a>`);
+    },
+
+    // B1-3: _operatorGroupsPanel — shows node groups visible to this operator on the dashboard.
+    // Groups are derived from the node tags on nodes in the cluster.
+    _operatorGroupsPanel(nodes) {
+        // Collect all unique tag groups from nodes.
+        const groupMap = new Map();
+        for (const n of nodes) {
+            const tags = n.tags || n.groups || [];
+            for (const tag of tags) {
+                if (!groupMap.has(tag)) groupMap.set(tag, { name: tag, total: 0, configured: 0 });
+                const g = groupMap.get(tag);
+                g.total++;
+                if (n.base_image_id) g.configured++;
+            }
+        }
+        if (groupMap.size === 0) {
+            return `<div class="empty-state"><div class="empty-state-text">No node groups defined yet.</div></div>`;
+        }
+        const rows = [...groupMap.values()].sort((a, b) => a.name.localeCompare(b.name)).slice(0, 8).map(g => `
+            <tr>
+                <td><a href="#/nodes/groups/${encodeURIComponent(g.name)}" class="link-accent">${escHtml(g.name)}</a></td>
+                <td class="text-dim">${g.total} node${g.total !== 1 ? 's' : ''}</td>
+                <td class="text-dim">${g.configured} configured</td>
+            </tr>`).join('');
+        return `<div class="table-wrap"><table><thead><tr><th>Group</th><th>Nodes</th><th>Configured</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    },
+
+    // B1-3: _operatorRecentDeploysPanel — shows the most recently deployed nodes.
+    _operatorRecentDeploysPanel(nodes) {
+        const deployed = nodes
+            .filter(n => n.last_deploy_succeeded_at || n.deploy_completed_preboot_at)
+            .sort((a, b) => {
+                const ta = new Date(a.last_deploy_succeeded_at || a.deploy_completed_preboot_at).getTime();
+                const tb = new Date(b.last_deploy_succeeded_at || b.deploy_completed_preboot_at).getTime();
+                return tb - ta;
+            })
+            .slice(0, 8);
+        if (deployed.length === 0) {
+            return `<div class="empty-state"><div class="empty-state-text">No successful deploys yet.</div></div>`;
+        }
+        const rows = deployed.map(n => {
+            const ts = n.last_deploy_succeeded_at || n.deploy_completed_preboot_at;
+            return `<tr>
+                <td><a href="#/nodes/${n.id}" class="link-accent">${escHtml(n.hostname || n.primary_mac || n.id)}</a></td>
+                <td class="text-dim" title="${escHtml(ts)}">${fmtRelative(ts)}</td>
+            </tr>`;
+        }).join('');
+        return `<div class="table-wrap"><table><thead><tr><th>Node</th><th>Deployed</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    },
+
     // _deployProgressTable renders the active deployments table from a MAC → DeployProgress map.
     _deployProgressTable(deployMap) {
         const entries = Array.from(deployMap.values())
             .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
             .slice(0, 20);
 
-        if (!entries.length) return emptyState('No active deployments');
+        // B2-7: better empty state with CTA.
+        if (!entries.length) return emptyState('No deployments in progress', 'No deployments in progress. Trigger a reimage from the Nodes page.', '<a href="#/nodes" class="btn btn-secondary btn-sm" style="margin-top:8px;">Go to Nodes</a>');
 
         return `<div class="table-wrap"><table aria-label="Active deployments">
             <thead><tr>
@@ -1866,9 +1966,10 @@ const Pages = {
     // When the image is in-use by nodes, shows them and offers a force-delete checkbox.
     async showDeleteImageModal(id, name) {
         // Pre-fetch to see if any nodes are using the image.
+        // B4-6: use API.nodes.list() instead of direct API.get('/nodes').
         let nodes = [];
         try {
-            const resp = await API.get(`/nodes`, { base_image_id: id });
+            const resp = await API.nodes.list({ base_image_id: id });
             nodes = (resp && resp.nodes) || [];
         } catch (_) {}
 
@@ -2252,16 +2353,18 @@ const Pages = {
     },
 
     // _removeImageTag removes a tag from the image and refreshes the tag display (S2-3).
+    // B4-3: DOM removal moved to success path; errors surfaced via App.toast.
     async _removeImageTag(imageId, tagToRemove) {
         const chips = document.querySelectorAll('#img-tag-chips .badge');
         const current = Array.from(chips).map(c => c.textContent.trim().replace(/×$/, '').trim()).filter(Boolean);
         const updated = current.filter(t => t !== tagToRemove);
         try {
             const img = await API.images.updateTags(imageId, updated);
+            // Only update DOM after server confirms the change.
             const container = document.getElementById('img-tags-display');
             if (container) container.innerHTML = Pages._renderImageTagEditor(imageId, img.tags || []);
         } catch (e) {
-            console.error('remove image tag:', e);
+            App.toast(`Failed to remove tag: ${e.message}`, 'error');
         }
     },
 
@@ -2993,8 +3096,14 @@ const Pages = {
     // _nodeRowActions renders the actions cell for a node row.
     // Power actions and deploy actions shown only to admin/operator; readonly sees View only.
     // S5-5: Adds "Re-deploy last image" and "Retry" quick-action buttons.
+    // B2-1: "Configure and Deploy" CTA for Registered nodes (has hardware_profile, no base_image_id).
     _nodeRowActions(n) {
         const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        // B2-1: show "Configure and Deploy" CTA for nodes registered but not yet assigned an image.
+        const isRegistered = n.hardware_profile && !n.base_image_id;
+        const configureBtn = (canMutate && isRegistered)
+            ? `<button class="btn btn-primary btn-sm" onclick="Pages._configureAndDeployModal('${n.id}','${escHtml(n.hostname||n.primary_mac)}')" title="Assign an image and deploy this node">Configure &amp; Deploy</button>`
+            : '';
         // S5-5: "Retry" appears for nodes in Failed state.
         const isFailed = n._deployStatus === 'error' || (n.last_deploy_failed_at && (!n.last_deploy_succeeded_at || n.last_deploy_failed_at > n.last_deploy_succeeded_at));
         const retryBtn = (canMutate && isFailed)
@@ -3021,7 +3130,7 @@ const Pages = {
             </div>` : '';
         return `<div class="flex gap-6" style="align-items:center">
             <a class="btn btn-secondary btn-sm" href="#/nodes/${n.id}">View</a>
-            ${retryBtn}${redeployBtn}
+            ${configureBtn}${retryBtn}${redeployBtn}
             ${pwrDropdown}
         </div>`;
     },
@@ -3047,6 +3156,203 @@ const Pages = {
     // S5-5: _listRedeploy opens the reimage modal pre-populated with the node's current image.
     _listRedeploy(nodeId, displayName) {
         Pages._nodeActionsTriggerReimage(nodeId, displayName);
+    },
+
+    // B2-1: _configureAndDeployModal — 3-step guided modal for Registered nodes.
+    // Step 1: image select. Step 2: SSH keys confirm. Step 3: reimage trigger.
+    // Assigns the image to the node then immediately queues a reimage.
+    async _configureAndDeployModal(nodeId, displayName) {
+        const MID = 'configure-deploy-modal';
+        // Remove any stale instance.
+        const stale = document.getElementById(MID);
+        if (stale) stale.remove();
+
+        // Fetch images for the picker.
+        let images = [];
+        try {
+            const resp = await API.images.list();
+            images = (resp && resp.images) || [];
+        } catch (_) {}
+
+        // Fetch current node to pre-fill SSH keys.
+        let node = null;
+        try {
+            node = await API.nodes.get(nodeId);
+        } catch (_) {}
+        const existingKeys = (node && node.ssh_keys) ? node.ssh_keys.join('\n') : '';
+
+        if (images.length === 0) {
+            Pages.showAlertModal(
+                'No Images Available',
+                'There are no images to assign. <a href="#/images">Upload an image</a> first, then return to configure this node.'
+            );
+            return;
+        }
+
+        const imageOptions = images
+            .map(img => `<option value="${escHtml(img.id)}">${escHtml(img.name)}${img.version ? ' — ' + escHtml(img.version) : ''}</option>`)
+            .join('');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = MID;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:480px" aria-labelledby="${MID}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${MID}-title">Configure &amp; Deploy — ${escHtml(displayName)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${MID}').remove()">&#215;</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:16px;">
+                    <!-- Step indicator -->
+                    <div style="display:flex;gap:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);font-size:12px;font-weight:600;">
+                        <div id="${MID}-step1-ind" style="flex:1;text-align:center;padding:6px 0;background:var(--accent);color:#fff;">1. Image</div>
+                        <div id="${MID}-step2-ind" style="flex:1;text-align:center;padding:6px 0;background:var(--bg-secondary);color:var(--text-secondary);">2. SSH Keys</div>
+                        <div id="${MID}-step3-ind" style="flex:1;text-align:center;padding:6px 0;background:var(--bg-secondary);color:var(--text-secondary);">3. Deploy</div>
+                    </div>
+
+                    <!-- Step 1: image select -->
+                    <div id="${MID}-step1">
+                        <label class="form-label" style="margin-bottom:6px;">Select image to assign to this node</label>
+                        <select id="${MID}-image" class="form-input" style="margin-top:4px;">
+                            ${imageOptions}
+                        </select>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
+                            This image will be set as the node's base image and immediately queued for deploy.
+                        </div>
+                    </div>
+
+                    <!-- Step 2: SSH keys -->
+                    <div id="${MID}-step2" style="display:none;">
+                        <label class="form-label" style="margin-bottom:6px;">SSH authorized keys (one per line)</label>
+                        <textarea id="${MID}-keys" class="form-input" rows="4"
+                            placeholder="ssh-ed25519 AAAA…&#10;ssh-rsa AAAA…"
+                            style="margin-top:4px;font-family:var(--font-mono);font-size:12px;resize:vertical;">${escHtml(existingKeys)}</textarea>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
+                            Leave blank to keep existing keys or deploy without key injection.
+                        </div>
+                    </div>
+
+                    <!-- Step 3: confirm -->
+                    <div id="${MID}-step3" style="display:none;">
+                        <div style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.35);border-radius:6px;padding:12px 14px;font-size:13px;">
+                            <strong>Ready to deploy</strong><br>
+                            <span id="${MID}-summary" style="color:var(--text-secondary);font-size:12px;"></span>
+                        </div>
+                        <div style="font-size:12px;color:var(--text-secondary);margin-top:10px;">
+                            The node will be reimaged on its next PXE boot. Make sure it is set to PXE boot first.
+                        </div>
+                    </div>
+
+                    <div id="${MID}-err" style="color:var(--error);font-size:13px;display:none;"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="${MID}-back" style="display:none;" onclick="Pages._cdStep(${JSON.stringify(MID)}, 'back')">Back</button>
+                    <button class="btn btn-secondary" id="${MID}-cancel" onclick="document.getElementById('${JSON.stringify(MID)}').remove()">Cancel</button>
+                    <button class="btn btn-primary" id="${MID}-next" onclick="Pages._cdStep('${MID}', 'next', '${nodeId}')">Next</button>
+                </div>
+            </div>`;
+
+        // Fix the cancel button — JSON.stringify added quotes; just use MID directly.
+        overlay.querySelector('#' + MID + '-cancel').onclick = () => overlay.remove();
+
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+
+        // Track current step in a dataset on the overlay.
+        overlay.dataset.step = '1';
+    },
+
+    // B2-1: _cdStep — advance or retreat the configure-and-deploy modal steps.
+    async _cdStep(mid, direction, nodeId) {
+        const overlay = document.getElementById(mid);
+        if (!overlay) return;
+        let step = parseInt(overlay.dataset.step, 10);
+
+        const errEl  = document.getElementById(mid + '-err');
+        const nextBtn = document.getElementById(mid + '-next');
+        const backBtn = document.getElementById(mid + '-back');
+        function showErr(msg) { errEl.textContent = msg; errEl.style.display = ''; }
+        function clearErr()   { errEl.textContent = ''; errEl.style.display = 'none'; }
+        clearErr();
+
+        if (direction === 'next') {
+            if (step === 1) {
+                // Validate image selected.
+                const imageId = document.getElementById(mid + '-image')?.value;
+                if (!imageId) { showErr('Please select an image.'); return; }
+                step = 2;
+            } else if (step === 2) {
+                // Move to confirm step — populate summary.
+                const imageId  = document.getElementById(mid + '-image')?.value;
+                const imageEl  = document.getElementById(mid + '-image');
+                const imageName = imageEl ? imageEl.options[imageEl.selectedIndex]?.text : imageId;
+                const summaryEl = document.getElementById(mid + '-summary');
+                if (summaryEl) summaryEl.textContent = `Image: ${imageName}`;
+                step = 3;
+                nextBtn.textContent = 'Deploy';
+                nextBtn.classList.remove('btn-primary');
+                nextBtn.classList.add('btn-danger');
+            } else if (step === 3) {
+                // Submit: assign image + SSH keys, then trigger reimage.
+                const imageId = document.getElementById(mid + '-image')?.value;
+                const keysRaw = document.getElementById(mid + '-keys')?.value || '';
+                const sshKeys = keysRaw.split('\n').map(k => k.trim()).filter(Boolean);
+
+                nextBtn.disabled = true;
+                nextBtn.textContent = 'Deploying…';
+
+                try {
+                    // Step A: update node with image and SSH keys.
+                    await API.nodes.update(nodeId, { base_image_id: imageId, ssh_keys: sshKeys });
+                    // Step B: queue reimage.
+                    await API.request('POST', `/nodes/${nodeId}/reimage`, {});
+                    overlay.remove();
+                    App.toast('Image assigned and reimage queued — node will deploy on next PXE boot', 'success');
+                    // Bust the node cache so the list reloads with the updated base_image_id.
+                    App._cacheSet('nodes', null, 0);
+                    Pages.nodes();
+                } catch (e) {
+                    nextBtn.disabled = false;
+                    nextBtn.textContent = 'Deploy';
+                    showErr(e.message || 'Deploy failed — check server logs.');
+                }
+                return;
+            }
+        } else {
+            // back
+            step = Math.max(1, step - 1);
+            if (step < 3) {
+                nextBtn.textContent = 'Next';
+                nextBtn.classList.add('btn-primary');
+                nextBtn.classList.remove('btn-danger');
+            }
+        }
+
+        overlay.dataset.step = step;
+
+        // Show/hide step panels.
+        [1, 2, 3].forEach(s => {
+            const panel = document.getElementById(mid + '-step' + s);
+            const ind   = document.getElementById(mid + '-step' + s + '-ind');
+            if (panel) panel.style.display = (s === step) ? '' : 'none';
+            if (ind) {
+                ind.style.background = (s === step) ? 'var(--accent)' : (s < step ? 'var(--success-bg, #d1fae5)' : 'var(--bg-secondary)');
+                ind.style.color      = (s === step) ? '#fff' : (s < step ? 'var(--success-text, #065f46)' : 'var(--text-secondary)');
+            }
+        });
+
+        // Back button visibility.
+        if (backBtn) backBtn.style.display = (step > 1) ? '' : 'none';
+
+        // Focus first focusable in active step.
+        const activePanel = document.getElementById(mid + '-step' + step);
+        if (activePanel) {
+            const first = activePanel.querySelector('select, input, textarea, button');
+            if (first) first.focus();
+        }
     },
 
     // nodesRefresh — called by the auto-refresh timer. Updates the nodes table
@@ -3775,7 +4081,7 @@ const Pages = {
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="6 9 12 15 18 9"/></svg>
                             </button>
                             <div class="actions-dropdown-menu" id="node-actions-menu">
-                                <button class="actions-dropdown-item" onclick="Pages._nodeActionsRediscover('${node.id}');Pages._toggleActionsDropdown()">Re-discover hardware</button>
+                                <button class="actions-dropdown-item" onclick="Pages._nodeActionsRediscover('${node.id}');Pages._toggleActionsDropdown()">Queue Reimage</button>
                                 <button class="actions-dropdown-item" onclick="Pages._nodeActionsTriggerReimage('${node.id}','${escHtml(displayName)}');Pages._toggleActionsDropdown()">Trigger reimage</button>
                                 ${iface ? `<button class="actions-dropdown-item" onclick="Pages.showCaptureModal(${JSON.stringify('root@' + iface.ip_address.split('/')[0])},${JSON.stringify((node.hostname && node.hostname !== '(none)') ? node.hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-') + '-capture' : '')});Pages._toggleActionsDropdown()">Capture as image</button>` : ''}
                                 ${Auth._role === 'admin' ? `<div class="actions-dropdown-sep"></div>
@@ -3916,14 +4222,9 @@ const Pages = {
                                   m = Math.floor((s % 3600) / 60);
                             return d > 0 ? `${d}d ${h}h ${m}m` : (h > 0 ? `${h}h ${m}m` : `${m}m`);
                         };
-                        const fmtMem = (kb) => kb !== null ? (kb / 1024 / 1024).toFixed(1) + ' GB' : '—';
+                        const fmtMem = (kb) => kb !== null ? (kb / 1024 / 1024).toFixed(1) + ' GiB' : '—';
                         const fmtPct = (used, total) => total ? Math.round(used / total * 100) + '%' : '—';
-                        const fmtBytes = (b) => {
-                            if (b >= 1e12) return (b/1e12).toFixed(1) + ' TB';
-                            if (b >= 1e9)  return (b/1e9).toFixed(1) + ' GB';
-                            if (b >= 1e6)  return (b/1e6).toFixed(0) + ' MB';
-                            return b + ' B';
-                        };
+                        // B4-1: removed inner fmtBytes shadow — use the outer binary fmtBytes consistently.
 
                         const diskRows = disk.map(d =>
                             `<tr>
@@ -4023,7 +4324,7 @@ const Pages = {
                         ${hw && hw.discovered_at ? `<span class="text-dim" style="font-size:12px">Last discovered: ${fmtRelative(hw.discovered_at)}</span>` : ''}
                         <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="Pages._nodeActionsRediscover('${node.id}')">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="width:13px;height:13px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                            Re-discover Hardware
+                            Queue Reimage
                         </button>
                     </div>
                     ${hw ? this._hardwareProfile(hw) : `<div class="card"><div class="card-body">${emptyState('No hardware profile', 'Hardware is discovered when a node registers via PXE boot.')}</div></div>`}
@@ -4678,20 +4979,24 @@ const Pages = {
         if (saveBar)  saveBar.style.display = 'none';
         if (statusEl) { statusEl.textContent = 'Saved'; statusEl.className = 'save-status saved'; }
         if (tabBtnEl) tabBtnEl.classList.remove('tab-dirty');
+        // B4-2: re-enable all save buttons after any save completes successfully.
+        document.querySelectorAll('[id^="tab-save-"]').forEach(btn => { btn.disabled = false; });
     },
 
     _tabMarkSaving(tabKey) {
         const statusEl = document.getElementById(`tab-save-status-${tabKey}`);
         const saveBtn  = document.getElementById(`tab-save-${tabKey}`);
         if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.className = 'save-status'; }
-        if (saveBtn)  saveBtn.disabled = true;
+        // B4-2: disable ALL save buttons while any save is in flight to prevent GET-then-PUT race.
+        document.querySelectorAll('[id^="tab-save-"]').forEach(btn => { btn.disabled = true; });
     },
 
     _tabMarkError(tabKey, msg) {
         const statusEl = document.getElementById(`tab-save-status-${tabKey}`);
         const saveBtn  = document.getElementById(`tab-save-${tabKey}`);
         if (statusEl) { statusEl.textContent = msg; statusEl.className = 'save-status error'; }
-        if (saveBtn)  { saveBtn.disabled = false; }
+        // B4-2: re-enable all save buttons when save fails.
+        document.querySelectorAll('[id^="tab-save-"]').forEach(btn => { btn.disabled = false; });
     },
 
     // _tabRevert resets the tab inputs back to original values without saving.
@@ -5164,17 +5469,19 @@ const Pages = {
 
     // ── Node Actions dropdown ─────────────────────────────────────────────────
 
+    // B4-7: renamed from _nodeActionsRediscover; updated label and warning text.
     async _nodeActionsRediscover(nodeId) {
         Pages.showConfirmModal({
-            title: 'Hardware Re-discovery',
-            message: 'Mark node for hardware re-discovery?<br><br>The node will need to PXE boot to re-register its hardware profile. This does <strong>not</strong> wipe the disk.',
-            confirmText: 'Re-discover',
+            title: 'Queue Reimage',
+            message: '<strong>Warning:</strong> Queuing a reimage will wipe the disk on the next PXE boot.<br><br>The node must PXE boot to proceed. The disk will be formatted and the assigned image re-deployed.',
+            confirmText: 'Queue Reimage',
+            danger: true,
             onConfirm: async () => {
                 try {
                     await API.request('POST', `/nodes/${nodeId}/reimage`, {});
-                    Pages.showAlertModal('Reimage Requested', 'PXE-boot the node to re-discover hardware. After registration, cancel or skip deployment if you only want hardware discovery.');
+                    App.toast('Reimage queued — PXE-boot the node to proceed.', 'success');
                 } catch (e) {
-                    Pages.showAlertModal('Re-discover Failed', escHtml(e.message));
+                    App.toast('Queue reimage failed: ' + e.message, 'error');
                 }
             },
         });
@@ -7717,6 +8024,53 @@ const Pages = {
                             <div class="alert alert-warning" style="font-size:12px;margin-bottom:10px">
                                 Overrides role-based package list. Use only if you need full control.
                             </div>
+                            <!-- B5-3: View default template link -->
+                            <div style="margin-bottom:8px;font-size:12px;">
+                                <a href="#" id="build-iso-ks-default-toggle"
+                                   style="color:var(--accent);text-decoration:underline;"
+                                   onclick="Pages._toggleKickstartDefault(event)">View default kickstart template</a>
+                            </div>
+                            <pre id="build-iso-ks-default-preview" style="display:none;background:var(--bg-code,#f8fafc);border:1px solid var(--border);border-radius:6px;
+                                 padding:10px;font-size:11px;max-height:240px;overflow:auto;white-space:pre;margin-bottom:8px;">
+# clustr auto-generated kickstart (RHEL family — representative template)
+# Variables like {{.Distro}} are substituted at build time from image settings.
+cdrom
+lang en_US.UTF-8
+keyboard us
+timezone UTC --utc
+rootpw --iscrypted &lt;bcrypt-hash&gt;
+selinux --disabled
+firewall --disabled
+network --bootproto=dhcp --device=link --activate
+skipx
+firstboot --disabled
+
+zerombr
+clearpart --all --initlabel --disklabel=gpt
+bootloader --location=mbr --boot-drive=sda --append="console=ttyS0,115200"
+part /boot/efi --fstype=vfat --size=512  --ondisk=sda --label=esp
+part /boot     --fstype=xfs  --size=1024 --ondisk=sda --label=boot
+part /         --fstype=xfs  --size=1    --grow       --ondisk=sda --label=root
+
+%packages --ignoremissing
+@^minimal-environment
+openssh-server
+grub2-pc
+grub2-efi-x64
+shim-x64
+efibootmgr
+%end
+
+%post --log=/root/ks-post.log
+systemctl enable sshd
+mkdir -p /etc/ssh/sshd_config.d
+echo "PasswordAuthentication yes" &gt; /etc/ssh/sshd_config.d/60-clustr-password-auth.conf
+# Remove machine-specific identifiers so captures produce clean base images.
+rm -f /etc/machine-id /var/lib/dbus/machine-id /etc/hostname
+rm -f /etc/ssh/ssh_host_* /root/.bash_history
+%end
+
+reboot</pre>
                             <div class="form-group">
                                 <textarea name="custom_kickstart" id="build-iso-kickstart" rows="8"
                                     placeholder="# Paste your kickstart/autoinstall/preseed here...&#10;# Leave blank to use the auto-generated config from roles."
@@ -7805,6 +8159,17 @@ const Pages = {
 
         // Disable submit if no roles AND no custom kickstart.
         if (btn) btn.disabled = (roles.length === 0 && !hasKS);
+    },
+
+    // B5-3: Toggle the default kickstart template preview.
+    _toggleKickstartDefault(e) {
+        e.preventDefault();
+        const preview = document.getElementById('build-iso-ks-default-preview');
+        const link    = document.getElementById('build-iso-ks-default-toggle');
+        if (!preview) return;
+        const showing = preview.style.display !== 'none';
+        preview.style.display = showing ? 'none' : '';
+        if (link) link.textContent = showing ? 'View default kickstart template' : 'Hide default kickstart template';
     },
 
     async submitBuildFromISO(e) {
@@ -8343,12 +8708,13 @@ const Pages = {
     async _settingsRender(tab) {
         Pages._settingsTab = tab;
         const isAdmin = Auth._role === 'admin';
+        // B3-1: Webhooks tab is admin-only. B3-4/B3-5: About tab for all roles.
         const tabs = isAdmin
-            ? ['api-keys', 'users', 'server-info', 'about']
+            ? ['api-keys', 'users', 'webhooks', 'server-info', 'about']
             : ['api-keys', 'server-info', 'about'];
         const tabBar = tabs.map(t => {
             const active = t === tab ? 'style="border-bottom:2px solid var(--accent);color:var(--accent);"' : '';
-            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'server-info': 'Server Info', 'about': 'About' }[t];
+            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'server-info': 'Server Info', 'about': 'About' }[t];
             return `<button class="btn btn-ghost" ${active} onclick="Pages._settingsRender('${t}')">${label}</button>`;
         }).join('');
 
@@ -8357,6 +8723,10 @@ const Pages = {
             body = await Pages._settingsAPIKeysTab();
         } else if (tab === 'users') {
             body = await Pages._settingsUsersTab();
+        } else if (tab === 'webhooks') {
+            body = await Pages._settingsWebhooksTab();
+        } else if (tab === 'about') {
+            body = await Pages._settingsAboutTab();
         } else if (tab === 'server-info') {
             body = await Pages._settingsServerInfoTab();
             body += `
@@ -8839,32 +9209,91 @@ const Pages = {
         }
     },
 
-    async _settingsResetUserPassword(id) {
-        const pw = prompt('Enter a temporary password for this user (min 8 chars):');
-        if (!pw) return;
-        if (pw.length < 8) {
-            App.toast('Password must be at least 8 characters', 'error');
-            return;
-        }
+    // B4-5: replaced prompt() with proper modals for password reset and role change.
+    _settingsResetUserPassword(id) {
+        const mid = 'reset-pw-modal';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = mid;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:420px" aria-labelledby="${mid}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${mid}-title">Reset Password</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${mid}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+                    <p style="margin:0;font-size:13px;color:var(--text-secondary);">
+                        Set a temporary password. The user will be required to change it on next login.
+                    </p>
+                    <label class="form-label">New temporary password (min 8 chars)
+                        <input id="rp-pw" class="form-input" type="password" placeholder="••••••••" autocomplete="new-password" style="margin-top:4px;">
+                    </label>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('${mid}').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._settingsResetUserPasswordSubmit('${mid}', '${escHtml(id)}')">Reset Password</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+    },
+
+    async _settingsResetUserPasswordSubmit(mid, id) {
+        const pw = (document.getElementById('rp-pw')?.value || '').trim();
+        if (pw.length < 8) { App.toast('Password must be at least 8 characters', 'error'); return; }
         try {
             await API.users.resetPassword(id, pw);
+            document.getElementById(mid)?.remove();
             App.toast('Password reset — user must change on next login', 'success');
         } catch (err) {
             App.toast('Reset failed: ' + err.message, 'error');
         }
     },
 
-    async _settingsChangeUserRole(id, currentRole) {
+    _settingsChangeUserRole(id, currentRole) {
         const roles = ['admin', 'operator', 'readonly'];
-        const next = roles.filter(r => r !== currentRole);
-        const choice = prompt(`Change role (current: ${currentRole}). Enter new role:\n  ${next.join(', ')}`);
-        if (!choice) return;
-        if (!roles.includes(choice.trim())) {
-            App.toast('Invalid role. Must be admin, operator, or readonly.', 'error');
-            return;
-        }
+        const mid = 'change-role-modal';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = mid;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:420px" aria-labelledby="${mid}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${mid}-title">Change Role</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${mid}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+                    <p style="margin:0;font-size:13px;color:var(--text-secondary);">
+                        Current role: <strong>${escHtml(currentRole)}</strong>
+                    </p>
+                    <label class="form-label">New role
+                        <select id="cr-role" class="form-input" style="margin-top:4px;">
+                            ${roles.filter(r => r !== currentRole).map(r =>
+                                `<option value="${r}">${r}</option>`).join('')}
+                        </select>
+                    </label>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('${mid}').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._settingsChangeUserRoleSubmit('${mid}', '${escHtml(id)}')">Change Role</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+    },
+
+    async _settingsChangeUserRoleSubmit(mid, id) {
+        const role = document.getElementById('cr-role')?.value;
+        if (!role) return;
         try {
-            await API.users.update(id, { role: choice.trim() });
+            await API.users.update(id, { role });
+            document.getElementById(mid)?.remove();
             App.toast('Role updated', 'success');
             Pages._settingsRender('users');
         } catch (err) {
@@ -9086,6 +9515,401 @@ const Pages = {
         document.body.appendChild(modal);
     },
 
+    // ─── B3-1/B3-2: Webhooks Settings Tab ────────────────────────────────────
+
+    async _settingsWebhooksTab() {
+        try {
+            const data = await API.request('GET', '/admin/webhooks');
+            const webhooks = (data && data.webhooks) ? data.webhooks : [];
+            const rows = webhooks.length === 0
+                ? `<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:24px;">No webhook subscriptions. Click + Add Webhook to create one.</td></tr>`
+                : webhooks.map(wh => `
+                    <tr>
+                        <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(wh.url)}">
+                            <code style="font-size:12px;">${escHtml(wh.url)}</code>
+                        </td>
+                        <td>${(wh.events || []).map(e => `<span class="badge badge-neutral badge-sm" style="margin-right:2px;">${escHtml(e)}</span>`).join('')}</td>
+                        <td>${wh.enabled ? '<span class="badge badge-ready">Enabled</span>' : '<span class="badge badge-neutral">Disabled</span>'}</td>
+                        <td style="font-size:12px;color:var(--text-secondary);">${fmtDate(wh.created_at)}</td>
+                        <td style="text-align:right;">
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._webhookDeliveriesModal('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Deliveries</button>
+                            <button class="btn btn-secondary btn-sm" style="margin-left:4px;" onclick="Pages._webhookEditModal('${escHtml(wh.id)}', '${escHtml(wh.url)}', ${JSON.stringify(wh.events||[])}, ${wh.enabled})">Edit</button>
+                            <button class="btn btn-danger btn-sm" style="margin-left:4px;" onclick="Pages._webhookDelete('${escHtml(wh.id)}', '${escHtml(wh.url)}')">Delete</button>
+                        </td>
+                    </tr>`).join('');
+            return `
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Webhook Subscriptions</h2>
+                        <button class="btn btn-primary btn-sm" onclick="Pages._webhookCreateModal()">+ Add Webhook</button>
+                    </div>
+                    <div class="card-body">
+                        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                            Webhooks notify external services when cluster events occur. Clustr signs each delivery with your configured secret.
+                        </p>
+                        <div style="overflow-x:auto;">
+                            <table class="table">
+                                <thead><tr>
+                                    <th>URL</th><th>Events</th><th>Status</th><th>Created</th><th></th>
+                                </tr></thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>`;
+        } catch (err) {
+            return alertBox('Failed to load webhooks: ' + err.message);
+        }
+    },
+
+    _webhookCreateModal() {
+        const id = 'webhook-create-modal';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = id;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        const events = ['deploy.complete', 'deploy.failed', 'verify_boot.timeout', 'image.ready'];
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:500px" aria-labelledby="${id}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${id}-title">Add Webhook</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+                    <label class="form-label">Endpoint URL
+                        <input id="wh-url" class="form-input" type="url" placeholder="https://example.com/hook" style="margin-top:4px;">
+                    </label>
+                    <label class="form-label">Secret (optional — used for HMAC signature)
+                        <input id="wh-secret" class="form-input" type="password" placeholder="leave blank for unsigned" style="margin-top:4px;">
+                    </label>
+                    <div>
+                        <div class="form-label" style="margin-bottom:6px;">Events</div>
+                        ${events.map(e => `<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:13px;">
+                            <input type="checkbox" class="wh-event-cb" value="${e}"> ${e}
+                        </label>`).join('')}
+                    </div>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._webhookCreateSubmit('${id}')">Create</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+    },
+
+    async _webhookCreateSubmit(modalId) {
+        const overlay = document.getElementById(modalId);
+        const url = (document.getElementById('wh-url')?.value || '').trim();
+        const secret = (document.getElementById('wh-secret')?.value || '').trim();
+        const events = [...document.querySelectorAll('.wh-event-cb:checked')].map(cb => cb.value);
+        if (!url) { App.toast('URL is required', 'error'); return; }
+        if (events.length === 0) { App.toast('Select at least one event', 'error'); return; }
+        try {
+            const body = { url, events, enabled: true };
+            if (secret) body.secret = secret;
+            await API.request('POST', '/admin/webhooks', body);
+            overlay.remove();
+            App.toast('Webhook created', 'success');
+            Pages._settingsRender('webhooks');
+        } catch (err) {
+            App.toast('Failed to create webhook: ' + err.message, 'error');
+        }
+    },
+
+    _webhookEditModal(whId, url, events, enabled) {
+        const id = 'webhook-edit-modal';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = id;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        const allEvents = ['deploy.complete', 'deploy.failed', 'verify_boot.timeout', 'image.ready'];
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:500px" aria-labelledby="${id}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${id}-title">Edit Webhook</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+                    <label class="form-label">Endpoint URL
+                        <input id="whe-url" class="form-input" type="url" value="${escHtml(url)}" style="margin-top:4px;">
+                    </label>
+                    <label class="form-label">New Secret (leave blank to keep existing)
+                        <input id="whe-secret" class="form-input" type="password" placeholder="unchanged" style="margin-top:4px;">
+                    </label>
+                    <div>
+                        <div class="form-label" style="margin-bottom:6px;">Events</div>
+                        ${allEvents.map(e => `<label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:13px;">
+                            <input type="checkbox" class="whe-event-cb" value="${e}" ${events.includes(e) ? 'checked' : ''}> ${e}
+                        </label>`).join('')}
+                    </div>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                        <input type="checkbox" id="whe-enabled" ${enabled ? 'checked' : ''}> Enabled
+                    </label>
+                    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('${id}').remove()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Pages._webhookEditSubmit('${id}', '${escHtml(whId)}')">Save</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+    },
+
+    async _webhookEditSubmit(modalId, whId) {
+        const overlay = document.getElementById(modalId);
+        const url = (document.getElementById('whe-url')?.value || '').trim();
+        const secret = (document.getElementById('whe-secret')?.value || '').trim();
+        const events = [...document.querySelectorAll('.whe-event-cb:checked')].map(cb => cb.value);
+        const enabled = document.getElementById('whe-enabled')?.checked ?? true;
+        if (!url) { App.toast('URL is required', 'error'); return; }
+        if (events.length === 0) { App.toast('Select at least one event', 'error'); return; }
+        try {
+            const body = { url, events, enabled };
+            if (secret) body.secret = secret;
+            await API.request('PUT', `/admin/webhooks/${encodeURIComponent(whId)}`, body);
+            overlay.remove();
+            App.toast('Webhook updated', 'success');
+            Pages._settingsRender('webhooks');
+        } catch (err) {
+            App.toast('Failed to update webhook: ' + err.message, 'error');
+        }
+    },
+
+    _webhookDelete(whId, url) {
+        Pages.showConfirmModal({
+            title: 'Delete Webhook',
+            message: `Delete webhook for <code>${escHtml(url)}</code>? This cannot be undone.`,
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: async () => {
+                try {
+                    await API.request('DELETE', `/admin/webhooks/${encodeURIComponent(whId)}`);
+                    App.toast('Webhook deleted', 'success');
+                    Pages._settingsRender('webhooks');
+                } catch (err) {
+                    App.toast('Delete failed: ' + err.message, 'error');
+                }
+            },
+        });
+    },
+
+    async _webhookDeliveriesModal(whId, url) {
+        const id = 'webhook-deliveries-modal';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = id;
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="modal" style="max-width:700px;max-height:85vh;display:flex;flex-direction:column;" aria-labelledby="${id}-title">
+                <div class="modal-header">
+                    <span class="modal-title" id="${id}-title">Last Deliveries — ${escHtml(url)}</span>
+                    <button class="modal-close" aria-label="Close" onclick="document.getElementById('${id}').remove()">×</button>
+                </div>
+                <div class="modal-body" style="overflow-y:auto;flex:1;">
+                    <div id="wh-deliveries-body">${loading('Loading deliveries…')}</div>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        trapModalFocus(overlay, () => overlay.remove());
+
+        try {
+            const data = await API.request('GET', `/admin/webhooks/${encodeURIComponent(whId)}/deliveries`);
+            const deliveries = (data && data.deliveries) ? data.deliveries : [];
+            const body = document.getElementById('wh-deliveries-body');
+            if (!body) return;
+            if (deliveries.length === 0) {
+                body.innerHTML = `<div style="text-align:center;color:var(--text-secondary);padding:24px;">No deliveries recorded yet.</div>`;
+                return;
+            }
+            body.innerHTML = `
+                <table class="table" style="font-size:13px;">
+                    <thead><tr><th>Status</th><th>Event</th><th>Delivered</th><th>Error</th></tr></thead>
+                    <tbody>
+                        ${deliveries.map(d => `<tr>
+                            <td>${d.status_code >= 200 && d.status_code < 300
+                                ? `<span class="badge badge-ready">${d.status_code}</span>`
+                                : `<span class="badge badge-error">${d.status_code || '—'}</span>`}</td>
+                            <td><span class="badge badge-neutral badge-sm">${escHtml(d.event_type || '')}</span></td>
+                            <td style="color:var(--text-secondary);">${fmtDate(d.delivered_at)}</td>
+                            <td style="color:var(--error);font-size:12px;">${escHtml(d.error_message || '')}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+        } catch (err) {
+            const body = document.getElementById('wh-deliveries-body');
+            if (body) body.innerHTML = alertBox('Failed to load deliveries: ' + err.message);
+        }
+    },
+
+    // ─── B3-4/B3-5: About Tab ────────────────────────────────────────────────
+
+    async _settingsAboutTab() {
+        // Fetch system version info if available; non-fatal.
+        let versionInfo = null;
+        try {
+            versionInfo = await API.request('GET', '/system/version').catch(() => null);
+        } catch (_) {}
+        const version    = (versionInfo && versionInfo.version)    || 'v1.1.0';
+        const buildDate  = (versionInfo && versionInfo.build_date) || '—';
+        const uptime     = (versionInfo && versionInfo.uptime)     || '—';
+        const gitSHA     = (versionInfo && versionInfo.git_sha)    || '—';
+
+        return `
+            <div class="card">
+                <div class="card-header"><h2 class="card-title">About clustr</h2></div>
+                <div class="card-body">
+                    <table style="font-size:14px;border-collapse:collapse;width:100%;">
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);width:180px;">Server Version</td><td><code>${escHtml(version)}</code></td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Build Date</td><td>${escHtml(buildDate)}</td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Uptime</td><td>${escHtml(uptime)}</td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Git SHA</td><td><code style="font-size:12px;">${escHtml(gitSHA)}</code></td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Changelog</td>
+                            <td><a href="https://github.com/sqoia-dev/clustr/blob/main/CHANGELOG.md" target="_blank" rel="noopener" style="color:var(--accent);">CHANGELOG.md</a></td></tr>
+                    </table>
+                </div>
+            </div>
+            <div class="card" style="margin-top:16px;">
+                <div class="card-header"><h2 class="card-title">Security</h2></div>
+                <div class="card-body">
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">Trust signals for this clustr deployment.</p>
+                    <table style="font-size:14px;border-collapse:collapse;width:100%;">
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);width:260px;">At-rest encryption</td>
+                            <td><span class="badge badge-ready">AES-256-GCM</span> <span style="font-size:12px;color:var(--text-secondary);">LDAP &amp; BMC credentials</span></td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Session auth</td>
+                            <td><span class="badge badge-ready">HMAC-SHA256</span> <span style="font-size:12px;color:var(--text-secondary);">12h TTL, 30min sliding window</span></td></tr>
+                        <tr><td style="padding:6px 0;color:var(--text-secondary);">Bundle signing</td>
+                            <td><span class="badge badge-ready">GPG verified</span> <span style="font-size:12px;color:var(--text-secondary);">All Slurm packages signed at build time</span></td></tr>
+                    </table>
+                </div>
+            </div>`;
+    },
+
+    // ─── B3-3: Audit Log Page ─────────────────────────────────────────────────
+
+    async auditLog() {
+        // Admin-only guard — non-admins are redirected to dashboard.
+        if (Auth._role !== 'admin') {
+            Router.navigate('/');
+            return;
+        }
+        App.render(loading('Loading audit log…'));
+        await Pages._auditLogRender({});
+    },
+
+    async _auditLogRender(filters) {
+        const params = {};
+        if (filters.actor)   params.actor  = filters.actor;
+        if (filters.action)  params.action = filters.action;
+        if (filters.since)   params.since  = filters.since;
+        if (filters.until)   params.until  = filters.until;
+        params.limit  = 100;
+        params.offset = filters.offset || 0;
+
+        try {
+            const data = await API.audit.query(params);
+            const records = (data && data.records) ? data.records : [];
+            const total   = (data && data.total)   ? data.total   : 0;
+
+            const tableRows = records.length === 0
+                ? `<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:24px;">No audit events match the current filters.</td></tr>`
+                : records.map(r => `
+                    <tr>
+                        <td style="color:var(--text-secondary);font-size:12px;white-space:nowrap;" title="${escHtml(r.created_at)}">${fmtRelative(r.created_at)}</td>
+                        <td style="font-size:13px;">${escHtml(r.actor_label || r.actor_id || '—')}</td>
+                        <td><code style="font-size:12px;background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">${escHtml(r.action || '—')}</code></td>
+                        <td style="font-size:12px;color:var(--text-secondary);">
+                            ${r.resource_type ? `<span class="badge badge-neutral badge-sm">${escHtml(r.resource_type)}</span>` : ''}
+                            ${r.resource_id ? `<code style="font-size:11px;margin-left:4px;">${escHtml(r.resource_id.substring(0, 12))}…</code>` : ''}
+                        </td>
+                        <td style="font-size:12px;color:var(--text-secondary);">${escHtml(r.ip_addr || '—')}</td>
+                    </tr>`).join('');
+
+            const offset  = filters.offset || 0;
+            const hasNext = (offset + 100) < total;
+            const hasPrev = offset > 0;
+            const pager   = (total > 100) ? `
+                <div style="display:flex;align-items:center;gap:8px;padding:12px 0;">
+                    ${hasPrev ? `<button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({...Pages._auditFilters,offset:${offset - 100}})">← Previous</button>` : ''}
+                    <span style="font-size:13px;color:var(--text-secondary);">Showing ${offset + 1}–${Math.min(offset + 100, total)} of ${total}</span>
+                    ${hasNext ? `<button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({...Pages._auditFilters,offset:${offset + 100}})">Next →</button>` : ''}
+                </div>` : '';
+
+            Pages._auditFilters = filters;
+
+            App.render(`
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">Audit Log</h1>
+                        <div class="page-subtitle">${total} events total</div>
+                    </div>
+                </div>
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-body" style="padding:12px 16px;">
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">
+                            <label class="form-label" style="margin:0;font-size:12px;">Actor
+                                <input id="af-actor" class="form-input" type="text" placeholder="actor ID or label"
+                                    value="${escHtml(filters.actor || '')}"
+                                    style="margin-top:4px;width:180px;font-size:13px;">
+                            </label>
+                            <label class="form-label" style="margin:0;font-size:12px;">Action
+                                <input id="af-action" class="form-input" type="text" placeholder="e.g. node.update"
+                                    value="${escHtml(filters.action || '')}"
+                                    style="margin-top:4px;width:180px;font-size:13px;">
+                            </label>
+                            <label class="form-label" style="margin:0;font-size:12px;">Since
+                                <input id="af-since" class="form-input" type="date"
+                                    value="${escHtml(filters.since || '')}"
+                                    style="margin-top:4px;font-size:13px;">
+                            </label>
+                            <label class="form-label" style="margin:0;font-size:12px;">Until
+                                <input id="af-until" class="form-input" type="date"
+                                    value="${escHtml(filters.until || '')}"
+                                    style="margin-top:4px;font-size:13px;">
+                            </label>
+                            <button class="btn btn-primary btn-sm" onclick="Pages._auditApplyFilters()">Apply</button>
+                            <button class="btn btn-secondary btn-sm" onclick="Pages._auditLogRender({})">Clear</button>
+                        </div>
+                    </div>
+                </div>
+                ${cardWrap('Events',
+                    `<div style="overflow-x:auto;">
+                        <table class="table" style="font-size:13px;">
+                            <thead><tr>
+                                <th style="width:140px">When</th>
+                                <th>Actor</th>
+                                <th>Action</th>
+                                <th>Resource</th>
+                                <th>IP</th>
+                            </tr></thead>
+                            <tbody>${tableRows}</tbody>
+                        </table>
+                        ${pager}
+                    </div>`)}
+            `);
+        } catch (err) {
+            App.render(alertBox('Failed to load audit log: ' + err.message));
+        }
+    },
+
+    _auditFilters: {},
+
+    _auditApplyFilters() {
+        const actor  = (document.getElementById('af-actor')?.value  || '').trim();
+        const action = (document.getElementById('af-action')?.value || '').trim();
+        const since  = (document.getElementById('af-since')?.value  || '').trim();
+        const until  = (document.getElementById('af-until')?.value  || '').trim();
+        // Convert date strings to RFC3339 midnight UTC for the API.
+        const toRFC = (d) => d ? new Date(d + 'T00:00:00Z').toISOString() : '';
+        Pages._auditLogRender({ actor, action, since: toRFC(since), until: toRFC(until), offset: 0 });
+    },
+
     // ─── DHCP Allocations ─────────────────────────────────────────────────
 
     async dhcpLeases() {
@@ -9261,6 +10085,11 @@ class ProgressStream {
 // Auth.logout() calls POST /api/v1/auth/logout then redirects to /login.
 
 const Auth = {
+    // A-10 fix: default to 'readonly' (lowest privilege) until /auth/me confirms the real role.
+    _role: 'readonly',
+    // B1-4: assigned_groups for operator scope — empty until /auth/me populates it.
+    _groups: [],
+
     async logout() {
         try {
             await fetch('/api/v1/auth/logout', {
@@ -9297,8 +10126,12 @@ const Auth = {
     // a missing auth response must never grant elevated UI affordances.
     async boot() {
         // If the server flagged a forced password change, redirect immediately.
+        // B2-8: preserve ?next= param so the user lands on the right page after password change.
         if (document.cookie.split(';').some(c => c.trim().startsWith('clustr_force_password_change='))) {
-            window.location.href = '/set-password';
+            const existingNext = new URLSearchParams(window.location.search).get('next') || '';
+            const hash = window.location.hash || '';
+            const nextParam = existingNext || (hash ? encodeURIComponent(hash) : '');
+            window.location.href = '/set-password' + (nextParam ? '?next=' + nextParam : '');
             return;
         }
 
@@ -9326,6 +10159,8 @@ const Auth = {
                 // never escalate to 'admin' on a missing or unexpected response shape.
                 const me = await resp.json().catch(() => ({}));
                 Auth._role = me.role || 'readonly';
+                // B1-4: store assigned_groups for operator scope filtering.
+                Auth._groups = Array.isArray(me.assigned_groups) ? me.assigned_groups : [];
 
                 // Populate sidebar footer with user info.
                 const userAvatar = document.getElementById('user-avatar');
@@ -9377,7 +10212,33 @@ const Auth = {
         if (typeof SlurmPages !== 'undefined') {
             SlurmPages.bootstrapNav().catch(() => {});
         }
+        // B1: Apply role-aware nav restrictions after role is known.
+        Auth._applyRoleNav();
         App.init();
+    },
+
+    // _applyRoleNav hides nav sections that are not appropriate for the current role.
+    // B1-1: operator — hides Slurm, LDAP, System Accounts, Network sections + restricts Settings.
+    // B1-2: readonly — same hides as operator; mutation buttons are disabled per-page via Auth._role checks.
+    // Admin sees everything (no change from current behaviour).
+    _applyRoleNav() {
+        const role = Auth._role;
+        if (role === 'admin') return; // admins see full nav — nothing to hide
+
+        // operator and readonly both lose: Slurm section, LDAP section,
+        // System Accounts section, Network Switches/Profiles section.
+        const hide = (id) => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        };
+
+        hide('nav-slurm-section');
+        hide('nav-ldap-section');
+        hide('nav-system-section');
+        hide('nav-network-section');
+
+        // Also hide the Audit log link if present (admin-only page, added by B3).
+        hide('nav-audit-link');
     },
 
     _role: 'readonly', // cached role from /auth/me — defaults to lowest privilege until /auth/me succeeds

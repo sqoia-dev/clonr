@@ -10,6 +10,20 @@
     const btn       = document.getElementById('login-btn');
     const errEl     = document.getElementById('login-error');
 
+    // B2-2: Show default-credentials hint on fresh installs only.
+    // Non-fatal — if the request fails we just don't show the hint.
+    (async function checkBootstrapStatus() {
+        try {
+            const resp = await fetch('/api/v1/auth/bootstrap-status');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const hint = document.getElementById('first-login-hint');
+            if (hint && data.bootstrap_complete === false) {
+                hint.style.display = '';
+            }
+        } catch (_) {}
+    }());
+
     function showError(msg) {
         errEl.textContent = msg;
         errEl.classList.add('visible');

@@ -23,7 +23,7 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test
+.PHONY: all client server clientd static clean test test-js
 
 all: client server clientd
 
@@ -43,6 +43,10 @@ static:
 
 test:
 	go test ./... -v
+
+# B4-8: JS utility function tests using Node.js built-in test runner (requires Node >= 20).
+test-js:
+	node --test test/js/app-utils.test.mjs
 
 clean:
 	rm -rf bin/

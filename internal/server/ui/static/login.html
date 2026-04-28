@@ -143,6 +143,11 @@
         <div class="login-title">Sign in</div>
         <div class="login-sub">Enter your username and password to access the dashboard.</div>
 
+        <!-- B2-2: Default credentials hint — shown on fresh installs only -->
+        <div id="first-login-hint" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#1e40af;">
+            <strong>First time?</strong> Default username is <code>clustr</code>. Your password was printed in the server startup log.<br>
+            <span style="font-size:12px;color:#3b82f6;">You will be prompted to change it after signing in.</span>
+        </div>
         <form id="login-form" autocomplete="on">
             <div class="login-field">
                 <label for="username">Username</label>

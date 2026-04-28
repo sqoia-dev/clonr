@@ -38,6 +38,7 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/slurm/configs", m.handleListConfigs)
 	r.Get("/slurm/configs/{filename}", m.handleGetConfig)
 	r.Put("/slurm/configs/{filename}", m.handleSaveConfig)
+	r.Post("/slurm/configs/{filename}/validate", m.handleValidateConfig)
 	r.Get("/slurm/configs/{filename}/history", m.handleConfigHistory)
 	r.Get("/slurm/configs/{filename}/render/{node_id}", m.handleRenderPreview)
 
@@ -240,6 +241,43 @@ func (m *Manager) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{"filename": filename, "version": ver}, http.StatusOK)
+}
+
+// handleValidateConfig is POST /api/v1/slurm/configs/{filename}/validate (B5-1).
+//
+// Accepts {"content":"..."} and returns a structured list of validation issues.
+// Does NOT save anything. Returns 200 with {"valid":true,"issues":[]} when clean,
+// or 200 with {"valid":false,"issues":[...]} when problems are found.
+// Returns 400 only for malformed request bodies.
+func (m *Manager) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Content == "" {
+		jsonError(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	issues, err := ValidateConfig(filename, body.Content)
+	if err != nil {
+		jsonError(w, "validation error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if issues == nil {
+		issues = []ValidationIssue{}
+	}
+	jsonResponse(w, map[string]interface{}{
+		"filename": filename,
+		"valid":    len(issues) == 0,
+		"issues":   issues,
+	}, http.StatusOK)
 }
 
 // handleSlurmReseedDefaults is POST /api/v1/slurm/configs/reseed-defaults (D18).

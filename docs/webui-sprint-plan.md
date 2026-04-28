@@ -150,9 +150,10 @@ The three reviews disagree on what matters most. The founder cannot adjudicate; 
 
 ---
 
-### Sprint B — v1.1.0 "Trustworthy Admin UI"
+### Sprint B — v1.1.0 "Trustworthy Admin UI" **[COMPLETED — 2026-04-27]**
 
 **Tag target:** `v1.1.0` 4-6 weeks after Sprint A ships (target window: 2026-06-01 to 2026-06-15).
+**Actual ship:** 2026-04-27 (accelerated — all 30 deliverables landed in a single sprint session).
 **Goal:** Make the existing RBAC model visible in the UI, eliminate the new-admin onboarding cliff, and surface the admin features that exist server-side but have zero browser presence (audit log, webhooks).
 **Personas served:**
 - Persona 1 (Sysadmin) — better dashboard, label clarity, surfaced features

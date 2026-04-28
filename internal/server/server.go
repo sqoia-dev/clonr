@@ -791,6 +791,24 @@ func (s *Server) buildRouter() chi.Router {
 		// with JSON if healthy, 503 with reason map if not. (GAP-2)
 		r.Get("/healthz/ready", health.ServeReady)
 
+		// B2-2: Bootstrap status probe — unauthenticated. Returns whether the default
+		// admin credentials hint should be shown on the login page. Safe to expose
+		// publicly — returns only a boolean, no user data.
+		r.Get("/auth/bootstrap-status", func(w http.ResponseWriter, r *http.Request) {
+			complete := true
+			count, err := s.db.CountUsers(r.Context())
+			if err != nil || count == 0 {
+				complete = false // fresh install — show the hint
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if complete {
+				_, _ = w.Write([]byte(`{"bootstrap_complete":true}`))
+			} else {
+				_, _ = w.Write([]byte(`{"bootstrap_complete":false}`))
+			}
+		})
+
 		// Fully public — no key required (PXE-booted nodes before any key is issued).
 		r.Get("/boot/ipxe", boot.ServeIPXEScript)
 		r.Get("/boot/vmlinuz", boot.ServeVMLinuz)
@@ -1230,6 +1248,11 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		return token, time.Unix(p.EXP, 0), nil
 	}
 
+	// B1-4: GetUserGroups fetches group memberships for operator role scoping.
+	getUserGroupsFn := func(userID string) ([]string, error) {
+		return s.db.GetUserGroupMemberships(context.Background(), userID)
+	}
+
 	return &handlers.AuthHandler{
 		LoginWithKey:      loginWithKeyFn,
 		LoginWithPassword: loginWithPasswordFn,
@@ -1237,6 +1260,7 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		SignForKey:        signForKeyFn,
 		Validate:          validateFn,
 		SetPassword:       setPasswordFn,
+		GetUserGroups:     getUserGroupsFn,
 		CookieName:        cookieName,
 		Secure:            s.cfg.SessionSecure,
 	}

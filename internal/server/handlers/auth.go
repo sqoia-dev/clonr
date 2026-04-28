@@ -43,6 +43,10 @@ type AuthHandler struct {
 	// Returns the new session token and expiry.
 	SetPassword func(userID, currentPassword, newPassword string) (token string, exp time.Time, err error)
 
+	// GetUserGroups returns the group IDs assigned to the user (for operator role scoping).
+	// May be nil — if nil, HandleMe omits the assigned_groups field.
+	GetUserGroups func(userID string) ([]string, error)
+
 	// CookieName is the cookie name (e.g. "clustr_session").
 	CookieName string
 
@@ -212,11 +216,28 @@ func (h *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, h.sessionCookie(newToken, int(time.Until(exp).Seconds())))
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"sub":        sub,
 		"role":       role,
 		"expires_at": exp.UTC().Format(time.RFC3339),
-	})
+	}
+
+	// B1-4: include assigned_groups for operator role scoping.
+	// Always present — empty slice when admin/readonly or no groups assigned.
+	if h.GetUserGroups != nil {
+		groups, err := h.GetUserGroups(sub)
+		if err != nil {
+			groups = []string{}
+		}
+		if groups == nil {
+			groups = []string{}
+		}
+		resp["assigned_groups"] = groups
+	} else {
+		resp["assigned_groups"] = []string{}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // setPasswordRequest is the body for POST /api/v1/auth/set-password.

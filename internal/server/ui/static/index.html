@@ -70,12 +70,12 @@
             </a>
 
             <a href="#/network/allocations" class="nav-item" id="nav-dhcp">
-                <!-- wifi/signal icon representing network allocations -->
+                <!-- wifi/signal icon representing DHCP leases -->
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                     <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
                     <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
                 </svg>
-                <span>Allocations</span>
+                <span>DHCP Leases</span>
             </a>
 
             <!-- Network module nav — gated on admin access; lives under CLONER section -->
@@ -111,6 +111,17 @@
                         <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                     </svg>
                     <span>Groups</span>
+                </a>
+                <!-- B3-3: Audit log — admin only -->
+                <a href="#/audit" class="nav-item" id="nav-audit-link">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                        <polyline points="10 9 9 9 8 9"/>
+                    </svg>
+                    <span>Audit Log</span>
                 </a>
             </div>
 
@@ -178,7 +189,7 @@
                         <line x1="6" y1="6" x2="6.01" y2="6"/>
                         <line x1="6" y1="18" x2="6.01" y2="18"/>
                     </svg>
-                    <span>Settings</span>
+                    <span>Module Setup</span>
                     <span id="nav-slurm-status-badge" class="badge badge-neutral badge-sm" style="margin-left:6px;">Disabled</span>
                 </a>
             </div>
@@ -207,7 +218,7 @@
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                         <circle cx="12" cy="8" r="4"/><path d="M2 20c0-4 4-7 10-7s10 3 10 7"/>
                     </svg>
-                    <span>Settings</span>
+                    <span>Module Setup</span>
                     <span id="nav-ldap-status-badge" class="badge badge-neutral badge-sm" style="display:none;margin-left:6px;">Disabled</span>
                 </a>
             </div>
