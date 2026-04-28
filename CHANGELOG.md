@@ -5,6 +5,105 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.2.0] — 2026-04-27
+
+**Sprint C — Researcher Portal MVP + ColdFront wedge**
+
+### Added
+
+- **Researcher Portal (C1)** — Viewer role with read-only dashboard. PI-scoped
+  view shows group membership, node status, and active deployments.
+  Routes: `#/portal`. Auth: viewer session cookie, separate `/portal.html` SPA.
+
+- **HTMX anomaly polling (C2-5)** — Dashboard anomaly card replaced with an
+  HTMX-driven widget that polls `/api/v1/dashboard/anomalies` every 30 seconds
+  using `hx-swap="outerHTML"`. Eliminates full-page refresh for anomaly counts.
+
+- **Dashboard System Health card (C3-22)** — Reads `/api/v1/healthz/ready` and
+  renders OK / Degraded / Error with per-check tooltip. No more hardcoded "Online".
+
+- **Per-node verify-boot timeout override (C3-18)** — New `verify_timeout_override`
+  field on `NodeConfig` (migration 054). Admins set a per-node timeout in seconds
+  on the Configuration tab; `0` disables the timeout for that node. The verify-boot
+  scanner applies the override before flagging a node as timed-out.
+
+- **Last failure summary banner (C3-20)** — When a node's last deploy failed and
+  has not been superseded by a successful deploy, a red banner appears above the
+  tabs with timestamp, "View Logs", and "Re-deploy" CTA.
+
+- **Bulk-select status shortcuts (C3-21)** — The bulk action bar now includes
+  "+Failed", "+Timed Out", and "+Never Deployed" quick-select buttons.
+  Node checkboxes carry a `data-status` attribute keyed to lifecycle state.
+
+- **Per-build cancel (C3-5)** — `POST /api/v1/images/{id}/cancel` sets a building
+  image's status to `error` without deleting the record.
+
+- **Image download button (C3-6)** — "Download Image" button on image detail
+  (status `ready` only) streams the blob via the existing authenticated endpoint.
+
+- **Config history pagination (C3-7)** — Config history tab loads 50 rows,
+  appends on "Load more" with remaining count displayed.
+
+- **Initramfs card relocated (C3-23)** — Moved from the Images page to Settings
+  → System tab (formerly "Server Info", now "System").
+
+- **Slurm sync: untracked node surfacing (C3-24)** — Sync Status page shows a
+  "Deployed Nodes Not in Slurm" card for deployed nodes with no config push
+  history. Each row has an "Add to cluster" button that triggers an immediate push.
+
+- **Slurm Settings: preview config panel (C3-25)** — New inline preview section
+  in Slurm Settings lets admins select a config file + Node ID and see the
+  rendered output before pushing.
+
+- **Bundle info in Settings → System (C3-26)** — Installed Slurm RPM bundles are
+  displayed in a table fetched from `/repo/health`. Includes a collapsed
+  "Re-install bundle" CLI hint.
+
+- **Layout smoke tests (C2-6)** — `internal/server/layout_smoke_test.go` asserts
+  that `index.html` and `portal.html` both include the pinned Alpine 3.15.11 and
+  HTMX 2.0.9 vendor scripts.
+
+### Changed
+
+- **Disk layout tab (C3-17)** — "Customize Layout" is collapsed by default when
+  no node-level override exists; only open when source is `node`. Group detail
+  page now shows a colour-coded visual partition bar alongside the table.
+
+- **Reimage modal (C3-19)** — Concurrency input has a tooltip explaining the
+  `CLUSTR_REIMAGE_MAX_CONCURRENT` server cap (default 20). Post-submit status
+  shows effective vs requested concurrency when they differ.
+
+- **Network tab validation (C3-16)** — IP Address fields validate CIDR notation
+  (`a.b.c.d/prefix`); Gateway validates bare IP. Invalid entries block save with
+  an inline error.
+
+- **CIDR + nav guard (C3-16 / C3-11)** — Navigation guard prevents leaving a
+  dirty node detail page without confirmation.
+
+- **Settings "Server Info" → "System"** — Tab renamed to reflect the broader
+  scope: initramfs, bundle info, and server diagnostics in one place.
+
+- **`API.health.ready()`** — New method in `api.js` for `GET /api/v1/healthz/ready`.
+
+### Fixed
+
+- **Deploy progress overflow (C3-1)** — Dashboard deploy table caps at 5 visible
+  rows; overflow is linked to the full deploys page.
+- **Diff table empty state (C3-2)** — Config push diff no longer breaks when the
+  container has no `tbody` on first data arrival.
+- **Reimage modal stale polling (C3-3)** — Poll guard checks modal liveness before
+  and after each async fetch; stops immediately when modal is closed.
+- **Snapshot SSE dedup (C3-4)** — Merged duplicate SSE listeners into one;
+  tracking vars declared once, no double-apply on reconnect.
+- **SSE stream cleanup on navigation (C3-13)** — `Router._navigate()` disconnects
+  `App._nodeLogStream` so stale streams don't accumulate.
+- **Settings log stream preservation (C3-14)** — `_settingsRender()` disconnects
+  `App._logStream` before re-rendering to prevent double-stream on tab switch.
+- **Custom variable key validation (C3-15)** — Keys validated with
+  `/^[A-Za-z0-9_-]+$/`; invalid keys show a warning icon and orange border.
+
+---
+
 ## [Unreleased — v1.1.1] — Sprint B.5 Alpine+HTMX adoption
 
 **Sprint B.5 — Framework adoption pilot**
