@@ -42,7 +42,10 @@ Reversibility legend:
 | D22 | Raw config editor pattern | Structured form for the 80% case + "Advanced: edit raw" disclosure + server-side validation on every save (regardless of which surface produced the input). Applies to all current and future config surfaces (slurm.conf, kickstart, network profiles, BMC). | cheap (per-surface) |
 | D23 | JS framework choice | Alpine.js 3 + HTMX 2, vendored under `internal/server/ui/static/vendor/`, no build step. Adopted Sprint C (v1.2.0) on greenfield Researcher portal. Mixing with vanilla supported indefinitely. | costly |
 | D24 | Powerhouse positioning thesis | clustr is the only open-source platform that unifies bare-metal HPC provisioning with allocation governance in a single Go binary. Closes the decade-old gap between node provisioners (xCAT/Warewulf) and allocation managers (ColdFront). Self-hosted, air-gap native, cryptographically verified trust chain from allocation decision to running job. Standing positioning statement; all sprint plans align to this. | one-way (positioning, not code) |
-| D25 | Customer-pull gate (governance features) | NO blanket customer-pull gate on governance features (founder directive: no revenue/headcount gating, sprints don't stop). Hybrid prioritization: build structural primitives (roles, surfaces, conceptual model) speculatively in v1.2-v1.4; defer customer-specific metric definitions, schema-heavy additions, and integrations gated on external systems (XDMoD, FreeIPA) until validated demand. Richard owns the speculative-vs-pulled call per sprint. | cheap |
+| D25 | Customer-pull gate (governance features) | NO blanket customer-pull gate on governance features (founder directive: no revenue/headcount gating, sprints don't stop). Hybrid prioritization: build structural primitives (roles, surfaces, conceptual model) speculatively in v1.2-v1.4; defer customer-specific metric definitions, schema-heavy additions, and integrations gated on external systems (XDMoD, FreeIPA) until validated demand. Richard owns the speculative-vs-pulled call per sprint. **SUPERSEDED 2026-04-27 by D27** — the rule was correct but the bucketing label "customer-pull" was overbroad and let cheap structural items get parked in Sprint Z. D27 narrows it. | cheap |
+| D26 | Attribute visibility defaults (Sprint E) | Default to least-sensitive reasonable level per attribute class. Financial → `pi`. Operational → `member`. Public research identity → `public`. Security credentials → `admin_only`. PI/Admin override available. | cheap |
+| D27 | Sprint Z re-sequencing (supersedes D25) | Dissolve undifferentiated "Sprint Z." Re-bucket into 4 buckets: (1) BUILD NOW = cheap structural primitives, scheduled into Sprints F/G/H at v1.5.0 → v1.7.0; (2) TECH-TRIG = unscheduled, gated on concrete technical signal (LOC, scale event, contention threshold) with explicit monitor + decision-maker; (3) CUST-SPEC = unscheduled, genuinely needs customer to define contract (custom metrics, third-party integrations, IdP shape); (4) SKIP = explicit non-goal (cloud allocation). Customer-pull gating now applies ONLY to Bucket 3. | cheap |
+| D28 | Versioning policy (v1.x vs v2.x boundary) | Minor bump (v1.x.0) for additive changes: new endpoints, new optional fields, new RBAC roles, new pages, plugin additions. Major bump (v2.0.0) reserved for: (a) schema migration that requires data conversion (PostgreSQL, multi-tenant tenant_id, attribute type system); (b) auth contract change (OIDC/SAML replacing or modifying API key/session semantics); (c) breaking API contract (removed endpoints, renamed fields in stable surfaces); (d) D10 violation (build step required). Patch bump (v1.x.y) reserved for hotfix. | one-way (versioning is contract with operators) |
 
 ---
 
@@ -1214,6 +1217,131 @@ changed at runtime by admins. No data migrations required for default changes.
 - An institutional operator reports that a default creates friction or a compliance issue.
 - A new attribute is added; this decision should be extended to cover it with an explicit
   rationale following the same principle.
+
+---
+
+## D27 — Sprint Z Re-Sequencing (supersedes D25)
+
+**Date:** 2026-04-27
+**Author:** Richard (Technical Co-founder)
+**Context:** D25 ruled a hybrid customer-pull gate for governance features. The rule was correct, but in practice the bucketing label "customer-pull" was overbroad: cheap structural primitives (CSP headers, SIEM JSONL export, OpenLDAP plugin, manager delegation, optional allocation expiration) ended up parked in the undifferentiated "Sprint Z (v2.0+ horizon, NOT committed)" bucket alongside genuinely customer-shaped work (custom metrics, OIDC, FreeIPA, XDMoD). The founder's standing rules — continuous sprints (`feedback_continuous_sprints.md`), no headcount/revenue gating (`feedback_no_headcount_gating.md`), and D25's own closing line ("when on the fence, default to BUILD over DEFER") — all argue that the cheap structural items should be committed sprints, not horizon items.
+
+**Question:** Does customer-pull gating apply to all of Sprint Z, or only to the items that genuinely need customer specification?
+
+**Decision:** **Dissolve the undifferentiated Sprint Z. Re-bucket every Z item into one of four explicit buckets. Customer-pull gating applies ONLY to Bucket 3 (CUST-SPEC).**
+
+**The four buckets (locked):**
+
+| Bucket | Definition | Sprint placement |
+|---|---|---|
+| **1. BUILD NOW** | Cheap structural primitives + obvious wins. Don't need customer specification to build correctly. | Committed sprints F/G/H at v1.5.0 → v1.6.0 → v1.7.0 |
+| **2. TECH-TRIG (technical-pull trigger)** | Real cost / real risk profile. Don't need customer to specify, but DO need a concrete technical signal that the cost is justified. | Unscheduled. Each item has explicit trigger + monitor location + decision-maker. Dispatched when trigger fires. |
+| **3. CUST-SPEC (customer specification)** | Genuinely needs a named customer to define the contract (custom metrics, third-party integrations into their stack, IdP shape). Speculative build = throwaway code. | Unscheduled. Dispatched when first customer pulls. |
+| **4. SKIP** | Out of clustr's positioning (e.g., cloud allocation per D24). Explicit non-goal. | Not built in v2.x. Revisit at v3.0+ if positioning changes. |
+
+**Application to old Sprint Z items (14 themes + 13 CF-Z items, deduplicated):**
+
+- **Build now (7 items)** → Sprints F/G/H (see `webui-sprint-plan.md` for deliverables):
+  - F (v1.5.0): CSP headers, SIEM JSONL export, optional allocation expiration (CF-03 optional)
+  - G (v1.6.0): OpenLDAP project plugin (CF-24), resource access restriction by group (CF-40), manager delegation (CF-09 manager scope)
+  - H (v1.7.0): Auto-compute allocation (CF-29)
+- **Tech-trigger (4 items)** — explicit triggers documented in `webui-sprint-plan.md` Bucket 2 table:
+  - PostgreSQL migration (CF-38) — trigger: SQLite write contention >50 ops/sec sustained 1h OR single deployment >500 nodes OR multi-tenant requirement triggers
+  - Multi-tenant data isolation — trigger: hosted-clustr-as-service decision OR operator runs ≥3 logically-separate fleets needing isolation
+  - Heavier framework migration — trigger: single page exceeds 800 LOC of Alpine x-data state OR triggers >3 architectural workarounds
+  - Two-tier hot/cold log archive — trigger: operator-reported eviction incident OR retention env raised >30 days by ≥2 operators
+- **Customer-spec (7 items)** — wait for first named customer:
+  - OIDC/SAML federation (CF-25) — needs IdP named
+  - FreeIPA HBAC bridge (CF-22) — needs FreeIPA-running operator
+  - XDMoD integration (CF-27) — needs XDMoD-running operator
+  - Customer-defined utilization metrics — needs metric set specified
+  - Custom allocation attributes (CF-04), custom resource attributes (CF-06), custom attribute types (CF-37) — need attribute set specified
+- **Skip (1 item)** — explicit defer to v3.0+:
+  - Cloud resource allocation (CF-30) — out of clustr's bare-metal-first positioning per D24
+
+**Why supersede D25 rather than amend:**
+
+D25's text was internally consistent and the prioritization table was correct. The failure mode was that "Sprint Z" as a single bucket label encouraged future agents to sweep cheap structural work into a deferral pile. D27 makes the bucketing crisp and the labels self-explanatory ("BUILD NOW" can't be misread as "defer"). The substance of D25's prioritization rule (low-cost low-risk → build speculatively; high-cost high-customer-risk → defer) survives intact within Buckets 1 and 3.
+
+**Standing meta-rule (carried forward from D25, made primary in D27):** When Richard is on the fence between BUILD-NOW and one of the gated buckets, default to BUILD-NOW. Cost of speculative build is engineering time only (no revenue at risk per `feedback_no_headcount_gating.md`). Cost of deferral is missing the institutional pitch window. Asymmetry favors building.
+
+**Decision authority for trigger evaluation (Bucket 2):**
+- **Technical triggers** (PostgreSQL contention, framework LOC ceiling, log eviction) → Richard decides when triggered.
+- **Product triggers** (multi-tenant requirement from a hosted-service decision, customer-pull arrivals routed to Bucket 3) → Founder decides.
+
+**Reversibility:** **cheap**. Re-bucketing items between buckets is a doc edit + sprint plan update; no code commitment. If a Bucket 1 item turns out to need customer input (we discover during F/G/H build), drop it back to Bucket 3 and dispatch a customer conversation.
+
+**Re-decision triggers:**
+- A Bucket 1 sprint (F/G/H) ships and the feature sees zero adoption after 6 months → reconsider Bucket 1 criteria; tighten toward speculative-build skepticism.
+- A Bucket 3 customer-pull arrives that contradicts our IdP/integration assumptions → re-shuffle the relevant CUST-SPEC item and possibly revise Bucket 1 priorities.
+- Founder directive that changes the BUILD-NOW default → re-rule entirely.
+
+**Supersedes:** D25 (Customer-Pull Gate for Governance Features). D25 remains in this document for traceability; its decision text is marked SUPERSEDED in the index.
+
+**See:** `docs/webui-sprint-plan.md` Sprint Z section (re-sequenced) for the per-item bucket assignments and Sprint F/G/H deliverable lists.
+
+---
+
+## D28 — Versioning Policy (v1.x vs v2.x boundary)
+
+**Date:** 2026-04-27
+**Author:** Richard (Technical Co-founder)
+**Context:** With Sprint Z re-sequenced (D27) into committed Sprints F/G/H at v1.5.0 → v1.7.0, the v1.x → v2.x boundary needs an explicit policy. Historically the boundary has implicitly meant "breaking changes," but absent a written rule future agents may drift the version number arbitrarily — bumping to v2.0 just because the feature feels big, or staying at v1.x through a schema migration because the change set isn't dramatic. We need a crisp, mechanical rule.
+
+**Question:** What classes of change warrant a major-version bump (v2.0.0), versus a minor bump (v1.x.0), versus a patch (v1.x.y)?
+
+**Decision:** **Strict semver-flavored policy:**
+
+**Patch bump (v1.x.y):** Hotfix only. Bug fixes that don't change any contract. Example: Sprint A v1.0.1.
+
+**Minor bump (v1.x.0):** All additive changes. New endpoints, new optional fields, new RBAC roles (additive — existing roles unchanged), new pages, new plugins, new audit events, new optional database columns. The defining test: an operator on the previous version can upgrade with no config changes, no data migration steps beyond automatic schema migrations, no client/integration changes. Examples: Sprint B (v1.1.0) added webhooks + audit UI; Sprint D (v1.3.0) added director portal + SMTP; Sprint E (v1.4.0) added attribute visibility + FOS classification; Sprint F (v1.5.0) adds CSP + SIEM export + optional expiration.
+
+**Major bump (v2.0.0):** Reserved for any of the following:
+
+(a) **Schema migration requiring data conversion or schema-wide changes to existing tables.** Examples: PostgreSQL migration (data export/import, driver swap), multi-tenant `tenant_id` added to every table (backfill required), attribute type system that re-shapes the existing `attributes` table.
+
+(b) **Auth contract change.** Examples: OIDC/SAML replacing or modifying API key/session semantics in ways that require operator action (re-issuing keys, re-binding sessions). Adding OIDC alongside existing API keys, with no removal, would NOT trigger major — that's additive (minor).
+
+(c) **Breaking API contract on stable surfaces.** Examples: removing an endpoint from `/api/v1/`, renaming a field in a documented response schema, changing a status code semantically. Internal endpoints (`/api/internal/`) are not in scope.
+
+(d) **D10 violation.** Heavier framework migration that requires npm/build step. Operators currently can `git clone && go build` — introducing Node.js as a build dependency is an operator-facing contract change.
+
+(e) **Wire protocol break.** Webhook payload schema change that breaks existing receivers; SSE event schema change that breaks existing dashboards.
+
+**Mechanical rule:** If an operator on v1.x can upgrade to v1.(x+1) by `git pull && systemctl restart clustr-serverd` with no other action, it's minor. If they have to do anything else (run a migration, change config, re-issue keys, install Node, update integrations), it's major.
+
+**Concrete near-term application:**
+- Sprint F (v1.5.0) — additive (CSP headers, JSONL endpoint, optional nullable column). MINOR.
+- Sprint G (v1.6.0) — additive (new role `manager`, new optional `allowed_request_groups[]`, OpenLDAP plugin). MINOR.
+- Sprint H (v1.7.0) — additive (auto-allocation policy default OFF, new endpoints). MINOR.
+- PostgreSQL migration (TECH-TRIG) — data migration required. MAJOR (v2.0.0).
+- Multi-tenant tenant_id (TECH-TRIG) — schema-wide backfill. MAJOR (v2.0.0).
+- OIDC federation (CUST-SPEC) — depends on whether it's additive (minor) or replaces sessions (major). Likely MAJOR.
+- Heavier framework (TECH-TRIG) — D10 violation. MAJOR (v2.0.0).
+- Additive Bucket 3 plugins (FreeIPA, XDMoD when pulled) — MINOR (v1.x.0).
+
+**The first BREAKING change among the unscheduled items is what cuts v2.0.0.** Until then, we stay in v1.x and continue minor bumps.
+
+**Why this rule (vs. looser "v2.0 when it feels like a big release"):**
+- Operators trust semver. Mis-versioning is a credibility hit.
+- Forces honest accounting: if Sprint F/G/H feel small individually but together represent a "v2.0 worth of value," that's still v1.7.0 by this rule. Emotional bigness is not a versioning criterion.
+- Prevents pre-emptive v2.0 marketing pressure from skipping over v1.5/v1.6/v1.7. Every minor release is a discrete operator value drop.
+- Makes the v2.0 announcement meaningful: when v2.0 ships, operators know there's a migration/action required.
+
+**Why not pure semver (where breaking ANY API field is major):**
+- We're pre-customer; internal evolution churn would generate too many v2.x.y.z bumps to be useful.
+- Operators don't have third-party integrations into clustr's API yet at scale; the contract surface that matters most is the operator-upgrade experience (the mechanical rule above).
+- We can tighten to strict semver later (post first paying integrator) without breaking the policy now.
+
+**Reversibility:** **one-way** for any version already shipped. The policy itself is cheap to amend going forward.
+
+**Re-decision triggers:**
+- First paying integrator with a code-level dependency on clustr's API → tighten to strict semver (every breaking field change = major).
+- A change lands that genuinely doesn't fit any category cleanly → amend the policy with the new category, don't shoehorn.
+
+**Supersedes:** Implicit "v2.0 = horizon items" framing in old Sprint Z and pre-D27 sprint plan headers.
+
+**See:** `docs/webui-sprint-plan.md` Sprint F/G/H sections for application; release tags in git history for examples of past minor bumps.
 
 ---
 

@@ -1,8 +1,8 @@
-# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.1.1 → v1.2 → v1.2.5 → v1.3 → v1.4 → v2.0+)
+# clustr WebUI — Sprint Plan (v1.0.1 → v1.1 → v1.1.1 → v1.2 → v1.2.5 → v1.3 → v1.4 → v1.5 → v1.6 → v1.7 → v2.0+)
 
-**Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)**
+**Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E below are committed. Sprint Z (v2.0+ horizon) is directional, not committed.
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E are RELEASED (v1.0.1 → v1.4.0). Sprints F, G, H are COMMITTED (v1.5.0 → v1.6.0 → v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -602,35 +602,213 @@ Per D25, this is the "low cost, low risk" structural primitive — read-only agg
 
 ---
 
-### Sprint Z — v2.0+ Horizon (directional, NOT committed)
+### Sprint Z — v2.0+ Horizon (RE-SEQUENCED 2026-04-27 per D27 — see `docs/decisions.md`)
 
-**Goal:** Multi-tenancy, federated identity, customer-defined reporting metrics, framework escalation. High-level only — no commits, no estimates, gated on customer signal OR technical-scale triggers (per D6 / D8 / D15).
-**Persona served:** Persona 6 (Federated User), enhanced surfaces for all existing personas.
-**Trigger conditions (D1 / D6 / D8 / D15 / D25 — already locked):**
-- First paying design partner with >50 nodes signs LOI (per D15)
-- AND/OR first institutional/regulated customer requests SSO, SOC 2, or multi-tenant scoping
-- AND/OR per D25 customer-pull gate fires for governance items below
+**What changed (2026-04-27):** Sprint Z was originally framed as one undifferentiated "directional, NOT committed" horizon gated on customer signal. That framing predates the founder's standing rules (continuous sprints, no headcount/revenue gating, default-to-BUILD-on-the-fence). D27 supersedes D25 to make crisp: customer-pull gating now applies ONLY to features where the customer must literally define the contract (custom metrics, third-party integrations into their stack, IdP shape). Everything else gets re-bucketed into "build now" (committed Sprints F/G/H below) or "build on a concrete technical signal." Sprint Z, as a single bucket, is dissolved.
 
-**Directional deliverables (write the plan when triggered, not before):**
+**The 14 themes + 13 CF-Z items are re-bucketed below into four crisp categories.**
 
-1. **OIDC / SAML federation** (CF-25, D1 re-decision trigger) — adds external IdP support. Keeps local sessions + API keys for sysadmins.
-2. **FreeIPA HBAC bridge** (CF-22) — allocation membership drives FreeIPA HBAC rules. High cost, customer-pull-gated per D25.
-3. **OpenLDAP project plugin** (CF-24) — automatic posixGroup creation in LDAP for each NodeGroup. Useful in environments without FreeIPA.
-4. **Auto-compute allocation** (CF-29) — automatic NodeGroup creation when new PI is onboarded; auto-assigns partitions. Requires PI onboarding workflow first (have it from C.5).
-5. **Multi-tenant data isolation** — schema-wide tenant_id; per-tenant NodeGroup scoping. Major undertaking. Only for Persona 6 or for hosted-clustr-as-service if that materializes.
-6. **Resource access restriction by group** (CF-40) — restrict which LDAP groups can request allocation to a NodeGroup. Multi-tenancy prerequisite.
-7. **PostgreSQL migration** (CF-38) — gated on SQLite write contention OR multi-tenant requirement (per D6).
-8. **XDMoD integration** (CF-27) — customer-pull-gated per D25; only ships when first customer with XDMoD signs.
-9. **Customer-defined utilization metrics + reporting model** — gated on first paying customer specifying metrics (per D25 + original C8 ruling).
-10. **Webui framework migration to a heavier framework** (Preact / Vue / Svelte with build step) — only if Alpine + HTMX hit complexity ceiling on a v2.0+ feature. Default v2.0+ stays on D23 stack.
-11. **CSP headers + inline-handler removal** (E-3) — sequenced after framework decision because CSP migration touches every onclick.
-12. **SIEM export** (D13 re-decision trigger) — JSONL export endpoint for audit log. Gated on a regulated customer.
-13. **Two-tier hot/cold log archive** (D2 re-decision trigger) — gated on customer reporting evicted-log incident.
-14. **Cloud resource allocation** (CF-30) — out of scope unless clustr expands to hybrid HPC+cloud. Explicit non-goal for v2.0; revisit at v3.0+.
+#### Bucket 1 — Build now (committed in Sprints F/G/H, v1.5/v1.6/v1.7)
 
-**Powerhouse alignment (D24 framing):** Sprint Z items 1-9 complete the unified-platform vision from D24. Items 10-13 are infrastructure/operability investments. Item 14 is an explicit defer of cloud scope — clustr stays bare-metal-first through v2.0.
+These are cheap structural primitives or obvious wins. They don't need customer specification. They're security/identity/automation primitives that every clustr operator gets value from. Default to BUILD per founder standing rule.
 
-**No estimates. No owners. No deliverables list.** This horizon exists only so that v1.1-v1.4 decisions don't accidentally close off these doors. Per D25, structural primitives (Persona 6 framing, multi-tenant schema design) may be sketched speculatively in design docs, but no implementation work commits without customer pull or technical-scale trigger firing.
+| Item | Origin | Sprint | Tag | Rationale |
+|---|---|---|---|---|
+| CSP headers + inline-handler removal | Z#11, E-3 | F | v1.5.0 | D23 chose Alpine 3 (CSP-safe build, vendored in B.5). Mechanical migration; security primitive; doesn't need customer pull. |
+| SIEM JSONL export endpoint | Z#12, D13-trigger | F | v1.5.0 | Cheap structural — JSONL stream over existing audit log table. Doesn't need a regulated customer to design correctly; the schema is just `audit_events.*` already in DB. |
+| Optional allocation expiration field | CF-03 (optional) | F | v1.5.0 | Nullable `expires_at` on NodeGroup + UI surface. Low cost, low risk; institutions that want renewal cycles can use it, those that don't (default) ignore it. |
+| OpenLDAP project plugin | Z#3, CF-24 | G | v1.6.0 | We already own LDAP module + per-NodeGroup membership. posixGroup auto-creation is mechanical extension. Useful in non-FreeIPA environments (the common case). |
+| Resource access restriction by group | Z#6, CF-40 | G | v1.6.0 | LDAP groups already exist (from CF-24 / existing LDAP plugin). Restricting which groups can request a NodeGroup allocation is contained policy code; doesn't require multi-tenancy to be valuable. |
+| Manager delegation (PI-to-manager) | CF-09 (manager) | G | v1.6.0 | PI role exists from C.5. One additional `manager` sub-role + delegated permissions; cheap, well-understood. |
+| Auto-compute allocation | Z#4, CF-29 | H | v1.7.0 | PI onboarding workflow shipped in C.5. Auto-NodeGroup creation + partition auto-assignment is structural automation. Single-theme sprint because it touches NodeGroup auto-creation + Slurm partition wiring + PI onboarding integration. |
+
+**Build-now total: 7 items across 3 sprints (F/G/H).**
+
+#### Bucket 2 — Build after technical-pull trigger (gated on concrete technical signal, NOT customer revenue)
+
+These items have a real cost and a real risk profile. We don't need a customer to specify them — but we do need a concrete technical signal that the cost is justified. Each item has an explicit, monitorable trigger and a named decision-maker.
+
+| Item | Origin | Trigger (concrete) | Monitor where | Decision-maker | Tag when triggered |
+|---|---|---|---|---|---|
+| PostgreSQL migration | Z#7, CF-38 | SQLite write contention >50 ops/sec sustained for 1 hour OR a single deployment exceeds 500 nodes OR multi-tenant requirement triggers (Bucket 2 multi-tenant item) | Existing `clustr_db_busy_total` counter (already emitted by `internal/server/db/`); add Grafana panel to `monitoring/grafana/`. Alert at >50 ops/sec sustained 1h. | Richard (technical) | v2.0.0 (BREAKING — schema migration, see D28) |
+| Multi-tenant data isolation | Z#5 | Either: hosted-clustr-as-service decision is taken by founder, OR a single operator runs ≥3 logically-separate node fleets needing strict cross-fleet isolation | Inbound: founder directive; technical: NodeGroup count per server >100 with cross-group access boundaries requested in issues | Founder (product) | v2.0.0 (BREAKING — schema-wide tenant_id) |
+| Heavier framework migration (Preact/Vue/Svelte + build step) | Z#10 | Per D21 active trigger #3: a specific feature requires complex form state machines beyond Alpine's reactive ergonomics — concretely, a single page exceeds 800 LOC of Alpine `x-data` state OR triggers >3 architectural workarounds (manual reactivity, custom directive hacks) | Code review during Sprint F+ feature work; Richard reviews all `internal/server/ui/static/pages/*.js` quarterly | Richard (technical) | v2.0.0 (BREAKING — D10 broken: requires npm/build step) |
+| Two-tier hot/cold log archive | Z#13, D2-trigger | Operator reports an evicted-log incident (issue or support thread) OR retention env var has been raised >30 days by ≥2 operators (signals demand for longer retention than TTL+row-cap can serve cheaply) | GitHub issues label `audit-log-retention`; Operator survey at v1.5 ship | Richard (technical) | v1.8.0 or later (additive, non-breaking — no major bump) |
+
+**Tech-trigger total: 4 items.** None are scheduled into Sprint F/G/H. When a trigger fires, an unscheduled sprint is dispatched and the v-tag is assigned per D28 (major if breaking, minor if additive).
+
+#### Bucket 3 — Build after customer specification (genuinely needs customer to define the contract)
+
+These items can't be built right without a named customer telling us what their stack/metrics/IdP look like. Building them speculatively is wasted code. Per D27, this is the ONLY bucket where customer-pull gating still applies.
+
+| Item | Origin | What we're waiting for | Cost of waiting |
+|---|---|---|---|
+| OIDC / SAML federation | Z#1, CF-25 | First institutional operator naming their IdP (Keycloak / Okta / Azure AD / Mokey / Shibboleth). The `userinfo` claim mapping, group-to-role binding, and session-vs-token semantics differ enough across IdPs that speculative build = throwaway code. | Low — local sessions + API keys cover all current operators. The contract surface (auth interface) is already abstracted. |
+| FreeIPA HBAC bridge | Z#2, CF-22 | First operator running FreeIPA who wants allocation→HBAC mapping. FreeIPA HBAC rule shape varies wildly by deployment (host groups, sudo rules, kerberos service classes); no universal mapping exists. | Low — operators without FreeIPA aren't blocked; CF-24 (Bucket 1) covers the OpenLDAP path. |
+| XDMoD integration | Z#8, CF-27 | First operator with running XDMoD. XDMoD's data model (sub-resource accounting, service-units conversion) is institution-specific. | Low — XDMoD adoption is roughly half the target market; the half without XDMoD don't care. |
+| Customer-defined utilization metrics + reporting model | Z#9 | First operator specifying what they want measured (cost-per-job? GPU-hours-by-PI? throughput-by-FOS?). Without this, we'd build the wrong rollups. | Low — read-only aggregation views of existing data already shipped in D + E. The custom-metrics layer is the upgrade. |
+| Custom allocation attributes (CF-04) | CF-04 | First operator naming the attribute set they need (license counts, storage quota, special hardware tags). | Low — `field_of_science`, `grant_*`, `publication_*`, `node_count` already cover the institutional defaults. |
+| Custom resource attributes (CF-06) | CF-06 | Same as CF-04, scoped to Resource (Node / NodeGroup) not Allocation. | Low — hardware profile already tracks the standard set. |
+| Custom attribute types (CF-37) | CF-37 | Type system for custom attributes (string / int / enum / date / bool). Goes hand-in-hand with CF-04 / CF-06. | Low — only matters when CF-04/CF-06 are in scope. |
+
+**Customer-spec total: 7 items.** Not scheduled. When pull arrives, a feature spike is dispatched. None of these are blockers for v2.0.
+
+#### Bucket 4 — Skip / explicit defer to v3.0+
+
+| Item | Origin | Why skipped |
+|---|---|---|
+| Cloud resource allocation | Z#14, CF-30 | Out of clustr's positioning. clustr is bare-metal-first per D24 powerhouse thesis. If clustr ever expands to hybrid HPC+cloud, this is a v3.0+ scope expansion that earns its own sprint plan. Explicit non-goal for v2.x. |
+
+**Skip total: 1 item.**
+
+---
+
+### Sprint F — v1.5.0 "Security & Audit Hardening" (COMMITTED)
+
+**Goal:** Lock down the webui's security posture (CSP) and operationalize the audit log for downstream consumers (SIEM JSONL, optional allocation expiration). All deliverables additive; no breaking changes; v1.5.0 minor bump per D28.
+
+**Persona served:** Personas 1 (Sysadmin) and 5 (IT Director) primary; Persona 6 (regulated/institutional) pre-positioned without being gated on it.
+
+**Cadence:** 4-6 weeks per standing cadence.
+
+**Deliverables:**
+
+1. **F1 — CSP headers + inline-handler removal**
+   - Set `Content-Security-Policy` headers on every webui response; default policy `default-src 'self'; script-src 'self' 'unsafe-inline-disabled'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'`.
+   - Migrate any remaining inline `onclick=` to Alpine `@click=` (per D23) or vanilla `addEventListener` in a page's `init()`.
+   - Verify Alpine 3 CSP-safe build (vendored in Sprint B.5) is the loaded variant; swap if not.
+   - Add a CSP regression test: `curl -I /` must include the header.
+
+2. **F2 — SIEM JSONL audit-log export endpoint**
+   - `GET /api/v1/audit/export?since=<rfc3339>&limit=N` streaming JSONL of audit events (one event per line).
+   - Cursor pagination via `next_since` header.
+   - Admin-only (existing RBAC). Document in `docs/api.md`.
+   - Reverses D13's "no SIEM export in v1.0" by promoting the JSONL contract to a stable surface; D13 re-decision trigger has fired (it's in scope without waiting for a regulated customer per D27).
+
+3. **F3 — Optional allocation expiration**
+   - Schema migration: nullable `expires_at TIMESTAMP` on `node_groups`.
+   - PI portal: optional "Expires on" field on NodeGroup edit.
+   - Director portal: filter "Expiring within 90 days" view.
+   - Notifications (uses Sprint D SMTP scaffolding): warn PI at 30/14/7 days before expiry. NO automatic deactivation — display only. (Strict expiration is still SKIP per CF-03; this is the optional field that closes the optional CF-03 case.)
+
+4. **F4 — CSP migration regression test suite**
+   - Frontend test that loads each top-level page in a headless browser and asserts no CSP violations in console.
+   - Run in CI on every PR.
+
+5. **F5 — Documentation**
+   - `docs/security-headers.md` — CSP policy explanation, how to extend for custom integrations.
+   - Update `docs/audit.md` (or add if absent) with JSONL schema + example SIEM ingestion config (Splunk + Elastic).
+   - `CHANGELOG.md` entry for v1.5.0.
+
+**Target tag:** **v1.5.0** (additive, no schema break, no API break — D28 says minor bump).
+
+**Risk profile:** Medium. CSP migration is mechanical but wide blast radius (touches every page). F4 (regression test) is the safety net.
+
+**Success criteria:**
+- Every page passes CSP enforcement with no console violations.
+- JSONL endpoint streams 10K events without OOM.
+- Optional expiration field round-trips through PI portal without breaking existing NodeGroup CRUD.
+
+---
+
+### Sprint G — v1.6.0 "Identity & Access Primitives" (COMMITTED, NEXT)
+
+**Goal:** Round out identity primitives to make clustr a complete IAM story for non-FreeIPA environments. OpenLDAP project plugin + group-based access restriction + manager delegation. Non-breaking; v1.6.0 minor bump.
+
+**Persona served:** Personas 1 (Sysadmin), 4 (PI), 5 (IT Director).
+
+**Cadence:** 4-6 weeks.
+
+**Deliverables:**
+
+1. **G1 — OpenLDAP project plugin (CF-24)**
+   - Auto-create posixGroup in LDAP for each NodeGroup (when LDAP module enabled).
+   - Sync NodeGroup membership → posixGroup memberUid on member add/remove.
+   - Configurable OU per cluster (default `ou=clustr-projects,$base_dn`).
+   - Idempotent on re-sync; never deletes manually-added LDAP members (additive only).
+
+2. **G2 — Resource access restriction by group (CF-40)**
+   - Per-NodeGroup field: `allowed_request_groups[]` (LDAP group DNs allowed to request membership).
+   - Default `[]` = open (current behavior).
+   - PI portal Visibility tab gets a "Who can request access?" picker.
+
+3. **G3 — Manager delegation (CF-09 manager scope)**
+   - New role: `manager` (sits between `pi` and `member` in RBAC).
+   - PI portal: "Delegate management" tab; PI can grant `manager` role to a member of their NodeGroup.
+   - Manager can: add/remove members, view utilization, request expansion. Cannot: delete NodeGroup, change PI ownership, change visibility defaults.
+   - Migration to `users.role` CHECK constraint (precedent: 2026-04-28 PI role expansion in `991a267`).
+
+4. **G4 — Documentation**
+   - Update `docs/rbac.md` to 6-role model (admin / operator / pi / manager / member / viewer).
+   - Update `docs/user-management.md` with OpenLDAP plugin enablement and group-restriction examples.
+   - `CHANGELOG.md` entry for v1.6.0.
+
+**Target tag:** **v1.6.0** (additive role + nullable fields; no breaking change to existing RBAC).
+
+**Risk profile:** Low-medium. Role additions have well-trodden migration pattern. OpenLDAP plugin uses existing LDAP module abstractions.
+
+**Success criteria:**
+- New NodeGroup creates posixGroup automatically when LDAP enabled; verified in `cloner` lab integration test.
+- Manager role can perform delegated actions; cannot escalate beyond delegated scope (RBAC test).
+- Group-restriction filter blocks unauthorized request attempts with audit log entry.
+
+---
+
+### Sprint H — v1.7.0 "Allocation Automation" (COMMITTED, AFTER G)
+
+**Goal:** Auto-compute allocation — NodeGroup auto-creation + Slurm partition auto-assignment when a new PI is onboarded. The structural payoff of the C.5 PI onboarding work. Single-theme sprint because it touches NodeGroup creation + Slurm partition wiring + PI onboarding integration; bundling with G's identity work would mix risk profiles.
+
+**Persona served:** Personas 1 (Sysadmin), 4 (PI), 5 (IT Director). Reduces operator-toil for PI onboarding from 5 manual steps to 1.
+
+**Cadence:** 4-6 weeks.
+
+**Deliverables:**
+
+1. **H1 — Auto-compute allocation policy engine**
+   - Configurable policy: when a new PI is onboarded, optionally auto-create a NodeGroup with N nodes from a named hardware profile.
+   - Policy fields: `enabled` (default false), `default_node_count`, `default_hardware_profile`, `default_partition_template`, `notify_admins_on_create` (bool).
+   - Admin-configurable via Settings → Governance tab.
+
+2. **H2 — Slurm partition auto-assignment**
+   - When auto-NodeGroup is created, auto-add a Slurm partition entry to slurm.conf (subject to D22 raw editor pattern; structured form path).
+   - Validate via `slurmd -C` per D22 step 3 before commit.
+   - Reload Slurm controller (existing `slurmctl reload` path).
+
+3. **H3 — PI onboarding workflow integration**
+   - PI onboarding wizard (from C.5) gets a new step: "Auto-allocate compute? [Y/N]" with preview of what would be created.
+   - Audit event: `pi_onboarded.auto_allocation` with full policy snapshot.
+   - Rollback path: single-button "Undo auto-allocation" available for 24h post-creation.
+
+4. **H4 — Documentation**
+   - Update `docs/pi-portal.md` with auto-allocation workflow.
+   - Add `docs/auto-allocation.md` covering policy configuration + rollback semantics.
+   - `CHANGELOG.md` entry for v1.7.0.
+
+**Target tag:** **v1.7.0** (additive feature; default off; no breaking change).
+
+**Risk profile:** Medium-high. Touches Slurm config write path (regression risk on D22 validation). Single-theme isolation (not bundling with G) is intentional.
+
+**Success criteria:**
+- Auto-allocation creates NodeGroup + Slurm partition + sends notifications in single transaction (or rolls back atomically).
+- Disabled-by-default verified; existing PI onboarding flow unchanged when policy off.
+- 24h undo restores prior state cleanly (NodeGroup deleted, partition removed, audit trail intact).
+
+---
+
+### Sprints I+ — Unscheduled (dispatched on tech-trigger or customer-pull signal)
+
+Per D27, we don't pre-schedule sprints for items that need a trigger. When PostgreSQL contention, multi-tenant demand, framework ceiling, or a customer-pull arrives, an unscheduled sprint is dispatched and the v-tag is assigned per D28:
+
+- **PostgreSQL migration** → **v2.0.0** (BREAKING per D28 — schema migration)
+- **Multi-tenant data isolation** → **v2.0.0** (BREAKING per D28 — schema-wide tenant_id)
+- **Heavier framework migration** → **v2.0.0** (BREAKING per D28 — D10 violated, build step required)
+- **Two-tier hot/cold log archive** → **v1.8.0+** (additive, minor bump)
+- **OIDC / SAML federation** → likely **v2.0.0** (BREAKING per D28 — auth contract change) when first IdP is named
+- **FreeIPA HBAC bridge** → **v1.x** minor bump (additive plugin) when pulled
+- **XDMoD integration** → **v1.x** minor bump (additive plugin) when pulled
+- **Custom metrics / custom attributes (CF-04/06/37)** → **v1.x** minor bump (additive) when pulled
+
+**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 → ... per Sprint F/G/H/I/... cadence.
 
 ---
 
@@ -731,7 +909,7 @@ Each of these is written once, applied everywhere, and locked into `docs/decisio
 
 ## Traceability Table — Every Finding from Every Review
 
-Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B.5 (v1.1.1, module-split), **C** = Sprint C (v1.2.0, framework + researcher portal), **C.5** = Sprint C.5 (v1.2.5, PI governance), **D** = Sprint D (v1.3.0, director + notifications + grants/pubs), **E** = Sprint E (v1.4.0, allocation workflow + visibility), **Z** = Sprint Z horizon (v2.0+, gated), **DEFER** = explicit defer with rationale, **N/A** = not a webui finding.
+Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B.5 (v1.1.1, module-split), **C** = Sprint C (v1.2.0, framework + researcher portal), **C.5** = Sprint C.5 (v1.2.5, PI governance), **D** = Sprint D (v1.3.0, director + notifications + grants/pubs), **E** = Sprint E (v1.4.0, allocation workflow + visibility), **F** = Sprint F (v1.5.0, security & audit hardening), **G** = Sprint G (v1.6.0, identity & access primitives), **H** = Sprint H (v1.7.0, allocation automation), **TECH-TRIG** = unscheduled, gated on technical signal (per D27 Bucket 2), **CUST-SPEC** = unscheduled, gated on customer specification (per D27 Bucket 3), **SKIP** = explicit non-goal (per D27 Bucket 4), **DEFER** = old marker, treated as TECH-TRIG or CUST-SPEC per re-bucket below.
 
 ### Engineering review (Dinesh, `webui-review-engineering.md`)
 
@@ -774,7 +952,7 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B
 | D-5 Settings tab loses log state | P3 | C | C3-14 |
 | E-1 monolithic app.js | P2 | B.5 | B5R-1, B5R-2 (moved to B.5 per D21 re-rule; was C2-1, C2-2) |
 | E-2 template-literal HTML pervasive | P3 | C | Largely resolved by Alpine adoption (D23) on touched pages; vanilla pages stay until they're touched |
-| E-3 no CSP | P2 | DEFER | Mitigated by D23 (Alpine 3 has CSP-safe build); revisit when first regulated customer demands CSP enforcement |
+| E-3 no CSP | P2 | F | F1 (Sprint F, v1.5.0). Re-bucketed 2026-04-27 per D27: CSP is a build-now security primitive, no longer customer-pull-gated. Alpine 3 CSP-safe build vendored in B.5 makes the migration mechanical. |
 | E-4 escHtml missing apostrophe | P3 | B.5 | B5R-3 (was C2-3) |
 | E-5 XHR upload bypasses 401 redirect | P3 | B.5 | Folded into B.5 module-split with auth.js extraction (was C2 cleanup) |
 | F-1 no JS unit tests | P2 | B+B.5 | B4-8 (helpers via node:test in Sprint B); B5R-4 (expand to ≥80% on utils.js in B.5) |
@@ -856,10 +1034,15 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B
 - **Sprint C.5 (v1.2.5 PI governance, NEW per ColdFront integration):** 3 ColdFront features (CF-02 partial, CF-08 full, CF-09)
 - **Sprint D (v1.3.0 director view + notifications + grants/pubs, NEW):** 5 ColdFront features (CF-11 lite, CF-12, CF-13, CF-14 partial, CF-15, CF-17, CF-18)
 - **Sprint E (v1.4.0 allocation workflow + visibility, NEW):** 4 ColdFront features (CF-16, CF-20, CF-39, plus CF-11 + CF-15 enhancements)
-- **Sprint Z (v2.0+ horizon, NOT committed):** 14 directional themes (was 8; expanded with CF-22, CF-24, CF-25, CF-27, CF-29, CF-30, CF-38, CF-40)
-- **DEFERRED with explicit rationale:** ~16 review findings + 5 ColdFront features marked Skip (CF-30 OpenStack, CF-31 Keycloak search, CF-32 Starfish, CF-34/CF-35 Django-specific, CF-03 strict mandatory expiration)
+- **Sprint F (v1.5.0, COMMITTED — security & audit hardening):** 5 deliverables (CSP, SIEM JSONL export, optional expiration, regression suite, docs). Re-bucketed from old Sprint Z items 11, 12, and CF-03 optional per D27.
+- **Sprint G (v1.6.0, COMMITTED — identity & access primitives):** 4 deliverables (OpenLDAP plugin CF-24, group restriction CF-40, manager delegation CF-09 scope, docs). Re-bucketed from old Sprint Z items 3, 6, and CF-09 manager per D27.
+- **Sprint H (v1.7.0, COMMITTED — allocation automation):** 4 deliverables (auto-compute policy CF-29, Slurm partition auto-assignment, PI onboarding integration, docs). Re-bucketed from old Sprint Z item 4 / CF-29 per D27.
+- **Unscheduled — TECH-TRIG (D27 Bucket 2, gated on concrete technical signal):** 4 items — PostgreSQL migration, multi-tenant isolation, heavier framework migration, two-tier hot/cold log archive. Each has explicit trigger + monitor + decision-maker documented above.
+- **Unscheduled — CUST-SPEC (D27 Bucket 3, gated on customer specification):** 7 items — OIDC/SAML, FreeIPA HBAC, XDMoD, custom utilization metrics, custom allocation attributes (CF-04), custom resource attributes (CF-06), custom attribute types (CF-37).
+- **SKIP (D27 Bucket 4, explicit non-goal):** 1 item — Cloud resource allocation (CF-30); plus 5 ColdFront items marked Skip from earlier (CF-31 Keycloak search, CF-32 Starfish, CF-34/CF-35 Django-specific, CF-03 strict mandatory expiration).
+- **DEFERRED review findings with explicit rationale:** ~16 review findings (unchanged from prior pass).
 
-Nothing is silently dropped.
+Nothing is silently dropped. Sprint Z (the single undifferentiated horizon) is dissolved per D27; every prior Z item is re-bucketed into F/G/H, TECH-TRIG, CUST-SPEC, or SKIP.
 
 ---
 
@@ -867,7 +1050,7 @@ Nothing is silently dropped.
 
 Source: `docs/coldfront-feature-mapping.md` (Monica, commit `2a25fd0`).
 
-Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5** = v1.2.5, **D** = v1.3.0, **E** = v1.4.0, **Z** = v2.0+ horizon (gated), **SKIP** = explicit non-goal with rationale, **PARTIAL-EXISTING** = clustr already covers this in current code.
+Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5** = v1.2.5, **D** = v1.3.0, **E** = v1.4.0, **F** = v1.5.0, **G** = v1.6.0, **H** = v1.7.0, **TECH-TRIG** = unscheduled per D27 Bucket 2, **CUST-SPEC** = unscheduled per D27 Bucket 3, **SKIP** = explicit non-goal per D27 Bucket 4, **PARTIAL-EXISTING** = clustr already covers this in current code.
 
 ### Core Platform (CF-01 through CF-20)
 
@@ -875,13 +1058,13 @@ Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5*
 |---|---|---|---|
 | CF-01 | Project management | C.5 | Implemented as NodeGroup-as-Project (single primitive per coldfront-feature-mapping.md Risk 2) — PI ownership added in C.5 |
 | CF-02 | Allocation management | C.5 + E | NodeGroup-as-Allocation in C.5; expansion-request workflow in C.5 (lightweight) → E (full CF-20) |
-| CF-03 | Allocation expiration + renewal | SKIP (strict) / Z (optional) | Strict mandatory expiration is wrong for bare-metal HPC (per Monica Bucket 5); optional expiration field can land in Z if a customer asks |
-| CF-04 | Allocation attributes (custom) | Z | Custom attributes are a multi-tenant / extensibility concern — defer to v2.0+ |
+| CF-03 | Allocation expiration + renewal | SKIP (strict) / F (optional) | Strict mandatory expiration is wrong for bare-metal HPC (per Monica Bucket 5); optional `expires_at` field ships in F (v1.5.0) per F3 — re-bucketed 2026-04-27 per D27 (cheap structural primitive, not customer-spec). |
+| CF-04 | Allocation attributes (custom) | CUST-SPEC | Custom attributes literally require customer to define which attributes. Per D27 Bucket 3. |
 | CF-05 | Resource management | PARTIAL-EXISTING + Z | clustr Nodes + Images + Hardware Profiles already cover compute resource; storage/license/cloud resource types defer to Z |
-| CF-06 | Resource attributes (custom + inherited) | Z | Same as CF-04 — multi-tenant / extensibility, defer to v2.0+ |
+| CF-06 | Resource attributes (custom + inherited) | CUST-SPEC | Same as CF-04 — customer must define attribute set. Per D27 Bucket 3. |
 | CF-07 | Linked resources (parent-child) | PARTIAL-EXISTING | Nodes link to NodeGroups already; partition resources implicit via Slurm config |
 | CF-08 | User management | C + C.5 | Researcher role added in C; PI self-service member management in C.5 |
-| CF-09 | PI / Manager delegation | C.5 (PI) / D (manager — if pulled) / Z (full delegation) | PI role is C.5; manager-delegation deferred to D only if customer asks |
+| CF-09 | PI / Manager delegation | C.5 (PI) / G (manager) | PI role shipped in C.5. Manager-delegation re-bucketed 2026-04-27 per D27 to G (v1.6.0) — cheap structural primitive (G3), no longer customer-pull-gated. |
 | CF-10 | Self-service user portal | C | Researcher portal MVP at /portal/ |
 | CF-11 | Annual project review workflow | D (lite) + E (multi-reviewer) | Lightweight version in D; multi-reviewer enhancement in E |
 | CF-12 | Grant tracking | D | Grants table + PI CRUD + director read |
@@ -899,15 +1082,15 @@ Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5*
 | CF-# | Plugin | Sprint | Notes |
 |---|---|---|---|
 | CF-21 | Slurm plugin (sacctmgr) | PARTIAL-EXISTING | clustr's Slurm module installs/configures Slurm; sacctmgr-driven account governance is the ColdFront layer — clustr's NodeGroup-driven model is the equivalent abstraction |
-| CF-22 | FreeIPA plugin | Z | High cost + customer-pull gated per D25 |
+| CF-22 | FreeIPA plugin | CUST-SPEC | FreeIPA HBAC rule shape varies wildly by deployment; needs first FreeIPA-running operator to define mapping. Per D27 Bucket 3. |
 | CF-23 | LDAP user search | PARTIAL-EXISTING + C.5 | clustr's LDAP module already has user lookup; C.5 PI member-add uses it for the autocomplete UX |
-| CF-24 | OpenLDAP project plugin | Z | Useful in non-FreeIPA environments; Z item |
-| CF-25 | Mokey/OIDC plugin | Z | OIDC is D1 re-decision trigger; Z item |
+| CF-24 | OpenLDAP project plugin | G | Re-bucketed 2026-04-27 per D27 to G (v1.6.0) — we own LDAP module; posixGroup auto-creation is mechanical extension; useful in non-FreeIPA environments (the common case). |
+| CF-25 | Mokey/OIDC plugin | CUST-SPEC | OIDC claim mapping varies across IdPs (Mokey/Keycloak/Okta/Azure AD); needs first institutional operator naming their IdP. Per D27 Bucket 3. v2.0.0 candidate per D28 (auth contract change). |
 | CF-26 | OnDemand plugin | C | OnDemand portal link via env var (C1-7) |
-| CF-27 | XDMoD plugin | Z | Customer-pull gated per D25 (high cost, not all customers run XDMoD) |
+| CF-27 | XDMoD plugin | CUST-SPEC | XDMoD data model is institution-specific; needs first XDMoD-running operator. Per D27 Bucket 3. |
 | CF-28 | iQuota plugin | C | Storage quota display via LDAP attribute mapping (C1-8) |
-| CF-29 | Auto-compute allocation | Z | Requires PI onboarding workflow first (have it from C.5); Z item |
-| CF-30 | OpenStack plugin | SKIP | Out of scope unless clustr expands to hybrid HPC+cloud (Sprint Z item 14 — explicit defer to v3.0+) |
+| CF-29 | Auto-compute allocation | H | Re-bucketed 2026-04-27 per D27 to H (v1.7.0). PI onboarding workflow shipped in C.5; auto-NodeGroup + Slurm partition wiring is structural automation, single-theme sprint. |
+| CF-30 | OpenStack plugin | SKIP | Out of scope; clustr is bare-metal-first per D24 powerhouse thesis. v3.0+ candidate if clustr ever expands to hybrid HPC+cloud. |
 | CF-31 | Keycloak user search | SKIP | Per Monica Bucket 5 — Keycloak not common in clustr target market; OIDC (Z) covers the use case generically |
 | CF-32 | Starfish plugin | SKIP | Per Monica Bucket 5 — CCR-specific niche tooling |
 
@@ -919,22 +1102,26 @@ Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5*
 | CF-34 | Django admin interface | SKIP | Not applicable — clustr is Go, not Django; webui already serves this function |
 | CF-35 | Django signals / event hooks | SKIP | Not applicable — Go module-plugin pattern already implements this |
 | CF-36 | Multiple auth backends | PARTIAL-EXISTING + Z | Sessions + API keys today; OIDC/LDAP-bind defer to Z (per D1) |
-| CF-37 | Custom attribute types | Z | Same as CF-04 — multi-tenant extensibility, Z item |
-| CF-38 | PostgreSQL data store | Z | Per D6 — defer until SQLite write contention or multi-tenant requirement |
+| CF-37 | Custom attribute types | CUST-SPEC | Type system for customer-defined attributes (string/int/enum/date/bool) — only matters when CF-04/CF-06 are pulled. Per D27 Bucket 3. |
+| CF-38 | PostgreSQL data store | TECH-TRIG | Per D6 + D27 — gated on concrete technical signal: SQLite write contention >50 ops/sec sustained 1h OR single deployment >500 nodes OR multi-tenant requirement. v2.0.0 when triggered (BREAKING per D28). |
 | CF-39 | Allocation visibility controls | E | Per-attribute visibility policy (E3 workstream) |
-| CF-40 | Resource access restriction by group | Z | Multi-tenancy prerequisite; Z item |
+| CF-40 | Resource access restriction by group | G | Re-bucketed 2026-04-27 per D27 to G (v1.6.0). LDAP groups exist; restriction policy is contained code; doesn't require multi-tenancy to be valuable. |
 
-### ColdFront Traceability Summary
+### ColdFront Traceability Summary (RE-BUCKETED 2026-04-27 per D27)
 
 | Bucket | Count | Verifiable in sprint |
 |---|---|---|
 | Already covered by clustr (PARTIAL-EXISTING) | 7 | CF-05, CF-07, CF-19 partial, CF-21, CF-23, CF-33, CF-36 |
 | Sprint C (v1.2.0) — ColdFront integration adds | 4 | CF-08 partial, CF-10, CF-26, CF-28 |
-| Sprint C.5 (v1.2.5) — NEW PI governance | 4 | CF-01 (via NodeGroup), CF-02 partial, CF-08 full, CF-09 |
-| Sprint D (v1.3.0) — NEW director + notifications + grants/pubs | 7 | CF-11 lite, CF-12, CF-13, CF-14, CF-15, CF-17, CF-18 |
-| Sprint E (v1.4.0) — NEW allocation workflow + visibility | 4 | CF-16, CF-20, CF-39, plus CF-11/CF-15 enhancements |
-| Sprint Z (v2.0+ horizon, gated) | 13 | CF-04, CF-06, CF-22, CF-24, CF-25, CF-27, CF-29, CF-30 (qualified), CF-37, CF-38, CF-40, CF-03 optional, CF-09 manager-delegation |
-| Skip with rationale | 5 | CF-30 (cloud, deferred to v3.0+), CF-31, CF-32, CF-34, CF-35 |
+| Sprint C.5 (v1.2.5) — PI governance | 4 | CF-01 (via NodeGroup), CF-02 partial, CF-08 full, CF-09 (PI scope) |
+| Sprint D (v1.3.0) — director + notifications + grants/pubs | 7 | CF-11 lite, CF-12, CF-13, CF-14, CF-15, CF-17, CF-18 |
+| Sprint E (v1.4.0) — allocation workflow + visibility | 4 | CF-16, CF-20, CF-39, plus CF-11/CF-15 enhancements |
+| **Sprint F (v1.5.0) — security & audit hardening** | 1 (+CSP/SIEM) | CF-03 optional |
+| **Sprint G (v1.6.0) — identity & access primitives** | 3 | CF-09 (manager scope), CF-24, CF-40 |
+| **Sprint H (v1.7.0) — allocation automation** | 1 | CF-29 |
+| **TECH-TRIG (unscheduled, technical signal — D27 Bucket 2)** | 1 | CF-38 |
+| **CUST-SPEC (unscheduled, customer specification — D27 Bucket 3)** | 5 | CF-04, CF-06, CF-22, CF-25, CF-27, CF-37 |
+| Skip with rationale (D27 Bucket 4) | 5 | CF-30 (cloud, v3.0+), CF-31, CF-32, CF-34, CF-35 |
 | **Total** | **40** | (Some CF-#s span multiple buckets; counts above may sum >40) |
 
 ---
@@ -949,8 +1136,8 @@ Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5*
 
 Everything else in the plan matters. These three are the ones that, if the next 90 days went sideways and we only got these out, would still leave clustr materially better positioned for institutional adoption than v1.0 is today.
 
-**The longer arc (added 2026-04-27 per ColdFront integration):** The 90-day window above gets us through Sprint A, B, B.5, and into early Sprint C. The full ColdFront-aware roadmap runs through v1.4 (Sprint E, ~2027-01) before reaching the v2.0+ horizon. Per D24 (powerhouse positioning) and D25 (hybrid customer-pull rule), the v1.2 → v1.4 arc speculatively builds the structural primitives (researcher portal, PI governance, director read-only view, grants/publications, allocation workflow) that operationalize the "unified bare-metal-to-governance platform" thesis. Customer-defined custom metrics, OIDC, FreeIPA, multi-tenant, and PostgreSQL all defer to Sprint Z (v2.0+) — gated on customer pull or technical-scale triggers, NOT on revenue or headcount (per founder standing rule). Sprints do not stop; dispatch is automatic.
+**The longer arc (updated 2026-04-27 per Sprint Z re-sequencing, D27, D28):** Sprints A → B → B.5 → C → C.5 → D → E are RELEASED (v1.0.1 → v1.4.0). The next three sprints are COMMITTED: F (v1.5.0 security & audit hardening) → G (v1.6.0 identity & access primitives) → H (v1.7.0 allocation automation). All three are additive; no breaking changes; no schema migrations; no major-version bump. Per D27, the old "Sprint Z" undifferentiated horizon is dissolved — its items are re-bucketed into committed F/G/H, technical-trigger-gated (Bucket 2), customer-spec-gated (Bucket 3), or skip (Bucket 4). Per D28, the v2.0.0 boundary is reserved for the first BREAKING change (most likely PostgreSQL migration, multi-tenant schema, OIDC contract change, or framework migration with build step). Until a breaking change is triggered, the sequence stays in v1.x. Sprints do not stop; dispatch is automatic per founder directive.
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E are committed. Sprint Z (v2.0+ horizon) is directional. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E are RELEASED. Sprints F, G, H are COMMITTED (v1.5.0 → v1.6.0 → v1.7.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
