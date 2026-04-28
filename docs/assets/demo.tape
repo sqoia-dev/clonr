@@ -6,22 +6,17 @@
 #   brew install vhs    (macOS)
 #   go install github.com/charmbracelet/vhs@latest  (Go)
 #
-# Run:
+# Run (from repo root):
 #   vhs docs/assets/demo.tape
 #
-# This shows the core trust chain: server start → bootstrap key → node
-# registration → API verification. No PXE boot required — runs against
-# a local Docker container.
+# What this shows: server version → pre-flight doctor → health check →
+# registered nodes → base image. Runs against a live clustr-serverd instance.
 #
-# Prerequisites for recording:
-#   docker run -d --name clustr-demo \
-#     -e CLUSTR_SECRET_KEY=$(openssl rand -hex 32) \
-#     -e CLUSTR_SESSION_SECRET=$(openssl rand -hex 64) \
-#     -e CLUSTR_AUTH_DEV_MODE=0 \
-#     -p 8080:8080 \
-#     ghcr.io/sqoia-dev/clustr-server:latest
-#   export CLUSTR_URL=http://localhost:8080
-#   export CLUSTR_API_KEY=<key from docker logs>
+# Prerequisites:
+#   A running clustr-serverd (see docs/install.md).
+#   Set CLUSTR_URL and CLUSTR_API_KEY before running:
+#     export CLUSTR_URL=http://<your-server-ip>:8080
+#     export CLUSTR_API_KEY=<your-admin-api-key>
 
 Output docs/assets/clustr-demo.gif
 
@@ -42,34 +37,23 @@ Sleep 1.5s
 # ── Pre-flight check ─────────────────────────────────────────────────────
 Type "clustr-serverd doctor"
 Enter
-Sleep 2s
+Sleep 3s
 
 # ── Verify server is healthy ─────────────────────────────────────────────
-Type `curl -s http://localhost:8080/api/v1/healthz/ready | python3 -m json.tool`
+Type `curl -s $CLUSTR_URL/api/v1/healthz/ready | python3 -m json.tool`
 Enter
 Sleep 2s
 
-# ── List nodes (empty cluster) ───────────────────────────────────────────
+# ── List registered nodes ────────────────────────────────────────────────
 Type `curl -s -H "Authorization: Bearer $CLUSTR_API_KEY" \`
 Enter
-Type `  http://localhost:8080/api/v1/nodes | python3 -m json.tool`
-Enter
-Sleep 2s
-
-# ── Simulate PXE node self-registration ──────────────────────────────────
-Type `curl -s -X POST \`
-Enter
-Type `  -H "Content-Type: application/json" \`
-Enter
-Type `  -d '{"mac":"52:54:00:aa:bb:01","hostname":"node001","arch":"x86_64"}' \`
-Enter
-Type `  http://localhost:8080/api/v1/nodes/register | python3 -m json.tool`
+Type `  $CLUSTR_URL/api/v1/nodes | python3 -m json.tool | grep -E '"hostname"|"status"|"total"'`
 Enter
 Sleep 2.5s
 
-# ── Node appears in the list ─────────────────────────────────────────────
+# ── Show base image ready for deployment ─────────────────────────────────
 Type `curl -s -H "Authorization: Bearer $CLUSTR_API_KEY" \`
 Enter
-Type `  http://localhost:8080/api/v1/nodes | python3 -m json.tool`
+Type `  $CLUSTR_URL/api/v1/images | python3 -m json.tool | grep -E '"name"|"status"|"os"|"version"'`
 Enter
 Sleep 3s

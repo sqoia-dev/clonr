@@ -43,9 +43,9 @@ The two-node Slurm cluster walk-through (controller + worker, `srun -N2 hostname
 
 ## Show me
 
-<img src="docs/assets/clustr-demo-static.svg" alt="clustr demo: doctor check → server start → node registration → API verification" width="900"/>
+<img src="docs/assets/clustr-demo.gif" alt="clustr demo: server version → doctor pre-flight check → health check → registered nodes → base image" width="900"/>
 
-_Above: four steps from `git clone` to a registered node — pre-flight check, server start with bootstrap key, PXE node self-registration, API confirmation. [Generate the animated terminal demo](docs/assets/demo.tape) with `vhs docs/assets/demo.tape` (requires [VHS](https://github.com/charmbracelet/vhs))._
+_Above: `clustr-serverd version` → `doctor` pre-flight → health check → registered node list → base image ready. [Regenerate the GIF](docs/assets/demo.tape) with `vhs docs/assets/demo.tape` (requires [VHS](https://github.com/charmbracelet/vhs))._
 
 ---
 

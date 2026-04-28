@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased] — Sprint L (Demo GIF)
+
+### Added
+
+- **`docs/assets/clustr-demo.gif`** — animated terminal demo GIF rendered with
+  VHS v0.11.0 against a live clustr-serverd instance (Rocky Linux 9, Xvfb,
+  Chromium 147, ffmpeg 5.1.8). Shows: `version` → `doctor` pre-flight →
+  health check → registered node list → base image. 670K, 1200×600, 15fps.
+- **`docs/assets/demo.tape`** — updated for v1.10.0: uses live server at
+  `$CLUSTR_URL`/`$CLUSTR_API_KEY` instead of a Docker container; replaces the
+  simulated `nodes/register` call (which now requires `hardware_profile`) with
+  real node list and image list queries.
+- **`README.md`** — "Show me" section now references the animated GIF instead
+  of the static SVG fallback (`clustr-demo-static.svg` retained in repo).
+
+---
+
 ## [v1.10.0] — 2026-04-27 (Sprint K — First-Job Bounce Rate)
 
 **Sprint K — First-Job Bounce Rate Reduction (10 candidates from Round 2 audit)**
