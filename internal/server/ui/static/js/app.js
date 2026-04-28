@@ -9217,11 +9217,11 @@ reboot</pre>
         const isAdmin = Auth._role === 'admin';
         // B3-1: Webhooks tab is admin-only. B3-4/B3-5: About tab for all roles.
         const tabs = isAdmin
-            ? ['api-keys', 'users', 'webhooks', 'server-info', 'about']
+            ? ['api-keys', 'users', 'webhooks', 'notifications', 'server-info', 'about']
             : ['api-keys', 'server-info', 'about'];
         const tabBar = tabs.map(t => {
             const active = t === tab ? 'style="border-bottom:2px solid var(--accent);color:var(--accent);"' : '';
-            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'server-info': 'System', 'about': 'About' }[t];
+            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'notifications': 'Notifications', 'server-info': 'System', 'about': 'About' }[t];
             return `<button class="btn btn-ghost" ${active} onclick="Pages._settingsRender('${t}')">${label}</button>`;
         }).join('');
 
@@ -9232,6 +9232,8 @@ reboot</pre>
             body = await Pages._settingsUsersTab();
         } else if (tab === 'webhooks') {
             body = await Pages._settingsWebhooksTab();
+        } else if (tab === 'notifications') {
+            body = await Pages._settingsNotificationsTab();
         } else if (tab === 'about') {
             body = await Pages._settingsAboutTab();
         } else if (tab === 'server-info') {
@@ -10103,6 +10105,142 @@ reboot</pre>
                 </div>`;
         } catch (err) {
             return alertBox('Failed to load webhooks: ' + err.message);
+        }
+    },
+
+    // ─── Sprint D — Notifications / SMTP Settings Tab ────────────────────────
+
+    async _settingsNotificationsTab() {
+        let smtp = {};
+        let groups = [];
+        try {
+            smtp = await API.request('GET', '/admin/smtp');
+        } catch (_) {}
+        try {
+            const gData = await API.request('GET', '/node-groups');
+            groups = (gData && gData.groups) ? gData.groups : [];
+        } catch (_) {}
+        const groupOptions = groups.map(g => `<option value="${escHtml(g.id)}">${escHtml(g.name)}</option>`).join('');
+        const checked = (v) => v ? 'checked' : '';
+        return `
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header">
+                    <h2 class="card-title">SMTP Configuration</h2>
+                    <div style="font-size:12px;color:var(--text-secondary);">Used for member notifications and group broadcasts. Password is stored encrypted.</div>
+                </div>
+                <div class="card-body">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <label class="form-label">Host
+                            <input id="smtp-host" class="form-input" type="text" value="${escHtml(smtp.host || '')}" placeholder="smtp.example.com" style="margin-top:4px;">
+                        </label>
+                        <label class="form-label">Port
+                            <input id="smtp-port" class="form-input" type="number" value="${smtp.port || 587}" placeholder="587" style="margin-top:4px;">
+                        </label>
+                        <label class="form-label">Username
+                            <input id="smtp-user" class="form-input" type="text" value="${escHtml(smtp.username || '')}" placeholder="noreply@example.com" style="margin-top:4px;">
+                        </label>
+                        <label class="form-label">Password
+                            <input id="smtp-pass" class="form-input" type="password" value="" placeholder="leave blank to keep existing" style="margin-top:4px;" autocomplete="new-password">
+                        </label>
+                        <label class="form-label">From address
+                            <input id="smtp-from" class="form-input" type="text" value="${escHtml(smtp.from_addr || '')}" placeholder="clustr &lt;noreply@example.com&gt;" style="margin-top:4px;">
+                        </label>
+                        <div style="display:flex;flex-direction:column;gap:8px;padding-top:20px;">
+                            <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                                <input type="checkbox" id="smtp-tls" ${checked(smtp.use_tls)}>
+                                STARTTLS (port 587)
+                            </label>
+                            <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                                <input type="checkbox" id="smtp-ssl" ${checked(smtp.use_ssl)}>
+                                Implicit TLS (port 465)
+                            </label>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-top:16px;align-items:center;">
+                        <button class="btn btn-primary" onclick="Pages._smtpSave()">Save SMTP settings</button>
+                        <button class="btn btn-secondary" onclick="Pages._smtpTest()">Send test email</button>
+                        <span id="smtp-status" style="font-size:13px;"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Broadcast to NodeGroup</h2>
+                    <div style="font-size:12px;color:var(--text-secondary);">Send a message to all approved members of a NodeGroup. Rate-limited to once per hour.</div>
+                </div>
+                <div class="card-body">
+                    <label class="form-label" style="margin-bottom:12px;">NodeGroup
+                        <select id="bc-group" class="form-input" style="margin-top:4px;">
+                            <option value="">Select a group…</option>
+                            ${groupOptions}
+                        </select>
+                    </label>
+                    <label class="form-label" style="margin-bottom:12px;">Subject
+                        <input id="bc-subject" class="form-input" type="text" placeholder="Message subject" style="margin-top:4px;">
+                    </label>
+                    <label class="form-label" style="margin-bottom:12px;">Body
+                        <textarea id="bc-body" class="form-input" rows="5" placeholder="Message body (plain text)" style="margin-top:4px;min-height:100px;resize:vertical;"></textarea>
+                    </label>
+                    <button class="btn btn-primary" onclick="Pages._bcSend()">Send broadcast</button>
+                    <span id="bc-status" style="font-size:13px;margin-left:12px;"></span>
+                </div>
+            </div>`;
+    },
+
+    async _smtpSave() {
+        const statusEl = document.getElementById('smtp-status');
+        if (statusEl) statusEl.textContent = 'Saving…';
+        const body = {
+            host:      (document.getElementById('smtp-host')?.value || '').trim(),
+            port:      parseInt(document.getElementById('smtp-port')?.value || '587', 10),
+            username:  (document.getElementById('smtp-user')?.value || '').trim(),
+            from_addr: (document.getElementById('smtp-from')?.value || '').trim(),
+            use_tls:   document.getElementById('smtp-tls')?.checked || false,
+            use_ssl:   document.getElementById('smtp-ssl')?.checked || false,
+        };
+        const pass = (document.getElementById('smtp-pass')?.value || '').trim();
+        if (pass) body.password = pass;
+        try {
+            await API.request('PUT', '/admin/smtp', body);
+            if (statusEl) { statusEl.textContent = 'Saved.'; statusEl.style.color = 'var(--success, #3fb950)'; }
+            App.toast('SMTP settings saved', 'success');
+        } catch (err) {
+            if (statusEl) { statusEl.textContent = 'Error: ' + err.message; statusEl.style.color = 'var(--error, #f85149)'; }
+        }
+    },
+
+    async _smtpTest() {
+        const statusEl = document.getElementById('smtp-status');
+        if (statusEl) { statusEl.textContent = 'Sending test…'; statusEl.style.color = ''; }
+        try {
+            await API.request('POST', '/admin/smtp/test', {});
+            if (statusEl) { statusEl.textContent = 'Test sent. Check your inbox.'; statusEl.style.color = 'var(--success, #3fb950)'; }
+            App.toast('Test email sent', 'success');
+        } catch (err) {
+            if (statusEl) { statusEl.textContent = 'Test failed: ' + err.message; statusEl.style.color = 'var(--error, #f85149)'; }
+        }
+    },
+
+    async _bcLoadGroup(groupID) {
+        // Pre-populate when switching groups — no-op here, send does validation.
+    },
+
+    async _bcSend() {
+        const groupID = (document.getElementById('bc-group')?.value || '').trim();
+        const subject = (document.getElementById('bc-subject')?.value || '').trim();
+        const body    = (document.getElementById('bc-body')?.value || '').trim();
+        const statusEl = document.getElementById('bc-status');
+        if (!groupID) { App.toast('Select a group', 'error'); return; }
+        if (!subject) { App.toast('Subject is required', 'error'); return; }
+        if (!body)    { App.toast('Body is required', 'error'); return; }
+        if (!confirm(`Send broadcast to all approved members of this group?\n\nSubject: ${subject}`)) return;
+        if (statusEl) { statusEl.textContent = 'Sending…'; statusEl.style.color = ''; }
+        try {
+            const resp = await API.request('POST', `/node-groups/${groupID}/broadcast`, { subject, body });
+            if (statusEl) { statusEl.textContent = `Sent to ${resp.sent || 0} recipient(s).`; statusEl.style.color = 'var(--success, #3fb950)'; }
+            App.toast('Broadcast sent', 'success');
+        } catch (err) {
+            if (statusEl) { statusEl.textContent = 'Error: ' + err.message; statusEl.style.color = 'var(--error, #f85149)'; }
         }
     },
 

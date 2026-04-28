@@ -454,7 +454,7 @@ Per D25, this is the "low cost, low risk" structural primitive — read-only agg
 
 ---
 
-### Sprint D — v1.3.0 "IT Director View + Notifications + Grants/Publications" (NEW — added 2026-04-27 per ColdFront integration)
+### Sprint D — v1.3.0 "IT Director View + Notifications + Grants/Publications" **[COMPLETED — 2026-04-27]**
 
 **Tag target:** `v1.3.0` 5-7 weeks after v1.2.5 ships (target window: 2026-10-12 to 2026-11-23).
 **Goal:** Promote the IT Director persona (Persona 5) to first-class with a read-only summary view. Add the SMTP scaffolding that unblocks email notifications. Add structural primitives for grant tracking and publication tracking. This sprint absorbs the bulk of Monica's v1.3-v1.4 follow-on bucket (CF-11, CF-12, CF-13, CF-15, CF-17) — sequenced as the natural next layer after the PI is first-class.

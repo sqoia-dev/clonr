@@ -18,6 +18,7 @@ const (
 	UserRoleReadonly UserRole = "readonly"
 	UserRoleViewer   UserRole = "viewer"
 	UserRolePI       UserRole = "pi"
+	UserRoleDirector UserRole = "director"
 )
 
 // UserRecord is the persisted representation of a user account.

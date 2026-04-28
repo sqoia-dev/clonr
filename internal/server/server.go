@@ -39,6 +39,7 @@ import (
 	ipmipower "github.com/sqoia-dev/clustr/internal/power/ipmi"
 	proxmoxpower "github.com/sqoia-dev/clustr/internal/power/proxmox"
 	"github.com/sqoia-dev/clustr/internal/reimage"
+	"github.com/sqoia-dev/clustr/internal/notifications"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	"github.com/sqoia-dev/clustr/internal/server/ui"
@@ -786,6 +787,11 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/portal/pi", servePIPortalPage(staticFS))
 	r.Get("/portal/pi/", servePIPortalPage(staticFS))
 
+	// /portal/director/ — Director portal (director role). Serves portal_director.html.
+	// Director-role users land here after login; admin can also access.
+	r.Get("/portal/director", serveDirectorPortalPage(staticFS))
+	r.Get("/portal/director/", serveDirectorPortalPage(staticFS))
+
 	// /repo/* — public, unauthenticated Slurm package repository served from
 	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
 	// Must be mounted BEFORE /api/v1 and outside apiKeyAuth so deployed nodes
@@ -836,10 +842,16 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(requireScope(true)).With(requireRole("admin")).Get("/portal/config", portalH.HandleGetConfig)
 		r.With(requireScope(true)).With(requireRole("admin")).Put("/portal/config", portalH.HandleUpdateConfig)
 
+		// ─── Sprint D — build mailer/notifier early so PI handler can use it ────────
+		smtpCfgEarly := s.loadSMTPConfig()
+		mailerEarly := notifications.NewSMTPMailer(smtpCfgEarly)
+		notifierEarly := &notifications.Notifier{Mailer: mailerEarly, Audit: s.audit}
+
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
 		// Admin can access all PI data. operator, readonly, viewer are blocked.
 		piH := s.buildPIHandler()
+		piH.Notifier = notifierEarly
 		piMW := portalhandler.PIMiddleware(s.db, userIDFromContext, userRoleFromContext)
 		r.Group(func(r chi.Router) {
 			r.Use(requirePI())
@@ -865,6 +877,64 @@ func (s *Server) buildRouter() chi.Router {
 			Get("/admin/pi/expansion-requests", piH.HandleListPendingExpansionRequests)
 		r.With(requireScope(true)).With(requireRole("admin")).
 			Post("/admin/pi/expansion-requests/{id}/resolve", piH.HandleResolveExpansionRequest)
+
+		// ─── Sprint D — Grant + Publication routes (PI + admin) ──────────────────
+		// Grants CRUD on PI-owned NodeGroups.
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			r.Get("/portal/pi/groups/{id}/grants", piH.HandleListGrants)
+			r.Post("/portal/pi/groups/{id}/grants", piH.HandleCreateGrant)
+			r.Put("/portal/pi/groups/{id}/grants/{grantID}", piH.HandleUpdateGrant)
+			r.Delete("/portal/pi/groups/{id}/grants/{grantID}", piH.HandleDeleteGrant)
+			// Publications CRUD on PI-owned NodeGroups.
+			r.Get("/portal/pi/groups/{id}/publications", piH.HandleListPublications)
+			r.Post("/portal/pi/groups/{id}/publications", piH.HandleCreatePublication)
+			r.Put("/portal/pi/groups/{id}/publications/{pubID}", piH.HandleUpdatePublication)
+			r.Delete("/portal/pi/groups/{id}/publications/{pubID}", piH.HandleDeletePublication)
+			// DOI lookup — opt-in outbound call to CrossRef.
+			r.Get("/portal/pi/publications/lookup", piH.HandleDOILookup)
+			// Annual review responses.
+			r.Get("/portal/pi/review-cycles", piH.HandleListPIReviewCycles)
+			r.Post("/portal/pi/review-cycles/{cycleID}/groups/{groupID}/respond", piH.HandleSubmitReviewResponse)
+		})
+
+		// ─── Sprint D — Director portal API (director or admin) ──────────────────
+		directorH := &portalhandler.DirectorHandler{DB: s.db, Audit: s.audit}
+		directorMW := portalhandler.DirectorMiddleware(userIDFromContext)
+		r.Group(func(r chi.Router) {
+			r.Use(requireDirector())
+			r.Use(directorMW)
+			r.Get("/portal/director/summary", directorH.HandleSummary)
+			r.Get("/portal/director/groups", directorH.HandleListGroups)
+			r.Get("/portal/director/groups/{id}", directorH.HandleGetGroup)
+			r.Get("/portal/director/export.csv", directorH.HandleExportCSV)
+			r.Get("/portal/director/export-full.csv", directorH.HandleExportCSVFull)
+			r.Get("/portal/director/review-cycles", directorH.HandleListReviewCycles)
+			r.Get("/portal/director/review-cycles/{id}", directorH.HandleGetReviewCycle)
+		})
+
+		// ─── Sprint D — SMTP config + broadcast (admin only) ─────────────────────
+		// Re-use the mailer built earlier for PI handler notifications.
+		notifH := &handlers.NotificationsHandler{
+			DB:                      s.db,
+			Audit:                   s.audit,
+			Mailer:                  mailerEarly,
+			BroadcastRateLimitHours: 1,
+		}
+		r.With(requireScope(true)).With(requireRole("admin")).Get("/admin/smtp", notifH.HandleGetSMTP)
+		r.With(requireScope(true)).With(requireRole("admin")).Put("/admin/smtp", notifH.HandleUpdateSMTP)
+		r.With(requireScope(true)).With(requireRole("admin")).Post("/admin/smtp/test", notifH.HandleTestSMTP)
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/node-groups/{id}/broadcast", notifH.HandleBroadcast)
+
+		// ─── Sprint D — Review cycle management (admin only) ──────────────────────
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Post("/admin/review-cycles", portalhandler.HandleCreateReviewCycle(s.db, s.audit))
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/review-cycles", portalhandler.HandleListReviewCycles(s.db))
+		r.With(requireScope(true)).With(requireRole("admin")).
+			Get("/admin/review-cycles/{id}", portalhandler.HandleGetReviewCycle(s.db))
 
 		// B2-2: Bootstrap status probe — unauthenticated. Returns whether the default
 		// admin credentials hint should be shown on the login page. Safe to expose
@@ -1324,6 +1394,46 @@ func (s *Server) buildPIHandler() *portalhandler.PIHandler {
 	}
 
 	return h
+}
+
+// serveDirectorPortalPage serves portal_director.html from the embedded static FS.
+func serveDirectorPortalPage(staticFS fs.FS) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := staticFS.Open("portal_director.html")
+		if err != nil {
+			// Fall back to login if director portal page not found.
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			http.Error(w, "director portal page not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		serveHTMLFile(w, r, f, "portal_director.html", stat.ModTime())
+	}
+}
+
+// loadSMTPConfig loads SMTP config from the DB (with env-var override at send time).
+// This is used at server start to build the mailer; env vars are re-read on each
+// send by SMTPMailer.
+func (s *Server) loadSMTPConfig() notifications.SMTPConfig {
+	cfg, err := s.db.GetSMTPConfig(context.Background())
+	if err != nil {
+		log.Warn().Err(err).Msg("smtp: failed to load config from DB; using defaults")
+		return notifications.SMTPConfig{Port: 587, UseTLS: true}
+	}
+	return notifications.SMTPConfig{
+		Host:     cfg.Host,
+		Port:     cfg.Port,
+		Username: cfg.Username,
+		Password: cfg.Password,
+		From:     cfg.From,
+		UseTLS:   cfg.UseTLS,
+		UseSSL:   cfg.UseSSL,
+	}
 }
 
 // servePIPortalPage serves portal_pi.html from the embedded static FS.

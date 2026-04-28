@@ -516,6 +516,27 @@ All variables are read from the process environment. With Docker Compose, set th
 | `CLUSTR_LDAP_CONFIG_DIR` | `/etc/clustr/ldap` | slapd `cn=config` tree and TLS certificates. |
 | `CLUSTR_LDAP_PKI_DIR` | `/etc/clustr/pki` | CA key and certificate for LDAP TLS. |
 
+### Notifications (SMTP)
+
+These variables override the SMTP settings stored in the database. Environment variables always take precedence. See [docs/notifications.md](notifications.md) for full documentation.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLUSTR_SMTP_HOST` | *(unset)* | SMTP server hostname. Required to enable email notifications. |
+| `CLUSTR_SMTP_PORT` | `587` | SMTP port. |
+| `CLUSTR_SMTP_USER` | *(unset)* | SMTP username / login. |
+| `CLUSTR_SMTP_PASS` | *(unset)* | SMTP password (plaintext env var; encrypted in DB). |
+| `CLUSTR_SMTP_FROM` | *(unset)* | From address, e.g. `clustr <noreply@hpc.edu>`. Required to enable email. |
+| `CLUSTR_SMTP_USE_TLS` | `false` | Set to `true` for STARTTLS (port 587). |
+| `CLUSTR_SMTP_USE_SSL` | `false` | Set to `true` for implicit TLS (port 465). |
+
+### Research tracking / PI portal
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLUSTR_PI_AUTO_APPROVE` | `false` | Set to `true` to auto-approve PI member-add requests without admin review. |
+| `CLUSTR_DOI_LOOKUP_ENABLED` | `false` | Set to `true` to allow PI portal DOI lookup via the CrossRef API (`api.crossref.org`). This is the **only outbound network call** clustr makes. Disable in air-gap deployments (the default). |
+
 ### Backup scripts
 
 These are used by `clustr-backup.sh` and `clustr-backup-verify.sh`, not by `clustr-serverd` itself.

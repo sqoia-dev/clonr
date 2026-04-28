@@ -175,6 +175,10 @@ func apiKeyAuth(database *db.DB, devMode bool, sessionSecret []byte, sessionSecu
 							// pi is more privileged than viewer but restricted to PI portal routes.
 							// Maps to a distinct sentinel so requireScope blocks pi on /admin/ routes.
 							roleScope = api.KeyScope("pi")
+						case "director":
+							// director is read-only institutional view — restricted to director portal.
+							// Maps to a distinct sentinel so requireScope blocks director on /admin/ routes.
+							roleScope = api.KeyScope("director")
 						}
 						ctx := context.WithValue(r.Context(), ctxKeyScope{}, roleScope)
 						ctx = context.WithValue(ctx, ctxKeyUserID{}, result.payload.Sub)
@@ -282,7 +286,7 @@ func requireScope(adminOnly bool) func(http.Handler) http.Handler {
 			}
 			if scope != api.KeyScopeAdmin && scope != api.KeyScopeOperator && scope != api.KeyScopeNode &&
 				scope != api.KeyScope("readonly") && scope != api.KeyScope("viewer") &&
-				scope != api.KeyScope("pi") {
+				scope != api.KeyScope("pi") && scope != api.KeyScope("director") {
 				writeForbidden(w, "unrecognized scope")
 				return
 			}
@@ -381,6 +385,36 @@ func requirePI() func(http.Handler) http.Handler {
 				return
 			}
 			writeForbidden(w, "this route requires pi, operator, or admin role")
+		})
+	}
+}
+
+// requireDirector returns a middleware that allows director and admin roles only.
+// Used for /api/v1/portal/director/* routes.
+// API keys (Bearer token, non-session) with admin scope always pass.
+func requireDirector() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+			// Admin API keys pass.
+			if scope == api.KeyScopeAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Session-based: check role.
+			if role := userRoleFromContext(r.Context()); role != "" {
+				if role == "director" || role == "admin" {
+					next.ServeHTTP(w, r)
+					return
+				}
+				writeForbidden(w, "this route requires director or admin role")
+				return
+			}
+			writeForbidden(w, "this route requires director or admin role")
 		})
 	}
 }

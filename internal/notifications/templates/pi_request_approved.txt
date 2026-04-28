@@ -1,0 +1,11 @@
+Hello,
+
+Your request to add "{{.Username}}" to the compute group "{{.GroupName}}" has been {{.Action}}.
+
+{{- if .AdminName}}
+Reviewed by: {{.AdminName}}
+{{- end}}
+
+The user now has access to the group. No further action is required.
+
+This is an automated message from clustr.

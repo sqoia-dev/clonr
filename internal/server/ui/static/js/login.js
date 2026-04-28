@@ -85,6 +85,10 @@
                         window.location.href = '/portal/pi/';
                         return;
                     }
+                    if (role === 'director') {
+                        window.location.href = '/portal/director/';
+                        return;
+                    }
 
                     // Honour the ?next= param set by api.js when session expired.
                     // next is a URL-encoded hash like "%23%2Fnodes%2Fabc" so we

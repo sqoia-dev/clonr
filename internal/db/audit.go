@@ -39,6 +39,23 @@ const (
 	//   GET /api/v1/audit?action=slurm.install.failed
 	// The new_value JSON contains "repo_url" and "detail" (last 2KB of dnf output).
 	AuditActionSlurmInstallFailed = "slurm.install.failed"
+
+	// Sprint D notification + grant/pub/review events.
+	AuditActionNotificationSent     = "notification.sent"
+	AuditActionNotificationFailed   = "notification.failed"
+	AuditActionNotificationSkipped  = "notification.skipped"
+	AuditActionBroadcastSent        = "broadcast.sent"
+	AuditActionBroadcastSkipped     = "broadcast.skipped"
+	AuditActionSMTPConfigUpdate     = "smtp_config.update"
+	AuditActionSMTPTestSend         = "smtp_config.test_send"
+	AuditActionGrantCreate          = "grant.create"
+	AuditActionGrantUpdate          = "grant.update"
+	AuditActionGrantDelete          = "grant.delete"
+	AuditActionPublicationCreate    = "publication.create"
+	AuditActionPublicationUpdate    = "publication.update"
+	AuditActionPublicationDelete    = "publication.delete"
+	AuditActionReviewCycleCreate    = "review_cycle.create"
+	AuditActionReviewResponseSubmit = "review_response.submit"
 )
 
 // AuditRecord is one row in audit_log.

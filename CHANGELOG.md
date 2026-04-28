@@ -5,6 +5,94 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.3.0] — 2026-04-27
+
+**Sprint D — IT Director Portal + Notifications + Grants/Publications**
+
+Adds institutional oversight (IT Director role), email notification
+infrastructure, per-group grant and publication tracking, and lightweight
+annual review cycles. No breaking changes; all new features are additive.
+
+### Added
+
+- **Director role (D-1 / CF-17)** — Sixth RBAC role: `director`. Read-only
+  institutional view. Login routes to `/portal/director/`. `requireDirector()`
+  middleware allows director and admin only. Scope sentinel `"director"` added
+  to `apiKeyAuth`. DB migration 059 extends the `users.role` CHECK constraint.
+  `director` role now valid in user create/update API.
+
+- **Director Portal (`/portal/director/`) (D-1)** — Alpine.js SPA with three
+  tabs: Summary (cluster-wide KPI cards), Groups (searchable table with PI,
+  node/member/grant/pub counts), and Annual Review (status summary). CSV export
+  of group summaries and full grants/publications CSV. Read-only; no mutations.
+
+- **Director API (D-1)** — New endpoints under `requireDirector()`:
+  `GET /api/v1/portal/director/summary`,
+  `GET /api/v1/portal/director/groups`,
+  `GET /api/v1/portal/director/groups/{id}`,
+  `GET /api/v1/portal/director/export.csv`,
+  `GET /api/v1/portal/director/export-full.csv`,
+  `GET /api/v1/portal/director/review-cycles`,
+  `GET /api/v1/portal/director/review-cycles/{id}`.
+
+- **SMTP notifications (D-2 / CF-15)** — `internal/notifications` package with
+  `Mailer` interface (SMTP + test stub). `Notifier` dispatcher with best-effort
+  send (never blocks primary workflow). Events: LDAP account created, member
+  added/removed, PI request approved/denied, annual review due/submitted,
+  broadcast. Templates embedded via `//go:embed`. SMTP config stored encrypted
+  (AES-256-GCM) in new `smtp_config` table (migration 063); env vars override
+  DB values at send time. Rate-limited broadcast via `broadcast_log` table.
+
+- **SMTP admin UI (D-2)** — New "Notifications" tab in Settings (admin-only).
+  SMTP host/port/user/pass/from/TLS/SSL form. "Send test" button sends to the
+  configured From address. Broadcast panel with NodeGroup selector.
+
+- **SMTP API (D-2)** — `GET/PUT /api/v1/admin/smtp`, `POST /api/v1/admin/smtp/test`,
+  `POST /api/v1/node-groups/{id}/broadcast`. Broadcast rate-limited to 1/hour/group.
+  Password never returned in GET response.
+
+- **PI notifications wired (D-2)** — `NotifyMemberAdded` fires on auto-approved
+  add; `NotifyMemberRemoved` fires on PI-initiated removal; `NotifyPIRequestApproved/Denied`
+  fires on admin resolution of pending member requests. All fire-and-forget in goroutines.
+
+- **Grant tracking (D-3 / CF-12)** — `grants` table (migration 060). PI can
+  CRUD grants on their NodeGroups. Admin can manage all. Fields: title, agency,
+  grant number, amount, dates, status (active/no_cost_extension/expired/pending),
+  notes. Director sees counts per group; full list via CSV export.
+  Routes: `GET/POST /api/v1/portal/pi/groups/{id}/grants`,
+  `PUT/DELETE /api/v1/portal/pi/groups/{id}/grants/{grantID}`.
+
+- **Publication tracking (D-3 / CF-13)** — `publications` table (migration 061).
+  PI can CRUD publications. Fields: DOI, title, authors, journal, year.
+  Optional DOI metadata lookup via CrossRef API (opt-in: `CLUSTR_DOI_LOOKUP_ENABLED=true`).
+  Air-gap deployments are not affected (disabled by default).
+  Route: `GET /api/v1/portal/pi/publications/lookup?doi=<doi>`.
+
+- **Annual review cycles (D-4 / CF-14)** — `review_cycles` + `review_responses`
+  tables (migration 062). Admin creates a cycle; pending response rows created for
+  all PI-owned groups. PIs respond: affirmed or archive_requested. Director and
+  admin view aggregate status. Routes: admin CRUD under `/api/v1/admin/review-cycles/`,
+  PI response at `/api/v1/portal/pi/review-cycles/{cycleID}/groups/{groupID}/respond`.
+
+- **PI Portal enhancements (D-3/D-4)** — New Grants, Publications, and Annual
+  Review tabs in the PI portal. Grant and publication modals with inline DOI
+  lookup (when enabled). Review cards with affirm/archive buttons.
+
+- **DB migrations 059–063** — Director role, grants, publications, review cycles,
+  SMTP config + broadcast log tables.
+
+### Changed
+
+- `validRole()` in users handler now accepts all six roles:
+  `admin, operator, readonly, viewer, pi, director`.
+- Login redirect now routes `director` role to `/portal/director/`.
+
+### Dependencies
+No new external dependencies. The CrossRef DOI lookup uses Go's `net/http`
+standard library with a polite User-Agent header.
+
+---
+
 ## [v1.2.5] — 2026-04-28
 
 **Sprint C.5 — PI Governance Layer**

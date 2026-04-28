@@ -1,0 +1,12 @@
+Hello {{.Username}},
+
+You have been {{.Action}} to the compute group "{{.GroupName}}".
+
+{{- if .PIName}}
+Group PI: {{.PIName}}
+{{- end}}
+
+You now have access to the nodes in this group for your research work.
+Contact your PI if you have questions about cluster access or usage policies.
+
+This is an automated message from clustr.

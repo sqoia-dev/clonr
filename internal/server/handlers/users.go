@@ -128,7 +128,7 @@ func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validRole(req.Role) {
-		writeValidationError(w, "role must be one of: admin, operator, readonly")
+		writeValidationError(w, "role must be one of: admin, operator, readonly, viewer, pi, director")
 		return
 	}
 	if msg := validatePassword(req.Password); msg != "" {
@@ -222,7 +222,7 @@ func (h *UsersHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Role change.
 	if req.Role != "" && req.Role != string(user.Role) {
 		if !validRole(req.Role) {
-			writeValidationError(w, "role must be one of: admin, operator, readonly")
+			writeValidationError(w, "role must be one of: admin, operator, readonly, viewer, pi, director")
 			return
 		}
 		// Last-admin guard: if demoting an admin, ensure another admin exists.
@@ -518,10 +518,10 @@ func (h *UsersHandler) enforceLastAdminGuard(r *http.Request, w http.ResponseWri
 	return nil
 }
 
-// validRole returns true for the three allowed role strings.
+// validRole returns true for any allowed role string.
 func validRole(role string) bool {
 	switch role {
-	case "admin", "operator", "readonly":
+	case "admin", "operator", "readonly", "viewer", "pi", "director":
 		return true
 	}
 	return false

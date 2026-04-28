@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/notifications"
 )
 
 // PIHandler provides HTTP handlers for the PI portal (/api/v1/portal/pi/*).
@@ -32,6 +33,9 @@ type PIHandler struct {
 
 	// RemoveLDAPMember removes an LDAP account from the given POSIX group.
 	RemoveLDAPMember func(ctx context.Context, groupName, username string) error
+
+	// Notifier dispatches email notifications. May be nil (no emails sent).
+	Notifier *notifications.Notifier
 }
 
 // ─── Context helpers ──────────────────────────────────────────────────────────
@@ -259,6 +263,15 @@ func (h *PIHandler) HandleAddMember(w http.ResponseWriter, r *http.Request) {
 		// Mark request as approved.
 		_ = h.DB.ResolvePIMemberRequest(ctx, requestID, "approved", userID)
 
+		// Notify the member they have been added (best-effort).
+		if h.Notifier != nil {
+			notifier := h.Notifier
+			gName := summary.Name
+			go func() {
+				notifier.NotifyMemberAdded(context.Background(), body.LDAPUsername, body.LDAPUsername, gName, userID)
+			}()
+		}
+
 		if ldapErr != "" {
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"status":      "approved",
@@ -337,6 +350,15 @@ func (h *PIHandler) HandleRemoveMember(w http.ResponseWriter, r *http.Request) {
 		"node_group", groupID, r.RemoteAddr,
 		map[string]string{"ldap_username": username}, nil,
 	)
+
+	// Notify the member they have been removed (best-effort).
+	if h.Notifier != nil {
+		notifier := h.Notifier
+		gName := summary.Name
+		go func() {
+			notifier.NotifyMemberRemoved(context.Background(), username, username, gName, userID)
+		}()
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
@@ -520,11 +542,15 @@ func (h *PIHandler) HandleResolveMemberRequest(w http.ResponseWriter, r *http.Re
 	}
 
 	// If approving, trigger LDAP group add.
-	if newStatus == "approved" && h.AddLDAPMember != nil {
-		summary, gErr := h.DB.GetNodeGroupSummary(ctx, req.GroupID)
-		if gErr == nil {
-			if lErr := h.AddLDAPMember(ctx, summary.Name, req.LDAPUsername); lErr != nil {
-				log.Warn().Err(lErr).Str("group", summary.Name).Str("user", req.LDAPUsername).
+	var groupName string
+	var piUsername string
+	summary, gErr := h.DB.GetNodeGroupSummary(ctx, req.GroupID)
+	if gErr == nil {
+		groupName = summary.Name
+		piUsername = summary.PIUsername
+		if newStatus == "approved" && h.AddLDAPMember != nil {
+			if lErr := h.AddLDAPMember(ctx, groupName, req.LDAPUsername); lErr != nil {
+				log.Warn().Err(lErr).Str("group", groupName).Str("user", req.LDAPUsername).
 					Msg("admin: LDAP group add on PI approval failed")
 			}
 		}
@@ -534,6 +560,20 @@ func (h *PIHandler) HandleResolveMemberRequest(w http.ResponseWriter, r *http.Re
 		"pi_member_request", requestID, r.RemoteAddr,
 		map[string]string{"status": "pending"}, map[string]string{"status": newStatus},
 	)
+
+	// Fire-and-forget notification to the PI whose request was resolved.
+	if h.Notifier != nil && piUsername != "" {
+		notifier := h.Notifier
+		go func() {
+			bgCtx := context.Background()
+			switch newStatus {
+			case "approved":
+				notifier.NotifyPIRequestApproved(bgCtx, piUsername, req.LDAPUsername, groupName, adminID)
+			case "denied":
+				notifier.NotifyPIRequestDenied(bgCtx, piUsername, req.LDAPUsername, groupName, adminID)
+			}
+		}()
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": newStatus})
 }
