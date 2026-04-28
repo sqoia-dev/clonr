@@ -144,7 +144,8 @@ func TestReseedDefaults_DefaultRowGetsNewVersion(t *testing.T) {
 		t.Fatalf("seed v1: err=%v ver=%d", err, v1)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/slurm/configs/reseed-defaults", nil)
+	// Routes are registered without the /api/v1 prefix — hit them directly.
+	req := httptest.NewRequest(http.MethodPost, "/slurm/configs/reseed-defaults", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -198,7 +199,7 @@ func TestReseedDefaults_OperatorRowIsSkipped(t *testing.T) {
 		t.Fatalf("operator edit: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/slurm/configs/reseed-defaults", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slurm/configs/reseed-defaults", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -253,7 +254,7 @@ func TestReseedDefaults_Idempotent(t *testing.T) {
 	}
 
 	// First call.
-	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/slurm/configs/reseed-defaults", nil)
+	req1 := httptest.NewRequest(http.MethodPost, "/slurm/configs/reseed-defaults", nil)
 	rec1 := httptest.NewRecorder()
 	r.ServeHTTP(rec1, req1)
 	if rec1.Code != http.StatusOK {
@@ -261,7 +262,7 @@ func TestReseedDefaults_Idempotent(t *testing.T) {
 	}
 
 	// Second call.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/slurm/configs/reseed-defaults", nil)
+	req2 := httptest.NewRequest(http.MethodPost, "/slurm/configs/reseed-defaults", nil)
 	rec2 := httptest.NewRecorder()
 	r.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
