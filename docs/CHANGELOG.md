@@ -2,6 +2,18 @@
 
 ---
 
+## v1.8.0 — Show HN Hardening, partial (Sprint I / I3) (2026-04-27)
+
+### I3: WCAG 2.1 AA + Lighthouse Perf Budget
+
+- `axe-core` CI gate — all 6 HTML pages audited on every push. Run: `make a11y`.
+- Lighthouse CI perf budget — FCP ≤ 2s, TTI ≤ 4s, TBT ≤ 300ms; accessibility score gate ≥ 0.90.
+- WCAG fixes: label/input associations across all portals; ARIA tab/tablist/tabpanel pattern on director + PI tab widgets; `role="dialog" aria-modal="true"` + labelling on all 6 modal overlays; `aria-live` on all loading/error states; `<main>` landmarks on director + PI portals.
+- New: `docs/accessibility.md`, `lighthouse-budget.json`, `.lighthouserc.json`.
+- See the root `CHANGELOG.md` v1.8.0 entry for full details.
+
+---
+
 ## v1.5.0 — Security & Audit Hardening (Sprint F) (2026-04-27)
 
 ### F1: Content Security Policy

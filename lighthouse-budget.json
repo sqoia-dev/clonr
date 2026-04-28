@@ -1,0 +1,33 @@
+[
+  {
+    "path": "/*",
+    "timings": [
+      {
+        "metric": "first-contentful-paint",
+        "budget": 2000
+      },
+      {
+        "metric": "interactive",
+        "budget": 4000
+      },
+      {
+        "metric": "total-blocking-time",
+        "budget": 300
+      }
+    ],
+    "resourceSizes": [
+      {
+        "resourceType": "script",
+        "budget": 512
+      },
+      {
+        "resourceType": "stylesheet",
+        "budget": 128
+      },
+      {
+        "resourceType": "total",
+        "budget": 1024
+      }
+    ]
+  }
+]

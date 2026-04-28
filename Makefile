@@ -23,7 +23,7 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test test-js
+.PHONY: all client server clientd static clean test test-js a11y
 
 all: client server clientd
 
@@ -47,6 +47,11 @@ test:
 # B4-8: JS utility function tests using Node.js built-in test runner (requires Node >= 20).
 test-js:
 	node --test test/js/app-utils.test.mjs
+
+# I3: WCAG 2.1 AA accessibility audit using axe-core + jsdom.
+# Install deps first: npm install --prefix test/js axe-core jsdom
+a11y:
+	node --test test/js/a11y.test.mjs
 
 clean:
 	rm -rf bin/

@@ -59,6 +59,49 @@ jobs:
       - name: JS app-utils unit tests
         run: node --test test/js/app-utils.test.mjs
 
+  # I3: WCAG 2.1 AA accessibility audit — axe-core via jsdom against static HTML.
+  # Fails on any critical or serious violation across all 6 HTML pages.
+  # Moderate findings are logged informational; documented in docs/accessibility.md.
+  a11y:
+    name: Accessibility (axe-core WCAG 2.1 AA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: test/js/package-lock.json
+
+      - name: Install axe-core and jsdom
+        run: npm install --prefix test/js axe-core jsdom
+
+      - name: Run axe-core WCAG 2.1 AA audit
+        run: node --test test/js/a11y.test.mjs
+
+  # I3: Lighthouse performance budget — static HTML served locally.
+  # Runs lighthouse against index.html, portal.html, portal_pi.html.
+  # Budget thresholds are in lighthouse-budget.json; assertions in .lighthouserc.json.
+  # Performance assertions are warnings (non-blocking); accessibility score is hard gate (>=0.90).
+  lighthouse:
+    name: Lighthouse perf budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Lighthouse CI
+        run: npm install -g @lhci/cli
+
+      - name: Run Lighthouse CI
+        run: lhci autorun
+        env:
+          LHCI_BUILD_CONTEXT__CURRENT_HASH: ${{ github.sha }}
+
   # I9: Link checker — fails on broken markdown links / fragment refs in docs/*.md.
   # Uses markdown-link-check via npx (no npm install required).
   # External URLs are skipped (--config) to avoid flaky network failures in CI;

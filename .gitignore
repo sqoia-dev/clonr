@@ -35,3 +35,9 @@ Thumbs.db
 # Local env
 .env
 .env.local
+
+# JS test deps — installed by CI / locally via npm install --prefix test/js
+test/js/node_modules/
+
+# Lighthouse CI output
+.lighthouseci/

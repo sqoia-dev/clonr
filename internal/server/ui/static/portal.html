@@ -181,18 +181,18 @@
     </header>
 
     <!-- Loading state -->
-    <div x-show="loading" style="display:flex;align-items:center;justify-content:center;flex:1;gap:10px;color:var(--text-secondary)">
-        <div class="spinner"></div>
+    <div x-show="loading" aria-live="polite" aria-label="Loading" style="display:flex;align-items:center;justify-content:center;flex:1;gap:10px;color:var(--text-secondary)">
+        <div class="spinner" role="status" aria-hidden="true"></div>
         <span>Loading your portal…</span>
     </div>
 
     <!-- Error state -->
-    <div x-show="!loading && error" style="display:flex;align-items:center;justify-content:center;flex:1;">
-        <div class="alert alert-error" x-text="error"></div>
+    <div x-show="!loading && error" aria-live="assertive" style="display:flex;align-items:center;justify-content:center;flex:1;">
+        <div class="alert alert-error" role="alert" x-text="error"></div>
     </div>
 
     <!-- Main content -->
-    <main class="portal-content" x-show="!loading && !error">
+    <main class="portal-content" id="main-content" x-show="!loading && !error">
 
         <!-- Welcome banner -->
         <div style="margin-bottom:24px">
@@ -293,16 +293,16 @@
                 </div>
                 <div class="card-body">
                     <div class="form-row">
-                        <label>Current password</label>
-                        <input type="password" x-model="pw.current" autocomplete="current-password" placeholder="Your current LDAP password">
+                        <label for="portal-pw-current">Current password</label>
+                        <input id="portal-pw-current" type="password" x-model="pw.current" autocomplete="current-password" placeholder="Your current LDAP password">
                     </div>
                     <div class="form-row">
-                        <label>New password</label>
-                        <input type="password" x-model="pw.new1" autocomplete="new-password" placeholder="New password (min 8 chars)">
+                        <label for="portal-pw-new1">New password</label>
+                        <input id="portal-pw-new1" type="password" x-model="pw.new1" autocomplete="new-password" placeholder="New password (min 8 chars)">
                     </div>
                     <div class="form-row">
-                        <label>Confirm new password</label>
-                        <input type="password" x-model="pw.new2" autocomplete="new-password" placeholder="Confirm new password">
+                        <label for="portal-pw-new2">Confirm new password</label>
+                        <input id="portal-pw-new2" type="password" x-model="pw.new2" autocomplete="new-password" placeholder="Confirm new password">
                     </div>
                     <button class="btn btn-primary" :disabled="pw.saving" @click="changePassword()" style="width:100%">
                         <span x-show="!pw.saving">Change password</span>

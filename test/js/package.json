@@ -1,0 +1,11 @@
+{
+  "name": "clustr-js-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test-only Node.js dependencies for clustr JS/a11y tests. Not bundled into the Go binary.",
+  "type": "module",
+  "devDependencies": {
+    "axe-core": "^4.10.0",
+    "jsdom": "^26.0.0"
+  }
+}

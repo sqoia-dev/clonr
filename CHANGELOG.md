@@ -5,6 +5,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.8.0] — 2026-04-27 (Sprint I — Show HN Hardening, partial)
+
+**Sprint I — Show HN Hardening (I1, I3, I4, I9 — engineering polish batch)**
+
+### Added (I3 — WCAG 2.1 AA + Lighthouse perf budget)
+
+- **axe-core CI gate** — new `a11y` job in `.github/workflows/ci.yml` runs
+  `axe-core` via `jsdom` against all 6 static HTML pages on every push and PR.
+  Fails on any WCAG 2.1 AA critical or serious violation. Run locally with
+  `make a11y` after `npm install --prefix test/js axe-core jsdom`.
+
+- **Lighthouse perf budget** — new `lighthouse` job in CI runs `@lhci/cli`
+  against `index.html`, `portal.html`, and `portal_pi.html` served from the
+  static dist dir. Budget: FCP ≤ 2s, TTI ≤ 4s, TBT ≤ 300ms (CI headroom above
+  Richard's 1.5s/3s/200ms targets). Accessibility score hard gate ≥ 0.90.
+
+- **`docs/accessibility.md`** — documents audited pages, CI gate, how to extend,
+  and all waived items with rationale.
+
+- **`lighthouse-budget.json`** + **`.lighthouserc.json`** — budget thresholds
+  and Lighthouse CI configuration.
+
+### Changed (I3 — WCAG accessibility fixes)
+
+- `portal.html` — password change inputs now have `id`/`for` label associations;
+  loading div has `aria-live="polite"`; error div has `aria-live="assertive"` +
+  `role="alert"`; `<main id="main-content">` added.
+
+- `portal_director.html` — outer content `<div>` promoted to `<main id="main-content">`;
+  tab widget gets full ARIA tab/tablist/tabpanel pattern with `aria-selected`,
+  `aria-controls`, `id` attributes; loading/error divs get `aria-live`; modal
+  overlay gets `role="dialog" aria-modal="true" aria-labelledby`; close button
+  gets `aria-label="Close dialog"`.
+
+- `portal_pi.html` — full ARIA tab/tabpanel pattern on 7-tab widget;
+  `id`/`for` associations on ~25 label/input pairs across all modals (Add Member,
+  Expansion, Change Request, Grant, Publication) and the first-project wizard;
+  all 4 modal overlays get `role="dialog" aria-modal="true" aria-labelledby`;
+  close buttons get `aria-label`; visibility group select gets `id`/`for`;
+  per-row visibility selects get `:aria-label` binding; `sr-only` utility class
+  added for required-field screen-reader text.
+
+---
+
 ## [v1.7.0] — 2026-04-27
 
 **Sprint H — Allocation Automation (CF-01, CF-26, CF-33)**

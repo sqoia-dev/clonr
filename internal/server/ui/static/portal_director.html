@@ -172,10 +172,10 @@
         </div>
     </header>
 
-    <div class="portal-content">
+    <main id="main-content" class="portal-content">
         <!-- Loading state -->
-        <div x-show="loading" class="loading"><div class="spinner"></div>Loading…</div>
-        <div x-show="!loading && error" class="alert alert-error" x-text="error"></div>
+        <div x-show="loading" aria-live="polite" class="loading"><div class="spinner" role="status" aria-hidden="true"></div>Loading…</div>
+        <div x-show="!loading && error" aria-live="assertive" class="alert alert-error" role="alert" x-text="error"></div>
 
         <div x-show="!loading && !error">
             <!-- Summary cards -->
@@ -215,14 +215,14 @@
             </div>
 
             <!-- Tabs -->
-            <div class="director-tabs">
-                <button class="director-tab" :class="tab === 'groups' ? 'active' : ''" @click="tab = 'groups'">Node Groups</button>
-                <button class="director-tab" :class="tab === 'reviews' ? 'active' : ''" @click="tab = 'reviews'; loadReviewCycles()">Annual Reviews</button>
-                <button class="director-tab" :class="tab === 'fos' ? 'active' : ''" @click="tab = 'fos'; loadFOSUtilization()">Field of Science</button>
+            <div class="director-tabs" role="tablist" aria-label="Director portal sections">
+                <button class="director-tab" role="tab" :aria-selected="tab === 'groups'" :class="tab === 'groups' ? 'active' : ''" @click="tab = 'groups'" id="tab-groups" aria-controls="panel-groups">Node Groups</button>
+                <button class="director-tab" role="tab" :aria-selected="tab === 'reviews'" :class="tab === 'reviews' ? 'active' : ''" @click="tab = 'reviews'; loadReviewCycles()" id="tab-reviews" aria-controls="panel-reviews">Annual Reviews</button>
+                <button class="director-tab" role="tab" :aria-selected="tab === 'fos'" :class="tab === 'fos' ? 'active' : ''" @click="tab = 'fos'; loadFOSUtilization()" id="tab-fos" aria-controls="panel-fos">Field of Science</button>
             </div>
 
             <!-- Groups tab -->
-            <div class="tab-pane" :class="tab === 'groups' ? 'active' : ''">
+            <div class="tab-pane" id="panel-groups" role="tabpanel" aria-labelledby="tab-groups" :class="tab === 'groups' ? 'active' : ''">
                 <div class="section-header">
                     <span class="section-title">All Node Groups (<span x-text="groups.length"></span>)</span>
                     <div style="display:flex;gap:8px">
@@ -262,7 +262,7 @@
             </div>
 
             <!-- Field of Science utilization tab (E2, CF-16) -->
-            <div class="tab-pane" :class="tab === 'fos' ? 'active' : ''">
+            <div class="tab-pane" id="panel-fos" role="tabpanel" aria-labelledby="tab-fos" :class="tab === 'fos' ? 'active' : ''">
                 <div class="section-header">
                     <span class="section-title">Field of Science Utilization</span>
                 </div>
@@ -295,7 +295,7 @@
             </div>
 
             <!-- Reviews tab -->
-            <div class="tab-pane" :class="tab === 'reviews' ? 'active' : ''">
+            <div class="tab-pane" id="panel-reviews" role="tabpanel" aria-labelledby="tab-reviews" :class="tab === 'reviews' ? 'active' : ''">
                 <div class="section-header">
                     <span class="section-title">Annual Review Cycles</span>
                 </div>
@@ -312,11 +312,12 @@
         </div>
 
         <!-- Group Detail Modal -->
-        <div x-show="showDetail" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:center;justify-content:center" @click.self="showDetail=false">
+        <div x-show="showDetail" role="dialog" aria-modal="true" aria-labelledby="modal-detail-title"
+             style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:center;justify-content:center" @click.self="showDetail=false">
             <div style="background:var(--bg-elevated,#161b22);border:1px solid var(--border,#30363d);border-radius:12px;max-width:700px;width:95%;max-height:80vh;overflow-y:auto;padding:24px" x-show="showDetail">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-                    <h3 style="margin:0;font-size:16px" x-text="detail && detail.name"></h3>
-                    <button @click="showDetail=false" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer">&times;</button>
+                    <h3 id="modal-detail-title" style="margin:0;font-size:16px" x-text="detail && detail.name"></h3>
+                    <button @click="showDetail=false" aria-label="Close dialog" style="background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer">&times;</button>
                 </div>
                 <div x-show="detailLoading" class="loading"><div class="spinner"></div></div>
                 <div x-show="!detailLoading && detail">
@@ -351,7 +352,7 @@
                 </div>
             </div>
         </div>
-    </div>
+    </main>
 </div>
 
 <script src="/ui/vendor/alpinejs/alpine-csp-3.15.11.min.js"></script>
