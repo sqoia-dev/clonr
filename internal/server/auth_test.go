@@ -418,3 +418,78 @@ func TestSlidingExpiry_ReissuesCookie(t *testing.T) {
 	t.Log("sliding expiry is unit-tested in session_test.go (TestValidate_SlidingReissue)")
 	_ = time.Second // satisfy import
 }
+
+// ─── A-10 regression: Auth role must never default to admin on /auth/me failure ─
+
+// TestMe_ReturnsRole_NotAdmin asserts that /auth/me for a logged-in admin
+// session returns the actual role field from the server.  The webui Auth.boot
+// now uses me.role || 'readonly' (not 'admin') so the server must return a
+// non-empty role for the promotion to work correctly.
+func TestMe_ReturnsRole_NotAdmin(t *testing.T) {
+	_, ts, _ := newAuthTestServer(t)
+	client := clientWithJar(t)
+
+	// Login as the bootstrapped clustr/clustr admin.
+	body := strings.NewReader(`{"username":"clustr","password":"clustr"}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := client.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login failed: %d", resp.StatusCode)
+	}
+
+	// /me must return a non-empty role so the webui can promote from 'readonly'.
+	meReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/auth/me", nil)
+	meResp, err := client.Do(meReq)
+	if err != nil {
+		t.Fatalf("me request: %v", err)
+	}
+	defer meResp.Body.Close()
+
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("/me: got %d, want 200", meResp.StatusCode)
+	}
+
+	var out map[string]any
+	_ = json.NewDecoder(meResp.Body).Decode(&out)
+
+	role, _ := out["role"].(string)
+	if role == "" {
+		t.Fatal("/me returned empty role — webui will not promote from 'readonly' default")
+	}
+	// The server must not inject an 'admin' role for non-admin users.
+	// For the bootstrap user this is 'admin' which is correct; the key assertion
+	// is that the field is populated so the JS fallback 'readonly' is not used.
+	t.Logf("/me role = %q (non-empty, webui will promote from readonly default)", role)
+}
+
+// TestMe_NoSession_Returns401_NotAdminRole is the core A-10 regression guard.
+// If /auth/me on a missing session ever returned 200 with a privileged role,
+// the previous bug (Auth._role defaulting to 'admin' on any failure) would be
+// invisible because the server was also handing out admin.  This test verifies
+// the server correctly returns 401 — not a 200 with role:"admin" — ensuring
+// the JS retry loop will redirect to login rather than silently granting admin.
+func TestMe_NoSession_Returns401_NotAdminRole(t *testing.T) {
+	_, ts, _ := newAuthTestServer(t)
+	// No login — no session cookie.
+	client := clientWithJar(t)
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/auth/me", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("me request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/me without session: got %d, want 401 — server must not return a role on unauthenticated requests", resp.StatusCode)
+	}
+
+	// Confirm the body does not contain role:"admin".
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if role, ok := out["role"]; ok {
+		t.Errorf("/me 401 body contains role=%v — server must not leak role on unauthenticated requests", role)
+	}
+}

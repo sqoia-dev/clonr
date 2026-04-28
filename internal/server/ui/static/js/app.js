@@ -9289,35 +9289,77 @@ const Auth = {
     // boot verifies the session via GET /api/v1/auth/me.
     // Valid session → start the app (unless force-password-change is set).
     // No session / expired → redirect to /login.
+    //
+    // A-10 fix: Auth._role defaults to 'readonly' (lowest privilege) until a
+    // successful /auth/me response promotes it to the real role.  On transient
+    // network failure we retry up to 3 times with exponential backoff before
+    // giving up and showing an error banner.  We never fall back to 'admin' —
+    // a missing auth response must never grant elevated UI affordances.
     async boot() {
         // If the server flagged a forced password change, redirect immediately.
         if (document.cookie.split(';').some(c => c.trim().startsWith('clustr_force_password_change='))) {
             window.location.href = '/set-password';
             return;
         }
-        try {
-            const resp = await fetch('/api/v1/auth/me', {
-                credentials: 'same-origin',
-            });
-            if (!resp.ok) {
-                window.location.href = '/login';
-                return;
-            }
-            // Also check the response — if the session is key-based, role may be missing.
-            const me = await resp.json().catch(() => ({}));
-            Auth._role = me.role || 'admin';
 
-            // Populate sidebar footer with user info
-            const userAvatar = document.getElementById('user-avatar');
-            const userName = document.getElementById('user-name');
-            const userRole = document.getElementById('user-role');
-            if (me.username) {
-                if (userAvatar) userAvatar.textContent = me.username.substring(0, 2).toUpperCase();
-                if (userName) userName.textContent = me.username;
+        // Attempt /auth/me up to 3 times with exponential backoff (500ms, 1s, 2s).
+        // A 401/403 is definitive (not retried) — redirect to login immediately.
+        // A network error or unexpected non-2xx is retried.
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+                await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt - 1)));
             }
-            if (userRole) userRole.textContent = Auth._role;
-        } catch (_) {
-            // Network error — still try to start the app; api.js will redirect on 401.
+            try {
+                const resp = await fetch('/api/v1/auth/me', { credentials: 'same-origin' });
+                if (resp.status === 401 || resp.status === 403) {
+                    window.location.href = '/login';
+                    return;
+                }
+                if (!resp.ok) {
+                    // Non-auth server error — retry.
+                    lastErr = new Error(`/auth/me returned HTTP ${resp.status}`);
+                    continue;
+                }
+                // Success: promote role from lowest-privilege default to actual role.
+                // If the role field is absent (key-based session), keep 'readonly' —
+                // never escalate to 'admin' on a missing or unexpected response shape.
+                const me = await resp.json().catch(() => ({}));
+                Auth._role = me.role || 'readonly';
+
+                // Populate sidebar footer with user info.
+                const userAvatar = document.getElementById('user-avatar');
+                const userName = document.getElementById('user-name');
+                const userRole = document.getElementById('user-role');
+                if (me.username) {
+                    if (userAvatar) userAvatar.textContent = me.username.substring(0, 2).toUpperCase();
+                    if (userName) userName.textContent = me.username;
+                }
+                if (userRole) userRole.textContent = Auth._role;
+                lastErr = null;
+                break;
+            } catch (err) {
+                // Network-level failure (offline, DNS, etc.) — retry.
+                lastErr = err;
+            }
+        }
+
+        if (lastErr) {
+            // All 3 attempts failed.  Auth._role stays at 'readonly' (the default).
+            // Show a persistent error banner so the operator knows the session state
+            // could not be confirmed.  Do NOT fall back to 'admin'.
+            const banner = document.getElementById('session-expiry-banner');
+            if (banner) {
+                banner.style.background = 'var(--error, #ef4444)';
+                banner.style.color = '#fff';
+                banner.style.cursor = 'default';
+                banner.textContent = "Couldn’t load your account — refresh to retry. Admin controls are hidden until your session is confirmed.";
+                banner.style.display = 'block';
+                // Remove the onclick so clicking the banner doesn't call extendSession.
+                banner.onclick = null;
+            }
+            // Still allow the app to start in read-only mode; api.js will redirect
+            // on the first 401 from any actual data fetch.
         }
         // Bootstrap LDAP nav visibility. Non-fatal — missing nav section is safe.
         if (typeof LDAPPages !== 'undefined') {
@@ -9338,7 +9380,7 @@ const Auth = {
         App.init();
     },
 
-    _role: 'admin', // cached role from /auth/me, used for UI gating
+    _role: 'readonly', // cached role from /auth/me — defaults to lowest privilege until /auth/me succeeds
 };
 
 // ─── Boot ─────────────────────────────────────────────────────────────────
