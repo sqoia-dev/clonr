@@ -394,25 +394,37 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		updReqTags = req.Groups
 	}
 
+	// Migration 054: resolve per-node verify timeout override.
+	var verifyTimeoutOverride *int
+	switch {
+	case req.ClearVerifyTimeoutOverride:
+		verifyTimeoutOverride = nil // revert to global
+	case req.VerifyTimeoutOverride != nil:
+		verifyTimeoutOverride = req.VerifyTimeoutOverride
+	default:
+		verifyTimeoutOverride = existing.VerifyTimeoutOverride // preserve existing
+	}
+
 	cfg := api.NodeConfig{
-		ID:                 id,
-		Hostname:           req.Hostname,
-		HostnameAuto:       false, // admin explicitly set the hostname → mark as non-auto
-		FQDN:               req.FQDN,
-		PrimaryMAC:         req.PrimaryMAC,
-		Interfaces:         req.Interfaces,
-		SSHKeys:            req.SSHKeys,
-		KernelArgs:         req.KernelArgs,
-		Tags:               updReqTags,
-		Groups:             updReqTags, // dual-emit: mirror tags into deprecated field
-		CustomVars:         req.CustomVars,
-		BaseImageID:        req.BaseImageID,
-		PowerProvider:      powerProvider,
-		GroupID:            desiredGroupID,
-		DiskLayoutOverride: layoutOverride,
-		ExtraMounts:        req.ExtraMounts,
-		CreatedAt:          existing.CreatedAt,
-		UpdatedAt:          time.Now().UTC(),
+		ID:                    id,
+		Hostname:              req.Hostname,
+		HostnameAuto:          false, // admin explicitly set the hostname → mark as non-auto
+		FQDN:                  req.FQDN,
+		PrimaryMAC:            req.PrimaryMAC,
+		Interfaces:            req.Interfaces,
+		SSHKeys:               req.SSHKeys,
+		KernelArgs:            req.KernelArgs,
+		Tags:                  updReqTags,
+		Groups:                updReqTags, // dual-emit: mirror tags into deprecated field
+		CustomVars:            req.CustomVars,
+		BaseImageID:           req.BaseImageID,
+		PowerProvider:         powerProvider,
+		GroupID:               desiredGroupID,
+		DiskLayoutOverride:    layoutOverride,
+		ExtraMounts:           req.ExtraMounts,
+		VerifyTimeoutOverride: verifyTimeoutOverride,
+		CreatedAt:             existing.CreatedAt,
+		UpdatedAt:             time.Now().UTC(),
 	}
 	if cfg.Interfaces == nil {
 		cfg.Interfaces = []api.InterfaceConfig{}

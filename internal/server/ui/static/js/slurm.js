@@ -120,6 +120,25 @@ const SlurmPages = {
                 <span id="slurm-reseed-status" style="margin-left:10px;font-size:12px;color:var(--text-secondary);"></span>
             </div>` : '';
 
+        // C3-25: Preview generated config section.
+        const previewConfigSection = st.enabled ? `
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
+                <h3 style="font-size:14px;font-weight:600;margin:0 0 6px;">Preview Generated Config</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin:0 0 10px;">
+                    Preview what clustr would generate and push to a specific node.
+                    Useful for validating templates before a push.
+                </p>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                    <select id="slurm-settings-preview-file" style="padding:6px 10px;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)">
+                        ${(st.managed_files || []).map(f => `<option value="${escHtml(f)}">${escHtml(f)}</option>`).join('')}
+                    </select>
+                    <input type="text" id="slurm-settings-preview-node" placeholder="Node ID (UUID)"
+                        style="flex:1;min-width:200px;padding:6px 10px;font-size:13px;font-family:monospace;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)">
+                    <button id="slurm-settings-preview-btn" class="btn btn-secondary" style="font-size:13px;padding:6px 14px;">Preview</button>
+                </div>
+                <div id="slurm-settings-preview-result" style="display:none;"></div>
+            </div>` : '';
+
         const disableBtn = st.enabled && isAdmin ? `
             <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border);">
                 <h3 style="font-size:14px;font-weight:600;margin:0 0 8px;color:var(--text-secondary);">Danger Zone</h3>
@@ -182,6 +201,7 @@ const SlurmPages = {
             </table>
             ${enableForm}
             ${restoreDefaultsBtn}
+            ${previewConfigSection}
             ${disableBtn}
         `);
     },
@@ -247,6 +267,29 @@ const SlurmPages = {
                         }
                     },
                 });
+            });
+        }
+
+        // C3-25: Preview generated config button.
+        const previewBtn = document.getElementById('slurm-settings-preview-btn');
+        if (previewBtn) {
+            previewBtn.addEventListener('click', async () => {
+                const filename = document.getElementById('slurm-settings-preview-file')?.value || '';
+                const nodeId   = (document.getElementById('slurm-settings-preview-node')?.value || '').trim();
+                const resultEl = document.getElementById('slurm-settings-preview-result');
+                if (!filename) { App.toast('Select a config file', 'error'); return; }
+                if (!nodeId)   { App.toast('Enter a Node ID', 'error'); return; }
+                if (resultEl) { resultEl.style.display = ''; resultEl.innerHTML = loading('Rendering…'); }
+                try {
+                    const data = await API.slurm.renderPreview(filename, nodeId);
+                    if (resultEl) {
+                        resultEl.innerHTML = `<pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:14px;overflow-x:auto;font-size:12px;max-height:400px;overflow-y:auto;white-space:pre;">${escHtml(data.rendered || '')}</pre>`;
+                    }
+                } catch (err) {
+                    if (resultEl) {
+                        resultEl.innerHTML = `<div class="alert alert-error">${escHtml(err.message)}</div>`;
+                    }
+                }
             });
         }
     },
@@ -1428,9 +1471,15 @@ const SlurmPages = {
     async syncStatus() {
         App.render(loading('Loading sync status…'));
         try {
-            const data = await API.slurm.syncStatus();
-            App.render(SlurmPages._syncStatusHtml(data.drift || []));
-            SlurmPages._bindSyncStatusEvents(data.drift || []);
+            // C3-24: fetch both sync status and all nodes to compute "deployed but not tracked".
+            const [data, nodesResp] = await Promise.allSettled([
+                API.slurm.syncStatus(),
+                API.nodes.list(),
+            ]);
+            const syncData = data.status === 'fulfilled' ? data.value : { drift: [] };
+            const allNodes = nodesResp.status === 'fulfilled' ? (nodesResp.value.nodes || []) : [];
+            App.render(SlurmPages._syncStatusHtml(syncData.drift || [], allNodes));
+            SlurmPages._bindSyncStatusEvents(syncData.drift || []);
             // Auto-refresh every 30 seconds.
             App.setAutoRefresh(() => SlurmPages.syncStatus(), 30000);
         } catch (err) {
@@ -1438,9 +1487,40 @@ const SlurmPages = {
         }
     },
 
-    _syncStatusHtml(drift) {
+    _syncStatusHtml(drift, allNodes) {
+        // C3-24: compute deployed nodes not yet tracked in Slurm drift.
+        const trackedIds = new Set(drift.map(d => d.node_id));
+        const deployedNodes = (allNodes || []).filter(n => n.deploy_verified_booted_at || n.deploy_completed_preboot_at);
+        const untrackedNodes = deployedNodes.filter(n => !trackedIds.has(n.id));
+
+        const untrackedSection = untrackedNodes.length > 0
+            ? cardWrap('Deployed Nodes Not in Slurm',
+                `<p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary)">
+                    These nodes are deployed but have never received a Slurm config push.
+                    Push configs to add them to your cluster.
+                </p>
+                <div class="table-wrap"><table>
+                    <thead><tr>
+                        <th>Hostname</th><th>MAC</th><th>Status</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                        ${untrackedNodes.map(n => `<tr>
+                            <td style="font-weight:500"><a href="#/nodes/${n.id}">${escHtml(n.hostname || '(unnamed)')}</a></td>
+                            <td class="text-mono text-sm text-dim">${escHtml(n.primary_mac || '—')}</td>
+                            <td>${n.deploy_verified_booted_at ? '<span class="badge badge-ready badge-sm">Verified</span>' : '<span class="badge badge-warning badge-sm">Preboot</span>'}</td>
+                            <td>
+                                <button class="btn btn-primary btn-sm" data-add-cluster-node="${escHtml(n.id)}"
+                                    data-add-cluster-name="${escHtml(n.hostname || n.primary_mac)}">
+                                    Add to cluster
+                                </button>
+                            </td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table></div>`)
+            : '';
+
         if (!drift.length) {
-            return cardWrap('Slurm Sync Status', emptyState('No sync data yet. Push configs to nodes to start tracking.'));
+            return untrackedSection + cardWrap('Slurm Sync Status', emptyState('No sync data yet. Push configs to nodes to start tracking.'));
         }
 
         // Build summary counts.
@@ -1478,6 +1558,15 @@ const SlurmPages = {
             `<th style="text-align:center;padding:8px 10px;font-size:11px;color:var(--text-secondary);font-weight:600;font-family:monospace;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(f)}">${escHtml(f)}</th>`
         ).join('');
 
+        // C3-9: derive per-node Slurm version from drift entries (most recent entry wins).
+        const nodeVersions = {};
+        for (const d of drift) {
+            if (d.slurm_version) nodeVersions[d.node_id] = d.slurm_version;
+        }
+        // Detect version divergence: if more than one distinct version is present, highlight stragglers.
+        const allVersions = [...new Set(Object.values(nodeVersions).filter(Boolean))];
+        const dominantVersion = allVersions.length === 1 ? allVersions[0] : null; // single version = no divergence
+
         const matrixRows = nodeIds.map(nodeId => {
             const nodeDrift = drift.filter(d => d.node_id === nodeId);
             const nodeSync  = nodeDrift.every(d => d.in_sync);
@@ -1497,11 +1586,16 @@ const SlurmPages = {
             const rowBadge = nodeSync
                 ? `<span class="badge badge-ready" style="font-size:10px;">sync</span>`
                 : `<span class="badge badge-error" style="font-size:10px;">drift</span>`;
+            // C3-9: Slurm version column — highlight if diverged from dominant version.
+            const nodeVer = nodeVersions[nodeId] || '—';
+            const verDiverged = dominantVersion && nodeVer !== dominantVersion && nodeVer !== '—';
+            const verCell = `<td style="padding:8px 12px;font-family:monospace;font-size:12px;white-space:nowrap;${verDiverged ? 'color:#dc2626;font-weight:600;' : 'color:var(--text-secondary);'}" title="${verDiverged ? 'Version mismatch — upgrade pending' : ''}">${escHtml(nodeVer)}</td>`;
             return `
                 <tr style="border-bottom:1px solid var(--border);">
                     <td style="padding:8px 12px;font-family:monospace;font-size:12px;white-space:nowrap;">
                         ${escHtml(nodeId.substring(0,12))}… ${rowBadge}
                     </td>
+                    ${verCell}
                     ${cols}
                 </tr>`;
         }).join('');
@@ -1524,21 +1618,43 @@ const SlurmPages = {
                     <thead>
                         <tr style="border-bottom:2px solid var(--border);">
                             <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;">Node</th>
+                            <!-- C3-9: Slurm version column — surfaces upgrade divergence -->
+                            <th style="text-align:left;padding:8px 12px;font-size:12px;color:var(--text-secondary);font-weight:600;" title="Slurm version installed on node">Slurm Version</th>
                             ${colHeaders}
                         </tr>
                     </thead>
                     <tbody>${matrixRows}</tbody>
                 </table>
             </div>
-        `);
+        `) + untrackedSection;
     },
 
     _bindSyncStatusEvents(drift) {
-        const btn = document.getElementById('sync-push-all-btn');
-        if (!btn) return;
-        btn.addEventListener('click', () => {
-            // Navigate to push page — the out-of-sync data is visible there.
-            App.navigate('#/slurm/push');
+        const pushAllBtn = document.getElementById('sync-push-all-btn');
+        if (pushAllBtn) {
+            pushAllBtn.addEventListener('click', () => {
+                // Navigate to push page — the out-of-sync data is visible there.
+                App.navigate('#/slurm/push');
+            });
+        }
+        // C3-24: "Add to cluster" buttons for untracked nodes.
+        document.querySelectorAll('[data-add-cluster-node]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const nodeId = btn.dataset.addClusterNode;
+                const nodeName = btn.dataset.addClusterName;
+                btn.disabled = true;
+                btn.textContent = 'Pushing…';
+                try {
+                    const op = await API.slurm.push({ node_ids: [nodeId] });
+                    App.toast(`Slurm push started for ${escHtml(nodeName)} (op: ${op.op_id || ''})`, 'success');
+                    // Refresh sync status so the node moves from untracked to tracked.
+                    setTimeout(() => SlurmPages.syncStatus(), 2000);
+                } catch (e) {
+                    App.toast(`Push failed: ${e.message}`, 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Add to cluster';
+                }
+            });
         });
     },
 

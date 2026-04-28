@@ -16,11 +16,28 @@ const Router = {
         this._navigate();
     },
 
+    // C3-11: navigation guard. Pages that track dirty state (e.g. node detail)
+    // set this to a function that returns a Promise<bool> — true = proceed, false = cancel.
+    // Cleared automatically on each completed navigation.
+    _navigationGuard: null,
+
     navigate(hash) {
-        window.location.hash = hash;
+        if (this._navigationGuard) {
+            const guard = this._navigationGuard;
+            guard().then(ok => {
+                if (ok) {
+                    this._navigationGuard = null;
+                    window.location.hash = hash;
+                }
+            });
+        } else {
+            window.location.hash = hash;
+        }
     },
 
     _navigate() {
+        // Clear navigation guard whenever a navigation commits (hashchange fired).
+        this._navigationGuard = null;
         const hash = window.location.hash.replace(/^#/, '') || '/';
         // Stop any running auto-refresh from the previous page.
         if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
@@ -31,6 +48,8 @@ const Router = {
         // Close any ISO build SSE stream and elapsed timer.
         if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
         if (Pages._isoBuildElapsedTimer) { clearInterval(Pages._isoBuildElapsedTimer); Pages._isoBuildElapsedTimer = null; }
+        // C3-13: Close node-log SSE stream on navigate-away (was only disconnected on tab switch, not on full nav).
+        if (App._nodeLogStream) { App._nodeLogStream.disconnect(); App._nodeLogStream = null; }
         // Remove node detail page click listener for actions dropdown.
         if (Pages._closeActionsDropdownOnOutsideClick) {
             document.removeEventListener('click', Pages._closeActionsDropdownOnOutsideClick);
@@ -86,6 +105,7 @@ const App = {
     // toast shows a transient notification at the bottom-right of the screen.
     // kind: "success" | "error" | "info" (default info)
     // Auto-dismisses after 4 seconds.
+    // C3-12: duplicate messages are deduplicated — a count badge is shown instead of stacking.
     toast(message, kind = 'info') {
         let container = document.getElementById('toast-container');
         if (!container) {
@@ -94,20 +114,44 @@ const App = {
             container.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none';
             document.body.appendChild(container);
         }
-        const toast = document.createElement('div');
         const colors = {
             success: { bg: '#10b981', icon: '✓' },
             error:   { bg: '#ef4444', icon: '✕' },
             info:    { bg: '#3b82f6', icon: 'ℹ' },
         };
         const c = colors[kind] || colors.info;
+        // C3-12: check for existing toast with the same message+kind and bump count.
+        const key = `toast-dedup-${kind}-${message}`;
+        const existing = container.querySelector(`[data-toast-key="${CSS.escape(key)}"]`);
+        if (existing) {
+            let badge = existing.querySelector('.toast-count-badge');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'toast-count-badge';
+                badge.style.cssText = 'background:rgba(0,0,0,0.25);border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;margin-left:4px;';
+                badge.textContent = '2';
+                const msgSpan = existing.querySelector('span[style*="flex:1"]');
+                if (msgSpan) msgSpan.appendChild(badge);
+            } else {
+                badge.textContent = String(parseInt(badge.textContent, 10) + 1);
+            }
+            // Reset dismiss timer by clearing and resetting.
+            if (existing._toastTimer) clearTimeout(existing._toastTimer);
+            existing._toastTimer = setTimeout(() => {
+                existing.style.animation = 'toastOut 0.2s ease-in forwards';
+                setTimeout(() => existing.remove(), 200);
+            }, 4000);
+            return;
+        }
+        const toast = document.createElement('div');
+        toast.setAttribute('data-toast-key', key);
         toast.setAttribute('role', 'alert');
         toast.setAttribute('aria-live', 'assertive');
         toast.setAttribute('aria-atomic', 'true');
         toast.style.cssText = `background:${c.bg};color:white;padding:12px 16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:14px;font-weight:500;min-width:280px;max-width:420px;display:flex;align-items:center;gap:10px;pointer-events:auto;animation:toastIn 0.2s ease-out`;
         toast.innerHTML = `<span style="font-size:18px;font-weight:bold" aria-hidden="true">${c.icon}</span><span style="flex:1">${escHtml(message)}</span><button style="cursor:pointer;opacity:0.7;padding:0 4px;background:none;border:none;color:white;font-size:16px;line-height:1" aria-label="Dismiss notification" onclick="this.parentElement.remove()">×</button>`;
         container.appendChild(toast);
-        setTimeout(() => {
+        toast._toastTimer = setTimeout(() => {
             toast.style.animation = 'toastOut 0.2s ease-in forwards';
             setTimeout(() => toast.remove(), 200);
         }, 4000);
@@ -261,23 +305,49 @@ const App = {
             }
         };
 
-        // Session expiry warning: poll /auth/me every 60s; if TTL < 600s show banner.
+        // C3-10: Session expiry banner with live countdown timer and auto-redirect.
+        // Polls /auth/me every 60s. When TTL < 600s, shows banner. When TTL < 300s,
+        // switches to second-level countdown. At TTL=0, redirects to /login.
+        let _sessionExpiresAt = null;
+        let _sessionCountdownTimer = null;
+
+        const _updateSessionBanner = () => {
+            const banner = document.getElementById('session-expiry-banner');
+            if (!banner || !_sessionExpiresAt) return;
+            const ttlSecs = Math.floor((_sessionExpiresAt - Date.now()) / 1000);
+            if (ttlSecs <= 0) {
+                // Session expired — redirect to login.
+                clearInterval(_sessionCountdownTimer);
+                window.location.href = '/login?expired=1';
+                return;
+            }
+            if (ttlSecs < 600) {
+                banner.style.display = 'block';
+                if (ttlSecs < 60) {
+                    banner.textContent = `Session expires in ${ttlSecs}s — click to extend`;
+                } else {
+                    const mins = Math.ceil(ttlSecs / 60);
+                    banner.textContent = `Session expires in ${mins} minute${mins === 1 ? '' : 's'} — click to extend`;
+                }
+            } else {
+                banner.style.display = 'none';
+            }
+        };
+
         const checkSession = async () => {
             const banner = document.getElementById('session-expiry-banner');
             if (!banner) return;
             try {
                 const me = await fetch('/api/v1/auth/me', { credentials: 'same-origin' });
-                if (!me.ok) { banner.style.display = 'none'; return; }
+                if (!me.ok) { banner.style.display = 'none'; _sessionExpiresAt = null; return; }
                 const data = await me.json();
                 if (!data.expires_at) { banner.style.display = 'none'; return; }
-                const expiresAt = new Date(data.expires_at);
-                const ttlSecs = Math.floor((expiresAt - Date.now()) / 1000);
-                if (ttlSecs < 600) {
-                    const mins = Math.max(1, Math.ceil(ttlSecs / 60));
-                    banner.textContent = `Session expires in ${mins} minute${mins === 1 ? '' : 's'} — click to extend`;
-                    banner.style.display = 'block';
-                } else {
-                    banner.style.display = 'none';
+                _sessionExpiresAt = new Date(data.expires_at).getTime();
+                _updateSessionBanner();
+                // Start second-level countdown when TTL < 300s (5 minutes).
+                const ttlSecs = Math.floor((_sessionExpiresAt - Date.now()) / 1000);
+                if (ttlSecs < 300 && !_sessionCountdownTimer) {
+                    _sessionCountdownTimer = setInterval(_updateSessionBanner, 1000);
                 }
             } catch (_) {
                 if (banner) banner.style.display = 'none';
@@ -657,11 +727,12 @@ const Pages = {
         App.render(loading('Loading dashboard…'));
 
         try {
-            const [imagesResp, nodesResp, progressEntries, initramfsInfo] = await Promise.all([
+            const [imagesResp, nodesResp, progressEntries, initramfsInfo, healthReady] = await Promise.all([
                 API.images.list(),
                 API.nodes.list(),
                 API.progress.list().catch(() => []),
                 API.system.initramfs().catch(() => null),
+                API.health.ready().catch(() => null),
             ]);
 
             const images = imagesResp.images || [];
@@ -796,19 +867,43 @@ const Pages = {
                         <div class="stat-value" id="dash-active-count">${Array.from(deployMap.values()).filter(d => d.phase !== 'complete' && d.phase !== 'error').length}</div>
                         <div class="stat-sub" id="dash-complete-count">${Array.from(deployMap.values()).filter(d => d.phase === 'complete').length} completed recently</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon stat-icon-purple">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-                                <path d="M12 2a10 10 0 1 0 10 10"/><polyline points="12 6 12 12 16 14"/>
-                            </svg>
-                        </div>
-                        <div class="stat-label">System Health</div>
-                        <div class="stat-value" style="font-size:18px;color:var(--success)">Online</div>
-                        <div class="stat-sub">PXE · API · Logs</div>
-                    </div>
+                    ${(() => {
+                        // C3-22: Dynamic System Health card from /healthz/ready.
+                        const hr = healthReady;
+                        let overallStatus = 'OK';
+                        let statusColor = 'var(--success)';
+                        let checkSummary = 'All checks passing';
+                        if (hr && hr.checks) {
+                            const failing = Object.entries(hr.checks).filter(([, v]) => v !== 'ok');
+                            if (failing.length > 0) {
+                                const hasMissing = failing.some(([, v]) => v.startsWith('missing'));
+                                overallStatus = hasMissing ? 'Degraded' : 'Error';
+                                statusColor = hasMissing ? 'var(--warning)' : 'var(--error)';
+                                checkSummary = failing.map(([k, v]) => `${k}: ${v.split(':')[0]}`).join(' · ');
+                            }
+                        } else if (!hr) {
+                            overallStatus = 'Unknown';
+                            statusColor = 'var(--text-secondary)';
+                            checkSummary = 'Health check unavailable';
+                        }
+                        return `<div class="stat-card" id="dash-health-card">
+                            <div class="stat-icon stat-icon-purple">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                                    <path d="M12 2a10 10 0 1 0 10 10"/><polyline points="12 6 12 12 16 14"/>
+                                </svg>
+                            </div>
+                            <div class="stat-label">System Health</div>
+                            <div class="stat-value" id="dash-health-status" style="font-size:18px;color:${statusColor}">${overallStatus}</div>
+                            <div class="stat-sub" id="dash-health-sub" title="${escHtml(checkSummary)}">${escHtml(checkSummary)}</div>
+                        </div>`;
+                    })()}
                 </div>
 
-                ${this._buildAnomalyCard(nodes)}
+                <!-- C2-5: Anomaly card — HTMX polls /api/v1/dashboard/anomalies every 30s.
+                     The card is shown/hidden based on data-anomaly-total written by the partial.
+                     hx-swap="innerHTML" replaces only the card body; hx-trigger="load, every 30s"
+                     fires immediately on insert then refreshes on schedule. -->
+                ${this._anomalyCardWrapper()}
 
                 ${cardWrap('Active Deployments',
                     `<div id="deploy-progress-container">${this._deployProgressTable(deployMap)}</div>`)}
@@ -842,6 +937,15 @@ const Pages = {
                     this._activityTimeline(recentActivity),
                     '') : ''}
             `);
+
+            // C2-5: Activate HTMX on the anomaly card body so hx-get fires.
+            // App.render uses innerHTML which bypasses HTMX's MutationObserver,
+            // so we must call htmx.process() manually on the new element.
+            const anomalyBody = document.getElementById('dash-anomaly-card-body');
+            if (anomalyBody && typeof htmx !== 'undefined') {
+                htmx.process(anomalyBody);
+            }
+            this._attachAnomalyVisibilityObserver();
 
             const viewer = document.getElementById('dash-log-viewer');
             if (viewer) {
@@ -1006,12 +1110,14 @@ const Pages = {
     // - createRow(item): returns a new <tr> element with data-key set
     // - updateRow(tr, item): mutates an existing <tr> in-place with fresh values
     _diffTable(container, newData, keyField, createRow, updateRow) {
-        const tbody = container.querySelector('tbody');
-        // If the table structure doesn't exist yet (e.g. was empty-state), rebuild fully.
+        let tbody = container.querySelector('tbody');
+        // C3-2: If the table structure doesn't exist yet (e.g. container shows the
+        // empty-state div), bootstrap a minimal table scaffold so the diff can proceed.
         if (!tbody) {
-            if (newData.length === 0) return; // leave empty-state as-is
-            // Can't diff without a tbody — let the next full navigation render handle it.
-            return;
+            if (newData.length === 0) return; // leave empty-state as-is; nothing to show
+            // Container has empty-state markup — replace with a bare table so rows can be appended.
+            container.innerHTML = '<div class="table-wrap"><table><tbody></tbody></table></div>';
+            tbody = container.querySelector('tbody');
         }
 
         const existing = new Map();
@@ -1032,8 +1138,28 @@ const Pages = {
         for (const [, el] of existing) el.remove();
     },
 
+    // C2-5: _anomalyCardWrapper returns the HTMX-driven anomaly card placeholder.
+    // On load + every 30s, HTMX swaps the outerHTML of this div with the server
+    // response. When there are no anomalies the server returns an empty <div>,
+    // effectively removing the card from the layout. When anomalies exist the
+    // server returns the full card HTML (including card-header and card-body).
+    // hx-headers sets HX-Request: true so the server returns the HTML partial.
+    _anomalyCardWrapper() {
+        return `<div id="dash-anomaly-htmx"
+            hx-get="/api/v1/dashboard/anomalies"
+            hx-trigger="load, every 30s"
+            hx-swap="outerHTML"
+            hx-headers='{"HX-Request": "true"}'></div>`;
+    },
+
+    // _attachAnomalyVisibilityObserver — no-op stub kept so call sites do not
+    // need updating. The outerHTML swap strategy makes a MutationObserver
+    // unnecessary (HTMX replaces the element itself on each poll).
+    _attachAnomalyVisibilityObserver() {},
+
     // B2-4: _buildAnomalyCard renders an "Anomalies" card with clickable node filter CTAs.
     // Shows counts for: failed reimages, verify_timeout, never deployed, stale (>90d).
+    // NOTE: kept for backward compatibility; replaced on the dashboard by C2-5 HTMX version.
     _buildAnomalyCard(nodes) {
         if (!nodes || nodes.length === 0) return '';
         const now = Date.now();
@@ -1117,9 +1243,12 @@ const Pages = {
 
     // _deployProgressTable renders the active deployments table from a MAC → DeployProgress map.
     _deployProgressTable(deployMap) {
-        const entries = Array.from(deployMap.values())
-            .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
-            .slice(0, 20);
+        const all = Array.from(deployMap.values())
+            .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+        // C3-1: cap at 20, show "+N more…" indicator when there are additional entries.
+        const CAP = 20;
+        const entries = all.slice(0, CAP);
+        const overflow = all.length - CAP;
 
         // B2-7: better empty state with CTA.
         if (!entries.length) return emptyState('No deployments in progress', 'No deployments in progress. Trigger a reimage from the Nodes page.', '<a href="#/nodes" class="btn btn-secondary btn-sm" style="margin-top:8px;">Go to Nodes</a>');
@@ -1161,6 +1290,9 @@ const Pages = {
                     <td class="text-dim text-sm">${fmtRelative(p.updated_at)}</td>
                 </tr>`;
             }).join('')}
+            ${overflow > 0 ? `<tr><td colspan="6" class="text-dim text-sm" style="text-align:center;padding:8px 12px">
+                + ${overflow} more deployment${overflow !== 1 ? 's' : ''} — <a href="#/deploys" class="link-accent">view all</a>
+            </td></tr>` : ''}
             </tbody>
         </table></div>`;
     },
@@ -1266,10 +1398,10 @@ const Pages = {
     async images(filterTag = '') {
         App.render(loading('Loading images…'));
         try {
-            const [resp, initramfsInfo] = await Promise.all([
+            // C3-23: Initramfs card moved to Settings → System tab.
+            const [resp] = await Promise.all([
                 // Always load all images for tag collection; server-side ?tag= used when filtering.
                 filterTag ? API.images.list('', filterTag) : API.images.list(),
-                API.system.initramfs().catch(() => null),
             ]);
             const images = resp.images || [];
 
@@ -1315,8 +1447,6 @@ const Pages = {
                         </button>
                     </div>
                 </div>
-
-                ${this._initramfsCard(initramfsInfo)}
 
                 ${images.length === 0 && !filterTag ? `
                 <!-- S5-8: Getting-started callout for new operators (Persona D) -->
@@ -2317,6 +2447,10 @@ const Pages = {
                         ${img.status === 'ready'
                             ? `<button class="btn btn-secondary" onclick="Pages.openShellTerminal('${escHtml(img.id)}')">Shell Access</button>`
                             : ''}
+                        ${img.status === 'ready'
+                            // C3-6: blob download via fetch() so non-2xx responses show an error toast.
+                            ? `<button class="btn btn-secondary btn-sm" onclick="Pages._downloadImageBlob('${escHtml(img.id)}', '${escHtml(img.name)}')">Download Image</button>`
+                            : ''}
                         ${Auth._role === 'admin' ? `<button class="btn btn-danger btn-sm" onclick="Pages.showDeleteImageModal('${img.id}', '${escHtml(img.name)}')">Delete Image</button>` : ''}
                     </div>
                 </div>
@@ -2392,6 +2526,46 @@ const Pages = {
             }
         } catch (e) {
             App.render(alertBox(`Failed to load image: ${e.message}`));
+        }
+    },
+
+    // C3-6: _downloadImageBlob downloads the image blob via fetch() so that
+    // non-2xx responses (e.g. 404 blob not found, 503 too many streams) are
+    // surfaced as an error toast rather than a silent browser failure.
+    async _downloadImageBlob(imageId, imageName) {
+        const btn = event && event.target;
+        if (btn) { btn.disabled = true; btn.textContent = 'Preparing…'; }
+        try {
+            const url = `/api/v1/images/${encodeURIComponent(imageId)}/blob`;
+            // Build auth headers without Content-Type (this is a GET, not a JSON post).
+            const headers = {};
+            const tok = API._token();
+            if (tok) headers['Authorization'] = `Bearer ${tok}`;
+            const resp = await fetch(url, {
+                headers,
+                credentials: 'same-origin',
+            });
+            if (!resp.ok) {
+                let errMsg = `Download failed (${resp.status})`;
+                try { const j = await resp.json(); errMsg = j.error || errMsg; } catch (_) {}
+                App.toast(errMsg, 'error');
+                return;
+            }
+            // Stream the response into a Blob, then trigger browser download.
+            const blob = await resp.blob();
+            const objUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objUrl;
+            // Use imageName as filename, stripping unsafe characters.
+            a.download = (imageName || imageId).replace(/[/\\?%*:|"<>]/g, '_') + '.tar';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(objUrl), 10000);
+        } catch (e) {
+            App.toast(`Download error: ${e.message}`, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Download Image'; }
         }
     },
 
@@ -2855,7 +3029,32 @@ const Pages = {
         bar.innerHTML = `
             <span style="font-size:13px;font-weight:600">${count} node${count !== 1 ? 's' : ''} selected</span>
             <button class="btn btn-primary btn-sm" onclick="Pages._nodesBulkReimage()">Reimage Selected</button>
+            <div style="width:1px;background:var(--border);align-self:stretch"></div>
+            <button class="btn btn-secondary btn-sm" title="Select all nodes in failed state"
+                onclick="Pages._nodesSelectByStatus('failed')">+ Failed</button>
+            <button class="btn btn-secondary btn-sm" title="Select all nodes with verify-boot timeout"
+                onclick="Pages._nodesSelectByStatus('verify_timeout')">+ Timed Out</button>
+            <button class="btn btn-secondary btn-sm" title="Select all nodes that have never deployed (image assigned but no deploy attempt)"
+                onclick="Pages._nodesSelectByStatus('never_deployed')">+ Never Deployed</button>
+            <div style="width:1px;background:var(--border);align-self:stretch"></div>
             <button class="btn btn-secondary btn-sm" onclick="Pages._nodesSelectAll(false);document.getElementById('nodes-select-all')&&(document.getElementById('nodes-select-all').checked=false)">Clear</button>`;
+    },
+
+    // C3-21: _nodesSelectByStatus selects all visible checkboxes for nodes matching status.
+    _nodesSelectByStatus(status) {
+        document.querySelectorAll('.node-select-cb').forEach(cb => {
+            const id = cb.dataset.id;
+            const nodeStatus = cb.dataset.status || '';
+            let match = false;
+            if (status === 'failed')         match = nodeStatus === 'error' || nodeStatus === 'failed';
+            if (status === 'verify_timeout') match = nodeStatus === 'deploy_verify_timeout';
+            if (status === 'never_deployed') match = nodeStatus === 'never_deployed';
+            if (match) {
+                cb.checked = true;
+                Pages._nodesCheckedIds.add(id);
+            }
+        });
+        Pages._nodesUpdateActionBar();
     },
 
     // S5-4: _nodesBulkReimage opens a modal to reimage all checked nodes.
@@ -3141,9 +3340,16 @@ const Pages = {
                 : '';
         })();
         // S5-4: Checkbox cell (admin/operator only).
+        // C3-21: data-status for quick-select by status.
         const canMutate = Auth._role === 'admin' || Auth._role === 'operator';
+        const nodeStatusKey = (() => {
+            if (n.deploy_verify_timeout_at) return 'deploy_verify_timeout';
+            if (n._deployStatus === 'error') return 'error';
+            if (n.base_image_id && !n.deploy_completed_preboot_at && !n._deployStatus) return 'never_deployed';
+            return n._deployStatus || 'unknown';
+        })();
         const checkboxCell = canMutate
-            ? `<td style="width:32px"><input type="checkbox" class="node-select-cb" data-id="${escHtml(n.id)}" onchange="Pages._nodesOnCheckboxChange()"></td>`
+            ? `<td style="width:32px"><input type="checkbox" class="node-select-cb" data-id="${escHtml(n.id)}" data-status="${nodeStatusKey}" onchange="Pages._nodesOnCheckboxChange()"></td>`
             : '';
         // S5-1: Power state cell. Initially shows — ; populated async by Pages._nodesFetchPower().
         const powerCell = `<td id="pwr-cell-${escHtml(n.id)}" class="text-dim text-sm">—</td>`;
@@ -4184,6 +4390,35 @@ const Pages = {
                     </div>
                 </div>
 
+                <!-- C3-20: Last failure summary banner — shown when last deploy failed and hasn't been superseded. -->
+                ${(() => {
+                    const failed = node.last_deploy_failed_at &&
+                        (!node.deploy_completed_preboot_at || new Date(node.last_deploy_failed_at) > new Date(node.deploy_completed_preboot_at)) &&
+                        !node.deploy_verified_booted_at &&
+                        !node.reimage_pending;
+                    if (!failed) return '';
+                    return `<div class="alert alert-error" style="margin:12px 0;display:flex;align-items:flex-start;gap:12px">
+                        <div style="flex:1">
+                            <strong>Last deployment failed</strong>
+                            <span style="font-weight:400;margin-left:6px;font-size:13px">${fmtDate(node.last_deploy_failed_at)}</span>
+                            <div style="margin-top:4px;font-size:13px;color:inherit;opacity:0.85">
+                                The most recent deploy did not complete. Check deploy logs for details.
+                                ${Auth._role !== 'readonly' ? `Reimage when ready to retry.` : ''}
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:8px;flex-shrink:0">
+                            <button class="btn btn-secondary btn-sm"
+                                onclick="Pages._switchNodeTab(document.getElementById('node-tab-btn-logs'), 'tab-logs', 'logs');Pages.loadNodeLogs('${escHtml(node.primary_mac)}')">
+                                View Logs
+                            </button>
+                            ${Auth._role !== 'readonly' ? `<button class="btn btn-secondary btn-sm"
+                                onclick="Pages._nodeActionsTriggerReimage('${node.id}', '${escHtml(displayName)}')">
+                                Re-deploy
+                            </button>` : ''}
+                        </div>
+                    </div>`;
+                })()}
+
                 <div class="tab-bar" id="node-tab-bar">
                     <div class="tab active" id="node-tab-btn-overview" onclick="Pages._switchNodeTab(this, 'tab-overview', 'overview')">Overview</div>
                     <div class="tab" id="node-tab-btn-hardware" onclick="Pages._switchNodeTab(this, 'tab-hardware', 'hardware')">Hardware</div>
@@ -4643,13 +4878,38 @@ const Pages = {
 
                     ${cardWrap('Custom Variables', `
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-                            <span class="text-dim" style="font-size:12px">Key/value pairs available as template variables during deployment</span>
+                            <span class="text-dim" style="font-size:12px">
+                                Key/value pairs available as template variables during deployment.
+                                <!-- C3-15: "Supported variables" link -->
+                                <a href="https://github.com/sqoia-dev/clustr/blob/main/docs/install.md#custom-variables" target="_blank" rel="noopener" style="color:var(--accent);margin-left:4px;">Supported variables</a>
+                            </span>
                             <button type="button" class="btn btn-secondary btn-sm" onclick="Pages._cfgAddVar()">+ Add Variable</button>
                         </div>
                         <div id="cfg-vars-list">
                             ${Object.keys(node.custom_vars || {}).length === 0
                                 ? `<div id="cfg-vars-empty" style="text-align:center;padding:12px;color:var(--text-dim);font-size:12px">No custom variables</div>`
                                 : Object.entries(node.custom_vars || {}).map(([k, v], i) => Pages._cfgVarRowHTML(i, k, v)).join('')}
+                        </div>`)}
+
+                    ${cardWrap('Deployment Timing', `
+                        <div class="form-group" style="margin-bottom:0">
+                            <label>Verify-Boot Timeout Override
+                                <span style="font-weight:400;font-size:12px;color:var(--text-secondary);margin-left:6px">(seconds; leave blank to use global default)</span>
+                            </label>
+                            <div style="display:flex;align-items:center;gap:10px">
+                                <input type="number" id="cfg-verify-timeout" min="0" max="86400"
+                                    value="${node.verify_timeout_override != null ? node.verify_timeout_override : ''}"
+                                    placeholder="e.g. 600"
+                                    oninput="Pages._tabMarkDirty('config')"
+                                    style="width:140px">
+                                <button type="button" class="btn btn-secondary btn-sm" id="cfg-verify-timeout-clear"
+                                    style="${node.verify_timeout_override != null ? '' : 'display:none'}"
+                                    onclick="Pages._cfgClearVerifyTimeout()">Use Global Default</button>
+                            </div>
+                            <div class="form-hint" style="margin-top:4px">
+                                Overrides <code>CLUSTR_VERIFY_TIMEOUT</code> for this node only.
+                                Set to <code>0</code> to disable verify-boot timeout entirely for this node.
+                            </div>
                         </div>`)}
 
                     ${cardWrap('Raw JSON', `<pre class="json-block">${escHtml(JSON.stringify(node, null, 2))}</pre>`)}
@@ -4902,6 +5162,25 @@ const Pages = {
 
             // Close actions dropdown when clicking outside.
             document.addEventListener('click', Pages._closeActionsDropdownOnOutsideClick);
+
+            // C3-11: navigation guard — warn on hash-change if any tab is dirty.
+            Router._navigationGuard = () => {
+                const dirtyTabs = Object.entries(Pages._nodeEditorState)
+                    .filter(([, s]) => s.dirty)
+                    .map(([tab]) => tab);
+                if (dirtyTabs.length === 0) return Promise.resolve(true);
+                return new Promise(resolve => {
+                    Pages.showConfirmModal({
+                        title: 'Unsaved Changes',
+                        message: `You have unsaved changes on the <strong>${escHtml(dirtyTabs.join(', '))}</strong> tab(s). Leave without saving?`,
+                        confirmText: 'Leave',
+                        cancelText: 'Stay',
+                        danger: false,
+                        onConfirm: () => resolve(true),
+                        onCancel:  () => resolve(false),
+                    });
+                });
+            };
 
         } catch (e) {
             App.render(alertBox(`Failed to load node: ${e.message}`));
@@ -5338,6 +5617,22 @@ const Pages = {
             if (k) customVars[k] = v;
         });
 
+        // C3-18: collect verify timeout override (null = use global default).
+        const vtoEl = document.getElementById('cfg-verify-timeout');
+        const vtoRaw = vtoEl ? vtoEl.value.trim() : '';
+        let verifyTimeoutOverride = null;
+        let clearVerifyTimeoutOverride = false;
+        if (vtoRaw === '') {
+            // If the input is blank and there WAS an override before, clear it.
+            // We signal this via clear_verify_timeout_override.
+            clearVerifyTimeoutOverride = true;
+        } else {
+            const parsed = parseInt(vtoRaw, 10);
+            if (!isNaN(parsed) && parsed >= 0) {
+                verifyTimeoutOverride = parsed;
+            }
+        }
+
         try {
             const existing = await API.nodes.get(nodeId);
             const body = {
@@ -5354,6 +5649,8 @@ const Pages = {
                 power_provider:  existing.power_provider || null,
                 extra_mounts:    existing.extra_mounts || [],
                 disk_layout_override: existing.disk_layout_override || null,
+                verify_timeout_override: verifyTimeoutOverride,
+                clear_verify_timeout_override: clearVerifyTimeoutOverride,
             };
             await API.nodes.update(nodeId, body);
 
@@ -5361,6 +5658,7 @@ const Pages = {
                 ssh_keys:    sshKeys.join('\n'),
                 kernel_args: kernelArgs,
                 custom_vars: Object.assign({}, customVars),
+                verify_timeout_override: verifyTimeoutOverride,
             };
             Pages._tabMarkClean('config');
         } catch (e) {
@@ -5373,9 +5671,14 @@ const Pages = {
         Pages._tabMarkSaving('network');
         const saveBtn = document.getElementById('tab-save-network');
 
+        // C3-16: CIDR validation helper — accepts "a.b.c.d/prefix" or empty.
+        const validCIDR = (v) => !v || /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(v);
+        const validIP   = (v) => !v || /^(\d{1,3}\.){3}\d{1,3}$/.test(v);
+
         // Collect interface rows.
         const interfaces = [];
-        document.querySelectorAll('#net-interfaces-list .net-iface-row').forEach(row => {
+        let validationError = '';
+        document.querySelectorAll('#net-interfaces-list .net-iface-row').forEach((row, i) => {
             const mac  = row.querySelector('.net-iface-mac')?.value.trim() || '';
             const name = row.querySelector('.net-iface-name')?.value.trim() || '';
             const ip   = row.querySelector('.net-iface-ip')?.value.trim() || '';
@@ -5383,10 +5686,23 @@ const Pages = {
             const dns  = (row.querySelector('.net-iface-dns')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
             const mtu  = parseInt(row.querySelector('.net-iface-mtu')?.value || '0', 10) || 0;
             const bond = row.querySelector('.net-iface-bond')?.value.trim() || '';
+            // C3-16: validate IP/CIDR format before saving.
+            if (ip && !validCIDR(ip)) {
+                validationError = `Interface ${i + 1}: IP Address must be in CIDR notation (e.g. 192.168.1.50/24), got: ${ip}`;
+            }
+            if (gw && !validIP(gw)) {
+                validationError = validationError || `Interface ${i + 1}: Gateway must be a bare IP address (e.g. 192.168.1.1), got: ${gw}`;
+            }
             if (mac || name || ip) {
                 interfaces.push({ mac_address: mac, name, ip_address: ip, gateway: gw, dns, mtu: mtu || undefined, bond: bond || undefined });
             }
         });
+
+        if (validationError) {
+            Pages._tabMarkError('network', validationError);
+            if (saveBtn) saveBtn.disabled = false;
+            return;
+        }
 
         try {
             const existing = await API.nodes.get(nodeId);
@@ -5500,9 +5816,16 @@ const Pages = {
     // ── Configuration tab helpers ─────────────────────────────────────────────
 
     _cfgVarRowHTML(idx, key, value) {
+        // C3-15: warn when the key contains characters that may not be valid in template expansion.
+        // Valid keys use [A-Za-z0-9_-] only. Spaces or special chars cause substitution failures.
+        const keyInvalid = key && !/^[A-Za-z0-9_-]+$/.test(key);
+        const warnIcon = keyInvalid
+            ? `<span title="Variable name contains invalid characters — use letters, digits, underscores, or hyphens only" style="color:#f59e0b;font-size:14px;cursor:help;">&#9888;</span>`
+            : '';
         return `<div class="cfg-var-row" data-idx="${idx}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+            ${warnIcon}
             <input type="text" class="cfg-var-key" value="${escHtml(key)}"
-                placeholder="variable_name" style="flex:1" oninput="Pages._tabMarkDirty('config')">
+                placeholder="variable_name" style="flex:1${keyInvalid ? ';border-color:#f59e0b;' : ''}" oninput="Pages._tabMarkDirty('config')">
             <input type="text" class="cfg-var-val" value="${escHtml(value)}"
                 placeholder="value" style="flex:2" oninput="Pages._tabMarkDirty('config')">
             <button type="button" class="btn btn-danger btn-sm" style="padding:2px 8px;font-size:11px;flex-shrink:0"
@@ -5527,6 +5850,15 @@ const Pages = {
         if (list && list.querySelectorAll('.cfg-var-row').length === 0) {
             list.innerHTML = `<div id="cfg-vars-empty" style="text-align:center;padding:12px;color:var(--text-dim);font-size:12px">No custom variables</div>`;
         }
+    },
+
+    // C3-18: _cfgClearVerifyTimeout clears the verify-timeout input and hides the "Use Global Default" button.
+    _cfgClearVerifyTimeout() {
+        const input = document.getElementById('cfg-verify-timeout');
+        const clearBtn = document.getElementById('cfg-verify-timeout-clear');
+        if (input) input.value = '';
+        if (clearBtn) clearBtn.style.display = 'none';
+        Pages._tabMarkDirty('config');
     },
 
     // ── Power Provider inline type change ─────────────────────────────────────
@@ -6389,15 +6721,27 @@ const Pages = {
         let effectiveSection = '';
         if (effective) {
             const src = sourceLabel[effective.source] || `<span class="badge badge-neutral">${escHtml(effective.source)}</span>`;
+            // C3-17: "Customize Layout" is collapsed by default unless the node already has its own override.
+            const customizeOpen = effective.source === 'node' ? ' open' : '';
+            const customizeSummaryHint = effective.source === 'node'
+                ? '<span style="font-size:11px;color:var(--text-secondary);margin-left:8px;font-weight:400">node override active</span>'
+                : '<span style="font-size:11px;color:var(--text-secondary);margin-left:8px;font-weight:400">inheriting — click to override</span>';
+            const customizeDetails = `
+                <details${customizeOpen} style="margin-top:12px;border:1px solid var(--border);border-radius:6px">
+                    <summary style="padding:8px 12px;cursor:pointer;font-size:13px;font-weight:600;user-select:none">
+                        Customize Layout${customizeSummaryHint}
+                    </summary>
+                    <div style="padding:12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
+                        <button class="btn btn-secondary btn-sm" onclick='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
+                            Edit Override
+                        </button>
+                        ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" onclick='Pages._clearLayoutOverride(${JSON.stringify(nodeId)})'>Clear Override</button>` : ''}
+                        <span style="font-size:12px;color:var(--text-secondary)">Override replaces the ${escHtml(effective.source)} default for this node only.</span>
+                    </div>
+                </details>`;
             effectiveSection = cardWrap(
                 `Current Effective Layout &nbsp;${src}`,
-                layoutToTable(effective.layout),
-                `<div class="flex gap-8">
-                    <button class="btn btn-secondary btn-sm" onclick='Pages._showLayoutOverrideEditor(${JSON.stringify(nodeId)}, ${JSON.stringify(JSON.stringify(effective.layout))})'>
-                        Edit Override
-                    </button>
-                    ${effective.source !== 'image' ? `<button class="btn btn-secondary btn-sm" onclick='Pages._clearLayoutOverride(${JSON.stringify(nodeId)})'>Clear Override</button>` : ''}
-                </div>`
+                `${layoutToTable(effective.layout)}${customizeDetails}`
             );
         }
 
@@ -6645,50 +6989,74 @@ const Pages = {
     // S5-12: _onConfigHistoryTabOpen loads config change history for the given node.
     // Paginates server-side via GET /api/v1/nodes/:id/config-history?page=&per_page=.
     async _onConfigHistoryTabOpen(nodeId, page = 1) {
+        // C3-7: limit=50, "Load more" append pattern instead of Previous/Next.
+        const PER_PAGE = 50;
         const wrap = document.getElementById('confighistory-wrap');
         if (!wrap) return;
-        wrap.innerHTML = loading('Loading history…');
-        try {
-            const resp = await API.nodes.configHistory(nodeId, page, 30);
-            const rows  = (resp && resp.history) || [];
-            const total = (resp && resp.total)   || 0;
-            const perPage = (resp && resp.per_page) || 30;
 
-            if (!rows.length) {
+        // On first load (page 1) replace wrap. On subsequent loads append rows.
+        if (page === 1) {
+            wrap.innerHTML = loading('Loading history…');
+        } else {
+            // Remove "Load more" button while fetching.
+            const prev = wrap.querySelector('#confighistory-load-more');
+            if (prev) { prev.textContent = 'Loading…'; prev.disabled = true; }
+        }
+
+        try {
+            const resp = await API.nodes.configHistory(nodeId, page, PER_PAGE);
+            const rows    = (resp && resp.history)  || [];
+            const total   = (resp && resp.total)    || 0;
+            const perPage = (resp && resp.per_page) || PER_PAGE;
+
+            if (!rows.length && page === 1) {
                 wrap.innerHTML = emptyState('No config changes recorded', 'Configuration changes are recorded each time a node is updated.');
                 return;
             }
 
-            const pages = Math.ceil(total / perPage);
-            const prevBtn = page > 1
-                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page - 1})">Previous</button>`
-                : '';
-            const nextBtn = page < pages
-                ? `<button class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page + 1})">Next</button>`
-                : '';
+            const hasMore = page * perPage < total;
+            const rowsHtml = rows.map(r => `<tr>
+                <td class="text-mono text-sm">${escHtml(r.field_name)}</td>
+                <td class="text-dim text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.old_value)}">${r.old_value ? escHtml(r.old_value) : '<span class="text-dim">—</span>'}</td>
+                <td class="text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.new_value)}">${r.new_value ? escHtml(r.new_value) : '<span class="text-dim">—</span>'}</td>
+                <td class="text-dim text-sm">${r.actor_label ? escHtml(r.actor_label) : '—'}</td>
+                <td class="text-dim text-sm">${fmtRelative(r.changed_at ? new Date(r.changed_at * 1000).toISOString() : null)}</td>
+            </tr>`).join('');
 
-            wrap.innerHTML = `
-                <div class="table-wrap"><table aria-label="Config change history">
-                    <thead><tr>
-                        <th>Field</th><th>Old Value</th><th>New Value</th><th>Changed By</th><th>When</th>
-                    </tr></thead>
-                    <tbody>
-                    ${rows.map(r => `<tr>
-                        <td class="text-mono text-sm">${escHtml(r.field_name)}</td>
-                        <td class="text-dim text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.old_value)}">${r.old_value ? escHtml(r.old_value) : '<span class="text-dim">—</span>'}</td>
-                        <td class="text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.new_value)}">${r.new_value ? escHtml(r.new_value) : '<span class="text-dim">—</span>'}</td>
-                        <td class="text-dim text-sm">${r.actor_label ? escHtml(r.actor_label) : '—'}</td>
-                        <td class="text-dim text-sm">${fmtRelative(r.changed_at ? new Date(r.changed_at * 1000).toISOString() : null)}</td>
-                    </tr>`).join('')}
-                    </tbody>
-                </table></div>
-                ${pages > 1 ? `<div style="display:flex;align-items:center;gap:8px;margin-top:12px">
-                    ${prevBtn}
-                    <span class="text-dim text-sm">Page ${page} of ${pages} · ${total} change${total !== 1 ? 's' : ''}</span>
-                    ${nextBtn}
-                </div>` : `<div class="text-dim text-sm" style="margin-top:8px">${total} change${total !== 1 ? 's' : ''} total</div>`}`;
+            if (page === 1) {
+                // First load: render full table + optional load-more footer.
+                wrap.innerHTML = `
+                    <div class="table-wrap"><table aria-label="Config change history">
+                        <thead><tr>
+                            <th>Field</th><th>Old Value</th><th>New Value</th><th>Changed By</th><th>When</th>
+                        </tr></thead>
+                        <tbody id="confighistory-tbody">${rowsHtml}</tbody>
+                    </table></div>
+                    <div id="confighistory-footer" style="margin-top:8px">
+                        ${hasMore
+                            ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', 2)">Load more (${total - rows.length} remaining)</button>`
+                            : `<span class="text-dim text-sm">${total} change${total !== 1 ? 's' : ''} total</span>`}
+                    </div>`;
+            } else {
+                // Append rows to existing tbody and update footer.
+                const tbody = wrap.querySelector('#confighistory-tbody');
+                if (tbody) tbody.insertAdjacentHTML('beforeend', rowsHtml);
+                const footer = wrap.querySelector('#confighistory-footer');
+                const loaded = page * perPage;
+                if (footer) {
+                    footer.innerHTML = hasMore
+                        ? `<button id="confighistory-load-more" class="btn btn-secondary btn-sm" onclick="Pages._onConfigHistoryTabOpen('${escHtml(nodeId)}', ${page + 1})">Load more (${total - loaded} remaining)</button>`
+                        : `<span class="text-dim text-sm">${total} change${total !== 1 ? 's' : ''} total</span>`;
+                }
+            }
         } catch (e) {
-            wrap.innerHTML = alertBox(`Failed to load config history: ${e.message}`);
+            if (page === 1) {
+                wrap.innerHTML = alertBox(`Failed to load config history: ${e.message}`);
+            } else {
+                App.toast(`Failed to load more: ${e.message}`, 'error');
+                const prev = wrap.querySelector('#confighistory-load-more');
+                if (prev) { prev.textContent = 'Load more'; prev.disabled = false; }
+            }
         }
     },
 
@@ -7124,13 +7492,25 @@ const Pages = {
             const layoutHtml = hasLayout
                 ? (() => {
                     const parts = group.disk_layout_override.partitions;
+                    // C3-17: visual partition bar
+                    const totalFixed = parts.reduce((s, p) => s + (p.size_bytes || 0), 0);
+                    const hasFill = parts.some(p => !p.size_bytes);
+                    const fsColors = { xfs: '#3b82f6', ext4: '#8b5cf6', vfat: '#10b981', swap: '#f59e0b', biosboot: '#6b7280', bios_grub: '#6b7280' };
+                    const barParts = parts.map(p => {
+                        const pct = (hasFill || totalFixed === 0)
+                            ? (p.size_bytes ? Math.round(p.size_bytes / (totalFixed || 1) * 80) : 20)
+                            : Math.max(2, Math.round(p.size_bytes / totalFixed * 100));
+                        const bg = fsColors[p.filesystem] || '#94a3b8';
+                        return `<div style="flex:${pct};background:${bg};min-width:24px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;overflow:hidden;white-space:nowrap;padding:0 4px" title="${escHtml(p.label||p.mountpoint||p.filesystem)}">${escHtml(p.label||p.mountpoint||'')}</div>`;
+                    }).join('');
+                    const bar = `<div style="display:flex;height:28px;border-radius:6px;overflow:hidden;margin-bottom:12px;border:1px solid var(--border)">${barParts}</div>`;
                     const rows = parts.map(p => `<tr>
                         <td>${escHtml(p.label || '—')}</td>
                         <td>${p.size_bytes ? fmtBytes(p.size_bytes) : '<span class="badge badge-neutral" style="font-size:10px">fill</span>'}</td>
                         <td><span class="badge badge-neutral" style="font-size:10px">${escHtml(p.filesystem || '—')}</span></td>
                         <td class="text-mono">${escHtml(p.mountpoint || '—')}</td>
                     </tr>`).join('');
-                    return `<div class="table-wrap"><table>
+                    return `${bar}<div class="table-wrap"><table>
                         <thead><tr><th>Label</th><th>Size</th><th>Filesystem</th><th>Mountpoint</th></tr></thead>
                         <tbody>${rows}</tbody>
                     </table></div>`;
@@ -7701,10 +8081,18 @@ const Pages = {
     // showGroupReimageModal opens the Reimage Group modal with image picker,
     // concurrency, and failure threshold settings.
     async showGroupReimageModal(groupId, groupName) {
-        let images = [];
+        let images = [], memberCount = null;
         try {
-            const resp = await API.images.list('ready');
-            images = (resp && resp.images) || [];
+            // C3-8: fetch images and group detail in parallel for node count preview.
+            const [imgResp, groupResp] = await Promise.allSettled([
+                API.images.list('ready'),
+                API.nodeGroups.get(groupId),
+            ]);
+            images = (imgResp.status === 'fulfilled' && imgResp.value && imgResp.value.images) || [];
+            if (groupResp.status === 'fulfilled') {
+                const members = (groupResp.value && groupResp.value.members) || [];
+                memberCount = members.length;
+            }
         } catch (_) {}
 
         const imageOptions = images.map(img =>
@@ -7732,9 +8120,13 @@ const Pages = {
                     </div>
                     <div class="form-grid" style="margin-bottom:14px">
                         <div class="form-group">
-                            <label>Concurrency</label>
+                            <label>
+                                Concurrency
+                                <span tabindex="0" title="Max nodes reimaged simultaneously in this job. The server&#39;s CLUSTR_REIMAGE_MAX_CONCURRENT setting (default 20) caps the total in-flight reimages across all concurrent jobs — individual job concurrency is honored up to that ceiling."
+                                    style="display:inline-block;width:14px;height:14px;border-radius:50%;background:var(--text-secondary);color:var(--bg-primary);font-size:10px;font-weight:700;text-align:center;line-height:14px;cursor:help;margin-left:4px;vertical-align:middle">?</span>
+                            </label>
                             <input type="number" id="grm-concurrency" value="5" min="1" max="50">
-                            <div class="form-hint">Max nodes reimaged simultaneously</div>
+                            <div class="form-hint">Max nodes reimaged simultaneously in this job</div>
                         </div>
                         <div class="form-group">
                             <label>Pause on failure %</label>
@@ -7749,8 +8141,11 @@ const Pages = {
                         </label>
                         <div class="form-hint" style="margin-top:4px">Use for hardware discovery or deploy pipeline testing without overwriting disks.</div>
                     </div>
+                    <!-- C3-8: node count preview shown before confirmation -->
                     <div style="background:var(--surface-secondary);border-radius:6px;padding:10px 14px;font-size:12px;color:var(--text-secondary);margin-bottom:16px">
-                        This will power-cycle all nodes in the group. Each node will PXE boot and deploy the selected image.
+                        ${memberCount !== null
+                            ? `<strong>${memberCount} node${memberCount !== 1 ? 's' : ''}</strong> in this group will be power-cycled. Each node will PXE boot and deploy the selected image.`
+                            : 'This will power-cycle all nodes in the group. Each node will PXE boot and deploy the selected image.'}
                     </div>
                     <div class="form-actions">
                         <button class="btn btn-secondary" onclick="document.getElementById('group-reimage-modal').remove()">Cancel</button>
@@ -7794,6 +8189,12 @@ const Pages = {
             if (submitBtn) submitBtn.style.display = 'none';
             if (statusEl) {
                 statusEl.style.display = '';
+                // C3-19: effective vs requested concurrency.
+                const reqConcurrency = concurrency || 5;
+                const effConcurrency = job.concurrency || reqConcurrency;
+                const concurrencyNote = effConcurrency !== reqConcurrency
+                    ? `<span style="color:var(--warning);font-size:11px;margin-left:4px">(requested ${reqConcurrency}, effective ${effConcurrency})</span>`
+                    : '';
                 statusEl.innerHTML = `
                     <div style="border:1px solid var(--border);border-radius:6px;padding:12px">
                         <div style="font-weight:600;margin-bottom:8px">Reimage Job Started</div>
@@ -7801,6 +8202,7 @@ const Pages = {
                             <div class="kv-item"><div class="kv-key">Job ID</div><div class="kv-value text-mono" style="font-size:11px">${escHtml((job.job_id || '').substring(0, 16))}...</div></div>
                             <div class="kv-item"><div class="kv-key">Status</div><div class="kv-value" id="grm-job-status-val">${escHtml(job.status || 'running')}</div></div>
                             <div class="kv-item"><div class="kv-key">Total Nodes</div><div class="kv-value">${job.total_nodes || 0}</div></div>
+                            <div class="kv-item"><div class="kv-key">Concurrency</div><div class="kv-value">${effConcurrency}${concurrencyNote}</div></div>
                             <div class="kv-item"><div class="kv-key">Triggered</div><div class="kv-value" id="grm-triggered">${job.triggered_nodes || 0} / ${job.total_nodes || 0}</div></div>
                         </div>
                         <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="document.getElementById('group-reimage-modal').remove()">Close</button>
@@ -7815,16 +8217,24 @@ const Pages = {
     },
 
     async _pollGroupReimageJob(jobId) {
+        // C3-3: guard — stop polling when the modal is gone.
+        const isModalAlive = () => !!document.getElementById('grm-job-status-val');
         const poll = async () => {
+            // Stop immediately if the modal has been closed.
+            if (!isModalAlive()) return;
             try {
                 const job = await API.nodeGroups.jobStatus(jobId);
+                // Re-check after the async call (user may have closed during fetch).
+                if (!isModalAlive()) return;
                 const statusEl = document.getElementById('grm-job-status-val');
                 const trigEl = document.getElementById('grm-triggered');
                 if (statusEl) statusEl.textContent = job.status || '—';
                 if (trigEl) trigEl.textContent = `${job.triggered_nodes || 0} / ${job.total_nodes || 0}`;
                 if (job.status === 'complete' || job.status === 'failed' || job.status === 'paused') return;
                 setTimeout(poll, 3000);
-            } catch (_) { setTimeout(poll, 5000); }
+            } catch (_) {
+                if (isModalAlive()) setTimeout(poll, 5000);
+            }
         };
         setTimeout(poll, 2000);
     },
@@ -8431,8 +8841,17 @@ reboot</pre>
             }, 1000);
         };
 
-        // Initial snapshot event (sent immediately on connect by the server).
+        // Track consecutive SSE errors to detect a dead build-progress endpoint.
+        // EventSource auto-reconnects; after 3 failed attempts with no snapshot
+        // received we surface the "interrupted" banner rather than spinning forever.
+        let _sseErrorCount = 0;
+        let _snapshotReceived = false;
+
+        // C3-4: single merged 'snapshot' listener (was two separate listeners, causing
+        // duplicate state application on every connect and missing _snapshotReceived flag).
         es.addEventListener('snapshot', (e) => {
+            _snapshotReceived = true;
+            _sseErrorCount = 0;
             try {
                 const state = JSON.parse(e.data);
                 _startElapsedTimer(state.started_at);
@@ -8458,13 +8877,6 @@ reboot</pre>
                 }
             } catch (_) {}
         };
-
-        // Track consecutive SSE errors to detect a dead build-progress endpoint.
-        // EventSource auto-reconnects; after 3 failed attempts with no snapshot
-        // received we surface the "interrupted" banner rather than spinning forever.
-        let _sseErrorCount = 0;
-        let _snapshotReceived = false;
-        es.addEventListener('snapshot', () => { _snapshotReceived = true; _sseErrorCount = 0; });
 
         es.onerror = () => {
             clearInterval(_elapsedTimer);
@@ -8535,16 +8947,19 @@ reboot</pre>
     _updateIsoBuildProgress() {},
 
     async _cancelIsoBuild(imageId) {
+        // C3-5: Use POST /images/{id}/cancel instead of DELETE.
+        // Cancel marks the image as error state without deleting the record;
+        // the admin can still view the build log and retry via resume.
         Pages.showConfirmModal({
             title: 'Cancel Build',
-            message: 'Cancel this build? The in-progress VM will be stopped and the image will remain in error state.',
+            message: 'Cancel this build? The image will be set to error state. You can resume or delete it afterwards.',
             confirmText: 'Cancel Build',
             danger: true,
             onConfirm: async () => {
                 try {
                     if (Pages._isoBuildSSE) { Pages._isoBuildSSE.close(); Pages._isoBuildSSE = null; }
                     clearInterval(Pages._isoBuildElapsedTimer);
-                    await API.images.delete(imageId);
+                    await API.images.cancelBuild(imageId);
                     Router.navigate('/images');
                 } catch (e) {
                     Pages.showAlertModal('Cancel Failed', escHtml(e.message));
@@ -8806,7 +9221,7 @@ reboot</pre>
             : ['api-keys', 'server-info', 'about'];
         const tabBar = tabs.map(t => {
             const active = t === tab ? 'style="border-bottom:2px solid var(--accent);color:var(--accent);"' : '';
-            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'server-info': 'Server Info', 'about': 'About' }[t];
+            const label  = { 'api-keys': 'API Keys', 'users': 'Users', 'webhooks': 'Webhooks', 'server-info': 'System', 'about': 'About' }[t];
             return `<button class="btn btn-ghost" ${active} onclick="Pages._settingsRender('${t}')">${label}</button>`;
         }).join('');
 
@@ -8865,6 +9280,11 @@ reboot</pre>
         } else {
             body = await Pages._settingsAboutTab();
         }
+
+        // C3-14: Disconnect the settings log stream before replacing the DOM.
+        // App.render() destroys the log-viewer element; keeping a reference to it
+        // in App._logStream would prevent proper re-init when the tab is revisited.
+        if (App._logStream) { App._logStream.disconnect(); App._logStream = null; }
 
         App.render(`
             <div class="page-header">
@@ -9160,12 +9580,20 @@ reboot</pre>
 
     async _settingsServerInfoTab() {
         try {
-            const [info, nodesResp] = await Promise.allSettled([
+            const [info, nodesResp, initramfsResp, repoHealthResp] = await Promise.allSettled([
                 API.health.get(),
                 API.nodes.list(),
+                API.system.initramfs().catch(() => null),
+                // C3-26: bundle info from /repo/health (public endpoint, no /api/v1 prefix).
+                fetch('/repo/health').then(r => r.ok ? r.json() : null).catch(() => null),
             ]);
-            const health     = info.status === 'fulfilled'      ? info.value      : null;
-            const nodes      = nodesResp.status === 'fulfilled' ? nodesResp.value : null;
+            const health        = info.status === 'fulfilled'        ? info.value        : null;
+            const nodes         = nodesResp.status === 'fulfilled'   ? nodesResp.value   : null;
+            // C3-23: initramfs card moved here from Images page.
+            const initramfsInfo = initramfsResp.status === 'fulfilled' ? initramfsResp.value : null;
+            // C3-26: bundle info.
+            const repoHealth = repoHealthResp.status === 'fulfilled' ? repoHealthResp.value : null;
+            const bundles = repoHealth?.installed || [];
             const version    = health?.version    || 'dev';
             const commit     = health?.commit     || 'unknown';
             const buildTime  = health?.build_time || 'unknown';
@@ -9175,27 +9603,51 @@ reboot</pre>
             const row = (label, value) => `
                 <tr>
                     <td style="padding:7px 20px 7px 0;color:var(--text-secondary);white-space:nowrap;font-size:13px;vertical-align:top;">${escHtml(label)}</td>
-                    <td style="padding:7px 0;font-family:monospace;font-size:13px;">${escHtml(value)}</td>
+                    <td style="padding:7px 0;font-family:monospace;font-size:13px;">${value}</td>
                 </tr>`;
 
-            return `<div class="card">
+            // C3-26: bundle card
+            const bundleCard = cardWrap('Installed Bundles',
+                bundles.length === 0
+                    ? `<div class="text-dim" style="padding:12px;font-size:13px">No bundles installed. Run <code>clustr-serverd bundle install</code> to install the Slurm RPM bundle.</div>`
+                    : `<div class="table-wrap"><table>
+                        <thead><tr><th>Distro/Arch</th><th>Slurm Version</th><th>Release</th><th>Installed At</th></tr></thead>
+                        <tbody>${bundles.map(b => `<tr>
+                            <td class="text-mono">${escHtml(b.distro || '—')}-${escHtml(b.arch || '—')}</td>
+                            <td class="text-mono">${escHtml(b.slurm_version || '—')}</td>
+                            <td class="text-mono">${escHtml(b.clustr_release || '—')}</td>
+                            <td>${escHtml(b.installed_at || '—')}</td>
+                        </tr>`).join('')}</tbody>
+                    </table></div>
+                    <details style="margin-top:12px">
+                        <summary style="cursor:pointer;font-size:12px;color:var(--text-secondary)">Re-install bundle</summary>
+                        <div style="margin-top:8px;font-size:12px;color:var(--text-secondary)">
+                            Run on the server to update or re-install the Slurm RPM bundle:
+                            <pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:8px;margin-top:6px;overflow-x:auto">clustr-serverd bundle install</pre>
+                        </div>
+                    </details>`
+            );
+
+            return `${Pages._initramfsCard(initramfsInfo)}
+            ${bundleCard}
+            <div class="card" style="margin-top:20px">
                 <div class="card-header"><h2 class="card-title">Server Info</h2></div>
                 <div style="padding:16px 20px;">
                     <table style="border-collapse:collapse;width:100%;max-width:560px;">
                         <tbody>
-                            ${row('Version', version)}
-                            ${row('Commit', commit)}
-                            ${row('Built', buildTime)}
-                            ${row('Registered nodes', nodeTotal)}
-                            ${row('Flip-back failures', flipFails)}
-                            ${row('Metrics endpoint', window.location.origin + '/metrics')}
+                            ${row('Version', escHtml(version))}
+                            ${row('Commit', escHtml(commit))}
+                            ${row('Built', escHtml(buildTime))}
+                            ${row('Registered nodes', escHtml(nodeTotal))}
+                            ${row('Flip-back failures', escHtml(flipFails))}
+                            ${row('Metrics endpoint', `<a href="${window.location.origin}/metrics" target="_blank" rel="noopener" style="color:var(--accent)">${escHtml(window.location.origin + '/metrics')}</a>`)}
                         </tbody>
                     </table>
                     ${health?.flip_back_failures > 0 ? `<div style="margin-top:12px;" class="alert alert-warn">One or more verify-boot flip-back failures detected. Check logs — Proxmox persistent boot order may still be PXE-first on affected nodes.</div>` : ''}
                 </div>
             </div>`;
         } catch (err) {
-            return `<div class="card"><div class="card-header"><h2 class="card-title">Server Info</h2></div><div style="padding:16px 20px;">${alertBox('Could not load server info: ' + err.message)}</div></div>`;
+            return `<div class="card"><div class="card-header"><h2 class="card-title">System</h2></div><div style="padding:16px 20px;">${alertBox('Could not load system info: ' + err.message)}</div></div>`;
         }
     },
 

@@ -338,6 +338,34 @@ func (h *ImagesHandler) DeleteImage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// CancelBuild handles POST /api/v1/images/:id/cancel (C3-5).
+// Marks a building image as errored so it is no longer counted as active.
+// The background goroutine will discover the status change and exit cleanly;
+// there is no direct goroutine kill because per-build cancel functions are
+// not yet tracked (full goroutine cancel is a v1.3 enhancement — D-N-3).
+// Returns 200 on success, 409 if the image is not currently building.
+func (h *ImagesHandler) CancelBuild(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	img, err := h.DB.GetBaseImage(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if img.Status != api.ImageStatusBuilding {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "image is not currently building",
+			Code:  "conflict",
+		})
+		return
+	}
+	if err := h.DB.UpdateBaseImageStatus(r.Context(), id, api.ImageStatusError, "cancelled by user"); err != nil {
+		log.Error().Err(err).Str("image_id", id).Msg("cancel build: update status")
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
 // GetImageStatus handles GET /api/v1/images/:id/status
 func (h *ImagesHandler) GetImageStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

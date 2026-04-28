@@ -270,8 +270,11 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 			log.Info().Msg("verify-boot scanner: stopping")
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-timeout)
-			nodes, err := s.db.ListNodesAwaitingVerification(ctx, cutoff)
+			// Migration 054: fetch all awaiting-verification nodes (deploy_completed_preboot_at
+			// <= now) so we can apply per-node timeout overrides in Go.
+			// Nodes with a longer per-node override will not be timed-out by the global cutoff.
+			now := time.Now()
+			nodes, err := s.db.ListNodesAwaitingVerification(ctx, now)
 			if err != nil {
 				log.Error().Err(err).Msg("verify-boot scanner: ListNodesAwaitingVerification failed")
 				continue
@@ -283,6 +286,21 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 			var wg sync.WaitGroup
 			for _, n := range nodes {
 				n := n // capture
+
+				// Migration 054: compute effective timeout for this node.
+				effectiveTimeout := timeout
+				if n.VerifyTimeoutOverride != nil {
+					if *n.VerifyTimeoutOverride == 0 {
+						// Zero means disabled for this node — skip.
+						continue
+					}
+					effectiveTimeout = time.Duration(*n.VerifyTimeoutOverride) * time.Second
+				}
+				// Only fire if the node has actually exceeded its effective timeout.
+				if n.DeployCompletedPrebootAt == nil || now.Sub(*n.DeployCompletedPrebootAt) < effectiveTimeout {
+					continue
+				}
+
 				wg.Add(1)
 				flipSem <- struct{}{} // acquire slot
 				go func() {
@@ -303,9 +321,9 @@ func (s *Server) runVerifyTimeoutScanner(ctx context.Context) {
 					log.Warn().
 						Str("node_id", n.ID).
 						Str("hostname", n.Hostname).
-						Str("timeout", timeout.String()).
+						Str("timeout", effectiveTimeout.String()).
 						Msgf("verify-boot scanner: node %s (%s) did not phone home within %s of deploy-complete — possible bootloader failure, kernel panic, or /etc/clustr/node-token not written correctly",
-							n.ID, n.Hostname, timeout)
+							n.ID, n.Hostname, effectiveTimeout)
 					// Flip persistent boot order back to disk-first on deploy-timeout.
 					// Prevents Proxmox VMs from being stuck PXE-first forever when the
 					// deploy completes but the node never calls verify-boot.
@@ -903,6 +921,11 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(requireImageAccess("id", s.db)).Get("/images/{id}", images.GetImage)
 		r.With(requireImageAccess("id", s.db)).Get("/images/{id}/blob", images.DownloadBlob)
 
+		// C2-5: Dashboard anomaly card — accessible to readonly/operator/admin.
+		// HTMX-aware: returns HTML partial when HX-Request: true.
+		dashboardH := &handlers.DashboardHandler{DB: s.db}
+		r.With(requireRole("readonly")).Get("/dashboard/anomalies", dashboardH.HandleAnomalies)
+
 		// Admin-only routes — require admin scope.
 		r.Group(func(r chi.Router) {
 			r.Use(requireScope(true)) // admin scope required
@@ -977,6 +1000,8 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Build resume (F2) — resume an interrupted build from last phase.
 			r.Post("/images/{id}/resume", resumeH.ResumeImageBuild)
+			// C3-5: cancel in-progress ISO build without deleting the image record.
+			r.Post("/images/{id}/cancel", images.CancelBuild)
 
 			// System initramfs management (F1).
 			r.Get("/system/initramfs", initramfsH.GetInitramfs)

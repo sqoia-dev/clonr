@@ -122,6 +122,8 @@ const API = {
             const path = opts.force ? `/images/${id}?force=true` : `/images/${id}`;
             return API.del(path);
         },
+        // C3-5: cancel an in-progress ISO build without deleting the image record.
+        cancelBuild(id)             { return API.post(`/images/${id}/cancel`, {}); },
         diskLayout(id)              { return API.get(`/images/${id}/disklayout`); },
         metadata(id)                { return API.get(`/images/${id}/metadata`); },
         updateTags(id, tags)        { return API.put(`/images/${id}/tags`, { tags }); },
@@ -269,6 +271,7 @@ const API = {
     },
     health: {
         get()                 { return API.get('/health'); },
+        ready()               { return API.get('/healthz/ready'); },
     },
     auth: {
         me()                  { return API.get('/auth/me'); },

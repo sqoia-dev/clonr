@@ -457,6 +457,10 @@ type NodeConfig struct {
 	// EffectiveExtraMounts to resolve. Stored as node-level on NodeConfig only
 	// after server-side merging for the deploy path.
 	ExtraMounts        []FstabEntry      `json:"extra_mounts,omitempty"`
+	// VerifyTimeoutOverride, when non-nil, overrides CLUSTR_VERIFY_TIMEOUT for this
+	// specific node. Value is in seconds. A value of 0 disables the timeout for this
+	// node entirely. NULL means use the global default. Added in migration 054.
+	VerifyTimeoutOverride *int `json:"verify_timeout_override,omitempty"`
 	// ReimagePending is set to true by the reimage orchestrator after it fires
 	// PowerCycle. The PXE boot handler returns the full clustr initramfs boot
 	// script while this flag is set, causing the node to deploy fresh.
@@ -711,6 +715,13 @@ type UpdateNodeConfigRequest struct {
 	// ExtraMounts replaces the node-level extra fstab entries. Send an empty
 	// slice to clear all node-level mounts (group mounts are unaffected).
 	ExtraMounts         []FstabEntry        `json:"extra_mounts,omitempty"`
+	// VerifyTimeoutOverride, when non-nil, overrides CLUSTR_VERIFY_TIMEOUT for this
+	// node. Value is in seconds. Set to 0 to disable the timeout for this node.
+	// Omit (null) to use the global default.
+	VerifyTimeoutOverride *int `json:"verify_timeout_override,omitempty"`
+	// ClearVerifyTimeoutOverride, when true, removes any per-node override and reverts
+	// to the global CLUSTR_VERIFY_TIMEOUT setting.
+	ClearVerifyTimeoutOverride bool `json:"clear_verify_timeout_override,omitempty"`
 }
 
 // ─── Node group request types ─────────────────────────────────────────────────
