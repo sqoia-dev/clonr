@@ -1,149 +1,234 @@
 # clustr
 
-clustr is a self-hosted node cloning and image management system for HPC clusters. It separates deployable OS images (base images) from per-node identity (hostname, network config, SSH keys), so a single image can be deployed to hundreds of nodes without modification.
+**The only open-source platform that provisions bare-metal HPC nodes and governs who uses them — in a single Go binary.**
 
-The system includes: an image factory (pull cloud images, import from ISO, capture from running nodes), chroot customization sessions, a built-in PXE/DHCP/TFTP server, IPMI/BMC management, InfiniBand device discovery, centralized logging with live streaming, and an embedded web UI.
+clustr closes the decade-old gap between node provisioners (xCAT, Warewulf) and allocation managers (ColdFront). One binary provisions your nodes via PXE, installs Slurm with a GPG-verified bundle, manages LDAP accounts, and gives researchers, PIs, and IT directors their own purpose-built portals — all self-hosted, all air-gap compatible, zero egress required.
 
-The system has two binaries: `clustr-serverd` (the management server) and `clustr` (the CLI, which runs both on operator workstations and on target nodes during deployment).
+---
+
+## Who this is for
+
+| Persona | What clustr gives you |
+|---|---|
+| **HPC Sysadmin** | PXE boot, image factory, one-click reimage, IPMI power control, centralized deploy logs, Slurm config push |
+| **PI / Research Group Lead** | Self-service member management, NodeGroup utilization dashboard, grant and publication tracking, allocation change requests |
+| **Researcher / Scientist** | Partition health status, LDAP self-service password change, OnDemand portal link |
+| **IT Director** | Read-only institutional dashboard, utilization reports, grant/publication summaries, exportable CSV for budget justification |
+
+If you run a research cluster — at a university, national lab, government facility, or private research organization — and you are tired of maintaining a fragile bridge between your provisioning tool and your governance tool, clustr is for you.
+
+---
+
+## What nothing else does
+
+Every HPC center today maintains a manual integration between two siloed systems: a node provisioner that handles bare metal, and an allocation manager that handles governance. They share no data model, no trust chain, and no user database. Keeping them in sync is a permanent ops burden.
+
+clustr eliminates that class of work:
+
+- **Single data model.** NodeGroups are simultaneously provisioning targets and allocation containers. Cluster state and governance state are always consistent because they are the same state.
+- **Cryptographic trust chain.** The path from allocation decision to running Slurm job is GPG-signed end to end. No external authority can inject an unsigned config. No other open-source tool in this space provides this guarantee.
+- **Air-gap native.** Embedded Slurm repo, static binary, zero outbound dependencies at runtime. Works in classified environments and research networks with strict egress controls. ColdFront's PyPI dependencies and xCAT's XML toolchains do not.
+
+---
+
+## How long to try it
+
+**15 minutes** from `git clone` to a running server with the web UI accessible, on a clean Rocky Linux 9 VM with Docker. See the Quick Start below.
+
+**Under 30 minutes** from server running to a PXE-deployed node that has booted into your base image.
+
+The two-node Slurm cluster walk-through (controller + worker, `srun -N2 hostname` succeeds) takes under 30 minutes after the server is running, assuming you have two VMs or bare-metal nodes on the provisioning network.
+
+---
+
+## Show me
+
+<!-- GIF placeholder: clustr-demo.gif -->
+<!--
+  Planned demo sequence (GIF creation is post-sprint I):
+  1. `docker compose up` → server starts, bootstrap API key printed
+  2. Browser opens to web UI dashboard
+  3. ISO build triggered via UI → progress bar advances
+  4. Node PXE boots → appears in Nodes list as "registered"
+  5. Reimage triggered → deploy log streams in real time in web UI
+  6. Node hits "verified booted" → dashboard green
+  Total runtime target: 30–45 seconds, no voiceover needed
+-->
+
+**[Demo GIF — coming Sprint I final week. Static screenshots available at `docs/architecture/`.]**
 
 ---
 
 ## Quick Start
 
-The fastest path to a running clustr instance is Docker Compose. For production HPC environments that need DHCP/TFTP on the host network namespace, or for operators who prefer bare-metal installs, see [docs/install.md](docs/install.md).
-
-### 1. Create directories and secrets
+The fastest path is Docker Compose. For bare-metal installs (needed for PXE/DHCP on the host network), see [docs/install.md](docs/install.md).
 
 ```bash
-# Data directories
+# 1. Create directories and generate secrets
 mkdir -p /var/lib/clustr/{db,images,boot,tftpboot,iso-cache,backups,log-archive,tmp}
 chmod 700 /var/lib/clustr
-
-# Config directory
 mkdir -p /etc/clustr && chmod 700 /etc/clustr
-
-# Generate secrets (never commit these)
 echo "CLUSTR_SECRET_KEY=$(openssl rand -hex 32)"     > /etc/clustr/secrets.env
 echo "CLUSTR_SESSION_SECRET=$(openssl rand -hex 64)" >> /etc/clustr/secrets.env
 chmod 400 /etc/clustr/secrets.env
-```
 
-### 2. Create clustr.env (Docker Compose only)
-
-```bash
-# Download the example and edit for your provisioning interface:
-curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/.env.example \
-  -o /etc/clustr/clustr.env
-# Edit CLUSTR_LISTEN_ADDR, CLUSTR_PXE_INTERFACE, CLUSTR_PXE_SERVER_IP
-# to match your provisioning network interface.
-chmod 600 /etc/clustr/clustr.env
-```
-
-**Bare-metal installs (Path B):** do not use `clustr.env`. Configuration variables go in `Environment=` lines inside the systemd unit file. See [docs/install.md §4.4](docs/install.md#44-install-systemd-unit) for details.
-
-### 3. Start the server
-
-```bash
-# Download the Compose file and start:
+# 2. Download Compose file and start
 curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/docker-compose.yml \
   -o /etc/clustr/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/sqoia-dev/clustr/main/deploy/docker-compose/.env.example \
+  -o /etc/clustr/clustr.env
+# Edit clustr.env: set CLUSTR_PXE_INTERFACE and CLUSTR_PXE_SERVER_IP
+cd /etc/clustr && docker compose up -d
 
-cd /etc/clustr
-docker compose up -d
-
-# Capture the one-time bootstrap admin API key printed at first startup:
+# 3. Get your bootstrap admin API key (printed once at first start)
 docker compose logs -f clustr 2>&1 | grep -A2 "Bootstrap admin"
-```
 
-### 4. Verify the server is healthy
-
-```bash
-# From the provisioning host directly:
+# 4. Verify health
 curl -s http://10.99.0.1:8080/api/v1/healthz/ready | python3 -m json.tool
-# All checks should be "ok"
 ```
 
-**Accessing the web UI from your workstation:**
+Open `http://<your-server-ip>/` and log in with the bootstrap credentials.
 
-`clustr-serverd` binds to the provisioning interface only (`10.99.0.1`). To reach the web UI from your operator workstation on the management LAN, you need a Caddy reverse proxy listening on a management interface address.
+For the complete walk-through — images, node registration, first deploy smoke test — see **[docs/install.md](docs/install.md)**.
 
-When running `install-dev-vm.sh` interactively, the script will **prompt you** to choose a management IP. It detects your management network and suggests the `.254` address as a stable alias (e.g. `192.168.1.254` for a `192.168.1.0/24` network), but you can accept, skip, or enter a custom address. The alias is only added after your explicit confirmation — the script never silently changes network state.
+For the two-node Slurm cluster quickstart (Rocky 9, `srun -N2 hostname` verified), see the [2-Node Slurm Cluster](#quick-start-2-node-slurm-cluster) section below.
 
-For non-interactive or automated installs, set `CLUSTR_MGMT_IP` before running the script:
+---
 
-```bash
-# Use the suggested .254 alias (adds a secondary address alongside your DHCP address):
-export CLUSTR_MGMT_IP=192.168.1.254
-bash scripts/setup/install-dev-vm.sh
+## Architecture
 
-# Or bind Caddy to the host's existing DHCP address (no alias needed):
-export CLUSTR_MGMT_IP=192.168.1.151
-bash scripts/setup/install-dev-vm.sh
+```
+┌─────────────────────────────────────────────────────┐
+│                   clustr-serverd                    │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────┐   │
+│  │  Image   │  │   PXE    │  │  Governance    │   │
+│  │ Factory  │  │ DHCP/TFTP│  │  (NodeGroups,  │   │
+│  │          │  │  iPXE    │  │  PI, Director) │   │
+│  └────┬─────┘  └────┬─────┘  └───────┬────────┘   │
+│       │             │                │             │
+│  ┌────┴─────────────┴────────────────┴────────┐   │
+│  │           SQLite  (single file DB)          │   │
+│  └─────────────────────────────────────────────┘   │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────┐   │
+│  │  Slurm   │  │   LDAP   │  │  Web UI        │   │
+│  │  Module  │  │  Module  │  │  (embedded,    │   │
+│  │ (bundled │  │          │  │   no build)    │   │
+│  │  RPMs)   │  │          │  │                │   │
+│  └──────────┘  └──────────┘  └────────────────┘   │
+└─────────────────────────────────────────────────────┘
+         ▲                              ▲
+         │ API / WebSocket              │ HTTP
+    ┌────┴────┐                   ┌─────┴──────┐
+    │  clustr │                   │  Browser   │
+    │  (CLI)  │                   │  (any)     │
+    │  PXE    │                   │            │
+    │  nodes  │                   │            │
+    └─────────┘                   └────────────┘
 ```
 
-Then open `http://<CLUSTR_MGMT_IP>/` in a browser and log in with `clustr` / `clustr`. You will be prompted to change the password immediately. For the full Caddy setup see [docs/tls-provisioning.md §3](docs/tls-provisioning.md#3-management-interface-access-dual-nic-setup).
+Two binaries:
+- `clustr-serverd` — management server (HTTP API, web UI, PXE/DHCP/TFTP, image factory, Slurm module, LDAP module, governance layer)
+- `clustr` — CLI + deploy agent (runs on operator workstations and inside the PXE initramfs on target nodes)
 
-**Note for existing installs:** if you ran an earlier version of the script that silently added a `.254` alias, remove it with `nmcli con mod "<connection>" -ipv4.addresses "192.168.1.254/24" && nmcli con up "<connection>"`. The install script will not modify an already-configured host's network state.
+See [docs/architecture/](docs/architecture/) for the full design doc and package layout.
 
-For a full walk-through — including image builds, node registration, and the first-deploy smoke test — see [docs/install.md](docs/install.md).
+---
 
-### 2. Pull an image
+## How clustr compares
 
-```bash
-clustr image pull \
-  --url https://your-image-server.example.com/rocky9-base.tar.gz \
-  --name rocky9-hpc-base \
-  --version 1.0.0 \
-  --os "Rocky Linux 9" \
-  --format filesystem
-```
+*Comparison based on publicly available documentation as of April 2026. "via plugin" means the capability exists but requires separate configuration or an external component. Checkmarks reflect generally-available functionality, not roadmap items.*
 
-### 3. Customize the image
+| Capability | **clustr v1.7** | xCAT 2.x | Warewulf 4.x | ColdFront 2.x | Bright CM |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Provisioning** | | | | | |
+| PXE / network boot | yes | yes | yes | no | yes |
+| IPMI / BMC management | yes | yes | yes | no | yes |
+| Image factory (pull, build, customize) | yes | partial | no | no | yes |
+| Air-gap / zero-egress operation | yes | partial | yes | no | yes |
+| EFI + BIOS boot, multi-NIC nodes | yes | yes | yes | no | yes |
+| Software RAID provisioning | yes | partial | no | no | yes |
+| InfiniBand / RoCE discovery | yes | yes | partial | no | yes |
+| **Slurm** | | | | | |
+| Slurm install + config management | yes | no | no | via plugin | yes |
+| GPG-signed bundled Slurm RPMs | yes | no | no | no | no |
+| Munge key distribution | yes | no | no | no | yes |
+| Slurm partition auto-configure | yes | no | no | via plugin | yes |
+| **Governance** | | | | | |
+| Allocation / NodeGroup management | yes | no | no | yes | partial |
+| PI self-service portal | yes | no | no | yes | partial |
+| Researcher status portal | yes | no | no | yes | partial |
+| IT Director read-only view | yes | no | no | yes | partial |
+| Grant + publication tracking | yes | no | no | yes | no |
+| Annual review workflow | yes | no | no | yes | no |
+| Allocation change requests | yes | no | no | yes | no |
+| SIEM audit log export (JSONL) | yes | no | no | no | partial |
+| **Security** | | | | | |
+| Cryptographic trust chain (alloc → job) | yes | no | no | no | no |
+| AES-256-GCM credential encryption | yes | no | no | no | yes |
+| CSP headers + no inline scripts | yes | no | no | no | yes |
+| RBAC (admin / operator / PI / researcher / director) | yes | partial | no | yes | yes |
+| **Operations** | | | | | |
+| Embedded web UI (no build step) | yes | no | no | yes | yes |
+| Single binary, SQLite, no external DB | yes | no | no | no | no |
+| Docker Compose install path | yes | no | no | yes | no |
+| Prometheus metrics endpoint | yes | no | no | no | yes |
+| Real-time deploy log streaming | yes | no | no | no | yes |
+| **License / model** | | | | | |
+| Open source | yes (MIT/Apache) | yes (EPL-1.0) | yes (BSD-3) | yes (AGPLv3) | no |
+| Self-hosted only (no SaaS, no phone-home) | yes | yes | yes | yes | no |
+| Commercial support required | no | no | no | no | yes |
 
-```bash
-# Drop into an interactive chroot shell for package installs, config changes, etc.
-clustr shell <image-id>
-# Inside chroot: dnf install -y slurm munge, configure sshd, etc.
-```
+**Notes on methodology:**
+- xCAT: features assessed from xcat-docs.readthedocs.io stable branch. xCAT has extensive scripting capabilities; "partial" means the capability requires manual configuration or shell scripting rather than a first-class feature.
+- Warewulf: features assessed from warewulf.org docs (main branch). Warewulf is a stateless provisioner; governance features are intentionally out of scope.
+- ColdFront: features assessed from docs.coldfront.dev stable + github.com/ubccr/coldfront. ColdFront handles governance only — it does not provision nodes, manage images, or touch bare metal.
+- Bright Cluster Manager: features assessed from nvidia.com/en-us/data-center/bright-cluster-manager. Commercial product; pricing is per-cluster, typically $50K–$150K+ depending on node count and support tier. "Partial" reflects that some governance capabilities exist but are less documented than the provisioning surface.
+- clustr v1.7.0 released 2026-04-27.
 
-### 4. Register node-specific config
+---
 
-```bash
-curl -X POST http://localhost:8080/api/v1/nodes \
-  -H "Authorization: Bearer mytoken" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "hostname": "compute-001",
-    "fqdn": "compute-001.cluster.example.com",
-    "primary_mac": "aa:bb:cc:dd:ee:01",
-    "base_image_id": "<image-id>",
-    "interfaces": [
-      {
-        "mac_address": "aa:bb:cc:dd:ee:01",
-        "name": "eth0",
-        "ip_address": "10.0.1.1/24",
-        "gateway": "10.0.1.254",
-        "dns": ["10.0.0.1"]
-      }
-    ],
-    "ssh_keys": ["ssh-ed25519 AAAA... admin@bastion"],
-    "groups": ["compute", "gpu"]
-  }'
-```
+## Current status
 
-### 5. Deploy to a node
+**v1.7.0** — stable, MIT/Apache licensed (LICENSE file in repo root).
 
-Boot the target node from a PXE initramfs containing `clustr`, then:
+| Track | Status |
+|---|---|
+| Core provisioning (PXE, images, deploy) | Stable |
+| Slurm module (bundled RPMs, munge, config) | Stable |
+| LDAP module (accounts, groups, password reset) | Stable |
+| Governance layer (PI portal, Director portal, audit) | Stable (v1.2–v1.7) |
+| Auto-allocation engine + PI onboarding | Stable (v1.7) |
+| Web UI | Stable (Alpine.js + HTMX + vanilla) |
 
-```bash
-clustr deploy \
-  --server http://clustr.cluster.internal:8080 \
-  --token mytoken \
-  --image <image-id> \
-  --fix-efi
-```
+**Known limitations (be honest before you commit):**
 
-`deploy` auto-discovers the node's MAC address, fetches the matching node config from the server, runs preflight checks, verifies image integrity (sha256), downloads and writes the image, applies hostname/network/SSH config, streams logs back to the server in real-time, and optionally repairs EFI boot entries. On failure the disk partition table is automatically restored from a pre-deploy backup.
+- No cloud or hybrid allocation support. clustr manages physical nodes only. There is no OpenStack, AWS, or Azure integration. This is an explicit non-goal (D27 Bucket 4).
+- No multi-tenant data isolation. A single clustr instance serves one organization. Multi-tenant requires PostgreSQL migration (v2.0, gated on scale triggers).
+- No OIDC / SSO for researcher login. Researcher and PI auth is local username+password or API key. OIDC is v2.0+, gated on a named customer requiring it.
+- No FreeIPA HBAC bridge in v1.x. LDAP module manages accounts; FreeIPA HBAC policy sync is v2.0, gated on customer demand.
+- No XDMoD integration yet. Utilization data comes from clustr's own deploy/node tables. XDMoD sync is unscheduled (D27 Bucket 3, customer-spec gate).
+- CI lab validation is not fully green. The iPXE build and end-to-end lab CI are known gaps (tracked as issue #104). The server unit tests and governance tests are green; the full PXE-boot-to-provisioned smoke test requires KVM access in CI.
+- EL10 (RHEL 10 / Rocky 10) Slurm bundle not yet available. Current bundled Slurm is v24.11.4 targeting EL9 (x86_64). EL10 bundle is on the roadmap; use RHEL/Rocky 9 for now.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history (v1.0.0 → v1.7.0).
+
+---
+
+## Contributing
+
+clustr is MIT/Apache licensed. Issues and PRs welcome.
+
+Before contributing governance features: ColdFront (AGPLv3) is a reference for feature design only. Do not reference ColdFront's source code in pull requests — any ColdFront-derived code would create a license conflict. Study the behavior; write original implementations.
+
+See [docs/architecture/](docs/architecture/) for the design rationale, and [docs/decisions.md](docs/decisions.md) for the locked architectural decisions.
+
+---
+
+## License
+
+MIT / Apache-2.0 dual-licensed. See LICENSE in the repo root.
 
 ---
 
@@ -625,6 +710,9 @@ Pages:
 - **Nodes** — view and manage node configurations
 - **Allocations** — DHCP allocations view: MAC→IP mapping for every node on the management network, sortable and linked to node detail
 - **Logs** — searchable log viewer with live SSE streaming; filter by node, level, or component
+- **PI Portal** (`/portal/pi/`) — NodeGroup utilization, member management, grants, publications, allocation requests
+- **Researcher Portal** (`/portal/`) — partition health, LDAP self-service password change
+- **Director Portal** (`/portal/director/`) — institutional summary, FOS utilization, CSV export
 
 ---
 
@@ -1161,7 +1249,7 @@ Example `RAIDSpec` in a node config:
 
 ## Access Control
 
-clustr uses a 3-tier role model: **admin** (full access), **operator** (group-scoped mutations), and **readonly** (view only). Operators are scoped to specific NodeGroups — they can only reimage and power nodes within the groups they are assigned to.
+clustr uses a role model with six roles: **admin** (full access), **operator** (group-scoped mutations), **pi** (NodeGroup owner, member management, governance), **readonly** (view only), **viewer** (researcher — partition status and self-service only), and **director** (read-only institutional view). Operators are scoped to specific NodeGroups — they can only reimage and power nodes within the groups they are assigned to.
 
 See [docs/rbac.md](docs/rbac.md) for the full permission matrix, group-scoped operator semantics, bootstrap flow, and migration guide.
 
@@ -1180,6 +1268,14 @@ Unauthenticated endpoints have explicit body size limits to prevent abuse: 1 MB 
 ### ISO import path restriction
 
 The server only allows ISO imports from paths under `CLUSTR_ISO_DIR` (default: `/var/lib/clustr/iso`). Paths outside this directory are rejected. Symlinks inside the ISO are extracted with `--copy-unsafe-links` to prevent traversal.
+
+### Content Security Policy
+
+All responses include CSP headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`). The web UI uses the Alpine.js CSP-safe build. No inline scripts.
+
+### Credential encryption
+
+LDAP bind passwords and BMC credentials are encrypted at rest using AES-256-GCM, sealed by `CLUSTR_SECRET_KEY`.
 
 ---
 
@@ -1276,14 +1372,14 @@ For a production install — covering Docker Compose (primary), bare-metal / Ans
 
 ## Architecture Overview
 
-See [docs/architecture.md](docs/architecture.md) for the full design doc.
+See [docs/architecture/](docs/architecture/) for the full design doc.
 
 Key decisions:
 
 - **BaseImage vs NodeConfig split** — One image blob serves N nodes. Per-node identity (hostname, IPs, SSH keys) is never baked into blobs. Applied at deploy time only.
 - **Pure-Go SQLite** (`modernc.org/sqlite`) — Keeps both binaries buildable with `CGO_ENABLED=0`. Required for static initramfs embedding.
 - **chi router** — Composes cleanly with standard `net/http` middleware.
-- **No auth system at v1** — Single pre-shared API token. HPC clusters are typically air-gapped and operator-administered.
+- **No external auth system** — Single pre-shared API token for machines; session cookies for humans. HPC clusters are typically air-gapped and operator-administered.
 - **Deployment engines** — Two backends: `FilesystemDeployer` (tar archive extraction with sgdisk + mkfs) and `BlockDeployer` (raw block image streamed directly to disk via dd, no temp file required).
 - **Embedded web UI** — Static assets compiled into the server binary via Go embed. No separate build step or asset server needed.
 - **Centralized log broker** — In-process log broker fans out SSE streams to connected CLI and web UI clients. Logs persisted to SQLite for historical queries.
