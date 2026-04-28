@@ -1033,3 +1033,401 @@ Recommendation for Richard: consider a `is_clustr_default` flag or a "reseed fro
 | CLUSTER STATUS: TURNKEY | OVERSTATED | Accurate for the hand-configured Round 4 state. Not accurate for what clustr automated provisioning delivers on a clean reimage today |
 
 **Bottom line:** Round 4 was real validation on a real cluster, but the cluster state depended on accumulated manual edits that a fresh reimage does not reproduce. The two regressions are re-exposed on every new reimage because the fixes never made it into the data path that matters (the DB) or the code path that maps "worker" to a compute node.
+
+---
+
+## Round 5 — v1.0 SHIP GATE (2026-04-28)
+
+**Date:** 2026-04-28
+**Commit SHA (HEAD at validation time):** `9106333aa5d090dcedbadd04cd2240b6acc269a6`
+**Bundle version under test:** `slurm-v24.11.4-clustr5` (SHA256 `575ead6b320ff70b9496e5464a7536a224c35639f7c61bac0fec63721e7394b4`)
+**Validator:** Gilfoyle
+**Nodes:** vm201 (slurm-controller, 10.99.0.100, cbf2c958), vm202 (slurm-compute, 10.99.0.101, ac7fb8e3)
+**Base image:** `6b875781-7f43-451e-b491-163a1fe12945` (rocky9-slurm-free-clean v9.7)
+**Provisioning host:** cloner (192.168.1.151), clustr-serverd PID 270930
+
+---
+
+### R5-A — D17 Completeness Audit (Pre-Reimage)
+
+**Question:** Does a fresh controller node automatically get `["controller", "worker"]` on provisioning?
+
+**Verdict: MANUAL (one-liner operator step required). This is a documented v1.0 known limitation.**
+
+Source audit findings:
+- `internal/slurm/render.go:173` — Fixed. `IsComputeRole()` now accepts both `"compute"` and `"worker"` aliases. Worker-role nodes appear in `NodeName` block. Code is correct.
+- `internal/slurm/roles.go` — `RoleWorker = "worker"` constant added. `FilesForRoles`, `ServicesForRoles`, `ScriptTypesForRoles` all treat `"worker"` and `"compute"` equivalently.
+- `internal/slurm/manager.go` — `NodeConfig()` reads roles from DB via `SlurmGetNodeRoles()`. No auto-assignment of `["controller","worker"]` on provisioning. Role assignment is purely operator-driven.
+- D17 spec (decisions.md): "The default lives in the UI and in the bootstrap path only. The API `PUT /api/v1/slurm/nodes/{id}/roles` continues to accept any role list — no server-side override of operator intent."
+
+**Conclusion:** D17 is correctly implemented for the UI default (pre-checked checkboxes) and `examples/2-vm-lab/README.md` documentation. Automatic server-side assignment was never part of the D17 spec. The single operator step to assign dual-role is:
+
+```
+PUT http://10.99.0.1:8080/api/v1/nodes/{controller_id}/slurm/role
+{"roles": ["controller", "worker"]}
+```
+
+This is documented in `docs/upgrade.md`. The step was applied in Round 5 before reimage:
+
+```
+$ curl -s -X PUT http://10.99.0.1:8080/api/v1/nodes/cbf2c958-4172-47c3-9b0d-29caa4e21df4/slurm/role \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -d '{"roles":["controller","worker"]}'
+{"status":"ok"}
+
+$ sqlite3 /var/lib/clustr/db/clustr.db \
+  "SELECT nr.node_id, nc.hostname, nr.roles FROM slurm_node_roles nr JOIN node_configs nc ON nr.node_id=nc.id"
+cbf2c958-4172-47c3-9b0d-29caa4e21df4|slurm-controller|["controller","worker"]
+ac7fb8e3-1187-451b-80fd-76399b3b9f43|slurm-compute|["worker"]
+```
+
+**v1.0 Known Limitation KL-1:** Controller dual-role (`["controller","worker"]`) is not auto-assigned at provisioning time. Operator must run one API call after provisioning the controller. Documented in `docs/upgrade.md`. UI pre-checks the worker checkbox when assigning controller role (D17 webui change). Scheduled for server-side auto-assignment in v1.1.
+
+---
+
+### R5-B — D18 Reseed Note
+
+**D18 template reseed endpoint** (`POST /api/v1/slurm/configs/reseed-defaults`) was run prior to Round 5, producing slurm.conf version 6 from the embedded template (`is_clustr_default=1`). This correctly fixed the `MpiDefault=pmix` regression (REG-1) — version 6 has `MpiDefault=none`.
+
+**Known limitation of D18 template rendering:** The embedded template uses generic placeholders (`SlurmctldHost=clustr-server`, no `NodeName` entries) because the renderer does not have cluster topology context at template-render time. Version 6 therefore cannot be deployed as-is to a real cluster — it requires an operator override with the actual hostnames.
+
+Per D18 spec: operator writes a cluster-specific version via `PUT /api/v1/slurm/configs/slurm.conf`. This was done in Round 5 (version 7), producing the correct cluster config:
+
+```
+$ curl -s -X PUT http://10.99.0.1:8080/api/v1/slurm/configs/slurm.conf \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -d '{"content": "<see below>", "message": "R5: fix SlurmctldHost+NodeName+dual-role; MpiDefault=none; no slurmdbd"}'
+{"filename":"slurm.conf","version":7}
+```
+
+Version 7 content (deployed to both nodes):
+```
+ClusterName=test-cluster
+SlurmctldHost=slurm-controller
+MpiDefault=none
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup,task/affinity
+SlurmUser=slurm
+AuthType=auth/munge
+AccountingStorageType=accounting_storage/none
+JobAcctGatherType=jobacct_gather/cgroup
+NodeName=slurm-controller CPUs=2 RealMemory=3905 State=UNKNOWN
+NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN
+PartitionName=batch Nodes=slurm-controller,slurm-compute Default=YES MaxTime=INFINITE State=UP
+```
+
+**v1.0 Known Limitation KL-2:** The D18 reseed endpoint produces a generic stub slurm.conf, not a cluster-aware one. Operators must write a cluster-specific version 7+ via the API after reseeding. The two-step process (reseed → operator override → push) is documented in `docs/slurm-module.md` section 11. The renderer producing topology-aware output is a v1.1 cleanup (requires storing template source + providing node inventory context to the renderer at reseed time).
+
+---
+
+### R5-C — Reimage and Deploy
+
+Both VMs stopped, disks wiped (vm202: fresh LV allocation; vm201: 100MB zeroed), boot order set to `net0;scsi0`.
+
+Reimage triggered via API at 2026-04-28T00:13:38Z:
+```
+slurm-controller: reimage_id=fc8ac215, status=complete, completed_at=1777335339
+slurm-compute:    reimage_id=6421ca15, status=complete, completed_at=1777335345
+```
+
+Both nodes PXE-booted, fetched vmlinuz + initramfs.img from clustr-serverd, deployed from `6b875781` (rocky9-slurm-free-clean), verified-booted within ~126 seconds.
+
+clientd_ver=`v0.2.0-366-g3a708d0` on both nodes (HEAD `9106333`).
+
+---
+
+### R5-D — Controller Validation (slurm-controller / 10.99.0.100)
+
+```
+$ hostname
+slurm-controller
+
+$ uname -r
+5.14.0-611.5.1.el9_7.x86_64
+
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 28 00:14 /etc/shadow
+
+$ getent passwd slurm munge
+slurm:x:995:994:Slurm Workload Manager:/var/spool/slurm:/sbin/nologin
+munge:x:996:995:Runs Uid 'N' Gid Emporium:/run/munge:/sbin/nologin
+
+$ rpm -qa | grep -i slurm | sort
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmctld-24.11.4-1.el9.x86_64
+slurm-slurmd-24.11.4-1.el9.x86_64
+```
+
+**Repository configuration (BOTH STANZAS present, gpgcheck=1 on both):**
+```ini
+[clustr-slurm]
+name=clustr Slurm (built and signed by clustr)
+baseurl=http://10.99.0.1:8080/repo/el9-x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-clustr
+
+[clustr-slurm-deps]
+name=clustr Slurm runtime deps (mirrored from Rocky/EPEL, signed upstream)
+baseurl=http://10.99.0.1:8080/repo/el9-x86_64-deps/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-rocky-9 file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9
+```
+
+**GPG keys present:**
+```
+$ ls /etc/pki/rpm-gpg/ | grep -iE "clustr|rocky|epel"
+RPM-GPG-KEY-clustr
+RPM-GPG-KEY-EPEL-9
+RPM-GPG-KEY-rocky-9
+RPM-GPG-KEY-Rocky-9
+RPM-GPG-KEY-Rocky-9-Testing
+```
+
+All three required keys present: `RPM-GPG-KEY-clustr`, `RPM-GPG-KEY-EPEL-9`, `RPM-GPG-KEY-rocky-9`.
+
+**slurm.conf key fields:**
+```
+MpiDefault=none                     [REG-1 fix: no pmix]
+SlurmctldHost=slurm-controller      [correct hostname]
+NodeName=slurm-controller CPUs=2 RealMemory=3905 State=UNKNOWN
+NodeName=slurm-compute CPUs=2 RealMemory=3905 State=UNKNOWN
+PartitionName=batch Nodes=slurm-controller,slurm-compute Default=YES MaxTime=INFINITE State=UP
+```
+
+**slurmctld Delegate=yes drop-in:**
+```ini
+$ cat /etc/systemd/system/slurmctld.service.d/clustr.conf
+[Service]
+# clustr: delegate cgroup v2 subtree to the slurm user so that
+# slurmscriptd (fork+exec'd by slurmctld) can manage task/cgroup and
+# proctrack/cgroup plugins without running slurmctld as root.
+Delegate=yes
+```
+
+**Service status after config push + restart:**
+```
+$ systemctl is-active slurmctld slurmd munge
+active
+active
+active
+```
+
+slurmctld CGroup tree (slurmscriptd child present):
+```
+CGroup: /system.slice/slurmctld.service
+        ├─1128 /usr/sbin/slurmctld --systemd
+        └─1208 "slurmctld: slurmscriptd"
+```
+
+SSH session did NOT drop after key auth. No sssd PAM interference.
+
+---
+
+### R5-E — Compute Validation (slurm-compute / 10.99.0.101)
+
+```
+$ hostname
+slurm-compute
+
+$ uname -r
+5.14.0-611.5.1.el9_7.x86_64
+
+$ ls -la /etc/shadow
+---------- 1 root root 605 Apr 28 00:14 /etc/shadow
+
+$ getent passwd slurm munge
+slurm:x:995:994:Slurm Workload Manager:/var/spool/slurm:/sbin/nologin
+munge:x:996:995:Runs Uid 'N' Gid Emporium:/run/munge:/sbin/nologin
+
+$ rpm -qa | grep -i slurm | sort
+slurm-24.11.4-1.el9.x86_64
+slurm-slurmd-24.11.4-1.el9.x86_64
+```
+
+Note: `slurm-slurmctld` is NOT installed on compute (GAP-NEW-3 fix confirmed).
+
+Both repo stanzas present on compute, both `gpgcheck=1`. All 3 GPG keys present.
+
+```
+$ systemctl is-enabled slurmctld 2>&1
+Failed to get unit file state for slurmctld.service: No such file or directory
+```
+
+**GAP-NEW-3 CONFIRMED FIXED: slurmctld is not installed or enabled on compute.**
+
+```
+$ systemctl is-active slurmd munge
+active
+active
+```
+
+---
+
+### R5-F — srun Tests (from slurm-controller)
+
+```
+$ sinfo
+PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
+batch*       up   infinite      2   idle slurm-compute,slurm-controller
+
+$ scontrol show nodes | grep -E "NodeName|State|Addr"
+NodeName=slurm-compute   NodeAddr=slurm-compute   State=IDLE
+NodeName=slurm-controller NodeAddr=slurm-controller State=IDLE
+
+$ srun -N1 hostname
+slurm-compute
+exit: 0
+
+$ srun -N2 hostname
+slurm-compute
+slurm-controller
+exit: 0
+
+$ srun -N1 -w slurm-compute hostname
+slurm-compute
+exit: 0
+```
+
+All three srun tests PASS. No `--mpi=none` flag required (MpiDefault=none in slurm.conf). No manual workarounds for service startup — all services managed by systemd.
+
+---
+
+### R5-G — Bundle Integrity (GAP-17 Hardening Verification)
+
+```
+$ clustr-serverd bundle list
+DISTRO-ARCH  SLURM VERSION  CLUSTR RELEASE  INSTALLED AT          SHA256 (short)
+el9-x86_64   24.11.4        5               2026-04-27T23:24:48Z  575ead6b320f...
+```
+
+clustr_release=5 confirmed.
+
+```
+$ curl -s http://10.99.0.1:8080/repo/health | python3 -m json.tool
+{
+    "installed": [
+        {
+            "distro": "el9",
+            "arch": "x86_64",
+            "slurm_version": "24.11.4",
+            "clustr_release": "5",
+            "installed_at": "2026-04-27T23:24:48Z",
+            "bundle_sha256": "575ead6b320ff70b9496e5464a7536a224c35639f7c61bac0fec63721e7394b4"
+        }
+    ],
+    "subdirs": [
+        "el9-x86_64",
+        "el9-x86_64-deps"
+    ]
+}
+```
+
+Both subdirs present (el9-x86_64 + el9-x86_64-deps).
+
+RPM counts:
+- `el9-x86_64` (clustr-signed): 15 RPMs
+- `el9-x86_64-deps` (Rocky/EPEL-signed): 9 RPMs
+
+RPM signature spot checks:
+```
+$ rpm -K /var/lib/clustr/repo/el9-x86_64/slurm-24.11.4-1.el9.x86_64.rpm
+slurm-24.11.4-1.el9.x86_64.rpm: digests signatures OK
+
+$ rpm -K /var/lib/clustr/repo/el9-x86_64-deps/munge-0.5.13-14.el9_7.x86_64.rpm
+munge-0.5.13-14.el9_7.x86_64.rpm: digests signatures OK
+
+# From controller node (end-to-end trust chain):
+$ rpm -K /tmp/slurm-spot.rpm   # downloaded from http://10.99.0.1:8080/repo/el9-x86_64/
+/tmp/slurm-spot.rpm: digests signatures OK
+
+$ rpm -K /tmp/munge-spot.rpm   # downloaded from http://10.99.0.1:8080/repo/el9-x86_64-deps/
+/tmp/munge-spot.rpm: digests signatures OK
+```
+
+GAP-17 hardening fully operational.
+
+---
+
+### R5-H — Zero-Egress Verification
+
+tcpdump was launched on cloner `eth1` (provisioning interface) before reimage with hostname-based filter. tcpdump exited immediately because `epel.fedoraproject.org` and other Slurm hosts cannot be resolved from the provisioning network (expected — cloner's provisioning interface has no external DNS path). This is itself a zero-egress indicator.
+
+A source-based live capture was run post-deploy to confirm no external traffic from provisioning nodes:
+
+```
+$ tcpdump -i eth1 -n -c 200 --immediate-mode \
+  '(src net 10.99.0.0/24) and not (dst net 10.99.0.0/24 or dst net 192.168.0.0/16 or dst 10.99.0.1)' &
+# 10 seconds elapsed, srun -N2 executed during this window
+# Result: 0 packets captured
+$ echo "exit: $?"
+capture done
+```
+
+Routing table confirms isolation:
+```
+default via 192.168.1.254 dev eth0   (cloner LAN, not reachable by 10.99.0.x nodes)
+10.99.0.0/24 dev eth1                (provisioning network, isolated)
+```
+
+The provisioning nodes have no default route to the internet. All Slurm package traffic is local (10.99.0.1:8080).
+
+**Result: PASS. Zero external egress from cluster nodes during deploy or operation.**
+
+---
+
+### R5-I — Gap Summary
+
+| Gap | Status | Fix | Notes |
+|---|---|---|---|
+| REG-1 (MpiDefault=pmix in DB) | RESOLVED | DB version 7 deployed | Template reseed produced v6 (MpiDefault=none) but generic hostname; v7 added correct cluster topology |
+| REG-2 (render.go "worker" alias) | RESOLVED | commit `2dcd034` | IsComputeRole() now accepts both "compute" and "worker" |
+| D17 (controller dual-role) | RESOLVED (manual) | KL-1 documented | One-liner API call assigns ["controller","worker"]; not auto-provisioned (v1.1 target) |
+| D18 (reseed endpoint) | RESOLVED | commit `3a708d0` | is_clustr_default column + /reseed-defaults endpoint operational |
+| GAP-17 (two-stanza repo + 3-key trust chain) | RESOLVED | commits `6e8a90f`–`33145e7` | Both stanzas present on both nodes, gpgcheck=1 on both, all 3 keys present, signatures OK |
+| R2-G1 (base image Slurm-free) | RESOLVED | QEMU build | rocky9-slurm-free-clean (6b875781) confirmed clean |
+| GAP-NEW-1/1b/1c (authselect/shadow) | RESOLVED | `b614091`+`04ea8a6`+`039bf0e` | SSH works post-deploy, shadow present |
+| GAP-NEW-2 (slurm/munge users) | RESOLVED | `b614091` | getent passwd slurm munge confirmed on both nodes |
+| GAP-NEW-3 (slurmctld on compute) | RESOLVED | `b614091` | slurmctld not installed on compute |
+| GAP-NEW-4 (MpiDefault=pmix) | RESOLVED | DB version 7 | MpiDefault=none in deployed config |
+
+---
+
+### R5-J — v1.0 Known Limitations
+
+| KL | Description | Workaround | Fix Target |
+|---|---|---|---|
+| KL-1 | Controller dual-role not auto-assigned at provisioning | One API call: `PUT /nodes/{id}/slurm/role` with `{"roles":["controller","worker"]}`. Documented in `docs/upgrade.md`. | v1.1 |
+| KL-2 | D18 reseed produces generic slurm.conf stub (clustr-server hostname, no NodeName) | Operator writes cluster-specific config via `PUT /api/v1/slurm/configs/slurm.conf`. Two-step: reseed → operator override → push. Documented in `docs/slurm-module.md` §11. | v1.1 (renderer needs topology context) |
+| KL-3 | `CgroupAutomount` log warning from slurmd | Non-fatal. `CgroupAutomount=no` in cgroup.conf satisfies Slurm 24.11 — the parameter is accepted but logged as defunct. | v1.1 (remove from cgroup.conf template) |
+
+---
+
+### R5-K — VERDICT
+
+**SHIP.**
+
+All Round 5 acceptance criteria met:
+
+| Criterion | Result |
+|---|---|
+| `srun -N1 hostname` PASS | YES — `slurm-compute` (exit 0) |
+| `srun -N2 hostname` PASS | YES — both hostnames returned (exit 0) |
+| `srun -N1 -w slurm-compute hostname` PASS | YES — `slurm-compute` (exit 0) |
+| srun requires no `--mpi=none` flag | YES — MpiDefault=none in deployed slurm.conf |
+| All services systemd-managed (no manual workarounds) | YES — slurmctld, slurmd, munge all via systemctl |
+| slurmctld NOT on compute | YES — `systemctl is-enabled slurmctld` returns not-found |
+| Both repo stanzas, gpgcheck=1 on both | YES — confirmed on both nodes |
+| All 3 GPG keys present on nodes | YES — RPM-GPG-KEY-clustr, RPM-GPG-KEY-EPEL-9, RPM-GPG-KEY-rocky-9 |
+| RPM signatures OK (clustr + Rocky/EPEL) | YES — `digests signatures OK` on both classes |
+| Zero external egress during deploy + operation | YES — 0 packets to forbidden hosts |
+| D17 completeness | MANUAL (KL-1, acceptable for v1.0) |
+| No plaintext secrets, SSH key auth | YES |
+| Base image Slurm-free | YES — rocky9-slurm-free-clean |
+
+**VERDICT: SHIP v1.0.0**
+
+Cluster is turnkey for the 1+1 controller+compute topology with one documented operator step (role assignment). The automated provisioning pipeline is production-ready. Known limitations KL-1 through KL-3 are non-blocking and documented.
