@@ -1066,6 +1066,27 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/portal/pi/review-cycles/{cycleID}/groups/{groupID}/respond", piH.HandleSubmitReviewResponse)
 		})
 
+		// ─── Sprint G — PI manager delegation (G3 / CF-09) ───────────────────────
+		// PI owner or admin can delegate/revoke managers for their NodeGroups.
+		// Delegated managers have the same per-project rights as the PI but are
+		// NOT the owner. Listed under PI portal middleware.
+		managerDelegH := &portalhandler.ManagerDelegationHandler{
+			DB:           s.db,
+			Audit:        s.audit,
+			Notifier:     notifierEarly,
+			GetActorInfo: getActorInfo,
+		}
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			// Manager list/add/remove on a specific NodeGroup.
+			r.Get("/portal/pi/groups/{id}/managers", managerDelegH.HandleListManagers)
+			r.Post("/portal/pi/groups/{id}/managers", managerDelegH.HandleAddManager)
+			r.Delete("/portal/pi/groups/{id}/managers/{userID}", managerDelegH.HandleRemoveManager)
+			// List all groups where the caller is a delegated manager.
+			r.Get("/portal/pi/managed-groups", managerDelegH.HandleListManagedGroups)
+		})
+
 		// ─── Sprint D — Director portal API (director or admin) ──────────────────
 		directorH := &portalhandler.DirectorHandler{DB: s.db, Audit: s.audit}
 		directorMW := portalhandler.DirectorMiddleware(userIDFromContext)
@@ -1419,6 +1440,11 @@ func (s *Server) buildRouter() chi.Router {
 			// requireRole("pi") passes pi, operator, and admin through.
 			r.With(requireRole("pi")).Put("/node-groups/{id}/expiration", nodeGroups.HandleSetExpiration)
 			r.With(requireRole("pi")).Delete("/node-groups/{id}/expiration", nodeGroups.HandleClearExpiration)
+			// G2 (CF-40): Per-NodeGroup LDAP group access restrictions.
+			// Admin-only: controls which LDAP groups are allowed to use this partition.
+			// GET returns the current list; PUT replaces it (pass [] to clear, = open access).
+			r.With(requireRole("admin")).Get("/node-groups/{id}/ldap-restrictions", nodeGroups.GetNodeGroupRestrictions)
+			r.With(requireRole("admin")).Put("/node-groups/{id}/ldap-restrictions", nodeGroups.SetNodeGroupRestrictions)
 			// Rolling group reimage — requires admin or group-scoped operator access.
 			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
 			// Group reimage job status polling.

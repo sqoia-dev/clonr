@@ -1,0 +1,14 @@
+Hello,
+
+A manager delegation on your compute group "{{.GroupName}}" has been revoked.
+
+{{- if .RevokedBy}}
+Revoked by: {{.RevokedBy}}
+{{- end}}
+{{- if .RevokedUser}}
+Revoked user: {{.RevokedUser}}
+{{- end}}
+
+If you believe this was done in error, please contact your cluster administrator.
+
+This is an automated message from clustr.

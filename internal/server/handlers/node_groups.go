@@ -511,3 +511,62 @@ func (h *NodeGroupsHandler) HandleClearExpiration(w http.ResponseWriter, r *http
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// ─── G2 — NodeGroup LDAP group access restrictions (Sprint G / CF-40) ─────────
+
+// GetNodeGroupRestrictions handles GET /api/v1/node-groups/{id}/ldap-restrictions.
+func (h *NodeGroupsHandler) GetNodeGroupRestrictions(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	groups, err := h.DB.GetNodeGroupAllowedLDAPGroups(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"group_id":            id,
+		"allowed_ldap_groups": groups,
+	})
+}
+
+// SetNodeGroupRestrictions handles PUT /api/v1/node-groups/{id}/ldap-restrictions.
+// Replaces the allowed_ldap_groups list. Pass [] to clear (open access).
+func (h *NodeGroupsHandler) SetNodeGroupRestrictions(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req struct {
+		AllowedLDAPGroups []string `json:"allowed_ldap_groups"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	if _, err := h.DB.GetNodeGroupFull(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if err := h.DB.SetNodeGroupAllowedLDAPGroups(r.Context(), id, req.AllowedLDAPGroups); err != nil {
+		log.Error().Err(err).Str("group_id", id).Msg("node_groups: set ldap restrictions failed")
+		writeError(w, err)
+		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", "admin"
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel,
+			"node_group.ldap_restrictions.set",
+			"node_group", id, r.RemoteAddr,
+			nil,
+			map[string]interface{}{"allowed_ldap_groups": req.AllowedLDAPGroups},
+		)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"group_id":            id,
+		"allowed_ldap_groups": req.AllowedLDAPGroups,
+	})
+}

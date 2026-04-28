@@ -32,6 +32,11 @@ type RenderContext struct {
 	Overrides map[string]string
 	// Timestamp is the render time, for header comments.
 	Timestamp string
+	// NodeGroupRestrictions is a map of NodeGroup name → allowed LDAP group CNs list.
+	// When non-empty for a partition, AllowGroups= is emitted on the PartitionName line.
+	// Keys are NodeGroup names (used as Slurm partition names in the default template).
+	// Added in Sprint G (G2 / CF-40).
+	NodeGroupRestrictions map[string][]string
 }
 
 // NodeRenderData represents one node's hardware parameters for the slurm.conf
@@ -248,13 +253,43 @@ func (m *Manager) buildRenderContext(ctx context.Context, nodeID string) (*Rende
 		currentNode = &nd
 	}
 
+	// Load per-NodeGroup LDAP group restrictions (G2 / CF-40).
+	// Keys: NodeGroup IDs → []string of allowed group CNs.
+	// We need to resolve NodeGroup ID → name for the template (partition names are
+	// based on NodeGroup names in the default slurm.conf.tmpl).
+	nodeGroupRestrictions := make(map[string][]string)
+	restrictionsByID, err := m.db.ListNodeGroupsWithRestrictions(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("slurm render: failed to load node group restrictions (using empty map)")
+	} else {
+		// Build a groupID → NodeGroup name map from the existing nodeConfigByID lookup.
+		// NodeGroups that have restrictions but no nodes are still useful (their partition
+		// might have nodes added later). Fetch all group names.
+		allGroups, groupErr := m.db.ListNodeGroupsForRender(ctx)
+		if groupErr != nil {
+			log.Warn().Err(groupErr).Msg("slurm render: failed to list node groups for restrictions")
+		}
+		groupNameByID := make(map[string]string, len(allGroups))
+		for _, g := range allGroups {
+			groupNameByID[g.ID] = g.Name
+		}
+		for groupID, groups := range restrictionsByID {
+			name, ok := groupNameByID[groupID]
+			if !ok {
+				name = groupID // fallback to ID
+			}
+			nodeGroupRestrictions[name] = groups
+		}
+	}
+
 	return &RenderContext{
-		ClusterName:        clusterName,
-		ControllerHostname: controllerHostname,
-		Nodes:              nodes,
-		CurrentNode:        currentNode,
-		Overrides:          currentNodeOverrides,
-		Timestamp:          time.Now().UTC().Format(time.RFC3339),
+		ClusterName:           clusterName,
+		ControllerHostname:    controllerHostname,
+		Nodes:                 nodes,
+		CurrentNode:           currentNode,
+		Overrides:             currentNodeOverrides,
+		Timestamp:             time.Now().UTC().Format(time.RFC3339),
+		NodeGroupRestrictions: nodeGroupRestrictions,
 	}, nil
 }
 

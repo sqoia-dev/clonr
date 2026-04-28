@@ -5,6 +5,104 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.6.0] — 2026-04-27
+
+**Sprint G — Identity & Access Primitives (CF-24, CF-40, CF-09)**
+
+Completes clustr's IAM story for non-FreeIPA environments: OpenLDAP project
+plugin auto-creates posixGroups per NodeGroup, per-NodeGroup LDAP group
+restrictions gate Slurm partition access, and PI manager delegation lets PIs
+deputize co-managers for their groups. No breaking changes; all new features
+are additive.
+
+### Added
+
+- **OpenLDAP project plugin (G1 / CF-24)** — When the LDAP module is enabled
+  and a NodeGroup is created, clustr auto-creates a `posixGroup` in LDAP
+  (`cn=clustr-project-<slug>,ou=clustr-projects,<base_dn>`). Member add/remove
+  operations are mirrored to `memberUid`. LDAP failures never block the primary
+  workflow: they are enqueued in `ldap_sync_queue` and retried with exponential
+  backoff (1 m → 2 m → 4 m → … capped at 60 m) by a background worker (ticks
+  every 2 minutes). Additive-only sync: manually-added LDAP members are never
+  removed by clustr re-sync. GID numbers are stable (derived from NodeGroup UUID
+  in the 10 000–29 999 range). DB migrations 069 adds `ldap_group_dn`,
+  `ldap_sync_state`, `ldap_sync_last_at`, `ldap_sync_error`,
+  `ldap_sync_enabled` columns to `node_groups` and creates the
+  `ldap_sync_queue` retry table.
+
+- **Per-NodeGroup LDAP group access restriction (G2 / CF-40)** — New
+  `allowed_ldap_groups` JSON array column on `node_groups` (migration 070).
+  When non-empty, the Slurm config render emits `AllowGroups=` on the
+  corresponding `PartitionName` line. Default `[]` = open access (no change
+  to existing behavior). Admin-only API:
+  `GET /api/v1/node-groups/{id}/ldap-restrictions`,
+  `PUT /api/v1/node-groups/{id}/ldap-restrictions`. Pass `[]` to clear
+  (restore open access). `NodeGroupRestrictions map[string][]string` added to
+  `RenderContext` so custom `slurm.conf.tmpl` templates can reference it.
+
+- **PI manager delegation (G3 / CF-09)** — New `project_managers` join table
+  (migration 071) with `UNIQUE(node_group_id, user_id)`. A PI can delegate
+  management rights to other users for their NodeGroup. Delegated managers have
+  the same per-project rights as the PI (view utilization, manage members,
+  submit allocation requests, set expiration) but are NOT the owner (cannot
+  delete the group, change PI ownership, or change visibility defaults). Admin
+  can list/revoke any delegation. New endpoints under PI portal middleware:
+  `GET /api/v1/portal/pi/groups/{id}/managers`,
+  `POST /api/v1/portal/pi/groups/{id}/managers` (`{"user_id": "<uuid>"}`),
+  `DELETE /api/v1/portal/pi/groups/{id}/managers/{userID}`,
+  `GET /api/v1/portal/pi/managed-groups`. Notification sent to newly delegated
+  manager on grant; PI notified when admin revokes a delegation on their group.
+  Audit events: `pi.manager.grant`, `pi.manager.revoke`.
+
+- **Notification templates for manager delegation** — `manager_granted`
+  (text + HTML) explains delegated manager permissions; `manager_revoked`
+  (text + HTML) notifies the PI when admin removes a delegation.
+  `NotifyManagerGranted` and `NotifyManagerRevoked` methods added to `Notifier`.
+
+- **DB migrations 069–071** — See G1/G2/G3 above. All migrations are
+  `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS` (safe on upgrade; existing rows
+  get default values).
+
+---
+
+## [v1.5.0] — 2026-04-27
+
+**Sprint F — Security & Audit Hardening (F1–F5)**
+
+Hardens the security posture with a strict Content Security Policy, removes all
+inline scripts, adds a SIEM-compatible audit log export endpoint, and implements
+allocation expiration warnings. No breaking API changes.
+
+### Added
+
+- **Content Security Policy (F1)** — `securityHeadersMiddleware` emits CSP,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  `Referrer-Policy: same-origin` on every response. Alpine.js switched to the
+  CSP-safe `@alpinejs/csp` build. All inline `<script>` blocks extracted to
+  external `.js` files; inline event handler attributes replaced with
+  `data-on-*` attributes dispatched by a central `Delegate` object.
+
+- **SIEM audit log export (F2)** — `GET /api/v1/audit/export` streams the
+  audit log as JSONL/NDJSON. Admin-only; rate-limited to 1 export per minute.
+  Supports `since`, `until`, `actor`, `action`, `resource_type` query params.
+  `StreamAuditLog` added to the DB layer for memory-efficient streaming.
+  "Export JSONL" button added to the admin Audit Log page.
+
+- **Allocation expiration (F3)** — Optional `expires_at` field on `node_groups`
+  (migration 068). `PUT /api/v1/node-groups/{id}/expiration` (pi+),
+  `DELETE /api/v1/node-groups/{id}/expiration`. Background scanner runs daily;
+  sends warning emails at 30, 14, and 7 days. `NotifyExpirationWarning` added to
+  the notifications package (text + HTML templates).
+
+- **CSP regression tests (F4)** — `test/js/csp-policy.test.mjs` (18 tests)
+  asserts no inline scripts, no inline handlers, CSP header configured, Alpine
+  CSP build used, SIEM export route registered. Added to CI.
+
+- **Documentation (F5)** — `docs/security-headers.md` (CSP policy reference),
+  `docs/audit.md` (SIEM export guide, JSONL schema, action reference).
+
+---
+
 ## [v1.4.0] — 2026-04-27
 
 **Sprint E — Governance Polish (CF-11, CF-15, CF-16, CF-20, CF-39)**

@@ -61,13 +61,18 @@ type Manager struct {
 	// On Debian/Ubuntu: "openldap".
 	// Detected during Enable() by EnsureOpenLDAP() and threaded into all chown calls.
 	slapdUser string
+
+	// projectPluginCfg is the OpenLDAP project plugin configuration (G1 / CF-24).
+	// Zero value uses defaultProjectPluginConfig() defaults (set in New()).
+	projectPluginCfg ProjectPluginConfig
 }
 
 // New creates a new LDAP Manager. Call StartBackgroundWorkers to start health checks.
 func New(cfg config.ServerConfig, database *db.DB) *Manager {
 	m := &Manager{
-		cfg: cfg,
-		db:  database,
+		cfg:              cfg,
+		db:               database,
+		projectPluginCfg: defaultProjectPluginConfig(),
 	}
 	// Restore in-memory passwords from DB on startup if module is ready.
 	m.restoreInMemoryPasswords(context.Background())
@@ -721,9 +726,10 @@ func (m *Manager) NodeConfig(ctx context.Context) (*api.LDAPNodeConfig, error) {
 
 // ─── Background workers ───────────────────────────────────────────────────────
 
-// StartBackgroundWorkers launches the health-check goroutine.
+// StartBackgroundWorkers launches the health-check goroutine and the project plugin worker.
 func (m *Manager) StartBackgroundWorkers(ctx context.Context) {
 	go m.runHealthChecker(ctx)
+	m.StartProjectPluginWorker(ctx)
 }
 
 // runHealthChecker ticks every 30 seconds and checks slapd reachability.

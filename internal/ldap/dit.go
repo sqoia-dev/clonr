@@ -806,3 +806,85 @@ func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 
 	return u, nil
 }
+
+// ─── Project plugin helpers ───────────────────────────────────────────────────
+
+// EnsureOU creates an organizationalUnit entry under parentDN if it does not exist.
+// Returns nil on success or if the OU already exists.
+func (c *ditClient) EnsureOU(ouName, parentDN string) error {
+	conn, err := c.connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	dn := fmt.Sprintf("ou=%s,%s", goldap.EscapeDN(ouName), parentDN)
+	addReq := goldap.NewAddRequest(dn, nil)
+	addReq.Attribute("objectClass", []string{"top", "organizationalUnit"})
+	addReq.Attribute("ou", []string{ouName})
+
+	if addErr := conn.Add(addReq); addErr != nil {
+		if goldap.IsErrorWithCode(addErr, goldap.LDAPResultEntryAlreadyExists) {
+			return nil // idempotent
+		}
+		return fmt.Errorf("ldap dit: ensure OU %s: %w", dn, addErr)
+	}
+	return nil
+}
+
+// EnsureProjectGroup creates a posixGroup under parentOU, or verifies it exists.
+// Returns the full DN of the group.
+func (c *ditClient) EnsureProjectGroup(cn string, gidNumber int, description, parentOU string) (string, error) {
+	conn, err := c.connect()
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	dn := fmt.Sprintf("cn=%s,%s", goldap.EscapeDN(cn), parentOU)
+	addReq := goldap.NewAddRequest(dn, nil)
+	addReq.Attribute("objectClass", []string{"top", "posixGroup"})
+	addReq.Attribute("cn", []string{cn})
+	addReq.Attribute("gidNumber", []string{strconv.Itoa(gidNumber)})
+	if description != "" {
+		addReq.Attribute("description", []string{description})
+	}
+
+	if addErr := conn.Add(addReq); addErr != nil {
+		if goldap.IsErrorWithCode(addErr, goldap.LDAPResultEntryAlreadyExists) {
+			return dn, nil // already exists — return the DN
+		}
+		return "", fmt.Errorf("ldap dit: ensure project group %s: %w", dn, addErr)
+	}
+	return dn, nil
+}
+
+// GetGroupMembers returns the memberUid list for a posixGroup identified by CN.
+// Returns an empty slice if the group has no members.
+func (c *ditClient) GetGroupMembers(cn string) ([]string, error) {
+	conn, err := c.connect()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Search the full DIT for the group by CN since it may be in any OU.
+	req := goldap.NewSearchRequest(
+		c.baseDN,
+		goldap.ScopeWholeSubtree,
+		goldap.NeverDerefAliases,
+		1, 0, false,
+		fmt.Sprintf("(&(objectClass=posixGroup)(cn=%s))", goldap.EscapeFilter(cn)),
+		[]string{"memberUid"},
+		nil,
+	)
+
+	sr, err := conn.Search(req)
+	if err != nil {
+		return nil, fmt.Errorf("ldap dit: get group members for %s: %w", cn, err)
+	}
+	if len(sr.Entries) == 0 {
+		return nil, fmt.Errorf("ldap dit: group %q not found", cn)
+	}
+	return sr.Entries[0].GetAttributeValues("memberUid"), nil
+}

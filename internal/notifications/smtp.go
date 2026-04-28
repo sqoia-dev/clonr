@@ -588,6 +588,38 @@ func (n *Notifier) NotifyExpirationWarning(ctx context.Context, to []string, gro
 	n.send(ctx, "expiration_warning", to, subject, "expiration_warning", data)
 }
 
+// ManagerGrantedData is the template data for manager_granted notifications.
+type ManagerGrantedData struct {
+	Username  string // LDAP username of the newly delegated manager
+	GroupName string // NodeGroup name
+	GrantedBy string // Display name of the PI who granted delegation
+}
+
+// NotifyManagerGranted sends a notification to a user when they are delegated
+// as a manager for a NodeGroup by a PI.
+func (n *Notifier) NotifyManagerGranted(ctx context.Context, to, username, groupName, grantedBy string) {
+	n.send(ctx, "manager_granted", []string{to},
+		"You have been added as a manager of "+groupName,
+		"manager_granted",
+		ManagerGrantedData{Username: username, GroupName: groupName, GrantedBy: grantedBy})
+}
+
+// ManagerRevokedData is the template data for manager_revoked notifications.
+type ManagerRevokedData struct {
+	GroupName   string // NodeGroup name
+	RevokedBy   string // Who revoked (PI username or "admin")
+	RevokedUser string // The user ID/username whose delegation was removed
+}
+
+// NotifyManagerRevoked sends a notification to the PI when an admin revokes
+// a manager delegation on their NodeGroup.
+func (n *Notifier) NotifyManagerRevoked(ctx context.Context, to, groupName, revokedBy, revokedUser string) {
+	n.send(ctx, "manager_revoked", []string{to},
+		"Manager delegation revoked on "+groupName,
+		"manager_revoked",
+		ManagerRevokedData{GroupName: groupName, RevokedBy: revokedBy, RevokedUser: revokedUser})
+}
+
 func (n *Notifier) SendBroadcast(ctx context.Context, to []string, subject, body, adminName, groupName string) error {
 	if n.Mailer == nil || !n.Mailer.IsConfigured() {
 		log.Info().Strs("to", to).Msg("[broadcast skipped: SMTP not configured]")
