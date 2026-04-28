@@ -51,11 +51,13 @@ func TestLayoutIncludesAlpineAndHTMX(t *testing.T) {
 
 	// The vendor script filenames are pinned — check exact file names so a
 	// version bump without a corresponding CI re-vendor is caught here.
+	// F1 (v1.5.0): index.html uses the Alpine CSP build (alpine-csp-*.min.js)
+	// instead of the standard build. Accept only the CSP build here.
 	checks := []struct {
 		name    string
 		needle  string
 	}{
-		{"Alpine.js 3.15.11", "alpine-3.15.11.min.js"},
+		{"Alpine.js 3.15.11 CSP build", "alpine-csp-3.15.11.min.js"},
 		{"HTMX 2.0.9", "htmx-2.0.9.min.js"},
 	}
 	for _, c := range checks {
@@ -98,11 +100,12 @@ func TestPortalLayoutIncludesAlpineAndHTMX(t *testing.T) {
 	}
 	html := body.String()
 
+	// F1 (v1.5.0): portal pages use the Alpine CSP build.
 	checks := []struct {
 		name   string
 		needle string
 	}{
-		{"Alpine.js 3.15.11", "alpine-3.15.11.min.js"},
+		{"Alpine.js 3.15.11 CSP build", "alpine-csp-3.15.11.min.js"},
 		{"HTMX 2.0.9", "htmx-2.0.9.min.js"},
 	}
 	for _, c := range checks {
