@@ -78,7 +78,7 @@ func (db *DB) GetTechTrigState(ctx context.Context, name TechTrigName) (TechTrig
 		FROM tech_trig_state
 		WHERE trigger_name = ?
 	`, string(name))
-	states, err := scanTechTrigRows(&singleRow{row: row})
+	states, err := scanTechTrigRows(&ttSingleRow{row: row})
 	if err != nil {
 		return TechTrigState{}, err
 	}
@@ -244,33 +244,34 @@ func (db *DB) ListTechTrigHistory(ctx context.Context, limit int) ([]TechTrigHis
 
 // ─── internal helpers ────────────────────────────────────────────────────────
 
-// rowScanner is satisfied by both *sql.Rows and the singleRow adapter.
-type rowScanner interface {
+// techTrigRowScanner is satisfied by both *sql.Rows and the ttSingleRow adapter.
+// Named distinctly to avoid conflict with the simpler rowScanner interface in users.go.
+type techTrigRowScanner interface {
 	Next() bool
 	Scan(dest ...any) error
 	Close() error
 	Err() error
 }
 
-// singleRow wraps *sql.Row to satisfy rowScanner.
-type singleRow struct {
+// ttSingleRow wraps *sql.Row to satisfy techTrigRowScanner for single-row queries.
+type ttSingleRow struct {
 	row    *sql.Row
 	called bool
 	err    error
 }
 
-func (s *singleRow) Next() bool {
+func (s *ttSingleRow) Next() bool {
 	if s.called {
 		return false
 	}
 	s.called = true
 	return true
 }
-func (s *singleRow) Scan(dest ...any) error { s.err = s.row.Scan(dest...); return s.err }
-func (s *singleRow) Close() error           { return nil }
-func (s *singleRow) Err() error             { return s.err }
+func (s *ttSingleRow) Scan(dest ...any) error { s.err = s.row.Scan(dest...); return s.err }
+func (s *ttSingleRow) Close() error           { return nil }
+func (s *ttSingleRow) Err() error             { return s.err }
 
-func scanTechTrigRows(rows rowScanner) ([]TechTrigState, error) {
+func scanTechTrigRows(rows techTrigRowScanner) ([]TechTrigState, error) {
 	defer rows.Close()
 	var out []TechTrigState
 	for rows.Next() {
