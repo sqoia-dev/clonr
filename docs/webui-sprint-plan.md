@@ -3,7 +3,7 @@
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (D21 re-rule + Sprint B.5 inserted + framework adoption now in Sprint C)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
 **Status:** LOCKED. Sprints A, B, B.5, C below are committed. Sprint D is directional, not committed.
-**Source reviews:**
+**Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
 - `docs/webui-review-personas.md` (Monica, commit `20d92dc`) — 6 personas, 1 served today
