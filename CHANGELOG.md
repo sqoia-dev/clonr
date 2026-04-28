@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.12.1] — 2026-04-27 (Sprint O — Candidate clarifications)
+
+**Sprint O — three candidates from Sprint N closed**
+
+### Changed
+
+- **O1 — `slurm-build.yml` Node sweep**: audited all `.github/workflows/*.yml` for
+  remaining Node 20 references. `slurm-build.yml` uses no `actions/setup-node` steps
+  (it builds Slurm RPMs via `dnf`, not Node); `ci.yml` is already fully on Node 24
+  (Sprint N). No changes required; candidate confirmed clean.
+
+- **O2 — Audit log on bootstrap-admin normal path** (policy clarification):
+  `bootstrap_admin.go` always writes `AuditActionUserCreate` on every invocation
+  (not only on `--bypass-complexity`). This is now documented explicitly in code:
+  every CLI credential-reset is a privileged action that deserves an audit trail,
+  regardless of whether complexity was bypassed. `KEEP` decision with rationale
+  comment added to `cmd/clustr-serverd/bootstrap_admin.go`.
+
+- **O3 — `must_change_password=false` on bypass** (policy clarification + improved
+  warning): `must_change_password` remains `false` on the bypass path (same as
+  normal path). Rationale documented in code: forcing `must_change_password=true`
+  blocks the operator from logging in until they set a new password, which defeats
+  the "I need in NOW" emergency recovery use case. Mitigation: stderr warning block
+  now includes a clear `ACTION:` line ("Change this password manually as soon as
+  recovery is complete") and the post-create stdout message is expanded with a
+  three-line action block directing the operator to Settings > Account.
+
+---
+
 ## [v1.12.0] — 2026-04-27 (Sprint N — Ergonomics + deprecation closeout)
 
 **Sprint N — bootstrap-admin bypass flag + GHA Node 24 sweep**

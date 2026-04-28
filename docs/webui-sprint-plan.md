@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M, N are RELEASED (v1.0.1 → v1.12.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions monitored via `docs/tech-triggers.md` and admin Tech Triggers UI (Sprint M).
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M, N, O are RELEASED (v1.0.1 → v1.12.1). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions monitored via `docs/tech-triggers.md` and admin Tech Triggers UI (Sprint M).
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -807,6 +807,19 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
+### Sprint O — v1.12.1 "Candidate Clarifications" **[COMPLETED — 2026-04-27]**
+
+**Goal:** Close the three candidates Sprint N spotted but deferred: `slurm-build.yml` Node audit, audit-log-on-normal-path policy, and `must_change_password=false` on bypass policy.
+
+**Shipped:** v1.12.1. CI green. Tag pushed. Cloner autodeploy picks up new binary.
+
+- **O1** — `slurm-build.yml` Node version sweep: audited all `.github/workflows/*.yml` for remaining Node 20 references. `slurm-build.yml` has no `actions/setup-node` steps (it builds Slurm RPMs via dnf). `ci.yml` is already fully on Node 24 (Sprint N). No file changes; candidate confirmed clean.
+- **O2** — Audit log on bootstrap-admin normal path (**KEEP** decision): every `bootstrap-admin` invocation always writes `AuditActionUserCreate` — not just bypass invocations. This is intentional: CLI credential-resets are privileged actions that deserve an audit trail. Policy rationale and actorID convention now documented in `cmd/clustr-serverd/bootstrap_admin.go` comment block.
+- **O3** — `must_change_password=false` on bypass (**KEEP** decision): `must_change_password` stays `false` on the bypass path. Rationale: forcing `true` would block the operator from logging in until they change the password, which defeats the "I need in NOW" emergency recovery use case. Mitigation: bypass stderr warning block now includes an explicit `ACTION:` line ("Change this password manually as soon as recovery is complete"); post-create stdout block expanded with three-line action directing operator to Settings > Account.
+- **CHANGELOG** — v1.12.1 entry.
+
+---
+
 ### Sprint N — v1.12.0 "Ergonomics + Deprecation Closeout" **[COMPLETED — 2026-04-27]**
 
 **Goal:** Close task #115 (bootstrap-admin bypass flag) and sweep remaining Node 20 GHA actions.
@@ -961,7 +974,7 @@ Per D27, we don't pre-schedule sprints for items that need a trigger. All four T
 - **XDMoD integration** → **v1.x** minor bump (additive plugin) when pulled
 - **Custom metrics / custom attributes (CF-04/06/37)** → **v1.x** minor bump (additive) when pulled
 
-**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I) → v1.9 (Sprint J) → v1.10 (Sprint K) → v1.10.1 (Sprint L, docs) → v1.11 (Sprint M, TECH-TRIG monitoring) → v1.12.0 (Sprint N, bootstrap bypass + Node 24 sweep) → v1.13+ per next sprint cadence.
+**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I) → v1.9 (Sprint J) → v1.10 (Sprint K) → v1.10.1 (Sprint L, docs) → v1.11 (Sprint M, TECH-TRIG monitoring) → v1.12.0 (Sprint N, bootstrap bypass + Node 24 sweep) → v1.12.1 (Sprint O, candidate clarifications) → v1.13+ per next sprint cadence.
 
 ---
 

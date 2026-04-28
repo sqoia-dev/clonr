@@ -127,13 +127,19 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 
 	if bypassComplexity {
 		// Loud warning — this is a security tradeoff documented in the audit log.
+		// POLICY: must_change_password is left false (same as normal path) so the
+		// operator can log in immediately during recovery. The weak password is not
+		// auto-expired. Forcing must_change_password=true would block access until a
+		// new password is set, defeating the "I need in NOW" emergency use case.
+		// The warning below is the mitigation: the operator is told explicitly to
+		// change the password as soon as the recovery session is complete.
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "WARNING: --bypass-complexity is set.\n")
 		fmt.Fprintf(os.Stderr, "  Password complexity validation is SKIPPED.\n")
 		fmt.Fprintf(os.Stderr, "  This is for EMERGENCY CREDENTIAL RECOVERY only.\n")
 		fmt.Fprintf(os.Stderr, "  A weak password will be stored in the database.\n")
-		fmt.Fprintf(os.Stderr, "  Change the password immediately after recovery.\n")
 		fmt.Fprintf(os.Stderr, "  This action will be recorded in the audit log.\n")
+		fmt.Fprintf(os.Stderr, "  ACTION: Change this password manually as soon as recovery is complete.\n")
 		fmt.Fprintf(os.Stderr, "\n")
 	} else {
 		if err := validateBootstrapPassword(password); err != nil {
@@ -193,8 +199,17 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		return fmt.Errorf("create user: %w", err)
 	}
 
-	// Audit log — always record the create; additionally record a bypass event
-	// when --bypass-complexity was used so post-incident reviews can find it.
+	// Audit log — POLICY: always record AuditActionUserCreate on every bootstrap-admin
+	// invocation, not just when --bypass-complexity is used. Rationale: bootstrap-admin
+	// is a privileged CLI operation (it can delete all users and create a new admin
+	// account). Every invocation should leave a trail in the audit log regardless of
+	// whether complexity was bypassed, so that post-incident reviews surface all
+	// credential-reset events. This is intentional behavior, not a bug.
+	//
+	// The actorID is "bootstrap-admin" (not a real UUID) because the CLI runs outside
+	// the HTTP request path; there is no authenticated session to attribute the action
+	// to. The actorLabel "bootstrap-admin (cli)" distinguishes it from API-originated
+	// user creates in audit log queries.
 	auditSvc := db.NewAuditService(database)
 	auditSvc.Record(ctx,
 		"bootstrap-admin",          // actorID — not a real user ID; marks the CLI actor
@@ -238,7 +253,9 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 	fmt.Printf("  Role:     admin\n")
 	fmt.Printf("  Web UI:   %s\n", webURL)
 	if bypassComplexity {
-		fmt.Printf("\nACTION REQUIRED: Change the password immediately — it does not meet complexity requirements.\n")
+		fmt.Printf("\nACTION REQUIRED: Change this password manually as soon as recovery is complete.\n")
+		fmt.Printf("  The password set with --bypass-complexity does not meet complexity requirements.\n")
+		fmt.Printf("  Log in, then go to Settings > Account to set a strong password.\n")
 	}
 	fmt.Printf("\nStart the server with: clustr-serverd\n")
 	fmt.Printf("Then log in at: %s\n\n", webURL)
