@@ -1281,6 +1281,8 @@ D25's text was internally consistent and the prioritization table was correct. T
 
 **See:** `docs/webui-sprint-plan.md` Sprint Z section (re-sequenced) for the per-item bucket assignments and Sprint F/G/H deliverable lists.
 
+**TECH-TRIG monitoring (Sprint M, v1.11.0):** All four Bucket 2 triggers are now instrumented. The background evaluator runs every 10 minutes and writes results to the `tech_trig_state` table. Admin UI surface: Settings > Tech Triggers. API: `GET /api/v1/admin/tech-triggers`. Prometheus: `clustr_tech_trigger{name}` and `clustr_tech_trigger_value{name}`. Operator runbook: `docs/tech-triggers.md`.
+
 ---
 
 ## D28 — Versioning Policy (v1.x vs v2.x boundary)

@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27 (original) — **Updated 2026-04-27 (ColdFront integration pass: Sprint C scope expanded; Sprints C.5, D, E added; D24 + D25 ruled)** — **Re-sequenced 2026-04-27 (Sprint Z dissolved; Sprints F/G/H committed at v1.5/v1.6/v1.7; D27 supersedes D25; D28 versioning policy ruled)**
 **Decision-maker:** Richard (Technical Co-founder) — full delegated authority from founder
-**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions documented per item.
+**Status:** LOCKED. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M are RELEASED (v1.0.1 → v1.11.0). Items in Buckets 2/3/4 of the dissolved Sprint Z are unscheduled; trigger conditions monitored via `docs/tech-triggers.md` and admin Tech Triggers UI (Sprint M).
 **Source reviews (deleted post-synthesis — recoverable via git log):**
 - `docs/webui-review-engineering.md` (Dinesh, commit `9a12772`) — 8 P1 / 14 P2 / 11 P3
 - `docs/webui-review-ops.md` (Jared, commit `8221e91`) — 1 Blocker / 9 High / 8 Medium / 3 Low
@@ -807,6 +807,31 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
+### Sprint M — v1.11.0 "TECH-TRIG Monitoring" **[COMPLETED — 2026-04-27]**
+
+**Goal:** Wire up the four D27 Bucket 2 TECH-TRIG signals so we know when they fire. Closes the "we'll know when to act" gap identified after Sprint Z re-sequencing (D27, 09c8dc1).
+
+**Shipped:** v1.11.0. All four triggers wired, evaluated, and visible in the admin UI. Migration 074 applied. CI green. Cloner autodeploy picks up new binary within 2 minutes.
+
+- **M1** — `tech_trig_state` table (migration 074) + background evaluator goroutine (10-minute tick). T1: node count + contention rate. T2: JS LOC + manual signal. T3: manual signal only. T4: log bytes estimate. On first firing: audit log entry + admin email via existing SMTP notifier.
+- **M2** — Admin API: `GET /api/v1/admin/tech-triggers`, `GET /api/v1/admin/tech-triggers/history`, `POST …/{name}/reset`, `POST …/{name}/signal`. All admin-only, all audit logged.
+- **M3** — Admin webui: "Tech Triggers" nav item (pulse icon) under admin settings group. Table: trigger name, description, current value, threshold, status badge, Reset/Signal toggle actions.
+- **M4** — Prometheus: `clustr_tech_trigger{name}` (0/1 fired) + `clustr_tech_trigger_value{name}` (primary metric). Added to existing metrics surface.
+- **M5** — `docs/tech-triggers.md`: threshold rationale, per-trigger "what to do when it fires" runbook, API reference, Prometheus metrics, database schema.
+- **M6** — `docs/decisions.md` D27 updated: note that TECH-TRIG monitoring is live, link to `docs/tech-triggers.md`.
+
+---
+
+### Sprint L — v1.10.1 "Demo GIF" **[COMPLETED — 2026-04-27]**
+
+**Shipped:** v1.10.1 (docs-only; no binary change). CI green. GIF committed to `docs/assets/`.
+
+- **L1** — `docs/assets/clustr-demo.gif`: 670K animated terminal demo rendered with VHS v0.11.0. Shows `version` → `doctor` → health check → node list → image list.
+- **L2** — `docs/assets/demo.tape`: updated for v1.10.0 (live server at `$CLUSTR_URL`/`$CLUSTR_API_KEY`).
+- **L3** — `README.md`: "Show me" section updated to reference animated GIF instead of static SVG fallback.
+
+---
+
 ### Sprint K — v1.10.0 "First-Job Bounce Rate" **[COMPLETED — 2026-04-27]**
 
 **Goal:** Push first-attempt cluster bring-up success rate from ~30-35% to ≥50% by closing all 10 candidates from Jared's Round 2 getting-started audit.
@@ -910,9 +935,9 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
-### Sprints J+ — Unscheduled (dispatched on tech-trigger or customer-pull signal)
+### Sprints N+ — Unscheduled (dispatched on tech-trigger or customer-pull signal)
 
-Per D27, we don't pre-schedule sprints for items that need a trigger. When PostgreSQL contention, multi-tenant demand, framework ceiling, or a customer-pull arrives, an unscheduled sprint is dispatched and the v-tag is assigned per D28:
+Per D27, we don't pre-schedule sprints for items that need a trigger. All four TECH-TRIG signals are now monitored (Sprint M, v1.11.0) — see `docs/tech-triggers.md` for thresholds and operator runbooks. When a trigger fires, the corresponding sprint is dispatched immediately. When PostgreSQL contention, multi-tenant demand, framework ceiling, or a customer-pull arrives, an unscheduled sprint is dispatched and the v-tag is assigned per D28:
 
 - **PostgreSQL migration** → **v2.0.0** (BREAKING per D28 — schema migration)
 - **Multi-tenant data isolation** → **v2.0.0** (BREAKING per D28 — schema-wide tenant_id)
@@ -923,7 +948,7 @@ Per D27, we don't pre-schedule sprints for items that need a trigger. When Postg
 - **XDMoD integration** → **v1.x** minor bump (additive plugin) when pulled
 - **Custom metrics / custom attributes (CF-04/06/37)** → **v1.x** minor bump (additive) when pulled
 
-**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I, COMMITTED per D29) → v1.9+ per Sprint J/K cadence.
+**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I) → v1.9 (Sprint J) → v1.10 (Sprint K) → v1.10.1 (Sprint L, docs) → v1.11 (Sprint M, TECH-TRIG monitoring) → v1.12+ per next sprint cadence.
 
 ---
 
@@ -1256,4 +1281,4 @@ Everything else in the plan matters. These three are the ones that, if the next 
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K are RELEASED (v1.0.1 → v1.10.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H, I, J, K, L, M are RELEASED (v1.0.1 → v1.11.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers (now monitored via `docs/tech-triggers.md` and the admin Tech Triggers UI). Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*

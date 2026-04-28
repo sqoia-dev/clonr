@@ -65,4 +65,24 @@ var (
 		Name: "clustr_webhook_deliveries_total",
 		Help: "Total outbound webhook delivery attempts by event type and delivery status.",
 	}, []string{"event", "status"})
+
+	// TechTrigFired is a gauge (0 or 1) per TECH-TRIG signal (Sprint M, v1.11.0).
+	// Labels: name = trigger name (t1_postgresql, t2_framework, t3_multitenant, t4_log_archive).
+	// Value: 1 = trigger has fired, 0 = not fired.
+	TechTrigFired = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "clustr_tech_trigger",
+		Help: "Whether each D27 TECH-TRIG signal has fired (1 = fired, 0 = not fired).",
+	}, []string{"name"})
+
+	// TechTrigValue is the most recent primary metric value for each TECH-TRIG signal.
+	// Labels: name = trigger name.
+	// Value semantics per trigger:
+	//   t1_postgresql  — node count (metric A; contention rate tracked in logs only)
+	//   t2_framework   — frontend JS LOC
+	//   t3_multitenant — 0 (no numeric primary metric; binary manual signal)
+	//   t4_log_archive — estimated log storage bytes
+	TechTrigValue = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "clustr_tech_trigger_value",
+		Help: "Current primary metric value for each D27 TECH-TRIG signal.",
+	}, []string{"name"})
 )

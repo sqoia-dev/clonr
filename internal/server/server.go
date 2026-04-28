@@ -92,6 +92,11 @@ type Server struct {
 	// server is available. The NodesHandler captures it via a closure so it picks
 	// up the live function even after the router is built.
 	dhcpLeaseLookup func(mac string) net.IP
+
+	// lastContentionRate caches the most recent SQLite write-contention rate (events/sec)
+	// computed by the tech-trig evaluator between ticks. Used by T1 evaluation.
+	// Stored as an atomicFloat64 (see tech_trig_worker.go) to avoid locking overhead.
+	lastContentionRate atomicFloat64
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -245,6 +250,8 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	go s.runExpirationScanner(ctx)
 	// H3: Auto-policy finalizer — closes the 24h undo window.
 	go s.runAutoPolicyFinalizer(ctx)
+	// M1: TECH-TRIG signal evaluator — 10-minute tick (Sprint M, v1.11.0).
+	go s.runTechTrigEvaluator(ctx)
 }
 
 // runDigestProcessor polls the notification digest queue every hour and sends
@@ -1604,6 +1611,19 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				slurmmodule.RegisterRoutes(r, s.slurmMgr)
 			})
+
+			// M1: TECH-TRIG monitoring — admin-only (Sprint M, v1.11.0).
+			// D27 Bucket 2 signal dashboard: surface current metric values, thresholds,
+			// and fired state for the four TECH-TRIG signals.
+			techTrigH := &handlers.TechTriggersHandler{
+				DB:           s.db,
+				Audit:        s.audit,
+				GetActorInfo: getActorInfo,
+			}
+			r.With(requireRole("admin")).Get("/admin/tech-triggers", techTrigH.HandleList)
+			r.With(requireRole("admin")).Get("/admin/tech-triggers/history", techTrigH.HandleHistory)
+			r.With(requireRole("admin")).Post("/admin/tech-triggers/{name}/reset", techTrigH.HandleReset)
+			r.With(requireRole("admin")).Post("/admin/tech-triggers/{name}/signal", techTrigH.HandleSignal)
 		})
 	})
 

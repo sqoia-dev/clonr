@@ -5,7 +5,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased] — Sprint L (Demo GIF)
+## [v1.11.0] — 2026-04-27 (Sprint M — TECH-TRIG Monitoring)
+
+**Sprint M — TECH-TRIG monitoring infrastructure (D27 Bucket 2 observability)**
+
+All changes are additive and non-breaking per D28. One new schema migration
+(`074_tech_trig_state.sql`). No existing routes changed.
+
+### Added (M1 — TECH-TRIG signal evaluator)
+
+- **`internal/db/migrations/074_tech_trig_state.sql`** — new `tech_trig_state`
+  table: one row per D27 Bucket 2 trigger with `current_value_json`,
+  `threshold_json`, `fired_at` (nullable), `last_evaluated_at`, and
+  `manual_signal`. Seeds all four rows on creation.
+- **`internal/db/techtrig.go`** — DB layer: `ListTechTrigStates`,
+  `GetTechTrigState`, `UpdateTechTrigState`, `ResetTechTrig`,
+  `SetTechTrigManualSignal`, `WasTechTrigAlreadyFired`, `ListTechTrigHistory`,
+  `CountNodes`, `MeasureLogBytes`. Value marshal helpers `T1ValueJSON`,
+  `T2ValueJSON`, `T4ValueJSON`.
+- **`internal/server/tech_trig_worker.go`** — 10-minute background evaluator
+  (`runTechTrigEvaluator`). Evaluates T1 (node count + contention rate), T2
+  (JS LOC + manual signal), T3 (manual signal only), T4 (log bytes). On first
+  firing transition: writes `tech_trig.fired` audit log entry + sends admin
+  notification email. `IncrSQLiteBusyCount()` incremented by DB layer for T1
+  contention metric. Exports `atomicFloat64` helper for lock-free rate caching.
+  Counts JS LOC from the embedded `ui.StaticFiles` FS (vendor paths excluded).
+- **`internal/metrics/metrics.go`** — two new Prometheus gauges:
+  `clustr_tech_trigger{name}` (0/1 fired) and `clustr_tech_trigger_value{name}`
+  (primary metric value).
+- **`internal/server/handlers/tech_triggers.go`** — `TechTriggersHandler`:
+  `HandleList`, `HandleHistory`, `HandleReset`, `HandleSignal`. All admin-only.
+  Audit logged.
+- **`internal/server/server.go`** — `lastContentionRate atomicFloat64` field
+  added to `Server`; `runTechTrigEvaluator` goroutine started in
+  `StartBackgroundWorkers`; four API routes wired under `requireRole("admin")`:
+  - `GET  /api/v1/admin/tech-triggers`
+  - `GET  /api/v1/admin/tech-triggers/history`
+  - `POST /api/v1/admin/tech-triggers/{name}/reset`
+  - `POST /api/v1/admin/tech-triggers/{name}/signal`
+- **`internal/server/ui/static/index.html`** — "Tech Triggers" nav item
+  (pulse/activity icon) added under the admin settings group.
+- **`internal/server/ui/static/js/api.js`** — `API.techTrigs` namespace:
+  `list()`, `history()`, `reset(name)`, `signal(name, signal)`.
+- **`internal/server/ui/static/js/app.js`** — `Pages.techTriggers()` and
+  `Pages._renderTechTriggers()`: admin table showing trigger name, description,
+  current value, threshold, status badge (FIRED / Not Fired), and action buttons
+  (Reset; Set Signal / Clear Signal for T2/T3). `Delegate` patterns registered
+  for `_techTrigReset` and `_techTrigSignal`. Route `/tech-triggers` registered.
+- **`docs/tech-triggers.md`** — operator reference: threshold rationale,
+  per-trigger "what to do when it fires" runbook, API reference, Prometheus
+  metrics, database schema.
+
+### Thresholds (documented rationale in docs/tech-triggers.md)
+
+| Trigger | Threshold | Fires when |
+|---|---|---|
+| T1 node count | 500 nodes | Automatic |
+| T1 contention rate | 5 events/sec (10-min window) | Automatic |
+| T2 JS LOC | 5,000 lines | Automatic |
+| T2 framework friction | operator set | Manual signal |
+| T3 multi-tenant | operator set | Manual signal only |
+| T4 log bytes | 50 GiB (estimated) | Automatic |
+
+---
+
+## [v1.10.1] — 2026-04-27 (Sprint L — Demo GIF)
+
+**Sprint L — Animated demo GIF (docs-only, no binary change)**
 
 ### Added
 

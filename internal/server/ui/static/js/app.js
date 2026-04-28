@@ -506,6 +506,10 @@ const Delegate = {
     // ── Pages._auditExport() — trigger JSONL download ────────────────────────
     D.register(/^Pages\._auditExport\(\)$/, () => Pages._auditExport());
 
+    // M1: Tech Triggers — delegate handlers (Sprint M, v1.11.0).
+    D.register(/^Pages\._techTrigReset\('([^']+)'\)$/, (el, m) => Pages._techTrigReset(m[1]));
+    D.register(/^Pages\._techTrigSignal\('([^']+)',\s*(true|false)\)$/, (el, m) => Pages._techTrigSignal(m[1], m[2] === 'true'));
+
 })();
 
 // ─── App state ────────────────────────────────────────────────────────────
@@ -669,6 +673,9 @@ const App = {
         });
         // B3-3: Audit log route — admin only; non-admins are redirected to dashboard.
         Router.register('/audit',    ()   => Pages.auditLog());
+
+        // M1: Tech Triggers route — admin only (Sprint M, v1.11.0).
+        Router.register('/tech-triggers', () => Pages.techTriggers());
 
         Router.register('/slurm',    ()   => {
             if (typeof SlurmPages !== 'undefined') SlurmPages.settings();
@@ -11457,6 +11464,144 @@ reboot</pre>
         if (f.action) params.set('action', f.action);
         const url = '/api/v1/audit/export?' + params.toString();
         window.open(url, '_blank');
+    },
+
+    // ─── M1: Tech Triggers (Sprint M, v1.11.0) ───────────────────────────────
+    //
+    // Admin-only page showing the four D27 Bucket 2 TECH-TRIG signals.
+    // Each trigger displays: name, description, current value, threshold,
+    // fired/not-fired status, and action buttons (reset, signal toggle).
+    //
+    // T2 (framework) and T3 (multitenant) have manual signal toggles.
+    // All four have a "Reset" button that clears fired_at + manual_signal.
+    //
+    // Uses vanilla JS string building (consistent with existing admin pages).
+
+    async techTriggers() {
+        App.render(loading('Loading tech triggers…'));
+        try {
+            const triggers = await API.techTrigs.list();
+            Pages._renderTechTriggers(triggers);
+        } catch (err) {
+            App.render(alertBox('Failed to load tech triggers: ' + err.message));
+        }
+    },
+
+    _renderTechTriggers(triggers) {
+        const trigLabels = {
+            't1_postgresql':  'T1 — PostgreSQL Migration',
+            't2_framework':   'T2 — Framework Ceiling',
+            't3_multitenant': 'T3 — Multi-Tenant Isolation',
+            't4_log_archive': 'T4 — Log Archive Pressure',
+        };
+
+        const rows = (triggers || []).map(t => {
+            const label = trigLabels[t.trigger_name] || t.trigger_name;
+            const statusBadge = t.fired
+                ? `<span class="badge badge-danger" style="font-size:13px;padding:4px 10px;">FIRED${t.fired_at ? ' ' + new Date(t.fired_at).toISOString().slice(0,10) : ''}</span>`
+                : `<span class="badge badge-success" style="font-size:13px;padding:4px 10px;">Not Fired</span>`;
+
+            const lastEval = t.last_evaluated_at
+                ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Last evaluated: ${new Date(t.last_evaluated_at).toLocaleString()}</div>`
+                : `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Not yet evaluated</div>`;
+
+            // Format current_value as a readable table.
+            const fmtValue = (obj) => {
+                if (!obj || typeof obj !== 'object') return String(obj);
+                return Object.entries(obj).map(([k, v]) => {
+                    // Format large byte numbers as GiB.
+                    if (k === 'log_bytes' && typeof v === 'number') {
+                        return `${k}: ${(v / (1024*1024*1024)).toFixed(2)} GiB`;
+                    }
+                    if (typeof v === 'number' && !Number.isInteger(v)) {
+                        return `${k}: ${v.toFixed(2)}`;
+                    }
+                    return `${k}: ${v}`;
+                }).join(' / ');
+            };
+
+            // Signal toggle (only T2 and T3).
+            const canSignal = t.trigger_name === 't2_framework' || t.trigger_name === 't3_multitenant';
+            const signalBtn = canSignal
+                ? (t.manual_signal
+                    ? `<button class="btn btn-sm" style="background:#f59e0b;color:#1e293b;" data-on-click="Pages._techTrigSignal('${t.trigger_name}', false)" title="Clear manual signal">Clear Signal</button>`
+                    : `<button class="btn btn-secondary btn-sm" data-on-click="Pages._techTrigSignal('${t.trigger_name}', true)" title="Mark manual signal as active">Set Signal</button>`)
+                : '';
+
+            const resetBtn = `<button class="btn btn-secondary btn-sm" data-on-click="Pages._techTrigReset('${t.trigger_name}')" title="Reset fired state and manual signal">Reset</button>`;
+
+            return `
+            <tr>
+                <td style="font-weight:600;">${escHtml(label)}</td>
+                <td style="font-size:12px;color:var(--text-secondary);max-width:260px;">${escHtml(t.description || '')}</td>
+                <td style="font-size:13px;font-family:var(--font-mono,monospace);">${escHtml(fmtValue(t.current_value))}</td>
+                <td style="font-size:13px;font-family:var(--font-mono,monospace);">${escHtml(fmtValue(t.threshold))}</td>
+                <td>
+                    ${statusBadge}
+                    ${lastEval}
+                </td>
+                <td>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                        ${signalBtn}
+                        ${resetBtn}
+                    </div>
+                </td>
+            </tr>`;
+        }).join('');
+
+        const empty = triggers && triggers.length === 0
+            ? `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No triggers found.</td></tr>`
+            : '';
+
+        App.render(`
+            <div class="page-header">
+                <div>
+                    <h1 class="page-title">Tech Triggers</h1>
+                    <div class="page-subtitle">D27 Bucket 2 signals — dispatches a sprint when a technical threshold is crossed</div>
+                </div>
+                <button class="btn btn-secondary btn-sm" data-on-click="Pages.techTriggers()" title="Refresh">Refresh</button>
+            </div>
+            <div class="card" style="margin-bottom:16px;padding:12px 16px;background:var(--bg-card);border-radius:8px;border:1px solid var(--border);">
+                <p style="margin:0;font-size:13px;color:var(--text-secondary);">
+                    These signals gate the D27 Bucket 2 TECH-TRIG sprints. Each trigger has a threshold; when crossed, a sprint is dispatched to address the underlying scaling or architecture issue.
+                    Manual signals (T2, T3) can be set by an operator when a qualitative threshold is reached. Use <strong>Reset</strong> to clear a fired state after a sprint has been dispatched.
+                    See <code>docs/tech-triggers.md</code> for thresholds, rationale, and the sprint each trigger dispatches.
+                </p>
+            </div>
+            ${cardWrap('Trigger Status',
+                `<div style="overflow-x:auto;">
+                    <table class="table" style="font-size:13px;">
+                        <thead><tr>
+                            <th style="width:180px">Trigger</th>
+                            <th>Description</th>
+                            <th>Current Value</th>
+                            <th>Threshold</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr></thead>
+                        <tbody>${rows || empty}</tbody>
+                    </table>
+                </div>`)}
+        `);
+    },
+
+    async _techTrigReset(name) {
+        try {
+            await API.techTrigs.reset(name);
+            // Re-render the page to reflect the updated state.
+            Pages.techTriggers();
+        } catch (err) {
+            App.toast('Reset failed: ' + err.message, 'error');
+        }
+    },
+
+    async _techTrigSignal(name, signal) {
+        try {
+            await API.techTrigs.signal(name, signal);
+            Pages.techTriggers();
+        } catch (err) {
+            App.toast('Signal update failed: ' + err.message, 'error');
+        }
     },
 
     // ─── DHCP Allocations (Alpine.js pilot — Sprint B.5) ──────────────────

@@ -472,4 +472,11 @@ const API = {
         // Node group PI ownership management.
         setGroupPI(groupId, piUserId)       { return API.put(`/node-groups/${encodeURIComponent(groupId)}/pi`, { pi_user_id: piUserId }); },
     },
+    techTrigs: {
+        // Sprint M (v1.11.0): TECH-TRIG signal monitoring — D27 Bucket 2 observability.
+        list()                    { return API.get('/admin/tech-triggers'); },
+        history()                 { return API.get('/admin/tech-triggers/history'); },
+        reset(name)               { return API.post(`/admin/tech-triggers/${encodeURIComponent(name)}/reset`, {}); },
+        signal(name, signal)      { return API.post(`/admin/tech-triggers/${encodeURIComponent(name)}/signal`, { signal }); },
+    },
 };
