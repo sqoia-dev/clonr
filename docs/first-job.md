@@ -21,7 +21,7 @@ This document walks a researcher through submitting their first Slurm job on a c
 
 Before you can submit jobs, your account must exist on every node in the cluster with a consistent UID and GID. Ask your cluster administrator which provisioning method is in use.
 
-### Approach A — Local sysaccounts
+### Approach A: Local sysaccounts
 
 Your administrator creates your account via the clustr web UI (**System > Accounts**) or API, then reimages the cluster nodes to inject it. After reimage completes, your account (`alice`, UID `2001`, etc.) exists in `/etc/passwd` on every node.
 
@@ -39,7 +39,7 @@ echo "alice:InitialPass1!" | chpasswd
 
 Your account lands with a locked password after the sysaccounts injection. The admin must set it explicitly.
 
-### Approach B — LDAP
+### Approach B: LDAP
 
 Your administrator creates your account in the clustr LDAP module. No reimage is required — your account is available on all nodes immediately via sssd.
 
