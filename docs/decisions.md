@@ -46,6 +46,7 @@ Reversibility legend:
 | D26 | Attribute visibility defaults (Sprint E) | Default to least-sensitive reasonable level per attribute class. Financial → `pi`. Operational → `member`. Public research identity → `public`. Security credentials → `admin_only`. PI/Admin override available. | cheap |
 | D27 | Sprint Z re-sequencing (supersedes D25) | Dissolve undifferentiated "Sprint Z." Re-bucket into 4 buckets: (1) BUILD NOW = cheap structural primitives, scheduled into Sprints F/G/H at v1.5.0 → v1.7.0; (2) TECH-TRIG = unscheduled, gated on concrete technical signal (LOC, scale event, contention threshold) with explicit monitor + decision-maker; (3) CUST-SPEC = unscheduled, genuinely needs customer to define contract (custom metrics, third-party integrations, IdP shape); (4) SKIP = explicit non-goal (cloud allocation). Customer-pull gating now applies ONLY to Bucket 3. | cheap |
 | D28 | Versioning policy (v1.x vs v2.x boundary) | Minor bump (v1.x.0) for additive changes: new endpoints, new optional fields, new RBAC roles, new pages, plugin additions. Major bump (v2.0.0) reserved for: (a) schema migration that requires data conversion (PostgreSQL, multi-tenant tenant_id, attribute type system); (b) auth contract change (OIDC/SAML replacing or modifying API key/session semantics); (c) breaking API contract (removed endpoints, renamed fields in stable surfaces); (d) D10 violation (build step required). Patch bump (v1.x.y) reserved for hotfix. | one-way (versioning is contract with operators) |
+| D29 | Sprint I selection (post-BUILD-NOW exhaustion) | Sprint I = "Show HN Hardening" at v1.8.0, hybrid of Option A (launch artifacts) and Option D (engineering polish), unified by Persona 0 (the HN reader stranger). 9 deliverables (I1–I9), Dinesh + Jared + Monica + Erlich owners, conditional Gilfoyle spike defaulted off. Target ship 2026-06-08, ~7 weeks of buffer to D16's 2026-07-27 launch. Rejects Options B/C (TECH-TRIG/CUST-SPEC speculation) as direct violations of D27 Bucket 2/3 gates. Sprint dispatches under D27 standing meta-rule (default to BUILD-NOW when on the fence). | cheap |
 
 ---
 
@@ -1342,6 +1343,59 @@ D25's text was internally consistent and the prioritization table was correct. T
 **Supersedes:** Implicit "v2.0 = horizon items" framing in old Sprint Z and pre-D27 sprint plan headers.
 
 **See:** `docs/webui-sprint-plan.md` Sprint F/G/H sections for application; release tags in git history for examples of past minor bumps.
+
+---
+
+## D29 — Sprint I Selection: Show HN Hardening (BUILD-NOW bucket exhaustion)
+
+**Date:** 2026-04-28
+**Author:** Richard (Technical Co-founder)
+**Context:** Sprints F/G/H shipped v1.5.0/v1.6.0/v1.7.0 between 2026-04-27 and 2026-04-28. The D27 BUILD-NOW bucket is fully drained (7/7 items). Per founder standing rules — sprints don't stop, no headcount/revenue gating, default to BUILD on the fence — a Sprint I must dispatch immediately. The remaining D27 buckets (TECH-TRIG, CUST-SPEC) are explicitly gated behind triggers that have not fired. D16 sets a Show HN target of 2026-07-27, ~13 weeks out from today.
+
+**Question:** What is the next sprint when the BUILD-NOW bucket is exhausted, no TECH-TRIG signal has fired, and no CUST-SPEC customer has pulled?
+
+**Options considered:**
+
+| Option | Verdict | Reason |
+|---|---|---|
+| A — Show HN prep only | Reject (incomplete) | Pure marketing/docs sprint isn't engineering output; standing rule is sprints don't stop. |
+| B — Speculative TECH-TRIG (framework migration) | Reject | Direct violation of D27 Bucket 2 gates and D21/D23 framework rulings. Alpine isn't at ceiling; pre-building the abstraction means building the wrong abstraction. |
+| C — Speculative CUST-SPEC (OIDC) | Reject | Direct violation of D25/D27 Bucket 3 gates. No named IdP = wrong claim shape = throwaway code. The whole point of D27 was to stop sweeping speculative customer-shaped work into committed sprints. |
+| D — Cross-cutting polish | Partial-accept | Engineering output is real (perf, a11y, smoke tests, install hardening) but "polish sprint" without focus risks yak-shaving. |
+| E — Pivot to other repos (tunnl/resolvr/hpc-ai-tools) | Reject | Loses 10-sprint clustr team rhythm. Cofounder isn't dispatching tunnl this turn. |
+| F — Hybrid | **Accept** | A + D combined, scoped tight, with the HN-reader stranger as the unifying persona. |
+
+**Decision:** **Sprint I = "Show HN Hardening" at v1.8.0 — hybrid of Option A (launch artifacts) and Option D (engineering polish).** The unifying persona is Persona 0: the HN reader who has never heard of clustr. Every deliverable is justified against "does this materially affect a stranger's first 30 minutes with clustr, or our ability to defend the launch in the comment thread?" The sprint is COMMITTABLE (9 deliverables I1–I9 with acceptance tests; see `webui-sprint-plan.md`), not directional.
+
+**Why hybrid, not pure Option A:** Standing rule says sprints don't stop and the team is engineering-led. A pure docs/copy sprint underuses Dinesh and breaks rhythm. Engineering deliverables (I1 install hardening, I2 smoke fixtures, I3 a11y/perf, I4 backend perf baseline, I9 docs sweep) keep the engineering org loaded; non-engineering deliverables (I5 Jared audit, I6 Monica copy, I7 Erlich launch plan) parallelize on ICs whose work is on the critical path for D16 anyway.
+
+**Why hybrid, not pure Option D:** "Polish sprint" without an external forcing function is the classic yak-shave. The 2026-07-27 Show HN date provides the forcing function: any polish work that doesn't measurably improve a stranger's first-touch is out of scope. I4 (perf baseline) is bounded by "document p50/p95 at 50- and 500-node simulated load, fix only what profiling justifies" — not "make it fast." This is the discipline that distinguishes a forcing-function-anchored polish sprint from yak-shaving.
+
+**Why this doesn't violate D27:** Sprint I touches zero items in TECH-TRIG (Bucket 2) or CUST-SPEC (Bucket 3). All deliverables are either (a) D27 Bucket 1-style cheap structural improvements to what we've already shipped, or (b) launch artifacts that are not code commitments to any external contract. The conditional I8 (hosted demo spike) defaults OFF specifically because hosting an internet-exposed PXE/DHCP service during HN traffic is a security-blast-radius risk that cannot be undone in real time.
+
+**Why I rejected the speculative-build options (B and C) directly:** D27's standing meta-rule says "default to BUILD-NOW when on the fence between BUILD-NOW and a gated bucket." Sprint I IS that BUILD-NOW default — for the work that was hiding in plain sight (institutional readiness for Show HN) and that we'd been treating as "not real engineering." Calling it Sprint I and giving it a v1.8.0 tag forces it to compete on the same plane as F/G/H did. That's the discipline. Inventing a TECH-TRIG or CUST-SPEC dispatch when neither trigger has fired is not "default to BUILD" — it's "violate the gate because we can't think of anything else to build," which D27 explicitly forecloses.
+
+**Why this doesn't violate D16:** D16 set Show HN at 2026-07-27 with a 1-week post-v1.0 buffer. We're well past v1.0 (we're at v1.7.0). Sprint I targets ship at 2026-06-08, leaving 7 weeks of buffer instead of 1. That's slack for a re-sequence if launch artifacts surface install-time gaps that need follow-up engineering.
+
+**Reversibility:** **cheap.** If a TECH-TRIG signal fires mid-sprint (e.g., a 500-node operator surfaces, PostgreSQL contention shows up), pause Sprint I and dispatch the trigger sprint. Sprint I deliverables are atomic per workstream; nothing is half-built waste.
+
+**Re-decision triggers:**
+- A TECH-TRIG signal fires before Sprint I ships → pause Sprint I, dispatch trigger sprint, resume Sprint I when trigger sprint ships.
+- A CUST-SPEC customer pulls during Sprint I → evaluate whether their pull is more valuable than launch readiness; founder call.
+- The 2026-06-08 ship target slips by more than 2 weeks → re-evaluate D16 launch date with founder; do not silently push.
+- Show HN ships and produces zero adoption signal after 30 days → revisit "default to BUILD" assumption for the next bucket-exhaustion case (D27 meta-rule re-decision trigger).
+
+**Concrete dispatch:**
+- **Owners:** Dinesh (I1, I2, I3, I4, I9 engineering); Jared (I5 audit); Monica (I6 copy); Erlich (I7 launch plan); Gilfoyle (I8 only if I8 is approved mid-sprint, default skip).
+- **Target tag:** v1.8.0 (additive per D28 — new CLI subcommands, smoke fixtures, doc updates, perf baseline doc; no schema change, no API contract change).
+- **Cadence:** 4-6 weeks. Target ship: 2026-06-08.
+- **Parallel:** Gilfoyle's task #104 (iPXE build + Lab Validation CI noise) continues in parallel; it is unblocking for I2 (smoke fixtures) but does not gate I1/I3/I4/I5/I6/I7/I9.
+
+**Standing meta-rule preserved:** When the next bucket-exhaustion moment arrives (after Sprint I ships and BUILD-NOW is again empty), the same D27 meta-rule applies — default to BUILD over wait, find the next high-leverage Bucket 1-style work that doesn't violate Bucket 2/3 gates, and dispatch.
+
+**Supersedes:** Nothing. Extends D27's sprint-dispatch logic to the case where the originally-enumerated BUILD-NOW bucket is empty.
+
+**See:** `docs/webui-sprint-plan.md` Sprint I section for the 9 deliverables, owner assignments, and acceptance criteria.
 
 ---
 

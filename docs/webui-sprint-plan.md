@@ -795,7 +795,89 @@ These items can't be built right without a named customer telling us what their 
 
 ---
 
-### Sprints I+ — Unscheduled (dispatched on tech-trigger or customer-pull signal)
+### Sprint I — v1.8.0 "Show HN Hardening" (COMMITTED, dispatched 2026-04-28 per D29)
+
+**Goal:** Compress the "stranger reads HN comment, clones repo, gets to working install" path to under 30 minutes, and produce the launch artifacts (README hero, demo GIF, blog post, FAQ pre-empts) that survive the first 72 hours of HN traffic. Engineering output is real (first-run UX hardening, install fixtures, accessibility, smoke coverage); launch artifacts are produced in parallel by the non-engineering ICs. Three months from D16's 2026-07-27 Show HN target, this is the highest-leverage sprint that does not violate D27 Bucket 2/3 gates.
+
+**Persona served:** Persona 0 — *the HN reader who has never heard of clustr* — plus Persona 1 (Sysadmin) on first-run experience. This is the only sprint in the F/G/H/I arc whose primary persona is a stranger.
+
+**Cadence:** 4-6 weeks. Target ship: 2026-06-08 (gives 7 weeks of buffer to D16's 2026-07-27).
+
+**Owners:**
+- **Dinesh** — engineering deliverables (I1, I2, I3, I4)
+- **Jared** — first-run UX walkthrough + getting-started doc audit (I5)
+- **Monica** — README hero + Show HN copy + FAQ pre-empts (I6)
+- **Erlich** — launch comms timing + HN posting strategy (I7, no code)
+- **Gilfoyle** — hosted demo feasibility spike only IF I8 is approved mid-sprint; default = no hosted demo
+
+**Deliverables:**
+
+1. **I1 — First-run install hardening**
+   - Audit `docs/install.md` Path A (Docker Compose) end-to-end on a clean VM. Every error path that a new operator can hit must produce an actionable error message with a doc anchor link.
+   - Bootstrap admin flow: today the bootstrap step requires reading two doc sections; collapse to one `clustr-serverd bootstrap-admin` subcommand that prints the API key + portal URL to stdout.
+   - `clustr-serverd doctor` subcommand: prints a green/red checklist of `dnsmasq` reachability, TFTP file presence, DB connectivity, image dir writable, secrets file present + locked-down. Exit code = number of red checks.
+   - Acceptance: a fresh `cloner` VM (Rocky 9, no prior clustr state) goes from `git clone` to "I can log into the portal as admin" in under 15 minutes by following only README + `install.md`.
+
+2. **I2 — Smoke test fixtures and CI**
+   - `make smoke` target: spins up clustr in Docker, runs a scripted PXE boot of a single QEMU node from a vendored tiny image, asserts the node hits `provisioned` state, tears down. Time budget: under 5 minutes wall-clock.
+   - Wire `make smoke` into `ci.yml` as a separate job (allowed to fail initially with a flake-tracking issue).
+   - Acceptance: smoke test green on three consecutive main pushes before we count it as load-bearing.
+
+3. **I3 — WebUI accessibility + performance pass**
+   - WCAG 2.1 AA audit on the three load-bearing routes: `/`, `/portal/`, `/portal/director/`. Fix anything that fails axe-core checks (color contrast, missing labels, keyboard traps).
+   - Lighthouse perf budget: First Contentful Paint < 1.5s, Total Blocking Time < 200ms on the dashboard route. Profile and fix what's red.
+   - Acceptance: axe-core CI check is green; Lighthouse budget enforced via `ci.yml` Lighthouse action.
+
+4. **I4 — Backend perf profiling**
+   - 30-minute pprof session against the lab `cloner` host under simulated 50-node-list load. Identify top 3 slow paths. Fix any that are obviously O(n^2) or sync-blocking-IO. No speculative optimization beyond the top 3.
+   - Acceptance: a `docs/perf-baseline.md` file documenting current p50/p95 latency on the four most-called endpoints (`/api/v1/nodes`, `/api/v1/nodegroups`, `/api/v1/allocations`, `/api/v1/audit/recent`) at 50-node and 500-node simulated loads. This baseline is the artifact; speeding things up beyond what profiling justifies is out of scope.
+
+5. **I5 — Getting-started flow audit (Jared)**
+   - Jared runs through clustr from `git clone` to "deployed a node" using only the public docs. Records every friction point in `docs/getting-started-audit-2026-04.md`. Hands the audit to Dinesh; high-priority frictions are folded into I1 mid-sprint.
+   - Acceptance: audit doc lands in week 1 of sprint; high-priority items closed by week 4.
+
+6. **I6 — README hero + Show HN copy (Monica)**
+   - README hero rewrite: 60-second pitch above the fold, animated GIF demo (15-30s), "Why clustr" 3-bullet block, "Compare to ColdFront / Warewulf / xCAT" table.
+   - Show HN post body draft (saved to `docs/SHOW-HN-DRAFT.md` in this repo, NOT in `tunnl.sh-docs`): title, body, opening comment, three pre-empted FAQs (auth model, why no SaaS, why Go).
+   - Acceptance: drafts merged by week 4, leaving 4+ weeks for revision before 2026-07-27.
+
+7. **I7 — Launch comms strategy (Erlich, no code)**
+   - HN posting day/time per D16 (Sunday 2026-07-27 confirmed) — Erlich confirms or proposes shift with rationale.
+   - Pre-launch outreach plan: who do we tell 24 hours before to seed early upvotes? (Risk: HN penalizes obvious vote rings.)
+   - Post-launch first-72-hour duty roster: who answers comments? Who fixes if a critical bug surfaces?
+   - Acceptance: `docs/launch-plan-2026-07-27.md` lands by week 3.
+
+8. **I8 — Hosted demo feasibility spike (Gilfoyle, CONDITIONAL)**
+   - One-day spike only if Monica + Erlich agree mid-sprint that a hosted demo materially improves the Show HN. Output: a one-page write-up of the cost/security blast-radius for running a hosted clustr instance (PXE/DHCP exposed to the internet is a non-starter; alternative = read-only frontend behind auth-gated dashboard with seeded data).
+   - **Default: skip.** The risk of running internet-exposed clustr during HN traffic is asymmetric (one bad actor finds a way to enqueue a malicious image build → the HN thread is now about clustr's security failure). Static screenshots + 30-second GIF clear the bar.
+
+9. **I9 — Documentation completeness sweep**
+   - `docs/api.md`: regenerate from current handler set; verify every `/api/v1/` endpoint is documented.
+   - `README.md`: ensure every linked doc anchor resolves.
+   - Acceptance: a docs link-checker runs in CI and is green.
+
+**Target tag:** **v1.8.0** (additive: new CLI subcommands, smoke fixtures, doc updates, perf-baseline doc; no schema change, no API contract change). Per D28: minor bump.
+
+**Risk profile:** Low. Mostly polish + tooling. Highest risk is I2 smoke test flakiness on CI runners (mitigated by allowing initial flake window). I8 carries real risk and is correctly defaulted off.
+
+**Success criteria:**
+- A stranger with `git`, `docker`, and 30 minutes can land a working clustr instance with one node provisioned.
+- `make smoke` is green on main for 3 consecutive pushes.
+- WCAG AA + Lighthouse budget enforced in CI.
+- Show HN draft + launch plan are reviewable artifacts in-repo by week 4 of sprint.
+- v1.8.0 ships with zero breaking changes; D27 buckets unchanged.
+
+**Why this sprint vs. the alternatives:** see `docs/decisions.md` D29.
+
+**What this sprint is explicitly NOT:**
+- Not a TECH-TRIG dispatch (no PostgreSQL, no framework migration, no multi-tenant) — those still wait for their D27 Bucket 2 triggers.
+- Not a CUST-SPEC dispatch (no OIDC, no FreeIPA, no XDMoD) — those still wait for a named customer per D27 Bucket 3.
+- Not a pivot to tunnl/resolvr/hpc-ai-tools — those repos have their own sprint cadences and are not Richard's call this turn.
+- Not a "polish sprint" with vague scope — every deliverable above is committable and has an acceptance test.
+
+---
+
+### Sprints J+ — Unscheduled (dispatched on tech-trigger or customer-pull signal)
 
 Per D27, we don't pre-schedule sprints for items that need a trigger. When PostgreSQL contention, multi-tenant demand, framework ceiling, or a customer-pull arrives, an unscheduled sprint is dispatched and the v-tag is assigned per D28:
 
@@ -808,7 +890,7 @@ Per D27, we don't pre-schedule sprints for items that need a trigger. When Postg
 - **XDMoD integration** → **v1.x** minor bump (additive plugin) when pulled
 - **Custom metrics / custom attributes (CF-04/06/37)** → **v1.x** minor bump (additive) when pulled
 
-**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 → ... per Sprint F/G/H/I/... cadence.
+**v2.0.0 will be cut when the first BREAKING change in this list lands.** Until then, the sequence is v1.5 → v1.6 → v1.7 → v1.8 (Sprint I, COMMITTED per D29) → v1.9+ per Sprint J/K cadence.
 
 ---
 
@@ -1037,6 +1119,7 @@ Legend: **A** = Sprint A (v1.0.1), **B** = Sprint B (v1.1.0), **B.5** = Sprint B
 - **Sprint F (v1.5.0, COMMITTED — security & audit hardening):** 5 deliverables (CSP, SIEM JSONL export, optional expiration, regression suite, docs). Re-bucketed from old Sprint Z items 11, 12, and CF-03 optional per D27.
 - **Sprint G (v1.6.0, COMMITTED — identity & access primitives):** 4 deliverables (OpenLDAP plugin CF-24, group restriction CF-40, manager delegation CF-09 scope, docs). Re-bucketed from old Sprint Z items 3, 6, and CF-09 manager per D27.
 - **Sprint H (v1.7.0, COMMITTED — allocation automation):** 4 deliverables (auto-compute policy CF-29, Slurm partition auto-assignment, PI onboarding integration, docs). Re-bucketed from old Sprint Z item 4 / CF-29 per D27.
+- **Sprint I (v1.8.0, COMMITTED — Show HN hardening):** 9 deliverables (first-run install hardening + bootstrap UX, smoke test fixtures + CI, WCAG/Lighthouse passes, perf baseline, getting-started audit, README + Show HN copy, launch plan, conditional hosted demo spike, docs sweep). Hybrid Option A + D per D29; persona is the HN-reader stranger; targets v1.8.0 ship before 2026-07-27 launch per D16.
 - **Unscheduled — TECH-TRIG (D27 Bucket 2, gated on concrete technical signal):** 4 items — PostgreSQL migration, multi-tenant isolation, heavier framework migration, two-tier hot/cold log archive. Each has explicit trigger + monitor + decision-maker documented above.
 - **Unscheduled — CUST-SPEC (D27 Bucket 3, gated on customer specification):** 7 items — OIDC/SAML, FreeIPA HBAC, XDMoD, custom utilization metrics, custom allocation attributes (CF-04), custom resource attributes (CF-06), custom attribute types (CF-37).
 - **SKIP (D27 Bucket 4, explicit non-goal):** 1 item — Cloud resource allocation (CF-30); plus 5 ColdFront items marked Skip from earlier (CF-31 Keycloak search, CF-32 Starfish, CF-34/CF-35 Django-specific, CF-03 strict mandatory expiration).
@@ -1136,8 +1219,8 @@ Legend: **A** = v1.0.1, **B** = v1.1.0, **B.5** = v1.1.1, **C** = v1.2.0, **C.5*
 
 Everything else in the plan matters. These three are the ones that, if the next 90 days went sideways and we only got these out, would still leave clustr materially better positioned for institutional adoption than v1.0 is today.
 
-**The longer arc (updated 2026-04-27 per Sprint Z re-sequencing, D27, D28):** Sprints A → B → B.5 → C → C.5 → D → E are RELEASED (v1.0.1 → v1.4.0). The next three sprints are COMMITTED: F (v1.5.0 security & audit hardening) → G (v1.6.0 identity & access primitives) → H (v1.7.0 allocation automation). All three are additive; no breaking changes; no schema migrations; no major-version bump. Per D27, the old "Sprint Z" undifferentiated horizon is dissolved — its items are re-bucketed into committed F/G/H, technical-trigger-gated (Bucket 2), customer-spec-gated (Bucket 3), or skip (Bucket 4). Per D28, the v2.0.0 boundary is reserved for the first BREAKING change (most likely PostgreSQL migration, multi-tenant schema, OIDC contract change, or framework migration with build step). Until a breaking change is triggered, the sequence stays in v1.x. Sprints do not stop; dispatch is automatic per founder directive.
+**The longer arc (updated 2026-04-28 per Sprint I dispatch, D29):** Sprints A → B → B.5 → C → C.5 → D → E → F → G → H are RELEASED (v1.0.1 → v1.7.0). Sprint I is COMMITTED (v1.8.0, "Show HN Hardening", target ship 2026-06-08, ~7 weeks of buffer to D16's 2026-07-27 launch target). Per D27, the old "Sprint Z" undifferentiated horizon is dissolved — its items are re-bucketed into committed F/G/H, technical-trigger-gated (Bucket 2), customer-spec-gated (Bucket 3), or skip (Bucket 4). Per D28, the v2.0.0 boundary is reserved for the first BREAKING change (most likely PostgreSQL migration, multi-tenant schema, OIDC contract change, or framework migration with build step). Until a breaking change is triggered, the sequence stays in v1.x. Sprints do not stop; dispatch is automatic per founder directive.
 
 ---
 
-*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
+*End of plan. Sprints A, B, B.5, C, C.5, D, E, F, G, H are RELEASED (v1.0.1 → v1.7.0). Sprint I (v1.8.0 Show HN Hardening) is COMMITTED per D29. Items in D27 Buckets 2/3 are unscheduled with explicit triggers. Bucket 4 is explicit skip. Sprints do not stop — dispatch is automatic per founder directive. Re-decision routes through Richard but does not block dispatch.*
