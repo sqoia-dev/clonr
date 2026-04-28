@@ -219,10 +219,11 @@ func (db *DB) GetPIGroupUtilization(ctx context.Context, groupID string) (PIGrou
 
 	// Node counts. deploy_completed_preboot_at is the canonical deploy success timestamp
 	// (last_deploy_succeeded_at was dropped in migration 049).
+	// COALESCE handles the case where the group has no members — SUM returns NULL for empty set.
 	err = db.sql.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) AS total,
-			SUM(CASE WHEN nc.deploy_completed_preboot_at IS NOT NULL THEN 1 ELSE 0 END) AS deployed
+			COALESCE(SUM(CASE WHEN nc.deploy_completed_preboot_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS deployed
 		FROM node_configs nc
 		LEFT JOIN node_group_memberships m ON m.node_id = nc.id AND m.is_primary = 1
 		WHERE m.group_id = ?`,
