@@ -88,19 +88,19 @@ No SSR. No Next.js. No Redux/Zustand. No GraphQL/tRPC. No auth provider. No tele
 - [x] **SCAFFOLD-5** Inter Variable + JetBrains Mono loaded
 - [x] **EMBED-1** Go `embed.FS` serving built `web/dist/` with SPA fallback to `index.html`
 - [x] **EMBED-2** Build pipeline: `make web` builds Vite, `go build` embeds it
-- [ ] **AUTH-1** Login screen (paste API key, validate, store in `localStorage`)
-- [ ] **AUTH-2** Auth context + protected routes (redirect unauthenticated to `/login`)
-- [ ] **SHELL-1** App shell: collapsible sidebar (Nodes, Images, Activity, Settings — last three disabled)
-- [ ] **SHELL-2** Top bar with Cmd-K trigger (palette opens, lists routes, no actions yet)
-- [ ] **SHELL-3** Top bar connection indicator (SSE connected/disconnected/reconnecting)
-- [ ] **NODES-1** Nodes list — fetch from real API, 5-column default view, advanced toggle reveals SHA256/role-detail
-- [ ] **NODES-2** SSE subscription for live node state updates (no polling)
-- [ ] **NODES-3** Row click opens detail Sheet — full node info, "reimage" button stub (logs intent, no action yet)
-- [ ] **NODES-4** Empty state with paste-ready `clustr-cli register` snippet
-- [ ] **NODES-5** URL-driven filters + sort (search params, copy-paste-able)
+- [x] **AUTH-1** Login screen (paste API key, validate, store in `localStorage`)
+- [x] **AUTH-2** Auth context + protected routes (redirect unauthenticated to `/login`)
+- [x] **SHELL-1** App shell: collapsible sidebar (Nodes, Images, Activity, Settings — last three disabled)
+- [x] **SHELL-2** Top bar with Cmd-K trigger (palette opens, lists routes, no actions yet)
+- [x] **SHELL-3** Top bar connection indicator (SSE connected/disconnected/reconnecting)
+- [x] **NODES-1** Nodes list — fetch from real API, 5-column default view, advanced toggle reveals SHA256/role-detail
+- [x] **NODES-2** SSE subscription for live node state updates (no polling)
+- [x] **NODES-3** Row click opens detail Sheet — full node info, "reimage" button stub (logs intent, no action yet)
+- [x] **NODES-4** Empty state with paste-ready `clustr-cli register` snippet
+- [x] **NODES-5** URL-driven filters + sort (search params, copy-paste-able)
 - [ ] **DEPLOY-1** Verify autodeploy on `cloner` (192.168.1.151) builds and serves the new app
-- [ ] **DEPLOY-2** Minimal new `README.md` — what clustr is, link to live UI, build instructions
-- [ ] **CI-1** New CI: lint TS, build web, build Go, smoke-run binary. Green on main.
+- [x] **DEPLOY-2** Minimal new `README.md` — what clustr is, link to live UI, build instructions
+- [x] **CI-1** New CI: lint TS, build web, build Go, smoke-run binary. Green on main.
 
 ### Out of scope (Sprint 2+)
 
