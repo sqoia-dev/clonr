@@ -189,6 +189,62 @@ Semver driven by git tags. `nfpm` reads `${VERSION}` from the environment, set t
 
 ---
 
+## Dev Host Policy: cloner (192.168.1.151)
+
+### Source-build-only; RPMs are not installed on cloner
+
+`cloner` is the internal dev iteration host. It runs `clustr-autodeploy` which builds all
+binaries directly from source on every `origin/main` drift. This gives ~2-minute iteration
+speed without waiting for a tagged release.
+
+**Binary paths on cloner:**
+
+| Path | Owner | Notes |
+|------|-------|-------|
+| `/usr/local/bin/clustr-serverd` | `clustr-autodeploy` | Source-built. This is what the systemd unit runs. |
+| `/usr/local/bin/clustr-static` | `clustr-autodeploy` | Static CLI embedded into initramfs. |
+| `/usr/local/bin/clustr-clientd` | `clustr-autodeploy` | Node agent binary. |
+| `/usr/local/bin/clustr` | `clustr-autodeploy` | Dynamic CLI for operator use on cloner. |
+
+**RPMs must not be installed on cloner.** The `clustr-serverd` RPM installs to `/usr/sbin/clustr-serverd`
+and ships its own `/usr/lib/systemd/system/clustr-serverd.service` unit. The dev systemd unit at
+`/etc/systemd/system/clustr-serverd.service` runs `/usr/local/bin/clustr-serverd`, so the two binaries
+do not conflict at runtime — but `dnf remove clustr-serverd` triggers the RPM post-remove scriptlet which
+removes the `multi-user.target.wants` symlink for the service, stopping it. If an RPM is ever installed
+on cloner for packaging validation, remove it with `dnf remove -y clustr-serverd` and then re-enable the
+dev service:
+
+```bash
+dnf remove -y clustr-serverd
+systemctl daemon-reload
+systemctl enable --now clustr-serverd
+```
+
+### Why RPMs coexisted without breaking autodeploy (2026-04-29 post-mortem)
+
+During v0.1.4 packaging validation (2026-04-28), the RPM was `dnf install`-ed on cloner while the
+source-built binary was already in place at `/usr/local/bin/clustr-serverd`. The systemd unit kept
+running the source binary — the RPM binary at `/usr/sbin/clustr-serverd` was never executed by any
+service. The autodeploy short-circuit ("Already up to date — nothing to do") appeared broken because
+`LOCAL_SHA == REMOTE_SHA` at `a272918` — which is correct behavior. Autodeploy had already rebuilt
+at that commit on 2026-04-28 23:31. The RPM's orphaned binary created the false impression that the
+wrong version was running. Root cause: the operator saw `v0.1.4` from `/usr/sbin/clustr-serverd version`
+and assumed it was the active binary. The active binary was `/usr/local/bin/clustr-serverd` at
+`v0.2.0-459-ga272918`. Fix: removed RPM; re-enabled service; autodeploy picked up a new commit on next
+forced cycle and rebuilt cleanly.
+
+**Verification (2026-04-29):**
+- RPM removed: `dnf remove -y clustr-serverd-0.1.4-1.el9` — confirmed `package clustr-serverd is not installed`
+- `/usr/sbin/clustr-serverd` — removed
+- `/usr/local/bin/clustr-serverd version` → `v0.2.0-459-ga272918` (source-built, commit `a272918`)
+- `systemctl enable --now clustr-serverd` → active, ExecStart `/usr/local/bin/clustr-serverd --pxe`
+- Health: `curl http://10.99.0.1:8080/api/v1/nodes` → HTTP 401 (auth enforced, service up)
+- Forced autodeploy cycle: detected drift to `f463df3`, rebuilt all binaries + initramfs, health check passed HTTP 401
+- Journal: `Auto-deploy complete: a27291874c36... → f463df3410111a...`
+- `clustr-autodeploy.timer` active (waiting)
+
+---
+
 ## Phase 3 — Verification Log
 
 ### v0.1.4 install verification (2026-04-29)
