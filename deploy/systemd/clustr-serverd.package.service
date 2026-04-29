@@ -1,0 +1,139 @@
+# clustr-serverd.package.service
+#
+# This file is shipped inside the clustr-serverd RPM/DEB package.
+# It is installed to /usr/lib/systemd/system/clustr-serverd.service by nfpm.
+#
+# Key difference from clustr-serverd.service (the cloner/source-build unit):
+#   - ExecStart uses /usr/sbin/clustr-serverd (FHS package path vs. /usr/local/bin)
+#   - EnvironmentFile reads /etc/clustr/clustr-serverd.conf (operator editable defaults)
+#     in addition to /etc/clustr/secrets.env (secrets, never committed or shown in logs)
+#
+# After package install, the operator must:
+#   1. Edit /etc/clustr/clustr-serverd.conf — set CLUSTR_PXE_INTERFACE and CLUSTR_PXE_SERVER_IP
+#      for your provisioning network.
+#   2. Create /etc/clustr/secrets.env — generate CLUSTR_SESSION_SECRET:
+#        openssl rand -hex 64 | sed 's/^/CLUSTR_SESSION_SECRET=/' > /etc/clustr/secrets.env
+#        chmod 0400 /etc/clustr/secrets.env && chown root:root /etc/clustr/secrets.env
+#   3. systemctl enable --now clustr-serverd
+#   4. clustr-serverd bootstrap-admin    # creates clustr/clustr default admin account
+
+[Unit]
+Description=clustr Server
+After=network.target dev-pts.mount
+Wants=network.target dev-pts.mount
+
+[Service]
+Type=simple
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+# Ensure devpts is mounted before starting — required for systemd-nspawn shell sessions.
+ExecStartPre=/bin/bash -c "mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts -o ptmxmode=666,mode=620,gid=5"
+ExecStart=/usr/sbin/clustr-serverd --pxe
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# Non-secret runtime configuration (paths, PXE settings, listen address).
+# Edit /etc/clustr/clustr-serverd.conf to override defaults.
+# The '-' prefix means systemd will not fail if the file does not exist yet.
+EnvironmentFile=-/etc/clustr/clustr-serverd.conf
+
+# Secret credentials: CLUSTR_SESSION_SECRET (required for persistent sessions).
+# Generate with: openssl rand -hex 64 | sed 's/^/CLUSTR_SESSION_SECRET=/' > /etc/clustr/secrets.env
+# chmod 0400 /etc/clustr/secrets.env && chown root:root /etc/clustr/secrets.env
+# Without this, an ephemeral secret is generated at boot and every restart
+# invalidates all active browser sessions.
+EnvironmentFile=-/etc/clustr/secrets.env
+
+# ---------------------------------------------------------------------------
+# Restart policy
+# ---------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=5s
+
+# Give systemd 5 minutes to wait for a clean stop before sending SIGKILL.
+# ISO builds via QEMU take 10-15 minutes; the server's graceful shutdown
+# handler drains in-flight builds for up to 120 seconds. 300s gives the
+# entire shutdown sequence ample headroom.
+TimeoutStopSec=300
+
+# ---------------------------------------------------------------------------
+# Resource limits
+# ---------------------------------------------------------------------------
+# QEMU spawns a large number of threads (vCPU threads, I/O threads, signal
+# handler threads) plus dracut and rsync subprocesses during a build. The
+# default TasksMax on many systemd versions is 512, which is easily exceeded
+# when multiple QEMU instances run concurrently. Setting infinity removes the
+# cap; resource safety is provided by the MemoryMax ceiling below.
+TasksMax=infinity
+
+# 8G ceiling: clustr-serverd is a combined management plane + ISO builder that
+# spawns QEMU children. Each QEMU builder VM requests -m 2048 (2G), and
+# multiple concurrent builds plus Go runtime overhead easily exceed 2G.
+MemoryMax=8G
+
+# Deprioritise OOM kill — clustr-serverd is the control plane.
+OOMScoreAdjust=-500
+
+# ---------------------------------------------------------------------------
+# Security hardening
+# ---------------------------------------------------------------------------
+# NoNewPrivileges=false is required: systemd-nspawn child processes inherit
+# the PR_SET_NO_NEW_PRIVS bit and cannot unset it; with it set, pivot_root(2)
+# fails with EPERM inside nspawn shell sessions.
+NoNewPrivileges=false
+
+# ProtectSystem, ProtectHome, PrivateTmp, ProtectKernelTunables,
+# ProtectKernelModules, ProtectControlGroups are all false because the
+# private mount namespace they create conflicts with nspawn session setup
+# on Rocky Linux 9 / XFS with systemd v252. Security is enforced by
+# CapabilityBoundingSet and AmbientCapabilities below.
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectControlGroups=false
+
+# RestrictNamespaces=false: nspawn must create mount and user namespaces.
+RestrictNamespaces=false
+
+# MountFlags cleared: no private mount namespace is created (ProtectSystem=false).
+MountFlags=
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+# CAP_NET_BIND_SERVICE  — bind DHCP/67 and TFTP/69
+# CAP_SYS_ADMIN         — nspawn mount namespace + QEMU /dev/kvm + mount(2)
+# CAP_SYS_CHROOT        — chroot(2) inside nspawn
+# CAP_MKNOD             — create device nodes in container namespace
+# CAP_SETPCAP           — nspawn capability dropping after chroot
+# CAP_AUDIT_WRITE       — nspawn audit login UID reset (avoids 5s delay)
+# CAP_DAC_OVERRIDE      — libmount privilege check for loop device mounts
+# CAP_DAC_READ_SEARCH   — overlay path traversal during rootfs copy
+# CAP_FOWNER            — libmount privilege check (see CAP_DAC_OVERRIDE)
+# CAP_CHOWN             — rsync preserves file ownership during rootfs copy
+# CAP_SETUID/CAP_SETGID — rsync restores uid/gid of files
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_SETPCAP CAP_AUDIT_WRITE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_MKNOD CAP_SETPCAP CAP_AUDIT_WRITE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN CAP_SETUID CAP_SETGID
+
+# ---------------------------------------------------------------------------
+# Device access
+# ---------------------------------------------------------------------------
+# /dev/kvm — QEMU-based ISO builds
+# /dev/net/tun — virtual network interfaces for nspawn sessions
+# block-loop + /dev/loop-control — losetup for rootfs extraction
+# /dev/mapper/control + block-253 — kpartx device-mapper partition aliases
+DevicePolicy=auto
+DeviceAllow=/dev/kvm rwm
+DeviceAllow=/dev/net/tun rwm
+DeviceAllow=block-loop rwm
+DeviceAllow=/dev/loop-control rw
+DeviceAllow=/dev/mapper/control rw
+DeviceAllow=block-253 rwm
+
+[Install]
+WantedBy=multi-user.target

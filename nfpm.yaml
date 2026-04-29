@@ -1,0 +1,157 @@
+# nfpm.yaml — package configuration for clustr RPM + DEB distribution.
+#
+# Usage (in CI or locally after building binaries):
+#
+#   # Server package
+#   VERSION=1.13.0 ARCH=amd64 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+#   VERSION=1.13.0 ARCH=amd64 nfpm pkg --config nfpm.yaml --packager deb --target dist/
+#
+#   # CLI package — use nfpm-cli.yaml
+#
+# Environment variables consumed:
+#   VERSION  — semver without leading 'v' (e.g. 1.13.0). Set from git tag in CI.
+#   ARCH     — target architecture: amd64 or arm64.
+#
+# Requires binaries to be built first:
+#   clustr-serverd-linux-${ARCH}  (server binary)
+#
+# See nfpm-cli.yaml for the clustr CLI package.
+
+name: clustr-serverd
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+version_schema: semver
+release: 1
+section: admin
+priority: optional
+maintainer: Sqoia Labs <hello@sqoia.dev>
+description: |
+  clustr server — node cloning and image management for HPC bare-metal clusters.
+  Register nodes, manage OS images and bundles, and reimage machines from a
+  single binary with built-in PXE (DHCP + TFTP), web UI, and REST API.
+vendor: Sqoia Labs
+homepage: https://github.com/sqoia-dev/clustr
+license: MIT
+
+# RPM-specific metadata
+rpm:
+  group: System Environment/Daemons
+  summary: clustr server — HPC node cloning and image management
+
+# Debian-specific metadata
+deb:
+  fields:
+    Depends: systemd
+
+contents:
+  # Server binary
+  - src: clustr-serverd-linux-${ARCH}
+    dst: /usr/sbin/clustr-serverd
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Systemd unit (package variant: ExecStart uses /usr/sbin path)
+  - src: deploy/systemd/clustr-serverd.package.service
+    dst: /usr/lib/systemd/system/clustr-serverd.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Default environment config — marked as config so package managers
+  # do not overwrite operator edits on upgrade (noreplace for RPM; conffile for DEB)
+  - src: deploy/clustr-serverd.conf
+    dst: /etc/clustr/clustr-serverd.conf
+    type: config|noreplace
+    file_info:
+      mode: 0640
+      owner: root
+      group: root
+
+  # Data directories — nfpm creates these as empty dirs owned by root;
+  # the post-install script chowns them to the clustr user.
+  - dst: /var/lib/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/images
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/db
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/boot
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/tftpboot
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/repo
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/ldap
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/log-archive
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/tmp
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/log/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /etc/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+scripts:
+  # post-install: create system user, fix ownership, daemon-reload
+  postinstall: scripts/pkg-postinstall.sh
+  # pre-remove: stop service before removal
+  preremove: scripts/pkg-preremove.sh
