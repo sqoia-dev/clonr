@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -171,53 +172,41 @@ func TestFromURL_Success_AsyncDownload(t *testing.T) {
 	}
 }
 
-// TestFromURL_CancelMidDownload verifies that cancelling (DELETE) a downloading
-// image marks it as error and the record exists.
-func TestFromURL_CancelMidDownload(t *testing.T) {
-	// Slow server that hangs.
-	hang := make(chan struct{})
-	defer close(hang)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-hang // block until test completes
-	}))
-	defer ts.Close()
+// TestFromURL_CancelBuild verifies that CancelBuild on a building image
+// transitions it to error status. Tests the cancel endpoint in isolation
+// without a live download goroutine (avoids the hanging-server timing issue).
+func TestFromURL_CancelBuild(t *testing.T) {
+	h, d := newImagesHandler(t)
+	ctx := t.Context()
 
-	imgH, d := newImagesHandler(t)
-	t.Setenv("CLUSTR_ALLOW_PRIVATE_IMAGE_URLS", "true")
-
-	w := postJSON(imgH.FromURL, "/api/v1/images/from-url", map[string]string{
-		"url": ts.URL + "/huge.iso",
-	})
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d", w.Code)
+	// Pre-insert an image in "building" state directly into the DB.
+	img := api.BaseImage{
+		ID:     "cancel-test-img",
+		Name:   "cancel-target",
+		Status: api.ImageStatusBuilding,
+		Format: api.ImageFormatBlock,
+		Tags:   []string{},
 	}
-	var resp map[string]string
-	_ = json.NewDecoder(w.Body).Decode(&resp)
-	imgID := resp["image_id"]
-	if imgID == "" {
-		imgID = resp["id"]
-	}
-	if imgID == "" {
-		t.Fatal("no image_id in response")
+	if err := d.CreateBaseImage(ctx, img); err != nil {
+		t.Fatalf("CreateBaseImage: %v", err)
 	}
 
-	// Cancel via CancelBuild (sets status=error).
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/images/"+imgID+"/cancel", nil)
-	req = withChiID(req, imgID)
-	cancelW := httptest.NewRecorder()
-	imgH.CancelBuild(cancelW, req)
-	// 200 if building, 409 if async hasn't set it to building yet (both acceptable for timing)
-	if cancelW.Code != http.StatusOK && cancelW.Code != http.StatusConflict {
-		t.Errorf("cancel: expected 200 or 409, got %d", cancelW.Code)
+	// Cancel via the HTTP endpoint.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/images/"+img.ID+"/cancel", nil)
+	req = withChiID(req, img.ID)
+	w := httptest.NewRecorder()
+	h.CancelBuild(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CancelBuild: expected 200, got %d; body: %s", w.Code, w.Body.String())
 	}
 
-	// The DB record must exist.
-	img, err := d.GetBaseImage(req.Context(), imgID)
+	// Confirm status is now error in the DB.
+	updated, err := d.GetBaseImage(ctx, img.ID)
 	if err != nil {
-		t.Fatalf("GetBaseImage: %v", err)
+		t.Fatalf("GetBaseImage after cancel: %v", err)
 	}
-	if img.ID == "" {
-		t.Error("image record not found after cancel")
+	if updated.Status != api.ImageStatusError {
+		t.Errorf("expected status=error after cancel, got %q", updated.Status)
 	}
 }
 
