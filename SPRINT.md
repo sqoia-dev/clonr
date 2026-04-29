@@ -98,7 +98,7 @@ No SSR. No Next.js. No Redux/Zustand. No GraphQL/tRPC. No auth provider. No tele
 - [x] **NODES-3** Row click opens detail Sheet — full node info, "reimage" button stub (logs intent, no action yet)
 - [x] **NODES-4** Empty state with paste-ready `clustr-cli register` snippet
 - [x] **NODES-5** URL-driven filters + sort (search params, copy-paste-able)
-- [ ] **DEPLOY-1** Verify autodeploy on `cloner` (192.168.1.151) builds and serves the new app
+- [x] **DEPLOY-1** Verify autodeploy on `cloner` (192.168.1.151) builds and serves the new app
 - [x] **DEPLOY-2** Minimal new `README.md` — what clustr is, link to live UI, build instructions
 - [x] **CI-1** New CI: lint TS, build web, build Go, smoke-run binary. Green on main.
 
