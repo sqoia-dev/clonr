@@ -132,3 +132,130 @@ No SSR. No Next.js. No Redux/Zustand. No GraphQL/tRPC. No auth provider. No tele
 - All commits authored as `NessieCanCode <robert.romero@sqoia.dev>`. No Co-Authored-By.
 - After every push, watch the CI run; fix red before reporting done.
 - Local Go builds are forbidden on this host (OOM). Push to main, let autodeploy + CI build.
+
+---
+
+## Sprint 2 — Complete the App
+
+**Started:** 2026-04-29 (immediately after Sprint 1)
+**Target:** 7–10 days. Escalate at day 12.
+
+### Goal
+
+Sprint 1 shipped the shell + Nodes. Sprint 2 makes the app **useful and complete**: the other three surfaces become real, the operator can act on nodes (not just observe), and Cmd-K stops being decorative.
+
+### Re-use the Nodes pattern
+
+Every new surface follows the same structure already proven on `/nodes`:
+- TanStack Query + SSE for data
+- 5-column default view + advanced toggle
+- Detail `<Sheet>` on row click
+- Empty state with paste-ready CLI snippet
+- URL-driven filters + sort
+- Status = color + shape + text
+
+Don't re-litigate the pattern. If something doesn't fit, ping Richard.
+
+### In scope
+
+#### Phase 0 — Username + password login (do this first)
+
+Sprint 1 shipped with API-key-paste login. That's wrong UX for an end-user web app. Web defaults to username/password; API keys are CLI-only. The server already has the full machinery — sessions, login/logout/me/set-password handlers, middleware that accepts both cookie and API key, `bootstrap-admin` CLI. Phase 0 is one tiny server endpoint + a web re-skin.
+
+**Server (one addition):**
+
+- [x] **AUTH0-1** Add `GET /api/v1/auth/status` → `{has_admin: bool}`, public (no auth). ~20 LOC + test. Used by web first-run gate.
+
+**Web (re-skin Sprint 1 auth):**
+
+- [ ] **AUTH0-2** Delete the API-key-paste login screen + `localStorage` token store from Sprint 1
+- [ ] **AUTH0-3** New `<Login/>` view: username + password form, `POST /api/v1/auth/login` with `credentials: "include"`. Show server error messages verbatim (don't reinvent password rules client-side).
+- [ ] **AUTH0-4** Global fetch wrapper: every request includes `credentials: "include"`; on 401 → flip session state to `unauthed` and re-mount `<Login/>`. No `X-Api-Key`, no `Authorization` headers from the web UI.
+- [ ] **AUTH0-5** `useSession()` hook: calls `GET /api/v1/auth/me` on mount; states = `loading | authed(user) | unauthed | setup_required`. App shell consults this before rendering protected content.
+- [ ] **AUTH0-6** First-run gate: before `<Login/>`, fetch `/api/v1/auth/status`. If `!has_admin`, render a "Setup required" page with paste-ready `clustr-serverd bootstrap-admin` snippet (host-local CLI only — never expose bootstrap over the web).
+- [ ] **AUTH0-7** `<SetPassword/>` view, shown when login response has `force_password_change: true` (or the `clustr_force_password_change` cookie is set). Posts to `POST /api/v1/auth/set-password`.
+- [ ] **AUTH0-8** Logout: `POST /api/v1/auth/logout` → flip session state to `unauthed`. Logout button lives in Settings (per SET-5) AND in the topbar user menu.
+- [ ] **AUTH0-9** Vite dev proxy to clustr-serverd so cookies work cross-origin in dev (don't loosen `SameSite=Strict`).
+
+**Auth anti-patterns (do not do any of these):**
+
+- No password / username / session in `localStorage` or `sessionStorage`.
+- No JWTs, no refresh-token rotation. The server's HMAC session with sliding expiry is correct as-is — don't touch.
+- No client-side password complexity rules. Mirror server errors only.
+- No web-callable admin bootstrap. CLI-only is the security boundary.
+- No mixed auth from the web UI. Cookie only.
+- Don't weaken `SameSite=Strict` to `Lax` in dev. Fix dev with a Vite proxy.
+
+**API keys remain valid for CLI/programmatic access.** The server middleware already accepts both. Settings → API Keys (SET-2) is for the logged-in user to manage their keys, not for web login.
+
+**Auth migration is the foundation for every other Sprint 2 phase.** Do not start Images/Activity/Settings/Reimage/Cmd-K until Phase 0 is merged and CI is green. Otherwise every TanStack Query call in those phases gets refactored when auth changes.
+
+#### Images surface
+
+- [ ] **IMG-1** `/images` route — list base images + bundles. Default cols: name, version, size, SHA256-short, "in use by" count
+- [ ] **IMG-2** Tabs inside Images: "Base Images" and "Bundles" (per IA — bundles live here, not top-level)
+- [ ] **IMG-3** SSE updates when an image is uploaded / deleted / referenced. No polling.
+- [ ] **IMG-4** Detail Sheet on row click — full SHA256, GPG fingerprint, size, repo stanzas, list of nodes currently using it
+- [ ] **IMG-5** Empty state with `clustr-cli image upload` snippet (read real CLI syntax from source)
+- [ ] **IMG-6** URL-driven search + sort
+
+#### Activity surface
+
+- [ ] **ACT-1** `/activity` route — unified live event stream. Replaces the legacy 3-separate-log views.
+- [ ] **ACT-2** Source events from server's existing audit/event endpoint (read server source; if no unified endpoint exists, ping Richard — adding one is in-scope if needed)
+- [ ] **ACT-3** Default cols: timestamp (relative), kind (provisioning / api / error), subject (node id / image id / api key id), summary
+- [ ] **ACT-4** SSE live append. Auto-scroll lock when user scrolls up (don't fight the user).
+- [ ] **ACT-5** Filter bar: kind + subject. URL-driven.
+- [ ] **ACT-6** Click row → detail Sheet with full payload (JSON in mono font, expandable)
+- [ ] **ACT-7** Empty state: "No activity yet. Trigger a node provisioning or upload an image."
+
+#### Settings surface
+
+- [ ] **SET-1** `/settings` route, sectioned (not tabs — single-page sections per IA principle: "Settings: One page, sectioned")
+- [ ] **SET-2** Section: API Keys — list, create (modal-free; inline form), revoke (inline destructive confirm with typed key label)
+- [ ] **SET-3** Section: Server Config — read-only view of current config (server hostname, network, ports, version)
+- [ ] **SET-4** Section: GPG Keys — list installed keys, fingerprints, add new (paste public key block)
+- [ ] **SET-5** Logout button at bottom of Settings (clears `localStorage`, redirects to `/login`)
+
+#### Reimage flow (the killer action)
+
+- [ ] **REIMG-1** Replace the Sprint 1 stub button on Node detail Sheet with the real flow
+- [ ] **REIMG-2** Inline destructive confirmation per UI/UX principle 4: expands inline below the button, shows current image → target image diff (visually distinct), requires typing the node ID
+- [ ] **REIMG-3** Target image selector: dropdown of available base images, pre-filtered to compatible ones
+- [ ] **REIMG-4** On confirm: POST to existing reimage endpoint, optimistic update node status to "provisioning", subscribe to SSE for that node's progress
+- [ ] **REIMG-5** Inline progress bar in the detail sheet (uses the same SSE stream as Nodes-2)
+- [ ] **REIMG-6** Toast on completion / failure with link to Activity entry
+
+#### Cmd-K actions
+
+- [ ] **PAL-1** Palette now lists actions in addition to routes. Sections: Navigation, Nodes, Images, API Keys
+- [ ] **PAL-2** Action: "Reimage node…" — opens a node picker, then triggers the same inline reimage flow on the Node detail page
+- [ ] **PAL-3** Action: "Create API key…" — inline form same as Settings → API Keys
+- [ ] **PAL-4** Action: "Upload image…" — links out to CLI doc (no UI upload in v2)
+- [ ] **PAL-5** Recent items: last 5 entities visited (nodes, images), persisted in localStorage
+
+#### Tests + polish
+
+- [ ] **TEST-1** Vitest configured. Critical hooks tested: `useAuth`, `useSSE`, query key factories
+- [ ] **TEST-2** Add `pnpm test` to CI before `make web`
+- [ ] **POL-1** Loading skeletons on every list (no spinner-on-empty)
+- [ ] **POL-2** Keyboard shortcuts: `g n` → Nodes, `g i` → Images, `g a` → Activity, `g s` → Settings (vim-style leader, no conflict with Cmd-K)
+- [ ] **POL-3** Update SPRINT.md checkboxes inline as items complete
+
+### Out of scope (Sprint 3+)
+
+- Image upload through the UI (CLI only — link to docs)
+- GPG key generation in-app (paste only)
+- Multi-tenancy / orgs / users (clustr is single-tenant API-key-only — won't change)
+- Reimage scheduling / batch reimage across many nodes
+- Charts / metrics / cluster utilization views
+- Dark/light system-preference auto-detection (manual toggle is fine for now)
+- Mobile layouts (operator audience is desktop-first; not a priority)
+
+### Definition of done
+
+1. All Sprint 2 checkboxes ticked.
+2. CI green on the merge commit (lint, vitest, build web, build go, smoke).
+3. Autodeploy on `cloner` ships and `http://10.99.0.1:8080/` shows the new screens live.
+4. An operator can: log in, see all 4 surfaces with real data, trigger a reimage from either the Node detail OR Cmd-K, watch it progress in real time, see the resulting Activity entry, create + revoke an API key from Settings, and find any entity by Cmd-K.
+5. No regressions on Sprint 1 functionality (Nodes list, SSE, login still work).

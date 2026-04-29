@@ -1033,6 +1033,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Use(apiKeyAuth(s.db, s.cfg.AuthDevMode, s.sessionSecret, s.cfg.SessionSecure))
 
 		// Auth endpoints — no scope required (login is pre-auth by definition).
+		r.Get("/auth/status", authH.HandleStatus)
 		r.Post("/auth/login", authH.HandleLogin)
 		r.Post("/auth/logout", authH.HandleLogout)
 		r.Get("/auth/me", authH.HandleMe)
@@ -1898,7 +1899,18 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		return user.Username, nil
 	}
 
+	// HasAdminUser returns true when at least one active admin user exists.
+	// Used by GET /api/v1/auth/status for first-run detection (AUTH0-1).
+	hasAdminUserFn := func() (bool, error) {
+		n, err := s.db.CountActiveAdmins(context.Background())
+		if err != nil {
+			return false, err
+		}
+		return n > 0, nil
+	}
+
 	return &handlers.AuthHandler{
+		HasAdminUser:      hasAdminUserFn,
 		LoginWithKey:      loginWithKeyFn,
 		LoginWithPassword: loginWithPasswordFn,
 		SignForUser:       signForUserFn,

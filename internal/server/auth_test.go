@@ -493,3 +493,84 @@ func TestMe_NoSession_Returns401_NotAdminRole(t *testing.T) {
 		t.Errorf("/me 401 body contains role=%v — server must not leak role on unauthenticated requests", role)
 	}
 }
+
+// ─── /auth/status first-run detection tests (AUTH0-1) ───────────────────────
+
+func TestAuthStatus_HasAdmin_True(t *testing.T) {
+	// newAuthTestServer bootstraps a default admin user, so has_admin should be true.
+	_, ts, _ := newAuthTestServer(t)
+	client := clientWithJar(t)
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/auth/status", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("auth/status request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/auth/status: got %d, want 200", resp.StatusCode)
+	}
+
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["has_admin"] != true {
+		t.Errorf("/auth/status has_admin: got %v, want true", out["has_admin"])
+	}
+}
+
+func TestAuthStatus_NoAdmin_False(t *testing.T) {
+	// Create a server with an empty database — no bootstrap user.
+	t.Helper()
+	dir := t.TempDir()
+	database, err := db.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	cfg := config.ServerConfig{
+		ListenAddr:    ":0",
+		ImageDir:      filepath.Join(dir, "images"),
+		DBPath:        filepath.Join(dir, "test.db"),
+		LogLevel:      "error",
+		SessionSecret: "test-session-secret-32-bytes-xxx",
+		SessionSecure: false,
+	}
+	// Do NOT call BootstrapDefaultUser — empty database.
+	srv := server.New(cfg, database, server.BuildInfo{})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	client := clientWithJar(t)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/auth/status", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("auth/status request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/auth/status: got %d, want 200", resp.StatusCode)
+	}
+
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out["has_admin"] != false {
+		t.Errorf("/auth/status has_admin: got %v, want false (empty db)", out["has_admin"])
+	}
+}
+
+func TestAuthStatus_IsPublic_NoAuth(t *testing.T) {
+	// Verify /auth/status is accessible without any credentials.
+	_, ts, _ := newAuthTestServer(t)
+	// Plain client — no cookie jar, no auth headers.
+	resp, err := http.Get(ts.URL + "/api/v1/auth/status")
+	if err != nil {
+		t.Fatalf("auth/status request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/auth/status public: got %d, want 200", resp.StatusCode)
+	}
+}

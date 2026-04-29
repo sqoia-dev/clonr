@@ -22,6 +22,10 @@ import (
 // via its function fields so it does not import the server package (avoiding
 // circular deps — server imports handlers).
 type AuthHandler struct {
+	// HasAdminUser returns true when at least one active admin user exists.
+	// Used by GET /api/v1/auth/status for first-run detection.
+	HasAdminUser func() (bool, error)
+
 	// LoginWithKey validates a raw API key string (deprecated legacy path).
 	// Returns (keyPrefix, scope, ok). keyPrefix is the first 8 chars of raw key.
 	LoginWithKey func(rawKey string) (keyPrefix string, scope string, ok bool)
@@ -341,6 +345,28 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 		"sub":  sub,
 		"role": role,
 	})
+}
+
+// HandleStatus handles GET /api/v1/auth/status.
+// Public (no auth required). Returns {"has_admin": bool} so the web UI can
+// detect first-run state and direct the operator to run bootstrap-admin.
+func (h *AuthHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
+	if h.HasAdminUser == nil {
+		// Safety fallback: if the function is not wired, assume admin exists to
+		// avoid accidentally routing a running server into first-run setup UI.
+		writeJSON(w, http.StatusOK, map[string]bool{"has_admin": true})
+		return
+	}
+	ok, err := h.HasAdminUser()
+	if err != nil {
+		log.Error().Err(err).Msg("auth/status: db error")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "internal server error",
+			"code":  "internal_error",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"has_admin": ok})
 }
 
 // sessionCookie builds a Set-Cookie value for the session.
