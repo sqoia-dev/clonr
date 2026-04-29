@@ -98,7 +98,7 @@ jobs:
 
       - name: Install nfpm + rpm tools
         run: |
-          NFPM_VERSION=2.41.4
+          NFPM_VERSION=2.46.3
           curl -fsSL \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xz nfpm
@@ -229,7 +229,7 @@ jobs:
 
       - name: Install nfpm + rpm tools
         run: |
-          NFPM_VERSION=2.41.4
+          NFPM_VERSION=2.46.3
           curl -fsSL \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xz nfpm
