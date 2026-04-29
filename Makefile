@@ -23,14 +23,19 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test
+.PHONY: all client server clientd static clean test web
 
-all: client server clientd
+all: web client server clientd
+
+web:
+	cd web && pnpm install --frozen-lockfile && pnpm build
+	rm -rf internal/server/web/dist
+	cp -r web/dist internal/server/web/dist
 
 client:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clustr ./cmd/clustr
 
-server:
+server: web
 	go build $(LDFLAGS) -o bin/clustr-serverd ./cmd/clustr-serverd
 
 clientd:

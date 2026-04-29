@@ -86,8 +86,8 @@ No SSR. No Next.js. No Redux/Zustand. No GraphQL/tRPC. No auth provider. No tele
 - [x] **SCAFFOLD-3** TanStack Router + Query installed, root route + `/nodes` route
 - [x] **SCAFFOLD-4** shadcn/ui initialized, copy in: Button, Input, Table, Sheet, Command, Toast, Tabs
 - [x] **SCAFFOLD-5** Inter Variable + JetBrains Mono loaded
-- [ ] **EMBED-1** Go `embed.FS` serving built `web/dist/` with SPA fallback to `index.html`
-- [ ] **EMBED-2** Build pipeline: `make web` builds Vite, `go build` embeds it
+- [x] **EMBED-1** Go `embed.FS` serving built `web/dist/` with SPA fallback to `index.html`
+- [x] **EMBED-2** Build pipeline: `make web` builds Vite, `go build` embeds it
 - [ ] **AUTH-1** Login screen (paste API key, validate, store in `localStorage`)
 - [ ] **AUTH-2** Auth context + protected routes (redirect unauthenticated to `/login`)
 - [ ] **SHELL-1** App shell: collapsible sidebar (Nodes, Images, Activity, Settings — last three disabled)

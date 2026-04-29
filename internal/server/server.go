@@ -40,6 +40,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/allocation"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
+	webui "github.com/sqoia-dev/clustr/internal/server/web"
 	"github.com/sqoia-dev/clustr/internal/webhook"
 )
 
@@ -1002,12 +1003,13 @@ func (s *Server) buildRouter() chi.Router {
 		log.Info().Msg("pprof profiling endpoints enabled at /debug/pprof (admin only)")
 	}
 
-	// Placeholder root — replaced by embedded SPA in Phase C.
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"app":"clustr","status":"ok"}`))
-	})
+	// Embedded SPA — serves built web/dist assets with index.html fallback.
+	// API routes registered above take precedence; this catches everything else.
+	spaHandler, spaErr := webui.Handler()
+	if spaErr != nil {
+		log.Fatal().Err(spaErr).Msg("server: failed to load embedded web UI")
+	}
+	r.Handle("/*", spaHandler)
 
 	// /repo/* — public, unauthenticated Slurm package repository served from
 	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
