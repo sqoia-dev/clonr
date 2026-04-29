@@ -80,12 +80,12 @@ No SSR. No Next.js. No Redux/Zustand. No GraphQL/tRPC. No auth provider. No tele
 - [x] **WIPE-5** Update `.github/workflows/ci.yml` — remove Node test/a11y/Lighthouse jobs
 - [x] **WIPE-6** Update `Makefile` — remove `test-js`, `a11y`, `smoke` targets
 - [x] **WIPE-7** Delete `docs/` entirely and root `CHANGELOG.md`. Delete `README.md`. (SPRINT.md stays.)
-- [ ] **WIPE-8** Confirm `go build ./...` is green and `clustr-serverd` starts
-- [ ] **SCAFFOLD-1** Create `web/` directory with Vite + React 19 + TS scaffold
-- [ ] **SCAFFOLD-2** Tailwind v4 wired, dark mode default, light mode toggle
-- [ ] **SCAFFOLD-3** TanStack Router + Query installed, root route + `/nodes` route
-- [ ] **SCAFFOLD-4** shadcn/ui initialized, copy in: Button, Input, Table, Sheet, Command, Toast, Tabs
-- [ ] **SCAFFOLD-5** Inter Variable + JetBrains Mono loaded
+- [x] **WIPE-8** Confirm `go build ./...` is green and `clustr-serverd` starts
+- [x] **SCAFFOLD-1** Create `web/` directory with Vite + React 19 + TS scaffold
+- [x] **SCAFFOLD-2** Tailwind v4 wired, dark mode default, light mode toggle
+- [x] **SCAFFOLD-3** TanStack Router + Query installed, root route + `/nodes` route
+- [x] **SCAFFOLD-4** shadcn/ui initialized, copy in: Button, Input, Table, Sheet, Command, Toast, Tabs
+- [x] **SCAFFOLD-5** Inter Variable + JetBrains Mono loaded
 - [ ] **EMBED-1** Go `embed.FS` serving built `web/dist/` with SPA fallback to `index.html`
 - [ ] **EMBED-2** Build pipeline: `make web` builds Vite, `go build` embeds it
 - [ ] **AUTH-1** Login screen (paste API key, validate, store in `localStorage`)
