@@ -11,13 +11,18 @@ Register nodes, manage base images and bundles, and reimage machines from a sing
 ## Quick start
 
 ```bash
-# Start the server
+# 1. Start the server
 CLUSTR_SECRET_KEY=<secret> clustr-serverd
 
-# Create an admin API key
-CLUSTR_SECRET_KEY=<secret> clustr-serverd apikey create --scope admin --description "local"
+# 2. Create the admin user (run once, on the server host)
+clustr-serverd bootstrap-admin
+#   Default credentials: clustr / clustr
+#   You will be prompted to change the password on first login.
+#
+#   Override the defaults with flags:
+#     clustr-serverd bootstrap-admin --username ops --password "S3cr3t!"
 
-# Open the UI, paste the API key at the login screen
+# 3. Open the UI and sign in
 open http://localhost:8080/
 ```
 

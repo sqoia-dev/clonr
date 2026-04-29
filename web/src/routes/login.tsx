@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useNavigate } from "@tanstack/react-router"
+import { useNavigate, useSearch } from "@tanstack/react-router"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useSession, type SessionUser } from "@/contexts/auth"
@@ -14,6 +14,10 @@ interface LoginResponse {
 export function LoginPage() {
   const { setAuthed, refresh } = useSession()
   const navigate = useNavigate()
+  // DEF-5: read ?firstrun=1 from URL — shows default-creds hint on first-run path only.
+  const search = useSearch({ from: "/login" })
+  const isFirstRun = search.firstrun === "1"
+
   const [username, setUsername] = React.useState("")
   const [password, setPassword] = React.useState("")
   const [loading, setLoading] = React.useState(false)
@@ -46,6 +50,7 @@ export function LoginPage() {
         return
       }
 
+      // Drop the ?firstrun param on successful login — default creds no longer needed.
       navigate({
         to: "/nodes",
         search: { q: undefined, status: undefined, sort: undefined, dir: undefined },
@@ -118,6 +123,18 @@ export function LoginPage() {
             {loading ? "Signing in..." : "Sign in"}
           </Button>
         </form>
+
+        {/* DEF-5: Show default-creds hint only on the ?firstrun=1 path.
+            This disappears after a successful login (navigate drops the param). */}
+        {isFirstRun && (
+          <p className="text-xs text-muted-foreground text-center">
+            Default credentials:{" "}
+            <code className="font-mono">clustr</code>{" "}
+            /{" "}
+            <code className="font-mono">clustr</code>
+            {" "}— you'll be prompted to set a real password.
+          </p>
+        )}
       </div>
     </div>
   )

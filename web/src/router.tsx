@@ -17,6 +17,9 @@ const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
   component: LoginPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    firstrun: typeof search.firstrun === "string" ? search.firstrun : undefined,
+  }),
 })
 
 const setupRoute = createRoute({

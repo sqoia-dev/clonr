@@ -1,17 +1,42 @@
 import * as React from "react"
+import { useNavigate } from "@tanstack/react-router"
 import { Button } from "@/components/ui/button"
-import { Copy, Check } from "lucide-react"
+import { Copy, Check, RefreshCw } from "lucide-react"
+import { apiFetch } from "@/lib/api"
 
 const BOOTSTRAP_CMD = "clustr-serverd bootstrap-admin"
 
 export function SetupPage() {
+  const navigate = useNavigate()
   const [copied, setCopied] = React.useState(false)
+  const [checking, setChecking] = React.useState(false)
+  const [markedDone, setMarkedDone] = React.useState(false)
 
   function copy() {
     navigator.clipboard.writeText(BOOTSTRAP_CMD).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
+  }
+
+  // Poll /auth/status after the operator clicks "I've run bootstrap-admin".
+  // On has_admin: true → redirect to /login?firstrun=1.
+  async function handleDone() {
+    setMarkedDone(true)
+    setChecking(true)
+    try {
+      const status = await apiFetch<{ has_admin: boolean }>("/api/v1/auth/status")
+      if (status.has_admin) {
+        navigate({ to: "/login", search: { firstrun: "1" } })
+        return
+      }
+      // Admin still not found — give the operator feedback.
+      setChecking(false)
+      setMarkedDone(false)
+    } catch {
+      setChecking(false)
+      setMarkedDone(false)
+    }
   }
 
   return (
@@ -37,11 +62,34 @@ export function SetupPage() {
           </Button>
         </div>
 
+        {/* DEF-4: default-creds hint immediately below the code block */}
+        <p className="text-xs text-muted-foreground text-center">
+          Default credentials:{" "}
+          <code className="font-mono">clustr</code>{" "}
+          /{" "}
+          <code className="font-mono">clustr</code>
+          {" "}— you'll be prompted to change on first login.
+        </p>
+
         <p className="text-xs text-muted-foreground text-center">
           Use <code className="font-mono">--bypass-complexity</code> for a temporary password and{" "}
           <code className="font-mono">--force</code> to overwrite an existing admin account.
-          Refresh this page after running the command.
         </p>
+
+        <Button
+          className="w-full"
+          onClick={handleDone}
+          disabled={checking || markedDone}
+        >
+          {checking ? (
+            <>
+              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+              Checking…
+            </>
+          ) : (
+            "I've run bootstrap-admin"
+          )}
+        </Button>
       </div>
     </div>
   )
