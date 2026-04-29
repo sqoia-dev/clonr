@@ -305,6 +305,16 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// DEF-3: Reject the literal default password to prevent operators from
+	// accidentally "changing" their password to the same insecure default.
+	if req.NewPassword == "clustr" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Password cannot be 'clustr' — please choose a real password.",
+			"code":  "validation_error",
+		})
+		return
+	}
+
 	if msg := validatePassword(req.NewPassword); msg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": msg,

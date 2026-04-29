@@ -259,3 +259,85 @@ Sprint 1 shipped with API-key-paste login. That's wrong UX for an end-user web a
 3. Autodeploy on `cloner` ships and `http://10.99.0.1:8080/` shows the new screens live.
 4. An operator can: log in, see all 4 surfaces with real data, trigger a reimage from either the Node detail OR Cmd-K, watch it progress in real time, see the resulting Activity entry, create + revoke an API key from Settings, and find any entity by Cmd-K.
 5. No regressions on Sprint 1 functionality (Nodes list, SSE, login still work).
+
+---
+
+## Sprint 3 — Harden + Close Carry-overs
+
+**Started:** 2026-04-29 (immediately after Sprint 2)
+**Target:** 7–10 days. Escalate at day 12.
+
+### Goal
+
+Sprint 1 made the app load. Sprint 2 made it useful. Sprint 3 makes it **trustworthy**: every gap closes, every poll becomes real-time, every known v1.0 limitation gets resolved, and the failure modes stop surprising operators.
+
+No new top-level surfaces. No new big features. This is finishing work + the v1.0 KL items.
+
+### In scope
+
+#### Phase 0 — Default admin credentials (do this first)
+
+The first-run UX should be: run one command, open the web UI, type a memorable default, change the password. Match Grafana/Jenkins/Portainer/MinIO conventions instead of forcing the operator to invent + remember credentials before they've even seen the app.
+
+- [x] **DEF-1** `clustr-serverd bootstrap-admin` with no flags creates user `clustr` with password `clustr` and `force_password_change=true`. Existing `--username` / `--password` flags continue to override — operator control intact.
+- [x] **DEF-2** `bootstrap-admin` reject conditions: if the literal default password equals the username (`clustr`/`clustr`), `force_password_change` MUST be set. Add a unit test that fails if a future change ever lets the default through unflagged.
+- [x] **DEF-3** Server `/api/v1/auth/set-password` rejects setting the password back to `clustr` when transitioning out of force-change. Test it.
+- [x] **DEF-4** Web Setup page (AUTH0-6 from Sprint 2) surfaces a copyable code block: `clustr-serverd bootstrap-admin` and a one-line hint immediately below: *"Default credentials: `clustr` / `clustr` — you'll be prompted to change on first login."*
+- [x] **DEF-5** Web Login page shows the default-creds hint as small muted text below the form ONLY when `/auth/status` returned `has_admin: true` AND the operator has not yet successfully logged in *and* the URL has `?firstrun` (set by the redirect from Setup → Login after bootstrap). Don't permanently advertise default creds in the live UI — they should disappear after first login.
+- [x] **DEF-6** README Quick Start: document the default creds in a fenced block, with the force-password-change note.
+
+- [ ] **SSE-1** Add server SSE channel for image lifecycle events (upload, delete, ref-count changes). Mirror the shape of the existing node SSE channel. Replaces the 15s polling in IMG-3.
+- [ ] **SSE-2** Wire `/images` to consume the new channel; remove the `refetchInterval`. No regressions.
+
+#### GPG keys — real surface
+
+- [ ] **GPG-1** Server: `GET /api/v1/gpg-keys` (list installed keyring entries with fingerprints, owner, trust, created). Read from the same source the bundle deploy uses.
+- [ ] **GPG-2** Server: `POST /api/v1/gpg-keys` accepts ASCII-armored public key block, validates, imports, returns the new entry. `DELETE /api/v1/gpg-keys/{fingerprint}` removes.
+- [ ] **GPG-3** Web: replace the Settings → GPG CLI note with a real list + paste-to-add inline form + inline destructive remove (typed fingerprint to confirm, per UI/UX principle 4).
+
+#### Cmd-K reimage picker
+
+- [ ] **PAL-2-2** "Reimage node…" in the palette opens an inline node picker (search, recent, paginated). Selecting a node opens that node's detail Sheet with the reimage panel already expanded. No more redirect to `/nodes`.
+
+#### v1.0 known-limitations cleanup
+
+- [ ] **KL-1** Auto-assign the dual `["controller","worker"]` role on the controller after slurm bundle deploy completes. Eliminates the post-provision API call. Add a unit test.
+- [ ] **KL-2** Replace D18 reseed endpoint's generic slurm.conf stub with a cluster-specific config generator that reads the deployed node inventory + roles. Existing cluster topology should round-trip through reseed without operator intervention.
+- [ ] **KL-3** Remove `CgroupAutomount=` from generated slurm.conf (deprecated parameter; warning visible in slurmd logs). Confirm no behavior regression with the existing e2e tests.
+
+#### Failure-mode polish
+
+- [ ] **POL-4** Global error boundary at the route level — catches render errors, shows a recovery card with "Reload" + the last 5 user actions (no PII / no payload data). Don't show stack traces unless `?debug=1`.
+- [ ] **POL-5** Optimistic update rollback on every mutation that does one. Reimage already does this; audit Settings → API key create/revoke and GPG add/delete and add the same pattern.
+- [ ] **POL-6** Network failure UX — when SSE disconnects and can't reconnect for >30s, the topbar connection indicator turns red and a one-line banner appears: "Live updates paused. Click to retry." (No spinner-on-failure; failure is its own state.)
+- [ ] **POL-7** Empty / loading / error states are explicitly rendered for every list. No accidental "blank screen looks like empty list" cases.
+
+#### Accessibility — minimum bar
+
+- [ ] **A11Y-1** All interactive elements keyboard-reachable; no focus traps; skip-to-main link in shell.
+- [ ] **A11Y-2** Color contrast on dark + light themes meets WCAG AA. Audit the OKLCH palette; bump where needed.
+- [ ] **A11Y-3** Status indicators have text or aria-label, not color-only (already a UI/UX principle, audit & fix any gaps).
+- [ ] **A11Y-4** Tables have proper `<th scope>` + caption.
+
+#### Tests
+
+- [ ] **TEST-3** Vitest: tests for the new fetch wrapper 401 handling + the SSE reconnect logic.
+- [ ] **TEST-4** Vitest: tests for the reimage flow's confirm-gate (typed ID match) and rollback on POST failure.
+- [ ] **TEST-5** Server: Go tests for the new GPG endpoints + the SSE image channel.
+
+### Out of scope (Sprint 4+)
+
+- Mobile layouts.
+- Image upload through the UI (CLI remains the path).
+- Multi-tenancy / orgs / users beyond local users.
+- Charts / metrics / cluster utilization views.
+- Batch reimage across many nodes (note for Sprint 4 if it surfaces).
+- SSO / OAuth / MFA / password reset flows.
+
+### Definition of done
+
+1. All Sprint 3 checkboxes ticked.
+2. CI green on the merge commit (lint, vitest, go test, build, smoke, gosec, govulncheck, trivy).
+3. Autodeploy on cloner ships the latest SHA; no SSE polling fallback in `/images`.
+4. Operator can: log in, manage GPG keys from Settings, trigger reimage entirely from Cmd-K (no /nodes detour), see Activity update in real time across nodes + images, get a useful error UI when SSE drops.
+5. v1.0 KL-1 / KL-2 / KL-3 closed and documented in a one-line note per fix in the commit message.

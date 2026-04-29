@@ -93,6 +93,16 @@ immediately after recovery.`,
 // which account was created with a weak password.
 const AuditActionBootstrapAdminBypassComplexity = "auth.bootstrap_admin.bypass_complexity"
 
+// DefaultAdminUsername is the default admin username created by bootstrap-admin
+// when no --username flag is provided. Matches Grafana/Jenkins/Portainer/MinIO
+// conventions to reduce first-run friction.
+const DefaultAdminUsername = "clustr"
+
+// DefaultAdminPassword is the default password set when no --password flag is
+// provided. force_password_change=true is always set on this path — the
+// operator MUST change it before using the app.
+const DefaultAdminPassword = "clustr"
+
 func runBootstrapAdmin(username, password string, force, bypassComplexity bool) error {
 	cfg := config.LoadServerConfig()
 
@@ -104,7 +114,19 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		password = os.Getenv("CLUSTR_BOOTSTRAP_PASSWORD")
 	}
 
-	// Interactive prompt if still empty.
+	// Apply defaults when neither flags nor env vars provide credentials.
+	// force_password_change is set to true below for the default path so the
+	// operator is forced to choose a real password before using the app.
+	usingDefaults := false
+	if username == "" && password == "" {
+		username = DefaultAdminUsername
+		password = DefaultAdminPassword
+		usingDefaults = true
+		bypassComplexity = true // default password intentionally doesn't meet complexity
+	}
+
+	// Interactive prompt only when username was explicitly set but password wasn't.
+	// (If both were empty we already filled both with defaults above.)
 	if username == "" {
 		fmt.Print("Admin username: ")
 		var u string
@@ -192,7 +214,7 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		Username:           username,
 		PasswordHash:       string(hash),
 		Role:               db.UserRoleAdmin,
-		MustChangePassword: false,
+		MustChangePassword: usingDefaults, // force change on default clustr/clustr path
 		CreatedAt:          time.Now(),
 	}
 	if err := database.CreateUser(ctx, rec); err != nil {
@@ -252,7 +274,10 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 	fmt.Printf("  Username: %s\n", username)
 	fmt.Printf("  Role:     admin\n")
 	fmt.Printf("  Web UI:   %s\n", webURL)
-	if bypassComplexity {
+	if usingDefaults {
+		fmt.Printf("  Password: %s (force password change required)\n", DefaultAdminPassword)
+		fmt.Printf("\nLog in with the default credentials, then set a real password when prompted.\n")
+	} else if bypassComplexity {
 		fmt.Printf("\nACTION REQUIRED: Change this password manually as soon as recovery is complete.\n")
 		fmt.Printf("  The password set with --bypass-complexity does not meet complexity requirements.\n")
 		fmt.Printf("  Log in, then go to Settings > Account to set a strong password.\n")

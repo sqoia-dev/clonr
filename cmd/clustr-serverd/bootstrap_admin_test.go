@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sqoia-dev/clustr/internal/db"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // --- Unit tests: validateBootstrapPassword ---
@@ -221,6 +222,53 @@ func TestRunBootstrapAdmin_ForceWithBypass(t *testing.T) {
 	}
 	if len(auditRecords) == 0 {
 		t.Error("expected bypass audit entry after --force --bypass-complexity, found none")
+	}
+}
+
+// TestBootstrapAdmin_DefaultCredentials_ForceChangeInvariant is the DEF-2
+// invariant test. It must fail loudly if any future change lets the default
+// clustr/clustr path through without force_password_change=true, or changes
+// the default password away from "clustr".
+//
+// POLICY: The default admin path (no --username/--password flags, no env vars)
+// MUST always:
+//   1. Create a user named "clustr"
+//   2. Set that user's password to "clustr"
+//   3. Set MustChangePassword=true
+//
+// If this test fails, someone broke the default-credentials contract.
+func TestBootstrapAdmin_DefaultCredentials_ForceChangeInvariant(t *testing.T) {
+	_, dbPath := openTestDB(t)
+	t.Setenv("CLUSTR_DB_PATH", dbPath)
+	// Explicitly clear env vars so no credentials can sneak in.
+	t.Setenv("CLUSTR_BOOTSTRAP_USERNAME", "")
+	t.Setenv("CLUSTR_BOOTSTRAP_PASSWORD", "")
+
+	// Call with empty username and password to exercise the default path.
+	if err := runBootstrapAdmin("", "", false, false); err != nil {
+		t.Fatalf("runBootstrapAdmin with defaults should succeed: %v", err)
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	u, err := database.GetUserByUsername(ctx, DefaultAdminUsername)
+	if err != nil {
+		t.Fatalf("default user %q not found: %v", DefaultAdminUsername, err)
+	}
+
+	// Invariant 1: MustChangePassword MUST be true on the default path.
+	if !u.MustChangePassword {
+		t.Error("INVARIANT FAILED: default clustr/clustr path must set force_password_change=true")
+	}
+
+	// Invariant 2: The stored hash must match the default password "clustr".
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(DefaultAdminPassword)); err != nil {
+		t.Errorf("INVARIANT FAILED: default password hash does not match %q: %v", DefaultAdminPassword, err)
 	}
 }
 
