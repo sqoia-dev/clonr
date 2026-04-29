@@ -11,7 +11,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
-import { Server, Image, Activity, Settings, RefreshCw, Key, Clock, ChevronLeft } from "lucide-react"
+import { Server, Image, Activity, Settings, RefreshCw, Key, Clock, ChevronLeft, Plus } from "lucide-react"
 import { apiFetch } from "@/lib/api"
 import type { ListNodesResponse } from "@/lib/types"
 
@@ -66,7 +66,7 @@ interface Props {
   onClose: () => void
 }
 
-type PaletteMode = "root" | "node-picker"
+type PaletteMode = "root" | "node-picker" | "add-image"
 
 export function CommandPalette({ open, onClose }: Props) {
   const navigate = useNavigate()
@@ -92,7 +92,7 @@ export function CommandPalette({ open, onClose }: Props) {
 
   function goTo(path: string) {
     onClose()
-    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined } })
+    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined } })
     else if (path === "/images") navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined } })
     else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined } })
     else navigate({ to: "/settings" })
@@ -111,7 +111,16 @@ export function CommandPalette({ open, onClose }: Props) {
         dir: undefined,
         openNode: nodeId,
         reimage: "1",
+        addNode: undefined,
       },
+    })
+  }
+
+  function addNode() {
+    onClose()
+    navigate({
+      to: "/nodes",
+      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: "1" },
     })
   }
 
@@ -123,7 +132,7 @@ export function CommandPalette({ open, onClose }: Props) {
   function visitRecent(entity: RecentEntity) {
     onClose()
     if (entity.kind === "node") {
-      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined } })
+      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined, addNode: undefined } })
     } else {
       navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined } })
     }
@@ -153,6 +162,11 @@ export function CommandPalette({ open, onClose }: Props) {
 
                 {/* Actions (PAL-1..4) */}
                 <CommandGroup heading="Actions">
+                  {/* NODE-CREATE-5: Cmd-K add node */}
+                  <CommandItem value="add node" onSelect={addNode}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add node…
+                  </CommandItem>
                   {/* PAL-2-2: inline node picker, no redirect */}
                   <CommandItem value="reimage node" onSelect={() => setMode("node-picker")}>
                     <RefreshCw className="mr-2 h-4 w-4" />

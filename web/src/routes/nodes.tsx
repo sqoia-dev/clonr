@@ -2,7 +2,7 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import {
@@ -29,6 +29,187 @@ import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest 
 import { nodeState } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
+// ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
+const hostnameRe = /^[a-z0-9-]{1,63}$/
+const macRe = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
+const ipv4Re = /^(\d{1,3}\.){3}\d{1,3}(\/\d+)?$/
+
+function normalizeMAC(raw: string): string {
+  return raw.toLowerCase().replace(/[^0-9a-f]/g, "").replace(/(.{2})(?=.)/g, "$1:")
+}
+
+// ─── AddNodeSheet ──────────────────────────────────────────────────────────────
+
+interface AddNodeSheetProps {
+  open: boolean
+  onClose: () => void
+}
+
+export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
+  const qc = useQueryClient()
+  const [hostname, setHostname] = React.useState("")
+  const [mac, setMac] = React.useState("")
+  const [ip, setIp] = React.useState("")
+  const [roles, setRoles] = React.useState<string[]>([])
+  const [notes, setNotes] = React.useState("")
+  const [errors, setErrors] = React.useState<Record<string, string>>({})
+
+  function reset() {
+    setHostname(""); setMac(""); setIp(""); setRoles([]); setNotes(""); setErrors({})
+  }
+
+  function handleClose() { reset(); onClose() }
+
+  function validate(): boolean {
+    const errs: Record<string, string> = {}
+    if (!hostnameRe.test(hostname)) errs.hostname = "Lowercase letters, digits, hyphens, 1–63 chars"
+    const normMac = normalizeMAC(mac)
+    if (!macRe.test(normMac)) errs.mac = "Must be a valid MAC address (e.g. bc:24:11:36:e9:2f)"
+    if (ip && !ipv4Re.test(ip)) errs.ip = "Must be a valid IPv4 address or CIDR (e.g. 10.0.0.5)"
+    setErrors(errs)
+    return Object.keys(errs).length === 0
+  }
+
+  // Fetch base images for base_image_id required by CreateNode
+  const { data: imagesData } = useQuery<ListImagesResponse>({
+    queryKey: ["images"],
+    queryFn: () => apiFetch<ListImagesResponse>("/api/v1/images"),
+    staleTime: 30000,
+    enabled: open,
+  })
+  const readyImages = imagesData?.images?.filter((img) => img.status === "ready") ?? []
+  const [baseImageId, setBaseImageId] = React.useState("")
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const normMac = normalizeMAC(mac)
+      const body: Record<string, unknown> = {
+        hostname,
+        primary_mac: normMac,
+        base_image_id: baseImageId || (readyImages[0]?.id ?? ""),
+        tags: roles.length ? roles : [],
+      }
+      if (ip) body.interfaces = [{ name: "eth0", mac_address: normMac, ip_address: ip }]
+      if (notes) body.notes = notes
+      return apiFetch<NodeConfig>("/api/v1/nodes", {
+        method: "POST",
+        body: JSON.stringify(body),
+      })
+    },
+    onSuccess: (node) => {
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      toast({ title: "Node registered", description: `${node.hostname} added successfully.` })
+      handleClose()
+    },
+    onError: (err) => {
+      const msg = String(err)
+      // Mirror server field errors verbatim
+      if (msg.includes("hostname")) setErrors((e) => ({ ...e, hostname: msg }))
+      else if (msg.includes("mac")) setErrors((e) => ({ ...e, mac: msg }))
+      else toast({ variant: "destructive", title: "Failed to add node", description: msg })
+    },
+  })
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!validate()) return
+    mutation.mutate()
+  }
+
+  function toggleRole(r: string) {
+    setRoles((prev) => prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r])
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => !v && handleClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-md overflow-y-auto">
+        <SheetHeader>
+          <SheetTitle>Add Node</SheetTitle>
+          <SheetDescription>Register a node manually (or PXE-boot to auto-register).</SheetDescription>
+        </SheetHeader>
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <Field label="Hostname *" error={errors.hostname}>
+            <Input
+              placeholder="compute-01"
+              value={hostname}
+              onChange={(e) => setHostname(e.target.value)}
+              className={cn(errors.hostname && "border-destructive")}
+            />
+          </Field>
+          <Field label="MAC Address *" error={errors.mac}>
+            <Input
+              placeholder="bc:24:11:36:e9:2f"
+              value={mac}
+              onChange={(e) => setMac(e.target.value)}
+              className={cn(errors.mac && "border-destructive")}
+            />
+          </Field>
+          <Field label="IP Address (optional — leave blank for DHCP)" error={errors.ip}>
+            <Input
+              placeholder="10.99.0.10 or 10.99.0.10/24"
+              value={ip}
+              onChange={(e) => setIp(e.target.value)}
+              className={cn(errors.ip && "border-destructive")}
+            />
+          </Field>
+          <Field label="Base Image">
+            <select
+              className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+              value={baseImageId}
+              onChange={(e) => setBaseImageId(e.target.value)}
+            >
+              <option value="">None (assign later)</option>
+              {readyImages.map((img) => (
+                <option key={img.id} value={img.id}>{img.name} {img.version}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Role (select all that apply)">
+            <div className="flex gap-3">
+              {(["controller", "worker"] as const).map((r) => (
+                <label key={r} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={roles.includes(r)}
+                    onChange={() => toggleRole(r)}
+                    className="rounded"
+                  />
+                  {r}
+                </label>
+              ))}
+            </div>
+          </Field>
+          <Field label="Notes (optional)">
+            <textarea
+              className="w-full text-sm border border-border bg-background rounded-md px-3 py-2 resize-none"
+              rows={2}
+              placeholder="Optional notes about this node…"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </Field>
+          <div className="flex gap-2 pt-2">
+            <Button type="submit" className="flex-1" disabled={mutation.isPending}>
+              {mutation.isPending ? "Registering…" : "Register Node"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={handleClose}>Cancel</Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-sm text-muted-foreground">{label}</label>
+      {children}
+      {error && <p className="text-xs text-destructive">{error}</p>}
+    </div>
+  )
+}
+
 interface NodeSearch {
   q?: string
   status?: string
@@ -36,6 +217,7 @@ interface NodeSearch {
   dir?: "asc" | "desc"
   openNode?: string
   reimage?: string
+  addNode?: string
 }
 
 export function NodesPage() {
@@ -49,6 +231,18 @@ export function NodesPage() {
   const sortDir = search.dir ?? "asc"
   const [advanced, setAdvanced] = React.useState(false)
   const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
+  const [addNodeOpen, setAddNodeOpen] = React.useState(false)
+  // NODE-CREATE-5: auto-open AddNode sheet from URL param (used by Cmd-K "Add node…").
+  React.useEffect(() => {
+    if (search.addNode === "1") {
+      setAddNodeOpen(true)
+      navigate({
+        to: "/nodes",
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined, addNode: undefined },
+        replace: true,
+      })
+    }
+  }, [search.addNode]) // eslint-disable-line react-hooks/exhaustive-deps
   // PAL-2-2: auto-open node from URL param (used by Cmd-K "Reimage node…").
   const openNodeId = search.openNode
   const autoReimage = search.reimage === "1"
@@ -63,6 +257,7 @@ export function NodesPage() {
         dir: patch.dir !== undefined ? patch.dir : sortDir === "asc" ? undefined : "desc",
         openNode: undefined,
         reimage: undefined,
+        addNode: undefined,
       },
       replace: true,
     })
@@ -131,7 +326,7 @@ export function NodesPage() {
       // Clear the param so back-navigation doesn't re-open.
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined, addNode: undefined },
         replace: true,
       })
     }
@@ -176,14 +371,23 @@ export function NodesPage() {
             onChange={(e) => updateSearch({ q: e.target.value || undefined })}
           />
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setAdvanced((a) => !a)}
-          className={cn(advanced && "bg-secondary")}
-        >
-          {advanced ? "Basic view" : "Advanced"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => setAddNodeOpen(true)}
+          >
+            <Plus className="h-4 w-4 mr-1" />
+            Add Node
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAdvanced((a) => !a)}
+            className={cn(advanced && "bg-secondary")}
+          >
+            {advanced ? "Basic view" : "Advanced"}
+          </Button>
+        </div>
       </div>
 
       {/* Table */}
@@ -191,7 +395,7 @@ export function NodesPage() {
         {isLoading ? (
           <NodesSkeleton />
         ) : nodes.length === 0 ? (
-          <EmptyState />
+          <EmptyState onAddNode={() => setAddNodeOpen(true)} />
         ) : (
           <Table>
             <caption className="sr-only">Registered cluster nodes</caption>
@@ -282,6 +486,9 @@ export function NodesPage() {
           autoReimage={autoReimage}
         />
       )}
+
+      {/* Add Node sheet (NODE-CREATE-2) */}
+      <AddNodeSheet open={addNodeOpen} onClose={() => setAddNodeOpen(false)} />
     </div>
   )
 }
@@ -296,7 +503,7 @@ function NodesSkeleton() {
   )
 }
 
-function EmptyState() {
+function EmptyState({ onAddNode }: { onAddNode: () => void }) {
   const [copied, setCopied] = React.useState(false)
   const snippet = `clustr --server http://<server>:8080 deploy --auto`
 
@@ -312,7 +519,7 @@ function EmptyState() {
       <div className="space-y-1">
         <h2 className="text-base font-semibold">No nodes registered yet</h2>
         <p className="text-sm text-muted-foreground">
-          PXE-boot a node to register it automatically, or run:
+          PXE-boot a node to register it automatically, add one here, or run:
         </p>
       </div>
       <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 max-w-lg">
@@ -321,6 +528,10 @@ function EmptyState() {
           {copied ? <Check className="h-3.5 w-3.5 text-status-healthy" /> : <Copy className="h-3.5 w-3.5" />}
         </Button>
       </div>
+      <Button onClick={onAddNode} size="sm">
+        <Plus className="h-4 w-4 mr-1" />
+        Add Node
+      </Button>
     </div>
   )
 }

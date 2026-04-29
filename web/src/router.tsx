@@ -53,7 +53,7 @@ const indexRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined } })
+    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined } })
   },
 })
 
@@ -72,6 +72,8 @@ const nodesRoute = createRoute({
     // PAL-2-2: open a specific node's detail sheet (with optional reimage panel)
     openNode: typeof search.openNode === "string" ? search.openNode : undefined,
     reimage: typeof search.reimage === "string" ? search.reimage : undefined,
+    // NODE-CREATE-5: open AddNode sheet from Cmd-K
+    addNode: typeof search.addNode === "string" ? search.addNode : undefined,
   }),
 })
 
