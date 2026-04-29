@@ -1209,7 +1209,7 @@ const Pages = {
                             <strong>Initramfs may be stale.</strong>
                             A newer image was created after the current initramfs was built. Nodes booting via PXE will use the old initramfs until it is rebuilt.
                         </span>
-                        <a href="#/images" class="btn btn-secondary btn-sm" style="white-space:nowrap">Go to Images</a>
+                        <button class="btn btn-secondary btn-sm" style="white-space:nowrap" data-on-click="Pages.showRebuildInitramfsModal()">Rebuild Initramfs</button>
                     </div>`;
                 }
                 return '';
@@ -1837,9 +1837,11 @@ const Pages = {
         App.render(loading('Loading images…'));
         try {
             // C3-23: Initramfs card moved to Settings → System tab.
-            const [resp] = await Promise.all([
+            // Stale-initramfs banner still shown here — fetch status alongside images.
+            const [resp, initramfsInfo] = await Promise.all([
                 // Always load all images for tag collection; server-side ?tag= used when filtering.
                 filterTag ? API.images.list('', filterTag) : API.images.list(),
+                API.system.initramfs().catch(() => null),
             ]);
             const images = resp.images || [];
 
@@ -1857,6 +1859,31 @@ const Pages = {
                     ${allTags.map(t => `<option value="${escHtml(t)}" ${t === filterTag ? 'selected' : ''}>${escHtml(t)}</option>`).join('')}
                     ${filterTag && !allTags.includes(filterTag) ? `<option value="${escHtml(filterTag)}" selected>${escHtml(filterTag)}</option>` : ''}
                 </select>` : '';
+
+            // Stale initramfs banner — shown on Images page so the operator sees the
+            // warning in context and can act immediately without navigating to System.
+            const staleInitramfsBanner = (() => {
+                if (!initramfsInfo || !initramfsInfo.build_time) return '';
+                const readyImages = images.filter(i => i.status === 'ready');
+                if (readyImages.length === 0) return '';
+                const newestImageTs = Math.max(...readyImages.map(i => {
+                    const t = i.created_at;
+                    return typeof t === 'number' ? t : (t ? new Date(t).getTime() / 1000 : 0);
+                }));
+                const initramfsTs = typeof initramfsInfo.build_time === 'number'
+                    ? initramfsInfo.build_time
+                    : new Date(initramfsInfo.build_time).getTime() / 1000;
+                if (newestImageTs > initramfsTs) {
+                    return `<div class="alert alert-warning" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                        <span>
+                            <strong>Initramfs may be stale.</strong>
+                            A newer image was created after the current initramfs was built. Nodes booting via PXE will use the old initramfs until it is rebuilt.
+                        </span>
+                        <button class="btn btn-secondary btn-sm" style="white-space:nowrap" data-on-click="Pages.showRebuildInitramfsModal()">Rebuild Initramfs</button>
+                    </div>`;
+                }
+                return '';
+            })();
 
             App.render(`
                 <div class="page-header">
@@ -1885,6 +1912,8 @@ const Pages = {
                         </button>
                     </div>
                 </div>
+
+                ${staleInitramfsBanner}
 
                 ${images.length === 0 && !filterTag ? `
                 <!-- S5-8: Getting-started callout for new operators (Persona D) -->

@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [v1.12.2] — 2026-04-27 (Hotfix — restore initramfs rebuild affordance on Images page)
+
+### Fixed
+
+- **Initramfs rebuild button missing from Images page** (operator-blocking regression):
+  Sprint C (commit `cfb0381`, task C3-23) intentionally moved the System Initramfs
+  card from the Images page to Settings → System, but left the stale-initramfs warning
+  on the Dashboard linking to Images — where there was no longer any rebuild action.
+  Operators who saw the staleness warning had no UI path to act on it; PXE nodes
+  continued loading the old initramfs after new images were built.
+
+  Fix: the Images page now fetches initramfs status alongside images and renders the
+  same stale-initramfs warning banner inline with a **Rebuild Initramfs** button that
+  opens the existing modal (`Pages.showRebuildInitramfsModal()`). The Dashboard warning
+  button is also corrected — it now says "Rebuild Initramfs" and triggers the modal
+  directly instead of navigating to the (now action-less) Images page.
+
+  Backend endpoint unchanged: `POST /api/v1/system/initramfs/rebuild`.
+
+---
+
 ## [v1.12.1] — 2026-04-27 (Sprint O — Candidate clarifications)
 
 **Sprint O — three candidates from Sprint N closed**
