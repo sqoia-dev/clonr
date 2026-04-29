@@ -126,10 +126,17 @@ jobs:
             | awk -F: '/^fpr:/{print $10; exit}')
           mkdir -p dist
 
+          # Pre-expand only ${ARCH} in the nfpm config src: paths, leaving
+          # ${VERSION} and ${EL_RELEASE} intact for nfpm's own env expansion.
+          # This avoids nfpm version-specific differences in glob path expansion.
+          NFPM_CLI_RESOLVED=$(mktemp /tmp/nfpm-cli-XXXXXX.yaml)
+          envsubst '${ARCH}' < nfpm-cli.yaml > "${NFPM_CLI_RESOLVED}"
+
           for EL in el8 el9 el10; do
             VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
-              nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
+              nfpm pkg --config "${NFPM_CLI_RESOLVED}" --packager rpm --target dist/
           done
+          rm -f "${NFPM_CLI_RESOLVED}"
 
           # Sign each RPM with gpg --detach-sign (embeds signature in RPM header).
           # rpmsign requires gpg passphrase via pinentry; we use loopback mode.
@@ -257,10 +264,16 @@ jobs:
             | awk -F: '/^fpr:/{print $10; exit}')
           mkdir -p dist
 
+          # Pre-expand only ${ARCH} in the nfpm config src: paths, leaving
+          # ${VERSION} and ${EL_RELEASE} intact for nfpm's own env expansion.
+          NFPM_SERVER_RESOLVED=$(mktemp /tmp/nfpm-server-XXXXXX.yaml)
+          envsubst '${ARCH}' < nfpm.yaml > "${NFPM_SERVER_RESOLVED}"
+
           for EL in el8 el9 el10; do
             VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
-              nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+              nfpm pkg --config "${NFPM_SERVER_RESOLVED}" --packager rpm --target dist/
           done
+          rm -f "${NFPM_SERVER_RESOLVED}"
 
           for rpm_file in dist/*.rpm; do
             echo "Signing: ${rpm_file}"
