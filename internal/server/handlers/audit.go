@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
 )
@@ -311,6 +312,67 @@ type auditJSONLLine struct {
 	OldValue *json.RawMessage `json:"old_value,omitempty"`
 	// NewValue is the JSON representation of the resource state after the action.
 	NewValue *json.RawMessage `json:"new_value,omitempty"`
+}
+
+// HandleDelete handles DELETE /api/v1/audit/:id — ACT-DEL-1 (Sprint 4).
+// Removes a single audit log entry. The deletion itself is recorded as an
+// audit.purged event. audit.purged events cannot be deleted.
+func (h *AuditHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	// Prevent deletion of meta-audit records.
+	if strings.HasPrefix(id, "audit.purged") {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "cannot delete audit.purged meta-records",
+			"code":  "protected_record",
+		})
+		return
+	}
+
+	if err := h.DB.DeleteAuditRecord(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// ACT-DEL-2: record the deletion itself as audit.purged.
+	db.NewAuditService(h.DB).Record(r.Context(), "", "", "audit.purged", "audit", id, r.RemoteAddr, nil,
+		map[string]string{"deleted_id": id, "count": "1"})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleBulkDelete handles DELETE /api/v1/audit?before=<rfc3339>&kind=<k> — ACT-DEL-1 (Sprint 4).
+// Bulk-removes entries matching the filter. Returns {count: N}.
+func (h *AuditHandler) HandleBulkDelete(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	p := db.AuditQueryParams{
+		Action:       q.Get("action"),
+		ResourceType: q.Get("resource_type"),
+	}
+	if s := q.Get("before"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			p.Until = t
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid 'before' — must be RFC3339",
+				"code":  "bad_request",
+			})
+			return
+		}
+	}
+
+	count, err := h.DB.BulkDeleteAuditRecords(r.Context(), p)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// ACT-DEL-2: record the bulk deletion as audit.purged.
+	db.NewAuditService(h.DB).Record(r.Context(), "", "", "audit.purged", "audit", "bulk", r.RemoteAddr, nil,
+		map[string]string{"count": fmt.Sprintf("%d", count), "before": q.Get("before"), "action": q.Get("action")})
+
+	writeJSON(w, http.StatusOK, map[string]int{"count": count})
 }
 
 // escapeHTMLAudit escapes characters that are special in HTML attribute/text

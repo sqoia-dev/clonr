@@ -36,10 +36,18 @@ type InitramfsHandler struct {
 	ScriptPath    string // path to build-initramfs.sh (abs)
 	InitramfsPath string // final output path (e.g. /var/lib/clustr/boot/initramfs-clustr.img)
 	ClustrBinPath  string // path to the clustr static binary passed to the script
+	// ImageDir is the base directory for the image store (same as ImagesHandler.ImageDir).
+	// When set, BuildInitramfsFromImage copies the built file here and registers a BaseImage.
+	ImageDir    string
+	// ImageEvents, when set, receives lifecycle SSE events emitted by BuildInitramfsFromImage.
+	ImageEvents ImageEventStoreIface
 
 	mu          sync.Mutex // serialises concurrent rebuild requests
 	running     bool
 	liveSHA256  string // sha256 of the on-disk initramfs; cached to avoid per-request file reads
+	// activeBuildCtxCancel holds the cancel function for the in-flight BuildInitramfsFromImage.
+	// Only one build may run at a time. Protected by mu.
+	activeBuildCtxCancel context.CancelFunc
 }
 
 // InitLiveSHA256 computes and caches the sha256 of the current on-disk initramfs.
@@ -593,6 +601,285 @@ func (h *InitramfsHandler) DeleteInitramfsHistory(w http.ResponseWriter, r *http
 // For now we return an informative 204.
 func (h *InitramfsHandler) GetBuildLog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// BuildInitramfsFromImage handles POST /api/v1/initramfs/build (INITRD-1..5).
+//
+// Request body (all optional):
+//   {"base_image_id":"<uuid>", "name":"optional", "kernel_args":"optional extra args"}
+//
+// Returns 202 immediately with {build_id, status:"queued"} and then switches to
+// streaming SSE (text/event-stream) that emits log lines from the build script:
+//   data: {"type":"log","line":"<text>"}
+//   data: {"type":"done","image_id":"<uuid>","sha256":"<hex>"}
+//   data: {"type":"error","message":"<text>"}
+//
+// On success, the built initramfs is copied into ImageDir and registered as a
+// BaseImage with format=block, name = req.Name (or "initramfs-<buildID[:8]>"),
+// notes = "kernel_version:<ver>". The image is also published via ImageEvents.
+//
+// Only one build may run at a time — returns 409 if one is already in progress.
+func (h *InitramfsHandler) BuildInitramfsFromImage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BaseImageID string `json:"base_image_id"`
+		Name        string `json:"name"`
+		KernelArgs  string `json:"kernel_args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	// Guard: reject if a build is already running.
+	h.mu.Lock()
+	if h.running {
+		h.mu.Unlock()
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "an initramfs build is already in progress",
+			Code:  "build_in_progress",
+		})
+		return
+	}
+	h.running = true
+	buildCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	h.activeBuildCtxCancel = cancel
+	h.mu.Unlock()
+
+	defer func() {
+		h.mu.Lock()
+		h.running = false
+		h.activeBuildCtxCancel = nil
+		h.mu.Unlock()
+		cancel()
+	}()
+
+	buildID := uuid.New().String()
+	imgName := req.Name
+	if imgName == "" {
+		imgName = "initramfs-" + buildID[:8]
+	}
+
+	// Create DB record for this build.
+	record := db.InitramfsBuildRecord{
+		ID:               buildID,
+		StartedAt:        time.Now().UTC(),
+		TriggeredByPrefix: extractKeyPrefix(r),
+		Outcome:          "pending",
+	}
+	if err := h.DB.CreateInitramfsBuild(r.Context(), record); err != nil {
+		log.Error().Err(err).Msg("initramfs build: create db record")
+		writeError(w, err)
+		return
+	}
+
+	// Pre-create image record with status=building so the UI can show it immediately.
+	now := time.Now().UTC()
+	img := api.BaseImage{
+		ID:          uuid.New().String(),
+		Name:        imgName,
+		Version:     buildID[:8],
+		Status:      api.ImageStatusBuilding,
+		Format:      api.ImageFormatBlock,
+		BuildMethod: "initramfs",
+		Notes:       "initramfs build — running",
+		CreatedAt:   now,
+	}
+	if h.DB != nil {
+		if err := h.DB.CreateBaseImage(r.Context(), img); err != nil {
+			log.Warn().Err(err).Msg("initramfs build: pre-create image record failed (non-fatal)")
+		} else if h.ImageEvents != nil {
+			h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventCreated, Image: &img})
+		}
+	}
+
+	// Switch to SSE streaming.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	writeSSELine := func(payload string) {
+		fmt.Fprintf(w, "data: %s\n\n", payload)
+		flusher.Flush()
+	}
+
+	// Helper to send a typed JSON event.
+	sendEvent := func(v any) {
+		b, _ := json.Marshal(v)
+		writeSSELine(string(b))
+	}
+
+	sendEvent(map[string]any{"type": "log", "line": fmt.Sprintf("build %s started", buildID[:8])})
+
+	// Build in a temp staging dir.
+	stagingPath := h.InitramfsPath + ".build-" + buildID[:8]
+	workDir, err := os.MkdirTemp("", "clustr-initramfs-build-*")
+	if err != nil {
+		sendEvent(map[string]any{"type": "error", "message": "failed to create work dir: " + err.Error()})
+		h.failBuild(buildID, err)
+		_ = h.DB.UpdateBaseImageStatus(buildCtx, img.ID, api.ImageStatusError, err.Error())
+		return
+	}
+	defer os.RemoveAll(workDir)
+
+	lines := make(chan string, 256)
+	var buildErr error
+	var scriptSHA256 string
+	var scriptSize int64
+	var kernelVer string
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buildErr = h.runScript(workDir, stagingPath, lines)
+		if buildErr == nil {
+			scriptSHA256, scriptSize, kernelVer = h.inspectStagingFile(stagingPath)
+		}
+	}()
+
+	// Stream log lines to the client.
+	for {
+		select {
+		case line, more := <-lines:
+			if !more {
+				lines = nil
+			} else {
+				sendEvent(map[string]any{"type": "log", "line": line})
+			}
+		case <-done:
+			// Drain remaining lines.
+			for line := range lines {
+				sendEvent(map[string]any{"type": "log", "line": line})
+			}
+			goto buildDone
+		case <-buildCtx.Done():
+			sendEvent(map[string]any{"type": "error", "message": "build cancelled"})
+			h.failBuild(buildID, context.Canceled)
+			_ = h.DB.UpdateBaseImageStatus(context.Background(), img.ID, api.ImageStatusError, "build cancelled")
+			// Clean up staging.
+			os.Remove(stagingPath) //nolint:errcheck
+			return
+		}
+	}
+
+buildDone:
+	if buildErr != nil {
+		sendEvent(map[string]any{"type": "error", "message": buildErr.Error()})
+		h.failBuild(buildID, buildErr)
+		_ = h.DB.UpdateBaseImageStatus(context.Background(), img.ID, api.ImageStatusError, buildErr.Error())
+		os.Remove(stagingPath) //nolint:errcheck
+		return
+	}
+
+	// Copy built initramfs into the image store (if ImageDir is set).
+	if h.ImageDir != "" {
+		imageDir := filepath.Join(h.ImageDir, img.ID)
+		if err := os.MkdirAll(imageDir, 0o755); err == nil {
+			destPath := filepath.Join(imageDir, "image.img")
+			if copyErr := initramfsCopyFile(stagingPath, destPath); copyErr != nil {
+				log.Warn().Err(copyErr).Str("image_id", img.ID).Msg("initramfs build: copy to image store failed")
+			}
+		}
+	}
+	os.Remove(stagingPath) //nolint:errcheck
+
+	// Finalize the initramfs system path (same as regular rebuild).
+	if h.InitramfsPath != "" {
+		_ = os.Rename(stagingPath, h.InitramfsPath)
+		h.mu.Lock()
+		h.liveSHA256 = scriptSHA256
+		h.mu.Unlock()
+	}
+
+	// Finalize the image record.
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+
+	notes := "initramfs build complete"
+	if kernelVer != "" {
+		notes = "kernel: " + kernelVer
+	}
+	_ = h.DB.FinishInitramfsBuild(dbCtx, buildID, scriptSHA256, scriptSize, kernelVer, "success")
+	_ = h.DB.TrimInitramfsBuilds(dbCtx, 5)
+
+	if err := h.DB.FinalizeBaseImage(dbCtx, img.ID, scriptSize, scriptSHA256); err != nil {
+		log.Warn().Err(err).Str("image_id", img.ID).Msg("initramfs build: finalize image record failed")
+	} else {
+		// Persist notes (kernel version).
+		_, _ = h.DB.SQL().ExecContext(dbCtx, `UPDATE base_images SET notes = ? WHERE id = ?`, notes, img.ID)
+	}
+
+	// Publish finalized image event.
+	if h.ImageEvents != nil {
+		updated := img
+		updated.Status = api.ImageStatusReady
+		updated.SizeBytes = scriptSize
+		updated.Checksum = scriptSHA256
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventFinalized, Image: &updated})
+	}
+
+	log.Info().
+		Str("build_id", buildID).
+		Str("image_id", img.ID).
+		Str("sha256", scriptSHA256).
+		Int64("size_bytes", scriptSize).
+		Str("kernel_version", kernelVer).
+		Msg("initramfs build: complete")
+
+	sendEvent(map[string]any{
+		"type":           "done",
+		"image_id":       img.ID,
+		"sha256":         scriptSHA256,
+		"size_bytes":     scriptSize,
+		"kernel_version": kernelVer,
+	})
+}
+
+// CancelInitramfsBuild handles DELETE /api/v1/initramfs/builds/{id} (INITRD-6).
+// Cancels the currently in-flight build if its ID matches. Returns 409 if no build
+// is running or the ID does not match the active build.
+func (h *InitramfsHandler) CancelInitramfsBuild(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	h.mu.Lock()
+	running := h.running
+	cancel := h.activeBuildCtxCancel
+	h.mu.Unlock()
+
+	if !running || cancel == nil {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "no build is currently in progress",
+			Code:  "no_active_build",
+		})
+		return
+	}
+
+	// Signal cancellation. The goroutine detects context.Done() and cleans up.
+	cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"build_id": id, "status": "cancelling"})
+}
+
+// initramfsCopyFile copies src to dst using io.Copy.
+func initramfsCopyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // parseInitramfsBuildInfo is a helper to unmarshal the rebuild response.

@@ -62,7 +62,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         if (gTimer.current) clearTimeout(gTimer.current)
         switch (e.key) {
           case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined } }); break
-          case "i": navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined } }); break
+          case "i": navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } }); break
           case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined } }); break
           case "s": navigate({ to: "/settings" }); break
         }

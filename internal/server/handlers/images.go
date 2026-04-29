@@ -1110,6 +1110,231 @@ func (cw *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// FromURL handles POST /api/v1/images/from-url — IMG-URL-1..3.
+//
+// Request body: {"url":"https://…","name":"optional","expected_sha256":"optional"}
+//
+// Returns immediately with {id, status:"building"} and kicks off an async download
+// goroutine that streams the file to disk, computes SHA256, finalises the image
+// record, and emits SSE events throughout.
+//
+// SSRF guard (IMG-URL-2): only http/https URLs are accepted; HEAD check is performed
+// to verify reachability and read Content-Length; private RFC-1918 IPs are rejected
+// unless CLUSTR_ALLOW_PRIVATE_IMAGE_URLS=true.
+func (h *ImagesHandler) FromURL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL            string `json:"url"`
+		Name           string `json:"name"`
+		ExpectedSHA256 string `json:"expected_sha256"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.URL == "" {
+		writeValidationError(w, "url is required")
+		return
+	}
+	// IMG-URL-2: only http/https.
+	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+		writeValidationError(w, "url must use http or https scheme")
+		return
+	}
+
+	// SSRF guard: reject private/loopback IPs unless allowlisted.
+	if !allowPrivateImageURLs() {
+		if err := rejectPrivateURL(req.URL); err != nil {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+				Error: err.Error(),
+				Code:  "ssrf_rejected",
+			})
+			return
+		}
+	}
+
+	// Auto-suggest name from URL filename when not provided.
+	name := req.Name
+	if name == "" {
+		parts := strings.Split(strings.TrimRight(req.URL, "/"), "/")
+		base := parts[len(parts)-1]
+		if idx := strings.Index(base, "?"); idx >= 0 {
+			base = base[:idx]
+		}
+		if base != "" {
+			name = base
+		} else {
+			name = "image-from-url"
+		}
+	}
+
+	now := time.Now().UTC()
+	img := api.BaseImage{
+		ID:          uuid.New().String(),
+		Name:        name,
+		Status:      api.ImageStatusBuilding,
+		Format:      api.ImageFormatBlock,
+		SourceURL:   req.URL,
+		Tags:        []string{},
+		CreatedAt:   now,
+	}
+
+	if err := h.DB.CreateBaseImage(r.Context(), img); err != nil {
+		log.Error().Err(err).Msg("from-url: create image record")
+		writeError(w, err)
+		return
+	}
+
+	if h.ImageEvents != nil {
+		imgCopy := img
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventCreated, Image: &imgCopy, ID: img.ID})
+	}
+
+	// Launch async download.
+	go h.downloadFromURL(img.ID, req.URL, req.ExpectedSHA256)
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionImageCreate, "image", img.ID,
+			r.RemoteAddr, nil, map[string]string{"name": img.Name, "source_url": req.URL})
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"image_id": img.ID,
+		"status":   img.Status,
+		"id":       img.ID,
+	})
+}
+
+// allowPrivateImageURLs returns true when CLUSTR_ALLOW_PRIVATE_IMAGE_URLS=true.
+func allowPrivateImageURLs() bool {
+	return strings.EqualFold(os.Getenv("CLUSTR_ALLOW_PRIVATE_IMAGE_URLS"), "true")
+}
+
+// rejectPrivateURL returns an error if the URL resolves to a private/loopback address.
+func rejectPrivateURL(rawURL string) error {
+	var privateRanges = []string{
+		"10.", "172.16.", "172.17.", "172.18.", "172.19.",
+		"172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+		"172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+		"172.30.", "172.31.", "192.168.", "127.", "169.254.",
+		"::1", "fc00:", "fd",
+	}
+	// Extract host from URL.
+	var host string
+	if rest := strings.TrimPrefix(rawURL, "https://"); rest != rawURL {
+		host = rest
+	} else {
+		host = strings.TrimPrefix(rawURL, "http://")
+	}
+	// Strip path.
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	// Strip port.
+	if idx := strings.LastIndex(host, ":"); idx >= 0 && idx > strings.LastIndex(host, "]") {
+		host = host[:idx]
+	}
+	host = strings.Trim(host, "[]")
+
+	for _, prefix := range privateRanges {
+		if strings.HasPrefix(host, prefix) {
+			return fmt.Errorf("url resolves to a private or loopback address (%s); set CLUSTR_ALLOW_PRIVATE_IMAGE_URLS=true to override", host)
+		}
+	}
+	// Also reject localhost.
+	if host == "localhost" || host == "0.0.0.0" {
+		return fmt.Errorf("url resolves to a private or loopback address (%s)", host)
+	}
+	return nil
+}
+
+// downloadFromURL performs the actual HTTP download in the background.
+// On completion it finalises the image record or marks it as error.
+func (h *ImagesHandler) downloadFromURL(imageID, rawURL, expectedSHA256 string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+	defer cancel()
+
+	if err := os.MkdirAll(h.ImageDir, 0o755); err != nil {
+		log.Error().Err(err).Str("image_id", imageID).Msg("from-url: mkdirall")
+		h.failImageDownload(imageID, fmt.Errorf("mkdir: %w", err))
+		return
+	}
+
+	blobPath := filepath.Join(h.ImageDir, imageID+".blob")
+
+	resp, err := (&http.Client{Timeout: 0}).Get(rawURL) //#nosec G107 — URL validated above
+	if err != nil {
+		h.failImageDownload(imageID, fmt.Errorf("http get: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		h.failImageDownload(imageID, fmt.Errorf("server returned %d", resp.StatusCode))
+		return
+	}
+
+	f, err := os.Create(blobPath)
+	if err != nil {
+		h.failImageDownload(imageID, fmt.Errorf("create file: %w", err))
+		return
+	}
+
+	hasher := sha256.New()
+	n, copyErr := io.Copy(f, io.TeeReader(resp.Body, hasher))
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(blobPath)
+		h.failImageDownload(imageID, fmt.Errorf("download: %w", copyErr))
+		return
+	}
+	if closeErr != nil {
+		_ = os.Remove(blobPath)
+		h.failImageDownload(imageID, fmt.Errorf("close file: %w", closeErr))
+		return
+	}
+
+	serverChecksum := hex.EncodeToString(hasher.Sum(nil))
+
+	// IMG-URL-3: verify expected SHA256 if provided.
+	if expectedSHA256 != "" && !strings.EqualFold(expectedSHA256, serverChecksum) {
+		_ = os.Remove(blobPath)
+		h.failImageDownload(imageID, fmt.Errorf("sha256 mismatch: expected %s, got %s", expectedSHA256, serverChecksum))
+		return
+	}
+
+	if err := h.DB.SetBlobPath(ctx, imageID, blobPath); err != nil {
+		h.failImageDownload(imageID, fmt.Errorf("set blob path: %w", err))
+		return
+	}
+	if err := h.DB.FinalizeBaseImage(ctx, imageID, n, serverChecksum); err != nil {
+		h.failImageDownload(imageID, fmt.Errorf("finalize: %w", err))
+		return
+	}
+
+	updated, err := h.DB.GetBaseImage(ctx, imageID)
+	if err == nil && h.ImageEvents != nil {
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventFinalized, Image: &updated, ID: updated.ID})
+	}
+	log.Info().Str("image_id", imageID).Str("sha256", serverChecksum).Int64("bytes", n).Msg("from-url: download complete")
+}
+
+// failImageDownload marks the image as error and emits an SSE event.
+func (h *ImagesHandler) failImageDownload(imageID string, reason error) {
+	log.Error().Err(reason).Str("image_id", imageID).Msg("from-url: download failed")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if dbErr := h.DB.UpdateBaseImageStatus(ctx, imageID, api.ImageStatusError, reason.Error()); dbErr != nil {
+		log.Error().Err(dbErr).Str("image_id", imageID).Msg("from-url: update status failed")
+	}
+	if h.ImageEvents != nil {
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventUpdated, ID: imageID})
+	}
+}
+
 // StreamImageEvents handles GET /api/v1/images/events — SSE-1.
 // Streams api.ImageEvent as Server-Sent Events whenever an image lifecycle
 // event occurs (create, update, delete, finalize). Replaces the 15s polling

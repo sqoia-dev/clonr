@@ -341,3 +341,141 @@ The first-run UX should be: run one command, open the web UI, type a memorable d
 3. Autodeploy on cloner ships the latest SHA; no SSE polling fallback in `/images`.
 4. Operator can: log in, manage GPG keys from Settings, trigger reimage entirely from Cmd-K (no /nodes detour), see Activity update in real time across nodes + images, get a useful error UI when SSE drops.
 5. v1.0 KL-1 / KL-2 / KL-3 closed and documented in a one-line note per fix in the commit message.
+
+---
+
+## Versioning reset (2026-04-29)
+
+Founder directive: restart versioning. Existing `v1.0.0..v1.12.2` tags are legacy. **No release until Sprint 4 ships.** The next tag will be `v0.1.0` — explicitly pre-stable. Gilfoyle's RPM pipeline + `pkg.sqoia.dev` infra are wired and idle, waiting for that tag.
+
+Existing tags remain in place as historical record. Slurm bundle tags (`slurm-v24.11.4-clustr*`) are unrelated and stay.
+
+---
+
+## Sprint 4 — Creation Flows (the missing half of the app)
+
+**Started:** 2026-04-29 (immediately after Sprint 3)
+**Target:** 10–14 days. Escalate at day 16.
+
+### Goal
+
+The app currently lets operators **observe and act on existing things** but not **create new ones**. You cannot add a node, create an image (from URL or ISO), or build an initramfs from the web UI. Until those creation flows exist, this is an observability dashboard, not a complete management application. Sprint 4 closes the gap.
+
+After Sprint 4 ships green, we tag **v0.1.0** — the first release of clustr v2.
+
+### Re-use the proven patterns
+
+- TanStack Query mutations with optimistic updates + rollback on error (already audited for current mutations in Sprint 3 POL-5).
+- SSE for any operation that takes longer than a click (long downloads, builds, registrations).
+- Inline destructive confirmation when relevant (e.g. cancel a running build).
+- Form validation via Zod schemas.
+- Empty states still teach with paste-ready CLI snippets — but now there's also a button right next to the snippet to do the same thing in the UI.
+
+### In scope
+
+#### Add Node (web UI)
+
+- [x] **NODE-CREATE-1** Server: confirm the registration endpoint used by `clustr-cli register` (read CLI source). Document its shape; if it returns 200/201 with the new node, web reuses as-is. If it requires CLI-only quirks (e.g. mTLS), expose a parallel `POST /api/v1/nodes` that's session-cookie authenticated.
+- [x] **NODE-CREATE-2** Web: "Add Node" button on the Nodes empty state AND in the topbar (next to filters). Opens a `<Sheet>` with a form: hostname, MAC address, IP/network (preferably auto-detected if cluster has DHCP), role (controller/worker/both), optional notes.
+- [x] **NODE-CREATE-3** Form validation (Zod): hostname matches `^[a-z0-9-]{1,63}$`, MAC normalized to lowercase colon-form, IP is valid IPv4 (or empty for DHCP).
+- [x] **NODE-CREATE-4** On submit: optimistic insert into the Nodes list with status "registering"; rollback on error and show field-specific server validation errors verbatim.
+- [x] **NODE-CREATE-5** Cmd-K action "Add node…" opens the same Sheet inline.
+- [x] **NODE-CREATE-6** Empty state on `/nodes` shows the button alongside the existing CLI snippet.
+
+#### Create Image — from URL
+
+- [x] **IMG-URL-1** Server: `POST /api/v1/images/from-url` accepts `{url, name?, expected_sha256?}`, kicks off async download into the image store. Returns `{image_id, status: "downloading"}`. Emits image SSE events (`image.downloading`, `image.created`, `image.failed`) with progress percent + bytes.
+- [x] **IMG-URL-2** Server: validate URL scheme (`http`/`https` only), HEAD-check Content-Length before committing if reachable. Reject URLs to internal IPs unless an allowlist flag is set (SSRF guard).
+- [x] **IMG-URL-3** Server: if `expected_sha256` is provided, verify after download; on mismatch, delete the partial and emit `image.failed` with reason.
+- [x] **IMG-URL-4** Web: "Add Image" button on `/images` opens a Sheet with tabs: "From URL" / "Upload ISO". URL tab has fields: URL, Name (auto-suggested from URL filename), expected SHA256 (optional, with a "Why?" tooltip).
+- [x] **IMG-URL-5** On submit: optimistic insert with status "downloading"; SSE drives the progress bar. Sheet stays open with the progress card; close button cancels the download (server endpoint `DELETE /api/v1/images/{id}` while status=downloading aborts).
+- [x] **IMG-URL-6** Cmd-K action "Add image from URL…" opens the same flow.
+
+#### Create Image — ISO Upload (resumable, TUS protocol)
+
+Sprint 4 ships resumable uploads via the TUS protocol — interrupted uploads of multi-GB ISOs auto-resume from the last byte rather than restarting at 0.
+
+- [x] **IMG-ISO-1** Server: implement TUS 1.0 protocol endpoints under `/api/v1/uploads/`. `POST` creates an upload (returns URL + Upload-Length), `HEAD` returns current offset, `PATCH` accepts byte ranges at the current offset, `DELETE` aborts and cleans up. Spec: https://tus.io/protocols/resumable-upload (link only — read the spec, don't trust memory of it).
+- [x] **IMG-ISO-2** Server: `POST /api/v1/images/from-upload` accepts `{upload_id, name?, expected_sha256?}` after the TUS upload completes. Server moves the assembled file into the image store, computes SHA256, registers the image. Emits standard image SSE events.
+- [x] **IMG-ISO-3** Server: streaming PATCH writes chunks directly to disk (never buffer whole ISO). Default cap 32 GB, configurable. Stale uploads (no PATCH for >24h) garbage-collected.
+- [x] **IMG-ISO-4** Web: `tus-js-client` library (small, standard). Drag-and-drop area + file picker. After completion, the client calls `POST /api/v1/images/from-upload` to register.
+- [x] **IMG-ISO-5** Real upload progress driven by tus-js-client's `onProgress` callback. Pause/Resume buttons (TUS supports this natively). Reconnect attempts on network blip.
+- [x] **IMG-ISO-6** SHA256 in browser via SubtleCrypto for <2 GB files; ≥2 GB skip client hash and rely on server's. Show computed/expected match status when complete.
+- [x] **IMG-ISO-7** Soft warning if file >10 GB: "Large ISO — consider hosting it internally and using From URL." Don't block; just nudge.
+
+#### Image deletion (web UI)
+
+- [x] **IMG-DEL-1** Server: ensure `DELETE /api/v1/images/{id}` works for completed images, not just downloading-state cancel. Refuse with 409 + clear error if any node currently uses the image (operator must reimage them first). Refuse with 409 if any initramfs build references it as a base.
+- [x] **IMG-DEL-2** Web: Delete button in image detail Sheet with inline destructive confirmation (typed image name to confirm, per UI/UX principle 4). Show "blocked: in use by N nodes" state with a list of those nodes (clickable to navigate) when refusal applies.
+- [x] **IMG-DEL-3** Cmd-K action: "Delete image…" opens a search picker, then the same inline confirmation flow.
+- [x] **IMG-DEL-4** Optimistic remove from list with rollback on 409.
+
+#### Edit Node
+
+- [x] **EDIT-NODE-1** Server: `PATCH /api/v1/nodes/{id}` accepts partial fields — `hostname`, `role` (controller/worker/both), `network` (IP/CIDR overrides), `notes`. Validate same rules as create. Emits `node.updated` SSE event.
+- [x] **EDIT-NODE-2** Web: Edit button in node detail Sheet flips the read-only fields into editable form (inline, not modal). Save / Cancel buttons. Optimistic update with rollback on validation error.
+- [x] **EDIT-NODE-3** Role changes that affect cluster topology (e.g. demoting a controller) require typed-hostname confirm before submitting — they're destructive in the cluster sense.
+- [x] **EDIT-NODE-4** Cmd-K: "Edit node…" opens picker → opens detail Sheet in edit mode.
+
+#### Node groups / tags / labels
+
+Use Kubernetes-style key:value tags. "Groups" emerge from filtering by tag — no separate group concept.
+
+- [x] **TAG-1** Server: `tags` field on the node model, persisted as a JSON object (or separate tags table — your call, document in commit). `POST /api/v1/nodes/{id}/tags` adds, `DELETE /api/v1/nodes/{id}/tags/{key}` removes. Tag keys match `^[a-z0-9._/-]{1,63}$`, values up to 255 chars.
+- [ ] **TAG-2** Server: `GET /api/v1/nodes?tag=key:value` filters by tag. Multiple `tag` params = AND. (Sprint 5: tag filter URL param)
+- [x] **TAG-3** Web: tag chips visible in Nodes list (compact form: `env=prod`). Inline + button on each row to add a tag (popover with key + value inputs).
+- [ ] **TAG-4** Web: filter bar gains tag selector (autocomplete from observed keys). URL-driven (existing pattern). (Sprint 5)
+- [x] **TAG-5** Web: tag detail in node Sheet with full management (add, remove with × on chip).
+
+#### Bulk node creation (CSV / YAML paste)
+
+- [x] **BULK-1** Server: `POST /api/v1/nodes/batch` accepts an array of node specs. Validates each, returns per-row results: `{index, status: "created" | "skipped" | "failed", id?, error?}`. Atomicity: NOT all-or-nothing — partial success is OK; the response tells the operator exactly what landed.
+- [x] **BULK-2** Web: Add Node Sheet gains a "Bulk" tab beside "Single". Textarea accepts CSV (with header `hostname,mac,ip,role,notes`) or YAML (a list of objects with the same keys). Auto-detect format on paste based on first non-blank line.
+- [x] **BULK-3** Web: "Preview" button parses the input client-side and shows a table of what will be created (rows with red highlighting for parse errors). Operator confirms before submit.
+- [x] **BULK-4** Web: on submit, show row-by-row results in the same table (status column populated as the server response comes back).
+- [ ] **BULK-5** Empty state: include a sample CSV snippet alongside the existing CLI snippet. (deferred to Sprint 5)
+
+#### Activity deletion
+
+- [x] **ACT-DEL-1** Server: `DELETE /api/v1/audit/{id}` removes a single activity entry. `DELETE /api/v1/audit?before=<rfc3339>&kind=<k>` bulk-removes entries matching the filter (returns count deleted).
+- [x] **ACT-DEL-2** Server: any deletion is itself logged as an `audit.purged` event (with the count + filter that was used) so the meta-trail is preserved. The audit-purged events themselves cannot be deleted (or only deletable by some explicit override that's not in scope here).
+- [x] **ACT-DEL-3** Web: row-level checkbox column on the Activity table. "Delete selected" button appears when ≥1 row is selected; opens inline confirmation requiring the operator to type "delete N entries".
+- [x] **ACT-DEL-4** Web: header-bar "Clear filtered…" button visible when a filter is active. Inline confirmation: shows the filter being used + the count that will be deleted. Operator types "clear" to confirm.
+- [x] **ACT-DEL-5** After deletion, optimistic remove from the list; SSE confirms (the new `audit.purged` event also lands in the stream — visible immediately).
+
+#### Build Initramfs
+
+- [x] **INITRD-1** Server: identify the existing initramfs build path (probably `dracut`-based or similar — read `internal/server/` for any existing build code; CLI may already have `clustr-cli initramfs build`). Wrap as `POST /api/v1/initramfs/build` accepting `{base_image_id, modules?, kernel_args?}`. Returns `{build_id, status: "queued"}`. Emits SSE events for queued/running/log-line/completed/failed with timestamped log lines.
+- [x] **INITRD-2** Server: built artifact is registered as an image in the same image store, with kind=initramfs. Operators can then deploy it to nodes via the existing reimage flow.
+- [x] **INITRD-3** Web: "Build Initramfs" button in the Images surface (Bundles tab, since initramfs is a bundle-like artifact). Opens a Sheet form: base image (dropdown of compatible base images), additional modules (multi-select or comma-separated string), kernel args (textarea, monospace).
+- [x] **INITRD-4** On submit: optimistic insert into the Images list with status "building"; SSE drives a live log panel inside the detail Sheet (auto-scroll lock per existing Activity pattern).
+- [x] **INITRD-5** On completion: toast with "View resulting image" action that opens the new initramfs's detail Sheet.
+- [x] **INITRD-6** Cancel button cancels a running build (server endpoint `DELETE /api/v1/initramfs/builds/{id}`).
+- [x] **INITRD-7** Cmd-K action "Build initramfs…" opens the same flow.
+
+#### Cross-cutting
+
+- [x] **X-1** Activity stream (`/activity`) gets new event kinds: `node.registered`, `image.downloaded`, `image.uploaded`, `initramfs.built` (and the corresponding `.failed` variants). Each shows up in the unified feed. (audit events fire via existing audit.Record calls)
+- [x] **X-2** Toast notifications fire on every successful or failed creation, with a "View" action linking to the entity.
+- [x] **X-3** Empty states updated — every list (Nodes, Images, Bundles inside Images) shows the new "Create…" button next to the existing CLI snippet so operators see both paths.
+- [ ] **X-4** Vitest: critical paths covered — node-create form validation, image-from-URL mutation flow, ISO upload progress events, initramfs build SSE consumption. (Sprint 5)
+- [ ] **X-5** Go tests: server endpoints for from-url, upload, initramfs-build (httptest style, mirror existing auth_test.go pattern). (Sprint 5)
+- [x] **X-6** README Quick Start updated: after `dnf install` and `bootstrap-admin`, "Open the web UI, add your first node, upload an ISO, build initramfs" — show the operator the happy path is fully UI-driven.
+
+### Out of scope (Sprint 5+)
+
+- Resumable / chunked / TUS-protocol uploads (Sprint 4 = single-shot upload only).
+- Image deletion through the UI (CLI keeps doing it for now — surface the snippet in the detail Sheet).
+- Editing existing nodes (rename, change role, etc) — separate sprint, more careful.
+- Node groups / tags / labels.
+- Bulk creation (add many nodes at once via CSV/YAML).
+- Multi-tenancy / orgs / team management.
+- User self-service password reset (still admin-driven).
+
+### Definition of done
+
+1. All Sprint 4 checkboxes ticked in this doc.
+2. CI green on the merge commit (lint, vitest, go test, build, smoke, gosec, govulncheck, trivy).
+3. Autodeploy on cloner ships the latest SHA.
+4. Operator end-to-end on a fresh deploy: log in → click "Add node" → register a node → click "Add image" / "From URL" → image downloads with live progress → click "Build initramfs" against that image → watch live log → resulting initramfs available → reimage a node onto it. All from the web UI; no CLI required for these flows.
+5. **Tag `v0.1.0` after Sprint 4 ships green.** Gilfoyle's release pipeline fires; RPMs land at `pkg.sqoia.dev/clustr/{el8,el9,el10}/x86_64/`. Verify on a fresh Rocky 9 VM in the Proxmox lab.

@@ -86,6 +86,8 @@ const imagesRoute = createRoute({
     tab: typeof search.tab === "string" ? search.tab : undefined,
     sort: typeof search.sort === "string" ? search.sort : undefined,
     dir: search.dir === "asc" || search.dir === "desc" ? (search.dir as "asc" | "desc") : undefined,
+    // IMG-URL-6: open AddImageSheet from Cmd-K
+    addImage: typeof search.addImage === "string" ? search.addImage : undefined,
   }),
 })
 

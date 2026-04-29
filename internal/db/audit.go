@@ -305,3 +305,52 @@ func (db *DB) StreamAuditLog(ctx context.Context, p AuditQueryParams, fn func(Au
 	}
 	return rows.Err()
 }
+
+// DeleteAuditRecord removes a single audit log entry by ID.
+// ACT-DEL-1 (Sprint 4). Returns sql.ErrNoRows if the record does not exist.
+func (db *DB) DeleteAuditRecord(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM audit_log WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("db: delete audit record: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: delete audit record rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("audit record not found: %s", id)
+	}
+	return nil
+}
+
+// BulkDeleteAuditRecords removes audit log entries matching the given params.
+// ACT-DEL-1 (Sprint 4). Returns the count of deleted records.
+// If p.Until is zero the call is rejected (require an explicit time bound for safety).
+func (db *DB) BulkDeleteAuditRecords(ctx context.Context, p AuditQueryParams) (int, error) {
+	if p.Until.IsZero() {
+		return 0, fmt.Errorf("bulk delete requires a 'before' time bound")
+	}
+
+	where := "WHERE created_at <= ?"
+	args := []interface{}{p.Until.Unix()}
+	if p.Action != "" {
+		where += " AND action = ?"
+		args = append(args, p.Action)
+	}
+	if p.ResourceType != "" {
+		where += " AND resource_type = ?"
+		args = append(args, p.ResourceType)
+	}
+	// Protect audit.purged records from bulk deletion.
+	where += " AND action != 'audit.purged'"
+
+	res, err := db.sql.ExecContext(ctx, `DELETE FROM audit_log `+where, args...)
+	if err != nil {
+		return 0, fmt.Errorf("db: bulk delete audit: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("db: bulk delete audit rows affected: %w", err)
+	}
+	return int(n), nil
+}

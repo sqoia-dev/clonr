@@ -2,9 +2,10 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import {
   Table,
   TableHeader,
@@ -120,83 +121,331 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
     setRoles((prev) => prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r])
   }
 
+  const [sheetTab, setSheetTab] = React.useState<"single" | "bulk">("single")
+
+  function handleCloseWithTabReset() {
+    setSheetTab("single")
+    handleClose()
+  }
+
   return (
-    <Sheet open={open} onOpenChange={(v) => !v && handleClose()}>
-      <SheetContent side="right" className="w-full sm:max-w-md overflow-y-auto">
+    <Sheet open={open} onOpenChange={(v) => !v && handleCloseWithTabReset()}>
+      <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
         <SheetHeader>
           <SheetTitle>Add Node</SheetTitle>
           <SheetDescription>Register a node manually (or PXE-boot to auto-register).</SheetDescription>
         </SheetHeader>
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-          <Field label="Hostname *" error={errors.hostname}>
-            <Input
-              placeholder="compute-01"
-              value={hostname}
-              onChange={(e) => setHostname(e.target.value)}
-              className={cn(errors.hostname && "border-destructive")}
-            />
-          </Field>
-          <Field label="MAC Address *" error={errors.mac}>
-            <Input
-              placeholder="bc:24:11:36:e9:2f"
-              value={mac}
-              onChange={(e) => setMac(e.target.value)}
-              className={cn(errors.mac && "border-destructive")}
-            />
-          </Field>
-          <Field label="IP Address (optional — leave blank for DHCP)" error={errors.ip}>
-            <Input
-              placeholder="10.99.0.10 or 10.99.0.10/24"
-              value={ip}
-              onChange={(e) => setIp(e.target.value)}
-              className={cn(errors.ip && "border-destructive")}
-            />
-          </Field>
-          <Field label="Base Image">
-            <select
-              className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
-              value={baseImageId}
-              onChange={(e) => setBaseImageId(e.target.value)}
-            >
-              <option value="">None (assign later)</option>
-              {readyImages.map((img) => (
-                <option key={img.id} value={img.id}>{img.name} {img.version}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Role (select all that apply)">
-            <div className="flex gap-3">
-              {(["controller", "worker"] as const).map((r) => (
-                <label key={r} className="flex items-center gap-1.5 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={roles.includes(r)}
-                    onChange={() => toggleRole(r)}
-                    className="rounded"
+        <div className="mt-6">
+          <Tabs value={sheetTab} onValueChange={(v) => setSheetTab(v as "single" | "bulk")}>
+            <TabsList className="w-full mb-4">
+              <TabsTrigger value="single" className="flex-1">Single</TabsTrigger>
+              <TabsTrigger value="bulk" className="flex-1">Bulk (CSV/YAML)</TabsTrigger>
+            </TabsList>
+            <TabsContent value="single">
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <Field label="Hostname *" error={errors.hostname}>
+                  <Input
+                    placeholder="compute-01"
+                    value={hostname}
+                    onChange={(e) => setHostname(e.target.value)}
+                    className={cn(errors.hostname && "border-destructive")}
                   />
-                  {r}
-                </label>
-              ))}
-            </div>
-          </Field>
-          <Field label="Notes (optional)">
-            <textarea
-              className="w-full text-sm border border-border bg-background rounded-md px-3 py-2 resize-none"
-              rows={2}
-              placeholder="Optional notes about this node…"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-            />
-          </Field>
-          <div className="flex gap-2 pt-2">
-            <Button type="submit" className="flex-1" disabled={mutation.isPending}>
-              {mutation.isPending ? "Registering…" : "Register Node"}
-            </Button>
-            <Button type="button" variant="ghost" onClick={handleClose}>Cancel</Button>
-          </div>
-        </form>
+                </Field>
+                <Field label="MAC Address *" error={errors.mac}>
+                  <Input
+                    placeholder="bc:24:11:36:e9:2f"
+                    value={mac}
+                    onChange={(e) => setMac(e.target.value)}
+                    className={cn(errors.mac && "border-destructive")}
+                  />
+                </Field>
+                <Field label="IP Address (optional — leave blank for DHCP)" error={errors.ip}>
+                  <Input
+                    placeholder="10.99.0.10 or 10.99.0.10/24"
+                    value={ip}
+                    onChange={(e) => setIp(e.target.value)}
+                    className={cn(errors.ip && "border-destructive")}
+                  />
+                </Field>
+                <Field label="Base Image">
+                  <select
+                    className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+                    value={baseImageId}
+                    onChange={(e) => setBaseImageId(e.target.value)}
+                  >
+                    <option value="">None (assign later)</option>
+                    {readyImages.map((img) => (
+                      <option key={img.id} value={img.id}>{img.name} {img.version}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Role (select all that apply)">
+                  <div className="flex gap-3">
+                    {(["controller", "worker"] as const).map((r) => (
+                      <label key={r} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={roles.includes(r)}
+                          onChange={() => toggleRole(r)}
+                          className="rounded"
+                        />
+                        {r}
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+                <Field label="Notes (optional)">
+                  <textarea
+                    className="w-full text-sm border border-border bg-background rounded-md px-3 py-2 resize-none"
+                    rows={2}
+                    placeholder="Optional notes about this node…"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </Field>
+                <div className="flex gap-2 pt-2">
+                  <Button type="submit" className="flex-1" disabled={mutation.isPending}>
+                    {mutation.isPending ? "Registering…" : "Register Node"}
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={handleCloseWithTabReset}>Cancel</Button>
+                </div>
+              </form>
+            </TabsContent>
+            <TabsContent value="bulk">
+              <BulkAddNodes onSuccess={handleCloseWithTabReset} readyImages={readyImages} />
+            </TabsContent>
+          </Tabs>
+        </div>
       </SheetContent>
     </Sheet>
+  )
+}
+
+// ─── BulkAddNodes ─────────────────────────────────────────────────────────────
+// BULK-2..5: CSV or YAML paste → preview table → batch submit with per-row results.
+
+interface BulkRow {
+  hostname: string
+  mac: string
+  ip?: string
+  role?: string
+  base_image_id?: string
+  // parse error for this row (client-side)
+  parseError?: string
+}
+
+interface BatchResult {
+  index: number
+  status: "created" | "failed" | "skipped"
+  id?: string
+  error?: string
+}
+
+function parseBulkInput(raw: string): BulkRow[] {
+  const trimmed = raw.trim()
+  if (!trimmed) return []
+
+  // Auto-detect: YAML starts with '-' or 'hostname:' or has ':' on the first non-blank line.
+  const firstLine = trimmed.split("\n").find((l) => l.trim() !== "") ?? ""
+  const isYAML = firstLine.trim().startsWith("-") || firstLine.includes("hostname:")
+
+  if (isYAML) {
+    // Minimal YAML list parse — handles `- hostname: x\n  mac: y` blocks.
+    const rows: BulkRow[] = []
+    let current: BulkRow | null = null
+    for (const line of trimmed.split("\n")) {
+      const t = line.trim()
+      if (t.startsWith("- ") || t === "-") {
+        if (current) rows.push(current)
+        current = { hostname: "", mac: "" }
+        const rest = t.slice(2).trim()
+        if (rest) {
+          const [k, ...vParts] = rest.split(":")
+          const v = vParts.join(":").trim()
+          assignField(current, k.trim(), v)
+        }
+      } else if (current && t.includes(":")) {
+        const [k, ...vParts] = t.split(":")
+        const v = vParts.join(":").trim()
+        assignField(current, k.trim(), v)
+      }
+    }
+    if (current) rows.push(current)
+    return rows.map((r) => validateBulkRow(r))
+  }
+
+  // CSV parse.
+  const lines = trimmed.split("\n").filter((l) => l.trim() !== "")
+  const header = lines[0].toLowerCase().split(",").map((h) => h.trim())
+  const dataLines = header.includes("hostname") ? lines.slice(1) : lines
+
+  return dataLines.map((line) => {
+    const cells = line.split(",").map((c) => c.trim())
+    const row: BulkRow = { hostname: "", mac: "" }
+    if (header.includes("hostname")) {
+      row.hostname = cells[header.indexOf("hostname")] ?? ""
+      row.mac = cells[header.indexOf("mac")] ?? ""
+      row.ip = cells[header.indexOf("ip")] ?? ""
+      row.role = cells[header.indexOf("role")] ?? ""
+    } else {
+      // Positional: hostname, mac, ip, role
+      row.hostname = cells[0] ?? ""
+      row.mac = cells[1] ?? ""
+      row.ip = cells[2] ?? ""
+      row.role = cells[3] ?? ""
+    }
+    return validateBulkRow(row)
+  })
+}
+
+function assignField(row: BulkRow, key: string, value: string) {
+  switch (key) {
+    case "hostname": row.hostname = value; break
+    case "mac": case "primary_mac": row.mac = value; break
+    case "ip": case "ip_address": row.ip = value; break
+    case "role": case "roles": case "tags": row.role = value; break
+    case "base_image_id": row.base_image_id = value; break
+  }
+}
+
+function validateBulkRow(row: BulkRow): BulkRow {
+  const errs: string[] = []
+  if (!row.hostname) errs.push("hostname required")
+  else if (!/^[a-z0-9-]{1,63}$/.test(row.hostname)) errs.push("invalid hostname")
+  const normMac = row.mac.toLowerCase().replace(/[^0-9a-f]/g, "").replace(/(.{2})(?=.)/g, "$1:")
+  if (!row.mac) errs.push("mac required")
+  else if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(normMac)) errs.push("invalid MAC")
+  if (errs.length > 0) return { ...row, parseError: errs.join("; ") }
+  return { ...row, mac: normMac }
+}
+
+function BulkAddNodes({ onSuccess, readyImages }: { onSuccess: () => void; readyImages: Array<{ id: string; name: string; version: string }> }) {
+  const qc = useQueryClient()
+  const [raw, setRaw] = React.useState("")
+  const [rows, setRows] = React.useState<BulkRow[]>([])
+  const [results, setResults] = React.useState<BatchResult[]>([])
+  const [submitted, setSubmitted] = React.useState(false)
+  const [loading, setLoading] = React.useState(false)
+
+  function handlePreview() {
+    setResults([])
+    setSubmitted(false)
+    setRows(parseBulkInput(raw))
+  }
+
+  async function handleSubmit() {
+    const valid = rows.filter((r) => !r.parseError)
+    if (valid.length === 0) return
+    setLoading(true)
+    try {
+      const resp = await apiFetch<{ results: BatchResult[] }>("/api/v1/nodes/batch", {
+        method: "POST",
+        body: JSON.stringify({
+          nodes: valid.map((r) => ({
+            hostname: r.hostname,
+            primary_mac: r.mac,
+            tags: r.role ? r.role.split(/[,\s]+/).filter(Boolean) : [],
+            base_image_id: r.base_image_id || readyImages[0]?.id || "",
+            ...(r.ip ? { interfaces: [{ name: "eth0", mac_address: r.mac, ip_address: r.ip }] } : {}),
+          })),
+        }),
+      })
+      setResults(resp.results)
+      setSubmitted(true)
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      const created = resp.results.filter((r) => r.status === "created").length
+      toast({ title: `${created} of ${valid.length} nodes created` })
+      if (created === valid.length) setTimeout(onSuccess, 1200)
+    } catch (err) {
+      toast({ variant: "destructive", title: "Batch failed", description: String(err) })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const hasErrors = rows.some((r) => r.parseError)
+  const validRows = rows.filter((r) => !r.parseError)
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <label className="text-sm text-muted-foreground">Paste CSV or YAML</label>
+        <textarea
+          className="w-full font-mono text-xs border border-border bg-background rounded-md px-3 py-2 resize-none"
+          rows={7}
+          placeholder={`hostname,mac,ip,role\ncompute-01,bc:24:11:aa:bb:cc,,worker\ncompute-02,bc:24:11:aa:bb:dd,,worker`}
+          value={raw}
+          onChange={(e) => { setRaw(e.target.value); setRows([]); setResults([]) }}
+        />
+        <p className="text-xs text-muted-foreground">
+          CSV header: <code className="font-mono">hostname,mac,ip,role</code> — or YAML list with the same keys.
+        </p>
+      </div>
+
+      {rows.length === 0 && (
+        <Button variant="outline" size="sm" className="w-full" onClick={handlePreview} disabled={!raw.trim()}>
+          Preview
+        </Button>
+      )}
+
+      {rows.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">{rows.length} rows parsed ({validRows.length} valid{hasErrors ? `, ${rows.length - validRows.length} errors` : ""})</p>
+          <div className="rounded-md border border-border overflow-auto max-h-52">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-secondary/40">
+                  <th className="text-left p-2">Hostname</th>
+                  <th className="text-left p-2">MAC</th>
+                  <th className="text-left p-2">Role</th>
+                  <th className="text-left p-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const result = results[validRows.indexOf(row)]
+                  const hasParseErr = !!row.parseError
+                  return (
+                    <tr key={i} className={cn("border-b border-border", hasParseErr && "bg-destructive/5")}>
+                      <td className="p-2 font-mono">{row.hostname || "—"}</td>
+                      <td className="p-2 font-mono">{row.mac || "—"}</td>
+                      <td className="p-2">{row.role || "—"}</td>
+                      <td className="p-2">
+                        {hasParseErr ? (
+                          <span className="text-destructive">{row.parseError}</span>
+                        ) : result ? (
+                          <span className={result.status === "created" ? "text-status-healthy" : "text-destructive"}>
+                            {result.status}{result.error ? `: ${result.error}` : ""}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">ready</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {!submitted && (
+            <div className="flex gap-2">
+              <Button
+                className="flex-1"
+                size="sm"
+                onClick={handleSubmit}
+                disabled={loading || validRows.length === 0}
+              >
+                {loading ? "Creating…" : `Create ${validRows.length} node${validRows.length !== 1 ? "s" : ""}`}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => { setRows([]); setResults([]) }}>
+                Reset
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -544,20 +793,147 @@ interface NodeSheetProps {
   autoReimage?: boolean
 }
 
+// ─── NodeSheet ────────────────────────────────────────────────────────────────
+// Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
+
 function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeSheetProps) {
+  const qc = useQueryClient()
   const state = nodeState(node)
+  const [editing, setEditing] = React.useState(false)
+  const [editHostname, setEditHostname] = React.useState(node.hostname)
+  const [editFqdn, setEditFqdn] = React.useState(node.fqdn || "")
+  const [editTags, setEditTags] = React.useState<string[]>(node.tags ?? [])
+  const [editRoleConfirm, setEditRoleConfirm] = React.useState("")
+  const [editError, setEditError] = React.useState("")
+  // TAG-3/5: inline tag add
+  const [tagInput, setTagInput] = React.useState("")
+
+  const isController = node.tags?.includes("controller")
+  const editRemovesController = isController && !editTags.includes("controller")
+
+  const editMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          hostname: editHostname || undefined,
+          fqdn: editFqdn || undefined,
+          tags: editTags,
+        }),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData<{ nodes: NodeConfig[] }>(["nodes"], (old) => {
+        if (!old) return old
+        return { ...old, nodes: old.nodes.map((n) => n.id === updated.id ? updated : n) }
+      })
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      toast({ title: "Node updated", description: `${updated.hostname} saved.` })
+      setEditing(false)
+      setEditError("")
+      setEditRoleConfirm("")
+    },
+    onError: (err) => {
+      setEditError(String(err))
+    },
+  })
+
+  function handleSave() {
+    if (editRemovesController && editRoleConfirm !== node.hostname) {
+      setEditError(`Type the node hostname "${node.hostname}" to confirm removing controller role`)
+      return
+    }
+    setEditError("")
+    editMutation.mutate()
+  }
+
+  function addTag(tag: string) {
+    const trimmed = tag.trim()
+    if (!trimmed || editTags.includes(trimmed)) return
+    setEditTags((prev) => [...prev, trimmed])
+    setTagInput("")
+  }
+
+  function removeTag(tag: string) {
+    setEditTags((prev) => prev.filter((t) => t !== tag))
+  }
 
   return (
     <Sheet open onOpenChange={(v) => !v && onClose()}>
       <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
         <SheetHeader>
-          <SheetTitle className="font-mono">{node.hostname || node.id}</SheetTitle>
+          <div className="flex items-center justify-between">
+            <SheetTitle className="font-mono">{node.hostname || node.id}</SheetTitle>
+            {!editing && (
+              <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2">
+                <Pencil className="h-3.5 w-3.5 mr-1" />
+                Edit
+              </Button>
+            )}
+          </div>
           <SheetDescription>
             <StatusDot state={state} />
           </SheetDescription>
         </SheetHeader>
 
         <div className="mt-6 space-y-4">
+          {editing ? (
+            /* ── Inline edit form (EDIT-NODE-2) ── */
+            <div className="space-y-4 rounded-md border border-border p-4">
+              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Editing node</h3>
+              <EditField label="Hostname">
+                <Input value={editHostname} onChange={(e) => setEditHostname(e.target.value)} className="font-mono text-xs" />
+              </EditField>
+              <EditField label="FQDN (optional)">
+                <Input value={editFqdn} onChange={(e) => setEditFqdn(e.target.value)} className="font-mono text-xs" />
+              </EditField>
+              {/* TAG-5: tag management in edit mode */}
+              <EditField label="Tags">
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {editTags.map((t) => (
+                    <span key={t} className="flex items-center gap-0.5 rounded bg-secondary px-2 py-0.5 text-xs font-mono">
+                      {t}
+                      <button onClick={() => removeTag(t)} className="ml-0.5 hover:text-destructive" aria-label={`Remove tag ${t}`}>
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="add tag…"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTag(tagInput) } }}
+                    className="text-xs flex-1"
+                  />
+                  <Button type="button" variant="outline" size="sm" onClick={() => addTag(tagInput)}>
+                    <Plus className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </EditField>
+              {/* EDIT-NODE-3: typed confirm for controller demotion */}
+              {editRemovesController && (
+                <EditField label={`Type "${node.hostname}" to confirm removing controller role:`}>
+                  <Input
+                    placeholder={node.hostname}
+                    value={editRoleConfirm}
+                    onChange={(e) => setEditRoleConfirm(e.target.value)}
+                    className="font-mono text-xs border-status-warning"
+                  />
+                </EditField>
+              )}
+              {editError && <p className="text-xs text-destructive">{editError}</p>}
+              <div className="flex gap-2 pt-1">
+                <Button size="sm" className="flex-1" onClick={handleSave} disabled={editMutation.isPending}>
+                  {editMutation.isPending ? "Saving…" : "Save"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setEditError(""); setEditHostname(node.hostname); setEditFqdn(node.fqdn || ""); setEditTags(node.tags ?? []) }}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
           <Section title="Identity">
             <Row label="ID" value={node.id} mono />
             <Row label="Hostname" value={node.hostname} />
@@ -574,17 +950,44 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeS
             <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
           </Section>
 
-          {node.tags?.length > 0 && (
-            <Section title="Tags">
-              <div className="flex flex-wrap gap-1.5">
-                {node.tags.map((t) => (
-                  <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
-                    {t}
-                  </span>
-                ))}
-              </div>
-            </Section>
-          )}
+          {/* TAG-5: tag display + inline add in view mode */}
+          <Section title="Tags">
+            <div className="flex flex-wrap gap-1.5">
+              {(node.tags ?? []).map((t) => (
+                <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
+                  {t}
+                </span>
+              ))}
+              {(node.tags ?? []).length === 0 && (
+                <span className="text-xs text-muted-foreground">No tags</span>
+              )}
+            </div>
+            <div className="flex gap-2 mt-2">
+              <Input
+                placeholder="add tag…"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    const trimmed = tagInput.trim()
+                    if (!trimmed) return
+                    const newTags = [...(node.tags ?? []).filter((t) => t !== trimmed), trimmed]
+                    apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+                      method: "PATCH",
+                      body: JSON.stringify({ tags: newTags }),
+                    }).then(() => {
+                      qc.invalidateQueries({ queryKey: ["nodes"] })
+                      setTagInput("")
+                      toast({ title: "Tag added", description: trimmed })
+                    }).catch((err) => toast({ variant: "destructive", title: "Failed to add tag", description: String(err) }))
+                  }
+                }}
+                className="text-xs flex-1 h-7"
+              />
+              <Tag className="h-3.5 w-3.5 mt-1.5 text-muted-foreground" />
+            </div>
+          </Section>
 
           {advanced && (
             <Section title="Advanced">
@@ -595,9 +998,20 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeS
           )}
 
           <ReimageFlow node={node} autoExpand={autoReimage} />
+            </>
+          )}
         </div>
       </SheetContent>
     </Sheet>
+  )
+}
+
+function EditField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-xs text-muted-foreground">{label}</label>
+      {children}
+    </div>
   )
 }
 

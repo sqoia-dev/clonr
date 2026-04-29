@@ -495,6 +495,99 @@ func (h *NodesHandler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// PatchNode handles PATCH /api/v1/nodes/:id — Sprint 4 EDIT-NODE-1.
+// Accepts a partial update: only fields present in the JSON body are changed.
+// Fields not present are preserved from the existing record.
+// Supported fields: hostname, fqdn, primary_mac, tags, kernel_args, notes, base_image_id.
+func (h *NodesHandler) PatchNode(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	existing, err := h.DB.GetNodeConfig(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Decode into a flexible map so we can tell which fields were provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	// Apply each provided field onto the existing record.
+	updated := existing
+	updated.UpdatedAt = time.Now().UTC()
+
+	if v, ok := patch["hostname"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil && s != "" {
+			updated.Hostname = s
+		}
+	}
+	if v, ok := patch["fqdn"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		updated.FQDN = s
+	}
+	if v, ok := patch["primary_mac"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil && s != "" {
+			updated.PrimaryMAC = strings.ToLower(s)
+		}
+	}
+	if v, ok := patch["tags"]; ok {
+		var tags []string
+		if err := json.Unmarshal(v, &tags); err == nil {
+			if tags == nil {
+				tags = []string{}
+			}
+			updated.Tags = tags
+			updated.Groups = tags // dual-emit for backward compat
+		}
+	}
+	if v, ok := patch["kernel_args"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		updated.KernelArgs = s
+	}
+	if v, ok := patch["base_image_id"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		updated.BaseImageID = s
+	}
+	if v, ok := patch["notes"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		if updated.CustomVars == nil {
+			updated.CustomVars = map[string]string{}
+		}
+		updated.CustomVars["notes"] = s
+	}
+
+	if err := h.DB.UpdateNodeConfig(r.Context(), updated); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		if changes, diffErr := db.DiffNodeConfigFields(sanitizeNodeConfig(existing), sanitizeNodeConfig(updated)); diffErr == nil {
+			if recErr := h.DB.RecordNodeConfigChanges(r.Context(), id, aLabel, changes); recErr != nil {
+				log.Warn().Err(recErr).Str("node_id", id).Msg("patch node: record config history failed (non-fatal)")
+			}
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeUpdate, "node", id,
+			r.RemoteAddr, sanitizeNodeConfig(existing), sanitizeNodeConfig(updated))
+	}
+
+	setNodeConfigSunsetHeader(w)
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // GetNodeByMAC handles GET /api/v1/nodes/by-mac/:mac
 func (h *NodesHandler) GetNodeByMAC(w http.ResponseWriter, r *http.Request) {
 	mac := chi.URLParam(r, "mac")
@@ -1046,4 +1139,119 @@ func extractNodeIdentity(profile []byte) (mac, hostname string) {
 		return nic.MAC, hostname
 	}
 	return "", hostname
+}
+
+// batchNodeSpec is the per-row shape accepted by BatchCreateNodes.
+type batchNodeSpec struct {
+	Hostname    string            `json:"hostname"`
+	FQDN        string            `json:"fqdn"`
+	PrimaryMAC  string            `json:"primary_mac"`
+	BaseImageID string            `json:"base_image_id"`
+	Tags        []string          `json:"tags"`
+	Groups      []string          `json:"groups"` // deprecated alias
+	KernelArgs  string            `json:"kernel_args"`
+	Interfaces  []api.InterfaceConfig `json:"interfaces"`
+}
+
+// BatchCreateNodes handles POST /api/v1/nodes/batch — BULK-1.
+//
+// Request body: {"nodes": [{hostname, primary_mac, base_image_id, tags, notes}, ...]}
+//
+// Returns per-row results: {index, status: "created"|"failed", id?, error?}.
+// NOT all-or-nothing: partial success is allowed.
+func (h *NodesHandler) BatchCreateNodes(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Nodes []batchNodeSpec `json:"nodes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if len(req.Nodes) == 0 {
+		writeValidationError(w, "nodes array is empty")
+		return
+	}
+	if len(req.Nodes) > 500 {
+		writeValidationError(w, "nodes array exceeds maximum of 500 entries")
+		return
+	}
+
+	type rowResult struct {
+		Index  int    `json:"index"`
+		Status string `json:"status"`
+		ID     string `json:"id,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	results := make([]rowResult, len(req.Nodes))
+	ctx := r.Context()
+	now := time.Now().UTC()
+
+	actorID, actorLabel := "", ""
+	if h.GetActorInfo != nil {
+		actorID, actorLabel = h.GetActorInfo(r)
+	}
+
+	for i, n := range req.Nodes {
+		if n.Hostname == "" {
+			results[i] = rowResult{Index: i, Status: "failed", Error: "hostname is required"}
+			continue
+		}
+		if n.PrimaryMAC == "" {
+			results[i] = rowResult{Index: i, Status: "failed", Error: "primary_mac is required"}
+			continue
+		}
+		n.PrimaryMAC = strings.ToLower(n.PrimaryMAC)
+
+		// Normalise base_image_id: use empty string if not provided.
+		if n.BaseImageID != "" {
+			if _, err := h.DB.GetBaseImage(ctx, n.BaseImageID); err != nil {
+				results[i] = rowResult{Index: i, Status: "failed", Error: fmt.Sprintf("base_image_id %q not found", n.BaseImageID)}
+				continue
+			}
+		}
+
+		tags := n.Tags
+		if len(tags) == 0 && len(n.Groups) > 0 {
+			tags = n.Groups
+		}
+		if tags == nil {
+			tags = []string{}
+		}
+
+		cfg := api.NodeConfig{
+			ID:          uuid.New().String(),
+			Hostname:    n.Hostname,
+			FQDN:        n.FQDN,
+			PrimaryMAC:  n.PrimaryMAC,
+			Tags:        tags,
+			Groups:      tags,
+			BaseImageID: n.BaseImageID,
+			Interfaces:  n.Interfaces,
+			KernelArgs:  n.KernelArgs,
+			CustomVars:  map[string]string{},
+			SSHKeys:     []string{},
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if cfg.Interfaces == nil {
+			cfg.Interfaces = []api.InterfaceConfig{}
+		}
+
+		if err := h.DB.CreateNodeConfig(ctx, cfg); err != nil {
+			results[i] = rowResult{Index: i, Status: "failed", Error: err.Error()}
+			continue
+		}
+
+		if h.Audit != nil {
+			h.Audit.Record(ctx, actorID, actorLabel, db.AuditActionNodeCreate, "node", cfg.ID,
+				r.RemoteAddr, nil, map[string]string{
+					"hostname": cfg.Hostname, "primary_mac": cfg.PrimaryMAC, "batch": "true",
+				})
+		}
+
+		results[i] = rowResult{Index: i, Status: "created", ID: cfg.ID}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }

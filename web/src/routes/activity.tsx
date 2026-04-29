@@ -1,8 +1,8 @@
 import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, RefreshCw } from "lucide-react"
+import { Search, RefreshCw, Trash2, AlertTriangle } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import {
@@ -22,6 +22,7 @@ import {
 import { apiFetch } from "@/lib/api"
 import type { AuditRecord, AuditQueryResponse } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { toast } from "@/hooks/use-toast"
 
 interface ActivitySearch {
   q?: string
@@ -48,6 +49,7 @@ function kindColor(kind: string): string {
 
 export function ActivityPage() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const search = useSearch({ strict: false }) as ActivitySearch
   const q = search.q ?? ""
   const kind = search.kind ?? ""
@@ -55,6 +57,14 @@ export function ActivityPage() {
   const listRef = React.useRef<HTMLDivElement>(null)
   const [userScrolled, setUserScrolled] = React.useState(false)
   const [selectedRecord, setSelectedRecord] = React.useState<AuditRecord | null>(null)
+
+  // ACT-DEL-3..5: selection + deletion state.
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+  const [deleteConfirm, setDeleteConfirm] = React.useState("")
+  const [deleteExpanded, setDeleteExpanded] = React.useState(false)
+  const [clearFilterExpanded, setClearFilterExpanded] = React.useState(false)
+  const [clearConfirm, setClearConfirm] = React.useState("")
+  const [optimisticRemovals, setOptimisticRemovals] = React.useState<Set<string>>(new Set())
 
   function updateSearch(patch: Partial<ActivitySearch>) {
     navigate({
@@ -96,47 +106,176 @@ export function ActivityPage() {
 
   const records = data?.records ?? []
   const filtered = records.filter((r) => {
+    if (optimisticRemovals.has(r.id)) return false
     if (q && !r.action.includes(q) && !r.actor_label.includes(q) && !r.resource_id.includes(q)) return false
     if (kind && kindLabel(r.action, r.resource_type) !== kind) return false
     return true
   })
 
+  const filterActive = !!(q || kind)
+  const selectedCount = selectedIds.size
+
+  async function handleDeleteSelected() {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    // Optimistic remove.
+    setOptimisticRemovals((prev) => new Set([...prev, ...ids]))
+    setSelectedIds(new Set())
+    setDeleteExpanded(false)
+    setDeleteConfirm("")
+    try {
+      await Promise.all(ids.map((id) => apiFetch(`/api/v1/audit/${id}`, { method: "DELETE" })))
+      qc.invalidateQueries({ queryKey: ["activity"] })
+      toast({ title: `Deleted ${ids.length} record${ids.length !== 1 ? "s" : ""}` })
+    } catch (err) {
+      // Rollback on error.
+      setOptimisticRemovals((prev) => {
+        const next = new Set(prev)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      toast({ variant: "destructive", title: "Delete failed", description: String(err) })
+    }
+  }
+
+  async function handleClearFiltered() {
+    const params = new URLSearchParams()
+    params.set("before", new Date().toISOString())
+    if (q) params.set("action", q)
+    if (kind === "provisioning") params.set("resource_type", "node")
+    if (kind === "api") params.set("resource_type", "api_key")
+
+    // Optimistic remove all visible filtered records.
+    const ids = filtered.map((r) => r.id)
+    setOptimisticRemovals((prev) => new Set([...prev, ...ids]))
+    setClearFilterExpanded(false)
+    setClearConfirm("")
+    try {
+      const resp = await apiFetch<{ count: number }>(`/api/v1/audit?${params}`, { method: "DELETE" })
+      qc.invalidateQueries({ queryKey: ["activity"] })
+      toast({ title: `Cleared ${resp.count} record${resp.count !== 1 ? "s" : ""}` })
+    } catch (err) {
+      setOptimisticRemovals((prev) => {
+        const next = new Set(prev)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      toast({ variant: "destructive", title: "Clear failed", description: String(err) })
+    }
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center justify-between gap-3 border-b border-border px-6 py-3">
-        <div className="relative w-72">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder="Filter by action or subject..."
-            value={q}
-            onChange={(e) => updateSearch({ q: e.target.value || undefined })}
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            {["", "provisioning", "api", "error"].map((k) => (
-              <Button
-                key={k || "all"}
-                variant={kind === k ? "secondary" : "ghost"}
-                size="sm"
-                className="text-xs"
-                onClick={() => updateSearch({ kind: k || undefined })}
-              >
-                {k || "All"}
-              </Button>
-            ))}
+      <div className="flex flex-col gap-2 border-b border-border px-6 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="relative w-72">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              className="pl-8"
+              placeholder="Filter by action or subject..."
+              value={q}
+              onChange={(e) => updateSearch({ q: e.target.value || undefined })}
+            />
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(isFetching && "animate-spin")}
-            onClick={() => refetch()}
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1">
+              {["", "provisioning", "api", "error"].map((k) => (
+                <Button
+                  key={k || "all"}
+                  variant={kind === k ? "secondary" : "ghost"}
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => updateSearch({ kind: k || undefined })}
+                >
+                  {k || "All"}
+                </Button>
+              ))}
+            </div>
+            {/* ACT-DEL-4: "Clear filtered…" when a filter is active */}
+            {filterActive && !clearFilterExpanded && (
+              <Button variant="ghost" size="sm" className="text-xs text-destructive" onClick={() => setClearFilterExpanded(true)}>
+                <Trash2 className="h-3 w-3 mr-1" />
+                Clear filtered…
+              </Button>
+            )}
+            {/* ACT-DEL-3: "Delete selected" when rows are selected */}
+            {selectedCount > 0 && !deleteExpanded && (
+              <Button variant="ghost" size="sm" className="text-xs text-destructive" onClick={() => setDeleteExpanded(true)}>
+                <Trash2 className="h-3 w-3 mr-1" />
+                Delete {selectedCount} selected
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn(isFetching && "animate-spin")}
+              onClick={() => refetch()}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
+
+        {/* ACT-DEL-3: Delete selected inline confirm */}
+        {deleteExpanded && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              Type <code className="font-mono">delete {selectedCount} entries</code> to confirm:
+            </div>
+            <div className="flex gap-2">
+              <Input
+                className="text-xs h-7 flex-1"
+                placeholder={`delete ${selectedCount} entries`}
+                value={deleteConfirm}
+                onChange={(e) => setDeleteConfirm(e.target.value)}
+              />
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-7"
+                disabled={deleteConfirm !== `delete ${selectedCount} entries`}
+                onClick={handleDeleteSelected}
+              >
+                Confirm
+              </Button>
+              <Button variant="ghost" size="sm" className="h-7" onClick={() => { setDeleteExpanded(false); setDeleteConfirm("") }}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* ACT-DEL-4: Clear filtered inline confirm */}
+        {clearFilterExpanded && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              Clear all {filtered.length} records matching current filter. Type <code className="font-mono">clear</code> to confirm:
+            </div>
+            <div className="flex gap-2">
+              <Input
+                className="text-xs h-7 flex-1"
+                placeholder="clear"
+                value={clearConfirm}
+                onChange={(e) => setClearConfirm(e.target.value)}
+              />
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-7"
+                disabled={clearConfirm !== "clear"}
+                onClick={handleClearFiltered}
+              >
+                Confirm
+              </Button>
+              <Button variant="ghost" size="sm" className="h-7" onClick={() => { setClearFilterExpanded(false); setClearConfirm("") }}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Table */}
@@ -162,6 +301,19 @@ export function ActivityPage() {
             <caption className="sr-only">Cluster activity log</caption>
             <TableHeader>
               <TableRow>
+                {/* ACT-DEL-3: checkbox column */}
+                <TableHead scope="col" className="w-8">
+                  <input
+                    type="checkbox"
+                    className="rounded"
+                    checked={selectedCount === filtered.length && filtered.length > 0}
+                    onChange={(e) => {
+                      if (e.target.checked) setSelectedIds(new Set(filtered.map((r) => r.id)))
+                      else setSelectedIds(new Set())
+                    }}
+                    aria-label="Select all"
+                  />
+                </TableHead>
                 <TableHead scope="col">Time</TableHead>
                 <TableHead scope="col">Kind</TableHead>
                 <TableHead scope="col">Actor</TableHead>
@@ -172,12 +324,29 @@ export function ActivityPage() {
             <TableBody>
               {filtered.map((rec) => {
                 const k = kindLabel(rec.action, rec.resource_type)
+                const checked = selectedIds.has(rec.id)
                 return (
                   <TableRow
                     key={rec.id}
-                    className="cursor-pointer"
+                    className={cn("cursor-pointer", checked && "bg-secondary/40")}
                     onClick={() => setSelectedRecord(rec)}
                   >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        className="rounded"
+                        checked={checked}
+                        onChange={(e) => {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev)
+                            if (e.target.checked) next.add(rec.id)
+                            else next.delete(rec.id)
+                            return next
+                          })
+                        }}
+                        aria-label={`Select record ${rec.id}`}
+                      />
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                       {relativeTime(rec.created_at)}
                     </TableCell>

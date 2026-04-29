@@ -886,6 +886,16 @@ func (s *Server) buildRouter() chi.Router {
 		WebhookDispatcher: s.webhookDispatcher,
 		ImageEvents:       s.imageEvents,
 	}
+
+	// Sprint 4: TUS resumable upload handler (IMG-ISO-1..2).
+	tusH := &handlers.TUSHandler{
+		ImageDir:     s.cfg.ImageDir,
+		DB:           s.db,
+		Audit:        s.audit,
+		ImageEvents:  s.imageEvents,
+		GetActorInfo: getActorInfo,
+	}
+	tusH.StartGC()
 	gpgKeysH := &handlers.GPGKeysHandler{
 		DB: s.db,
 		EmbeddedKeys: []handlers.EmbeddedGPGKey{
@@ -962,6 +972,8 @@ func (s *Server) buildRouter() chi.Router {
 		ScriptPath:    "scripts/build-initramfs.sh", // ignored at runtime — script is embedded
 		InitramfsPath: s.cfg.PXE.BootDir + "/initramfs-clustr.img",
 		ClustrBinPath:  s.cfg.ClustrBinPath, // abs path to clustr CLI binary; defaults to /usr/local/bin/clustr
+		ImageDir:      s.cfg.ImageDir,
+		ImageEvents:   s.imageEvents,
 	}
 	// Prime the in-memory sha256 cache from the on-disk initramfs (if present).
 	// Non-fatal: if the file does not yet exist the cache stays empty and the
@@ -1431,6 +1443,9 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Audit log (S3-4) — admin only (operators and readonly cannot read audit log).
 			r.With(requireRole("admin")).Get("/audit", auditH.HandleQuery)
+			// ACT-DEL-1 (Sprint 4): single-record and bulk delete.
+			r.With(requireRole("admin")).Delete("/audit/{id}", auditH.HandleDelete)
+			r.With(requireRole("admin")).Delete("/audit", auditH.HandleBulkDelete)
 			// F2: SIEM JSONL streaming export — admin only, rate-limited 1/min.
 			r.With(requireRole("admin")).Get("/audit/export", auditH.HandleExport)
 
@@ -1444,6 +1459,15 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/events", images.StreamImageEvents)
 			r.Get("/images", images.ListImages)
 			r.Post("/images", images.CreateImage)
+			// IMG-URL-1: download image from URL (Sprint 4).
+			r.Post("/images/from-url", images.FromURL)
+			// IMG-ISO-1..2: TUS resumable upload (Sprint 4).
+			r.Options("/uploads/", tusH.Options)
+			r.Post("/uploads/", tusH.Create)
+			r.Head("/uploads/{id}", tusH.Head)
+			r.Patch("/uploads/{id}", tusH.Patch)
+			r.Delete("/uploads/{id}", tusH.TUSDelete)
+			r.Post("/images/from-upload", tusH.FromUpload)
 			r.Delete("/images/{id}", images.DeleteImage)
 			r.Get("/images/{id}/status", images.GetImageStatus)
 			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
@@ -1478,6 +1502,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/system/initramfs/rebuild", initramfsH.RebuildInitramfs)
 			r.Delete("/system/initramfs/history/{id}", initramfsH.DeleteInitramfsHistory)
 
+			// Sprint 4 INITRD-1..6: image-store initramfs build with SSE log streaming.
+			r.Post("/initramfs/build", initramfsH.BuildInitramfsFromImage)
+			r.Delete("/initramfs/builds/{id}", initramfsH.CancelInitramfsBuild)
+
 			// Shell sessions
 			r.Post("/images/{id}/shell-session", factory.OpenShellSession)
 			r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
@@ -1498,9 +1526,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/nodes/connected", clientdH.GetConnectedNodes)
 			r.Get("/nodes", nodes.ListNodes)
 			r.Post("/nodes", nodes.CreateNode)
+			// Sprint 4 BULK-1: batch create endpoint (must be before /{id}).
+			r.Post("/nodes/batch", nodes.BatchCreateNodes)
 			r.Get("/nodes/{id}", nodes.GetNode)
-			// PUT and DELETE require admin or group-scoped operator access.
+			// PUT, PATCH and DELETE require admin or group-scoped operator access.
 			r.With(requireGroupAccess("id", s.db)).Put("/nodes/{id}", nodes.UpdateNode)
+			// Sprint 4 EDIT-NODE-1: partial update endpoint.
+			r.With(requireGroupAccess("id", s.db)).Patch("/nodes/{id}", nodes.PatchNode)
 			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}", nodes.DeleteNode)
 
 			// S5-12: Node config change history (admin-only audit trail).

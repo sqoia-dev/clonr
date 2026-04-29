@@ -72,6 +72,18 @@ sudo clustr-serverd bootstrap-admin
 
 # 5. Open the UI and sign in
 open http://localhost:8080/
+
+# 6. Add your first node
+#    Click "Add Node" in the top-bar → fill in hostname + MAC address → Register.
+#    Or PXE-boot a node — it registers automatically.
+
+# 7. Upload an OS image
+#    Click "Add Image" → "From URL" → paste an image URL → Download.
+#    Or drag-and-drop an ISO onto the "Upload ISO" tab for resumable TUS upload.
+
+# 8. Build the PXE initramfs
+#    Click Images → Bundles tab → "Build Initramfs" → watch live build log.
+#    The resulting image is registered and ready to reimage nodes.
 ```
 
 ## Build from source
