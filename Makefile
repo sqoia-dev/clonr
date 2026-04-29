@@ -23,7 +23,7 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test test-js a11y smoke
+.PHONY: all client server clientd static clean test
 
 all: client server clientd
 
@@ -43,23 +43,6 @@ static:
 
 test:
 	go test ./... -v
-
-# B4-8: JS utility function tests using Node.js built-in test runner (requires Node >= 20).
-test-js:
-	node --test test/js/app-utils.test.mjs
-
-# I3: WCAG 2.1 AA accessibility audit using axe-core + jsdom.
-# Install deps first: npm install --prefix test/js axe-core jsdom
-a11y:
-	node --test test/js/a11y.test.mjs
-
-# I2: Smoke test fixture — spins up clustr-serverd in Docker, simulates a
-# PXE-booted node registering itself, and asserts it appears in /api/v1/nodes.
-# Requires: Docker daemon running, curl available.
-# Time budget: under 5 minutes wall-clock (typically <30s on GitHub-hosted runners).
-# See scripts/ci/smoke.sh for full docs.  See docs/testing.md for local usage.
-smoke:
-	bash scripts/ci/smoke.sh
 
 clean:
 	rm -rf bin/

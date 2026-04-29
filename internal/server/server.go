@@ -2,15 +2,12 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -43,7 +40,6 @@ import (
 	"github.com/sqoia-dev/clustr/internal/allocation"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
-	"github.com/sqoia-dev/clustr/internal/server/ui"
 	"github.com/sqoia-dev/clustr/internal/webhook"
 )
 
@@ -1006,30 +1002,12 @@ func (s *Server) buildRouter() chi.Router {
 		log.Info().Msg("pprof profiling endpoints enabled at /debug/pprof (admin only)")
 	}
 
-	// Embedded web UI — served without bearer auth.
-	// The UI JavaScript talks to /api/v1 which enforces auth when a token is set.
-	staticFS, _ := fs.Sub(ui.StaticFiles, "static")
-	fileServer := http.FileServer(http.FS(staticFS))
-	r.Handle("/ui/*", http.StripPrefix("/ui", fileServer))
-	r.Get("/", serveIndex(staticFS))
-	// /login — dedicated login page (served from same static FS as the main UI).
-	r.Get("/login", serveLoginPage(staticFS))
-	// /set-password — forced first-login password change page.
-	r.Get("/set-password", serveSetPasswordPage(staticFS))
-	// /portal/ — researcher portal (viewer role). Serves portal.html from static FS.
-	// Viewer-role users are redirected here on login (handled in login.js + auth/me).
-	r.Get("/portal", servePortalPage(staticFS))
-	r.Get("/portal/", servePortalPage(staticFS))
-
-	// /portal/pi/ — PI portal (pi role). Serves portal_pi.html from static FS.
-	// PI-role users land here after login; admin can also access for testing.
-	r.Get("/portal/pi", servePIPortalPage(staticFS))
-	r.Get("/portal/pi/", servePIPortalPage(staticFS))
-
-	// /portal/director/ — Director portal (director role). Serves portal_director.html.
-	// Director-role users land here after login; admin can also access.
-	r.Get("/portal/director", serveDirectorPortalPage(staticFS))
-	r.Get("/portal/director/", serveDirectorPortalPage(staticFS))
+	// Placeholder root — replaced by embedded SPA in Phase C.
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"app":"clustr","status":"ok"}`))
+	})
 
 	// /repo/* — public, unauthenticated Slurm package repository served from
 	// cfg.RepoDir.  Populated by "clustr-serverd bundle install".
@@ -1630,66 +1608,6 @@ func (s *Server) buildRouter() chi.Router {
 	return r
 }
 
-// serveSetPasswordPage serves set-password.html from the embedded static FS.
-func serveSetPasswordPage(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("set-password.html")
-		if err != nil {
-			// Fall back to login page if not yet present.
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "set-password page not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "set-password.html", stat.ModTime())
-	}
-}
-
-// serveLoginPage serves login.html from the embedded static FS.
-func serveLoginPage(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("login.html")
-		if err != nil {
-			http.Error(w, "login page not found", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "login page not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "login.html", stat.ModTime())
-	}
-}
-
-// servePortalPage serves portal.html from the embedded static FS.
-// The researcher portal is a separate HTML page from the main admin UI (index.html).
-func servePortalPage(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("portal.html")
-		if err != nil {
-			// Portal page not built yet — redirect to login.
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "portal page not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "portal.html", stat.ModTime())
-	}
-}
-
 // buildPortalHandler constructs the portal.Handler with closures wired to
 // the LDAP and Slurm managers.
 func (s *Server) buildPortalHandler() *portalhandler.Handler {
@@ -1823,26 +1741,6 @@ func (s *Server) buildAutoPolicyHandler(notifier *notifications.Notifier, getAct
 	}
 }
 
-// serveDirectorPortalPage serves portal_director.html from the embedded static FS.
-func serveDirectorPortalPage(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("portal_director.html")
-		if err != nil {
-			// Fall back to login if director portal page not found.
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "director portal page not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "portal_director.html", stat.ModTime())
-	}
-}
-
 // loadSMTPConfig loads SMTP config from the DB (with env-var override at send time).
 // This is used at server start to build the mailer; env vars are re-read on each
 // send by SMTPMailer.
@@ -1860,26 +1758,6 @@ func (s *Server) loadSMTPConfig() notifications.SMTPConfig {
 		From:     cfg.From,
 		UseTLS:   cfg.UseTLS,
 		UseSSL:   cfg.UseSSL,
-	}
-}
-
-// servePIPortalPage serves portal_pi.html from the embedded static FS.
-func servePIPortalPage(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("portal_pi.html")
-		if err != nil {
-			// Fall back to login if PI portal page not found.
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "PI portal page not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "portal_pi.html", stat.ModTime())
 	}
 }
 
@@ -2159,42 +2037,6 @@ func (s *Server) serveRepoHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(response{Installed: bundles, Subdirs: subdirs})
-}
-
-// serveIndex serves index.html from the embedded static FS.
-func serveIndex(staticFS fs.FS) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		f, err := staticFS.Open("index.html")
-		if err != nil {
-			http.Error(w, "UI not found", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			http.Error(w, "UI not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		serveHTMLFile(w, r, f, "index.html", stat.ModTime())
-	}
-}
-
-// serveHTMLFile serves an fs.File via http.ServeContent, safely handling
-// non-seekable files (e.g. os.DirFS in tests). embed.FS files satisfy
-// io.ReadSeeker directly; for other FS implementations the file is read
-// into a bytes.Reader so that http.ServeContent can seek for Range requests.
-func serveHTMLFile(w http.ResponseWriter, r *http.Request, f fs.File, name string, modTime time.Time) {
-	if rs, ok := f.(io.ReadSeeker); ok {
-		http.ServeContent(w, r, name, modTime, rs)
-		return
-	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		http.Error(w, "failed to read "+name, http.StatusInternalServerError)
-		return
-	}
-	http.ServeContent(w, r, name, modTime, bytes.NewReader(data))
 }
 
 // Handler returns the underlying http.Handler for use in tests.

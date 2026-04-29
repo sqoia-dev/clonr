@@ -1,17 +1,13 @@
 package server
 
 import (
-	"bufio"
 	"context"
-	"io/fs"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/metrics"
-	"github.com/sqoia-dev/clustr/internal/server/ui"
 )
 
 // techTrigTickInterval is how often the tech-trig evaluator runs.
@@ -32,9 +28,6 @@ const contentionThresholdPerSec float64 = 5.0
 
 // t1NodeCountThreshold is the T1 node-count threshold.
 const t1NodeCountThreshold = 500
-
-// t2JSLOCThreshold is the T2 frontend JS LOC threshold (D21 / D27).
-const t2JSLOCThreshold = 5000
 
 // t4LogBytesThreshold is the T4 log-storage threshold: 50 GiB.
 const t4LogBytesThreshold int64 = 50 * 1024 * 1024 * 1024
@@ -60,7 +53,6 @@ func (s *Server) runTechTrigEvaluator(ctx context.Context) {
 		Str("tick", techTrigTickInterval.String()).
 		Int("t1_node_threshold", t1NodeCountThreshold).
 		Float64("t1_contention_threshold_per_sec", contentionThresholdPerSec).
-		Int("t2_js_loc_threshold", t2JSLOCThreshold).
 		Int64("t4_log_bytes_threshold", t4LogBytesThreshold).
 		Msg("tech-trig evaluator: started")
 
@@ -184,19 +176,17 @@ func (s *Server) evalT1(ctx context.Context) {
 }
 
 func (s *Server) evalT2(ctx context.Context) {
-	jsLOC := countJSLOC()
-	valueJSON, err := db.T2ValueJSON(jsLOC)
+	// T2 fires only on manual_signal now that the legacy JS UI is gone.
+	state, stateErr := s.db.GetTechTrigState(ctx, db.TechTrigFramework)
+	manualSignal := stateErr == nil && state.ManualSignal
+
+	valueJSON, err := db.T2ValueJSON(0)
 	if err != nil {
 		log.Warn().Err(err).Msg("tech-trig T2: marshal value json failed")
 		return
 	}
 
-	// T2 fires if LOC >= threshold OR manual_signal is set.
-	// Check manual_signal from DB.
-	state, stateErr := s.db.GetTechTrigState(ctx, db.TechTrigFramework)
-	manualSignal := stateErr == nil && state.ManualSignal
-
-	fired := jsLOC >= t2JSLOCThreshold || manualSignal
+	fired := manualSignal
 	wasAlreadyFired, _ := s.db.WasTechTrigAlreadyFired(ctx, db.TechTrigFramework)
 
 	if err := s.db.UpdateTechTrigState(ctx, db.TechTrigFramework, valueJSON, fired); err != nil {
@@ -209,32 +199,22 @@ func (s *Server) evalT2(ctx context.Context) {
 		firedVal = 1
 	}
 	metrics.TechTrigFired.WithLabelValues(string(db.TechTrigFramework)).Set(firedVal)
-	metrics.TechTrigValue.WithLabelValues(string(db.TechTrigFramework)).Set(float64(jsLOC))
+	metrics.TechTrigValue.WithLabelValues(string(db.TechTrigFramework)).Set(0)
 
 	if fired && !wasAlreadyFired {
-		reason := "LOC threshold crossed"
-		if manualSignal {
-			reason = "operator-marked framework friction"
-		}
 		s.sendTechTrigNotification(ctx, db.TechTrigFramework,
 			"T2 Framework ceiling trigger fired",
-			"The frontend JS framework ceiling has been reached.\n\n"+
-				"Reason: "+reason+"\n"+
-				"Current JS LOC: "+intToStr(jsLOC)+" (threshold: "+intToStr(t2JSLOCThreshold)+")\n\n"+
-				"Action: consult docs/tech-triggers.md for the framework migration sprint spec.\n",
+			"The frontend framework ceiling trigger was manually signalled.\n\n"+
+				"Action: consult SPRINT.md for the webapp rebuild sprint spec.\n",
 		)
 		s.audit.Record(ctx, "system", "clustr", "tech_trig.fired",
 			"tech_trigger", string(db.TechTrigFramework), "",
 			nil, map[string]interface{}{
-				"js_loc":        jsLOC,
-				"threshold":     t2JSLOCThreshold,
 				"manual_signal": manualSignal,
-				"reason":        reason,
 			})
 		log.Warn().
-			Int("js_loc", jsLOC).
 			Bool("manual_signal", manualSignal).
-			Msg("tech-trig T2: FIRED — framework ceiling threshold crossed")
+			Msg("tech-trig T2: FIRED — operator-marked framework ceiling")
 	}
 }
 
@@ -327,39 +307,6 @@ func (s *Server) sendTechTrigNotification(ctx context.Context, name db.TechTrigN
 		Str("trigger", string(name)).
 		Strs("recipients", emails).
 		Msg("tech-trig: notification sent")
-}
-
-// countJSLOC counts non-blank lines in *.js files under the embedded static UI,
-// excluding any path that contains "/vendor/". This is the T2 metric.
-// Returns 0 on any error (non-fatal; just means T2 LOC metric is 0 until fixed).
-func countJSLOC() int {
-	total := 0
-	_ = fs.WalkDir(ui.StaticFiles, "static", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if !strings.HasSuffix(path, ".js") {
-			return nil
-		}
-		// Exclude vendor/ directory.
-		if strings.Contains(path, "/vendor/") {
-			return nil
-		}
-		f, err := ui.StaticFiles.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				total++
-			}
-		}
-		return nil
-	})
-	return total
 }
 
 // ─── atomic float64 helper ───────────────────────────────────────────────────

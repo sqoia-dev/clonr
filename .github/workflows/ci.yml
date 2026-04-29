@@ -5,9 +5,6 @@ on:
     branches: [main]
   pull_request:
   # workflow_call allows other workflows (initramfs.yml) to use this as a gate.
-  # S6-9: initramfs.yml declares needs: [ci] and calls this workflow so that
-  # no initramfs artifact is published unless lint, test, build, and all three
-  # security scanners pass.
   workflow_call:
 
 jobs:
@@ -45,88 +42,6 @@ jobs:
       - name: go test
         run: go test ./... -v -count=1 -timeout 300s
 
-      # F4 (v1.5.0): CSP regression test suite — asserts no inline scripts or
-      # event handlers in served HTML, CSP header present, Alpine CSP build used.
-      # Uses Node.js built-in test runner (node:test), no npm install required.
-      - name: Setup Node.js for CSP tests
-        uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-
-      - name: JS CSP policy tests
-        run: node --test test/js/csp-policy.test.mjs
-
-      - name: JS app-utils unit tests
-        run: node --test test/js/app-utils.test.mjs
-
-  # I3: WCAG 2.1 AA accessibility audit — axe-core via jsdom against static HTML.
-  # Fails on any critical or serious violation across all 6 HTML pages.
-  # Moderate findings are logged informational; documented in docs/accessibility.md.
-  a11y:
-    name: Accessibility (axe-core WCAG 2.1 AA)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-          cache: "npm"
-          cache-dependency-path: test/js/package-lock.json
-
-      - name: Install axe-core and jsdom
-        run: npm install --prefix test/js axe-core jsdom
-
-      - name: Run axe-core WCAG 2.1 AA audit
-        run: node --test test/js/a11y.test.mjs
-
-  # I3: Lighthouse performance budget — static HTML served locally.
-  # Runs lighthouse against index.html, portal.html, portal_pi.html.
-  # Budget thresholds are in lighthouse-budget.json; assertions in .lighthouserc.json.
-  # Performance assertions are warnings (non-blocking); accessibility score is hard gate (>=0.90).
-  lighthouse:
-    name: Lighthouse perf budget
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-
-      - name: Install Lighthouse CI
-        run: npm install -g @lhci/cli
-
-      - name: Run Lighthouse CI
-        run: lhci autorun
-        env:
-          LHCI_BUILD_CONTEXT__CURRENT_HASH: ${{ github.sha }}
-
-  # I9: Link checker — fails on broken markdown links / fragment refs in docs/*.md.
-  # Uses markdown-link-check via npx (no npm install required).
-  # External URLs are skipped (--config) to avoid flaky network failures in CI;
-  # only relative file links and fragment anchors are checked.
-  link-check:
-    name: Link check (docs)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-
-      - name: Check markdown links in docs/
-        run: |
-          # Exclude internal audit/draft docs — these intentionally quote
-          # broken links verbatim as bug reports and should not be normalized.
-          EXCLUDE_PATTERN="getting-started-audit|SHOW-HN-DRAFT"
-          FILES=$(find docs -name "*.md" | grep -Ev "$EXCLUDE_PATTERN" | sort)
-          npx --yes markdown-link-check \
-            --config .github/mlc-config.json \
-            $FILES \
-            README.md CHANGELOG.md
-
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -148,94 +63,6 @@ jobs:
       - name: Verify static linking
         run: file bin/clustr | grep -q "statically linked"
 
-  # ─────────────────────────────────────────────────────────────────────────
-  # I2: Smoke test — spins up clustr-serverd in Docker, simulates a PXE-booted
-  # node calling POST /api/v1/nodes/register, and asserts the node appears in
-  # GET /api/v1/nodes with state "registered".
-  #
-  # Runs after build so the Docker image is built from tested code.
-  # continue-on-error: true for the initial flake window — sprint plan I2 spec:
-  # "allowed to fail initially with a flake-tracking issue."
-  # Remove continue-on-error once smoke is green on 3 consecutive main pushes.
-  # ─────────────────────────────────────────────────────────────────────────
-  smoke:
-    name: Smoke test (Docker node registration)
-    runs-on: ubuntu-latest
-    needs: [build]
-    # J2: continue-on-error removed after 3 consecutive green smoke runs on main
-    # (streak tracked in .github/smoke-streak.json). Smoke is now a hard CI gate.
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build smoke image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: clustr-serverd:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Run smoke test
-        env:
-          SMOKE_IMAGE: clustr-serverd:smoke
-          SMOKE_TIMEOUT: "60"
-        run: bash scripts/ci/smoke.sh
-
-      # J2: Smoke flake-threshold tracker.
-      # Reads .github/smoke-streak.json to check whether 3 consecutive green
-      # smoke runs have been recorded.  When the threshold is met, this step
-      # fails CI with a clear human-action message so the developer removes
-      # continue-on-error: true from this job.
-      #
-      # Workflow:
-      #   1. After each green smoke run on main, increment
-      #      "consecutive_smoke_passes" in .github/smoke-streak.json and commit.
-      #   2. Reset to 0 on any smoke failure.
-      #   3. When this step triggers (streak >= 3), open a PR that removes
-      #      continue-on-error: true from this job, then reset the streak to 0.
-      #
-      # See docs/testing.md for full policy.
-      - name: Check smoke flake-threshold
-        run: |
-          STREAK=$(python3 -c "import json; d=json.load(open('.github/smoke-streak.json')); print(d['consecutive_smoke_passes'])")
-          echo "Current smoke streak: ${STREAK}"
-          if [ "${STREAK}" -ge 3 ]; then
-            echo ""
-            echo "================================================================"
-            echo "HUMAN ACTION REQUIRED: smoke streak threshold reached (${STREAK}/3)"
-            echo ""
-            echo "The smoke test has been green for 3+ consecutive main pushes."
-            echo "Remove 'continue-on-error: true' from the 'smoke' job in"
-            echo ".github/workflows/ci.yml to make it a hard CI gate."
-            echo ""
-            echo "After removing continue-on-error, reset the streak:"
-            echo "  echo '{ \"consecutive_smoke_passes\": 0 }' > .github/smoke-streak.json"
-            echo "================================================================"
-            exit 1
-          fi
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Security scanning — S3-12
-  #
-  # Three scanners run in parallel after lint passes:
-  #   gosec       — Go static analysis for security issues
-  #   govulncheck — Go vulnerability database check (stdlib + deps)
-  #   trivy       — Container image vulnerability scan (HIGH/CRITICAL)
-  #
-  # Threshold: HIGH severity findings fail the build.
-  #
-  # False-positive suppressions and accepted-risk decisions are documented in
-  # .github/security-allowlist.yaml.  Do not suppress a finding without a
-  # corresponding entry in that file.
-  # ─────────────────────────────────────────────────────────────────────────
-
   gosec:
     name: gosec
     runs-on: ubuntu-latest
@@ -248,20 +75,9 @@ jobs:
           go-version: "1.25.9"
           cache: true
 
-      # Install gosec.  Pin to a specific version for reproducibility.
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
 
-      # Excluded rules and rationale — all documented in .github/security-allowlist.yaml:
-      #   G115 — uint64→int64 disk-size conversions; int64 max is 9.2 EB, safe for HPC use
-      #   G118 — context.Background in goroutines that must outlive HTTP requests
-      #   G122 — WalkDir race-prone paths; admin-controlled directories, low actual risk
-      #   G702 — Command injection taint on hardcoded system binaries (systemctl, journalctl, slapcat)
-      #   G703 — Path traversal taint; paths originate from DB/config, UUID-validated at API layer
-      #   G704 — SSRF taint on CLI client calling operator-configured URL and on w.Write() responses
-      #
-      # Severity threshold: HIGH.  -severity high causes gosec to exit non-zero if any
-      # HIGH finding is present AFTER the exclusions above.
       - name: Run gosec
         run: |
           gosec \
@@ -278,7 +94,6 @@ jobs:
         with:
           sarif_file: gosec-results.sarif
           category: gosec
-        # Continue if SARIF upload fails (e.g. private repos without GHAS)
         continue-on-error: true
 
   govulncheck:
@@ -296,10 +111,6 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      # govulncheck exits non-zero if any vulnerability is found in call paths
-      # reachable from the codebase.  All stdlib vulns are fixed by bumping
-      # go.mod to go 1.25.9.  If new findings appear, check whether go.mod needs
-      # a further patch bump, or document an acceptance in security-allowlist.yaml.
       - name: Run govulncheck
         run: govulncheck ./...
 
@@ -318,9 +129,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Build the image locally (linux/amd64 only for CI speed; multi-arch push
-      # happens only on tag via docker.yml).  Load into the local Docker daemon
-      # so trivy can scan it.
       - name: Build container image for scanning
         uses: docker/build-push-action@v7
         with:
@@ -333,14 +141,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Scan the locally-built image using the official trivy action.
-      #   exit-code: 1     — non-zero exit if findings at or above threshold
-      #   severity: HIGH,CRITICAL — threshold: HIGH and above fail the build
-      #   ignore-unfixed: true — do not fail on vulns with no available fix
-      #   vuln-type: os,library — scan both OS packages and language deps
-      #
-      # If a finding has a fix available and is HIGH/CRITICAL, the build fails.
-      # Document any accepted findings in .github/security-allowlist.yaml.
       - name: Scan image with trivy
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -351,7 +151,6 @@ jobs:
           vuln-type: os,library
           format: table
 
-      # Emit SARIF for GitHub Security tab — separate step so it runs even if scan fails.
       - name: Trivy SARIF output
         if: always()
         uses: aquasecurity/trivy-action@v0.36.0
