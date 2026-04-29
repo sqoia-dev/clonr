@@ -101,7 +101,7 @@ export function CommandPalette({ open, onClose }: Props) {
 
   function goTo(path: string) {
     onClose()
-    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined } })
+    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, tag: undefined } })
     else if (path === "/images") navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } })
     else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined } })
     else navigate({ to: "/settings" })
@@ -121,6 +121,7 @@ export function CommandPalette({ open, onClose }: Props) {
         openNode: nodeId,
         reimage: "1",
         addNode: undefined,
+        tag: undefined,
       },
     })
   }
@@ -129,7 +130,7 @@ export function CommandPalette({ open, onClose }: Props) {
     onClose()
     navigate({
       to: "/nodes",
-      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: "1" },
+      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: "1", tag: undefined },
     })
   }
 
@@ -141,7 +142,7 @@ export function CommandPalette({ open, onClose }: Props) {
   function visitRecent(entity: RecentEntity) {
     onClose()
     if (entity.kind === "node") {
-      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined, addNode: undefined } })
+      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined, addNode: undefined, tag: undefined } })
     } else {
       navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } })
     }
@@ -153,7 +154,7 @@ export function CommandPalette({ open, onClose }: Props) {
     recordRecentEntity({ kind: "node", id: nodeId, label: nodeLabel })
     navigate({
       to: "/nodes",
-      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: nodeId, reimage: undefined, addNode: undefined },
+      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: nodeId, reimage: undefined, addNode: undefined, tag: undefined },
     })
   }
 

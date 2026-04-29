@@ -53,7 +53,7 @@ const indexRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined } })
+    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, tag: undefined } })
   },
 })
 
