@@ -21,7 +21,6 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet"
 import { StatusDot } from "@/components/StatusDot"
-import { useAuth } from "@/contexts/auth"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
@@ -37,7 +36,6 @@ interface NodeSearch {
 }
 
 export function NodesPage() {
-  const { apiKey } = useAuth()
   const { setStatus } = useConnection()
   const navigate = useNavigate()
   const search = useSearch({ strict: false }) as NodeSearch
@@ -70,7 +68,7 @@ export function NodesPage() {
       if (q) params.set("search", q)
       if (sortCol) params.set("sort", sortCol)
       if (sortDir) params.set("dir", sortDir)
-      return apiFetch<ListNodesResponse>(`/api/v1/nodes?${params}`, apiKey)
+      return apiFetch<ListNodesResponse>(`/api/v1/nodes?${params}`)
     },
     refetchInterval: 30000,
     staleTime: 10000,
@@ -78,13 +76,12 @@ export function NodesPage() {
 
   // SSE subscription for live updates
   React.useEffect(() => {
-    if (!apiKey) return
     let es: EventSource | null = null
     let reconnectTimer: ReturnType<typeof setTimeout>
 
     function connect() {
       const url = sseUrl(`/api/v1/logs/stream?component=node-heartbeat`)
-      es = new EventSource(url)
+      es = new EventSource(url, { withCredentials: true })
 
       es.onopen = () => {
         setStatus("connected")
@@ -107,7 +104,7 @@ export function NodesPage() {
       es?.close()
       setStatus("disconnected")
     }
-  }, [apiKey, refetch, setStatus])
+  }, [refetch, setStatus])
 
   // Update connection status when query has data
   React.useEffect(() => {

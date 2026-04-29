@@ -168,14 +168,14 @@ Sprint 1 shipped with API-key-paste login. That's wrong UX for an end-user web a
 
 **Web (re-skin Sprint 1 auth):**
 
-- [ ] **AUTH0-2** Delete the API-key-paste login screen + `localStorage` token store from Sprint 1
-- [ ] **AUTH0-3** New `<Login/>` view: username + password form, `POST /api/v1/auth/login` with `credentials: "include"`. Show server error messages verbatim (don't reinvent password rules client-side).
-- [ ] **AUTH0-4** Global fetch wrapper: every request includes `credentials: "include"`; on 401 → flip session state to `unauthed` and re-mount `<Login/>`. No `X-Api-Key`, no `Authorization` headers from the web UI.
-- [ ] **AUTH0-5** `useSession()` hook: calls `GET /api/v1/auth/me` on mount; states = `loading | authed(user) | unauthed | setup_required`. App shell consults this before rendering protected content.
-- [ ] **AUTH0-6** First-run gate: before `<Login/>`, fetch `/api/v1/auth/status`. If `!has_admin`, render a "Setup required" page with paste-ready `clustr-serverd bootstrap-admin` snippet (host-local CLI only — never expose bootstrap over the web).
-- [ ] **AUTH0-7** `<SetPassword/>` view, shown when login response has `force_password_change: true` (or the `clustr_force_password_change` cookie is set). Posts to `POST /api/v1/auth/set-password`.
-- [ ] **AUTH0-8** Logout: `POST /api/v1/auth/logout` → flip session state to `unauthed`. Logout button lives in Settings (per SET-5) AND in the topbar user menu.
-- [ ] **AUTH0-9** Vite dev proxy to clustr-serverd so cookies work cross-origin in dev (don't loosen `SameSite=Strict`).
+- [x] **AUTH0-2** Delete the API-key-paste login screen + `localStorage` token store from Sprint 1
+- [x] **AUTH0-3** New `<Login/>` view: username + password form, `POST /api/v1/auth/login` with `credentials: "include"`. Show server error messages verbatim (don't reinvent password rules client-side).
+- [x] **AUTH0-4** Global fetch wrapper: every request includes `credentials: "include"`; on 401 → flip session state to `unauthed` and re-mount `<Login/>`. No `X-Api-Key`, no `Authorization` headers from the web UI.
+- [x] **AUTH0-5** `useSession()` hook: calls `GET /api/v1/auth/me` on mount; states = `loading | authed(user) | unauthed | setup_required`. App shell consults this before rendering protected content.
+- [x] **AUTH0-6** First-run gate: before `<Login/>`, fetch `/api/v1/auth/status`. If `!has_admin`, render a "Setup required" page with paste-ready `clustr-serverd bootstrap-admin` snippet (host-local CLI only — never expose bootstrap over the web).
+- [x] **AUTH0-7** `<SetPassword/>` view, shown when login response has `force_password_change: true` (or the `clustr_force_password_change` cookie is set). Posts to `POST /api/v1/auth/set-password`.
+- [x] **AUTH0-8** Logout: `POST /api/v1/auth/logout` → flip session state to `unauthed`. Logout button lives in Settings (per SET-5) AND in the topbar user menu.
+- [x] **AUTH0-9** Vite dev proxy to clustr-serverd so cookies work cross-origin in dev (don't loosen `SameSite=Strict`).
 
 **Auth anti-patterns (do not do any of these):**
 

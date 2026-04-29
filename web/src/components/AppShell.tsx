@@ -1,18 +1,20 @@
 import * as React from "react"
 import { Link, useRouterState } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon } from "lucide-react"
+import { Server, Image, Activity, Settings, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CommandPalette } from "@/components/CommandPalette"
 import { useTheme } from "@/contexts/theme"
 import { useConnection } from "@/contexts/connection"
+import { useSession } from "@/contexts/auth"
+import { apiFetch } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 const navItems = [
   { label: "Nodes", path: "/nodes", icon: Server, active: true },
-  { label: "Images", path: "/images", icon: Image, active: false },
-  { label: "Activity", path: "/activity", icon: Activity, active: false },
-  { label: "Settings", path: "/settings", icon: Settings, active: false },
+  { label: "Images", path: "/images", icon: Image, active: true },
+  { label: "Activity", path: "/activity", icon: Activity, active: true },
+  { label: "Settings", path: "/settings", icon: Settings, active: true },
 ]
 
 const connectionConfig = {
@@ -24,10 +26,15 @@ const connectionConfig = {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = React.useState(false)
   const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [userMenuOpen, setUserMenuOpen] = React.useState(false)
   const { theme, toggle } = useTheme()
   const { status } = useConnection()
+  const { session, setUnauthed } = useSession()
   const routerState = useRouterState()
   const currentPath = routerState.location.pathname
+
+  const username =
+    session.status === "authed" ? (session.user.username ?? session.user.sub) : ""
 
   React.useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -39,6 +46,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [])
+
+  // Close user menu on outside click.
+  const userMenuRef = React.useRef<HTMLDivElement>(null)
+  React.useEffect(() => {
+    if (!userMenuOpen) return
+    function onClick(e: MouseEvent) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", onClick)
+    return () => document.removeEventListener("mousedown", onClick)
+  }, [userMenuOpen])
+
+  async function handleLogout() {
+    try {
+      await apiFetch("/api/v1/auth/logout", { method: "POST" })
+    } catch {
+      // Ignore errors — clear local state regardless.
+    }
+    setUnauthed()
+    setUserMenuOpen(false)
+  }
 
   const conn = connectionConfig[status]
 
@@ -67,32 +97,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.path}
                 to={item.path}
-                disabled={!item.active}
                 className={cn(
                   "flex items-center gap-3 rounded-md px-2 py-2 text-sm transition-colors",
                   isActive
                     ? "bg-secondary text-foreground"
-                    : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
-                  !item.active && "pointer-events-none opacity-40"
+                    : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
                 )}
               >
                 <item.icon className="h-4 w-4 shrink-0" />
                 {!collapsed && <span>{item.label}</span>}
               </Link>
             )
-            if (!item.active && collapsed) {
+            if (collapsed) {
               return (
                 <Tooltip key={item.path}>
                   <TooltipTrigger asChild>{el}</TooltipTrigger>
-                  <TooltipContent side="right">Sprint 2</TooltipContent>
-                </Tooltip>
-              )
-            }
-            if (!item.active) {
-              return (
-                <Tooltip key={item.path}>
-                  <TooltipTrigger asChild>{el}</TooltipTrigger>
-                  <TooltipContent side="right">{item.label} — Sprint 2</TooltipContent>
+                  <TooltipContent side="right">{item.label}</TooltipContent>
                 </Tooltip>
               )
             }
@@ -143,6 +163,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" size="icon" onClick={toggle}>
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
+
+            {/* User menu */}
+            <div className="relative" ref={userMenuRef}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 text-xs text-muted-foreground"
+                onClick={() => setUserMenuOpen((v) => !v)}
+              >
+                <User className="h-3.5 w-3.5" />
+                {username && <span className="max-w-24 truncate">{username}</span>}
+              </Button>
+
+              {userMenuOpen && (
+                <div className="absolute right-0 top-full mt-1 w-40 rounded-md border border-border bg-card shadow-md z-50">
+                  <button
+                    className="flex w-full items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:bg-secondary/50 hover:text-foreground rounded-md"
+                    onClick={handleLogout}
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 

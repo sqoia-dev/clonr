@@ -1,12 +1,11 @@
 import { createRouter, createRoute, createRootRoute, redirect, Outlet } from "@tanstack/react-router"
 import { AppShell } from "@/components/AppShell"
 import { LoginPage } from "@/routes/login"
+import { SetupPage } from "@/routes/setup"
+import { SetPasswordPage } from "@/routes/set-password"
 import { NodesPage } from "@/routes/nodes"
 import { StubPage } from "@/routes/stub"
-
-function getApiKey() {
-  return localStorage.getItem("clustr.apiKey")
-}
+import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
   component: Outlet,
@@ -16,26 +15,33 @@ const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
   component: LoginPage,
-  beforeLoad: () => {
-    if (getApiKey()) {
-      throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined } })
-    }
-  },
 })
 
+const setupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/setup",
+  component: SetupPage,
+})
+
+const setPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/set-password",
+  component: SetPasswordPage,
+})
+
+// The protected layout wraps all authenticated routes in SessionGate, which
+// redirects to /login when unauthed, /setup when setup_required, and
+// /set-password when force_password_change cookie is present.
 const protectedLayout = createRoute({
   getParentRoute: () => rootRoute,
   id: "protected",
   component: () => (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <SessionGate>
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </SessionGate>
   ),
-  beforeLoad: () => {
-    if (!getApiKey()) {
-      throw redirect({ to: "/login" })
-    }
-  },
 })
 
 const indexRoute = createRoute({
@@ -81,6 +87,8 @@ const settingsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
+  setupRoute,
+  setPasswordRoute,
   protectedLayout.addChildren([
     indexRoute,
     nodesRoute,
