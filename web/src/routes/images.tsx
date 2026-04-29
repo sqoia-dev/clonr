@@ -89,7 +89,7 @@ export function ImagesPage() {
   const queryClient = useQueryClient()
   const imageQueryKey = ["images", q, sortCol, sortDir]
 
-  const { data } = useQuery<ListImagesResponse>({
+  const { data, isLoading: imagesLoading, isError: imagesError } = useQuery<ListImagesResponse>({
     queryKey: imageQueryKey,
     queryFn: () => {
       const params = new URLSearchParams()
@@ -197,27 +197,38 @@ export function ImagesPage() {
           </div>
 
           <TabsContent value={tab} className="flex-1 overflow-auto mt-0">
-            {displayImages.length === 0 ? (
+            {imagesLoading ? (
+              <div className="p-4 space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="h-10 w-full rounded bg-secondary/40 animate-pulse" />
+                ))}
+              </div>
+            ) : imagesError ? (
+              <div className="flex items-center justify-center h-40">
+                <p className="text-sm text-destructive">Failed to load images. Reload to retry.</p>
+              </div>
+            ) : displayImages.length === 0 ? (
               <EmptyState />
             ) : (
               <Table>
+                <caption className="sr-only">Cluster base images and bundles</caption>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>
+                    <TableHead scope="col">
                       <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("name")}>
                         Name <SortIcon col="name" />
                       </button>
                     </TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>
+                    <TableHead scope="col">Status</TableHead>
+                    <TableHead scope="col">
                       <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("version")}>
                         Version <SortIcon col="version" />
                       </button>
                     </TableHead>
-                    <TableHead>Size</TableHead>
-                    <TableHead>SHA256</TableHead>
-                    {advanced && <TableHead>OS / Arch</TableHead>}
-                    <TableHead>
+                    <TableHead scope="col">Size</TableHead>
+                    <TableHead scope="col">SHA256</TableHead>
+                    {advanced && <TableHead scope="col">OS / Arch</TableHead>}
+                    <TableHead scope="col">
                       <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("created_at")}>
                         Created <SortIcon col="created_at" />
                       </button>

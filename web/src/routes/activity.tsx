@@ -67,7 +67,7 @@ export function ActivityPage() {
     })
   }
 
-  const { data, refetch, isFetching } = useQuery<AuditQueryResponse>({
+  const { data, refetch, isFetching, isLoading: actLoading, isError: actError } = useQuery<AuditQueryResponse>({
     queryKey: ["activity", q, kind],
     queryFn: () => {
       const params = new URLSearchParams({ limit: String(LIMIT) })
@@ -145,17 +145,28 @@ export function ActivityPage() {
         className="flex-1 overflow-auto"
         onScroll={handleScroll}
       >
-        {filtered.length === 0 ? (
+        {actLoading ? (
+          <div className="p-4 space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="h-8 w-full rounded bg-secondary/40 animate-pulse" />
+            ))}
+          </div>
+        ) : actError ? (
+          <div className="flex items-center justify-center h-40">
+            <p className="text-sm text-destructive">Failed to load activity. Reload to retry.</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <EmptyState />
         ) : (
           <Table>
+            <caption className="sr-only">Cluster activity log</caption>
             <TableHeader>
               <TableRow>
-                <TableHead>Time</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Actor</TableHead>
-                <TableHead>Action</TableHead>
-                <TableHead>Subject</TableHead>
+                <TableHead scope="col">Time</TableHead>
+                <TableHead scope="col">Kind</TableHead>
+                <TableHead scope="col">Actor</TableHead>
+                <TableHead scope="col">Action</TableHead>
+                <TableHead scope="col">Subject</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

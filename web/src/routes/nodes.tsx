@@ -194,9 +194,10 @@ export function NodesPage() {
           <EmptyState />
         ) : (
           <Table>
+            <caption className="sr-only">Registered cluster nodes</caption>
             <TableHeader>
               <TableRow>
-                <TableHead>
+                <TableHead scope="col">
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("hostname")}
@@ -204,7 +205,7 @@ export function NodesPage() {
                     Hostname <SortIcon col="hostname" />
                   </button>
                 </TableHead>
-                <TableHead>
+                <TableHead scope="col">
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("status")}
@@ -212,8 +213,8 @@ export function NodesPage() {
                     Status <SortIcon col="status" />
                   </button>
                 </TableHead>
-                <TableHead>Role / Tags</TableHead>
-                <TableHead>
+                <TableHead scope="col">Role / Tags</TableHead>
+                <TableHead scope="col">
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("last_deploy")}
@@ -221,11 +222,11 @@ export function NodesPage() {
                     Last heartbeat <SortIcon col="last_deploy" />
                   </button>
                 </TableHead>
-                <TableHead>Image</TableHead>
+                <TableHead scope="col">Image</TableHead>
                 {advanced && (
                   <>
-                    <TableHead>MAC</TableHead>
-                    <TableHead>Firmware</TableHead>
+                    <TableHead scope="col">MAC</TableHead>
+                    <TableHead scope="col">Firmware</TableHead>
                   </>
                 )}
               </TableRow>

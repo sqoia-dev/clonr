@@ -65,7 +65,7 @@ function APIKeysSection() {
   const [copiedKey, setCopiedKey] = React.useState(false)
   const [showKey, setShowKey] = React.useState(false)
 
-  const { data } = useQuery<ListAPIKeysResponse>({
+  const { data, isLoading: keysLoading, isError: keysError } = useQuery<ListAPIKeysResponse>({
     queryKey: ["api-keys"],
     queryFn: () => apiFetch<ListAPIKeysResponse>("/api/v1/admin/api-keys"),
     staleTime: 10000,
@@ -77,28 +77,48 @@ function APIKeysSection() {
         method: "POST",
         body: JSON.stringify({ scope: "admin", label }),
       }),
-    onSuccess: (res) => {
+    // POL-5: Optimistic insert — add a placeholder key; replace on success, rollback on error.
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ["api-keys"] })
+      const prev = qc.getQueryData<ListAPIKeysResponse>(["api-keys"])
+      return { prev }
+    },
+    onSuccess: (res, _v, ctx) => {
+      // Roll back the placeholder, then let invalidation populate the real entry.
+      if (ctx?.prev) qc.setQueryData(["api-keys"], ctx.prev)
       qc.invalidateQueries({ queryKey: ["api-keys"] })
       setNewRawKey(res.key)
       setLabel("")
       setShowCreate(false)
     },
-    onError: (err) => {
-      toast({ variant: "destructive", title: "Failed to create key", description: String(err) })
+    onError: (_err, _v, ctx) => {
+      // POL-5: rollback any optimistic state.
+      if (ctx?.prev) qc.setQueryData(["api-keys"], ctx.prev)
+      toast({ variant: "destructive", title: "Failed to create key" })
     },
   })
 
   const revokeMutation = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/v1/admin/api-keys/${id}`, { method: "DELETE" }),
+    // POL-5: Optimistic remove — remove from list immediately, rollback on error.
+    onMutate: async (id: string) => {
+      await qc.cancelQueries({ queryKey: ["api-keys"] })
+      const prev = qc.getQueryData<ListAPIKeysResponse>(["api-keys"])
+      qc.setQueryData<ListAPIKeysResponse>(["api-keys"], (old) =>
+        old ? { ...old, api_keys: old.api_keys.filter((k) => k.id !== id) } : old
+      )
+      return { prev }
+    },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["api-keys"] })
       setRevokeConfirm(null)
       setRevokeLabel("")
       toast({ title: "API key revoked" })
     },
-    onError: (err) => {
-      toast({ variant: "destructive", title: "Failed to revoke key", description: String(err) })
+    onError: (_err, _id, ctx) => {
+      // POL-5: rollback.
+      if (ctx?.prev) qc.setQueryData(["api-keys"], ctx.prev)
+      toast({ variant: "destructive", title: "Failed to revoke key" })
     },
   })
 
@@ -173,8 +193,12 @@ function APIKeysSection() {
         </Button>
       )}
 
+      {/* POL-7: Loading / error / empty states */}
+      {keysLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {keysError && <p className="text-sm text-destructive">Failed to load API keys. Reload to retry.</p>}
+
       {/* Keys list */}
-      {keys.length === 0 ? (
+      {!keysLoading && !keysError && keys.length === 0 ? (
         <p className="text-sm text-muted-foreground">No API keys. Create one to access the API programmatically.</p>
       ) : (
         <div className="space-y-2">

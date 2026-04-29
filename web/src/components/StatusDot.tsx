@@ -27,23 +27,27 @@ type Props =
   | { state: NodeState; label?: string; className?: string }
   | { state: GenericState; label: string; className?: string }
 
+// A11Y-3: The colored dot is decorative (aria-hidden). The visible text label
+// is the accessible name — status is never conveyed by color alone.
 export function StatusDot({ state, label, className }: Props) {
   // Check if it's a NodeState key.
   if (state in nodeStateConfig) {
     const cfg = nodeStateConfig[state as NodeState]
+    const displayLabel = label ?? cfg.label
     return (
       <span className={cn("inline-flex items-center gap-1.5 text-xs", className)}>
-        <span className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
-        {label ?? cfg.label}
+        <span aria-hidden="true" className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
+        {displayLabel}
       </span>
     )
   }
   // Generic state.
   const cfg = genericStateConfig[state as GenericState]
+  const displayLabel = label ?? state
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-xs", className)}>
-      <span className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
-      {label ?? state}
+      <span aria-hidden="true" className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
+      {displayLabel}
     </span>
   )
 }

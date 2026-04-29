@@ -307,23 +307,23 @@ The first-run UX should be: run one command, open the web UI, type a memorable d
 
 #### Failure-mode polish
 
-- [ ] **POL-4** Global error boundary at the route level — catches render errors, shows a recovery card with "Reload" + the last 5 user actions (no PII / no payload data). Don't show stack traces unless `?debug=1`.
-- [ ] **POL-5** Optimistic update rollback on every mutation that does one. Reimage already does this; audit Settings → API key create/revoke and GPG add/delete and add the same pattern.
-- [ ] **POL-6** Network failure UX — when SSE disconnects and can't reconnect for >30s, the topbar connection indicator turns red and a one-line banner appears: "Live updates paused. Click to retry." (No spinner-on-failure; failure is its own state.)
-- [ ] **POL-7** Empty / loading / error states are explicitly rendered for every list. No accidental "blank screen looks like empty list" cases.
+- [x] **POL-4** Global error boundary at the route level — catches render errors, shows a recovery card with "Reload" + the last 5 user actions (no PII / no payload data). Don't show stack traces unless `?debug=1`.
+- [x] **POL-5** Optimistic update rollback on every mutation that does one. Reimage already does this; audit Settings → API key create/revoke and GPG add/delete and add the same pattern.
+- [x] **POL-6** Network failure UX — when SSE disconnects and can't reconnect for >30s, the topbar connection indicator turns red and a one-line banner appears: "Live updates paused. Click to retry." (No spinner-on-failure; failure is its own state.)
+- [x] **POL-7** Empty / loading / error states are explicitly rendered for every list. No accidental "blank screen looks like empty list" cases.
 
 #### Accessibility — minimum bar
 
-- [ ] **A11Y-1** All interactive elements keyboard-reachable; no focus traps; skip-to-main link in shell.
-- [ ] **A11Y-2** Color contrast on dark + light themes meets WCAG AA. Audit the OKLCH palette; bump where needed.
-- [ ] **A11Y-3** Status indicators have text or aria-label, not color-only (already a UI/UX principle, audit & fix any gaps).
-- [ ] **A11Y-4** Tables have proper `<th scope>` + caption.
+- [x] **A11Y-1** All interactive elements keyboard-reachable; no focus traps; skip-to-main link in shell.
+- [x] **A11Y-2** Color contrast on dark + light themes meets WCAG AA. Audit the OKLCH palette; bump where needed.
+- [x] **A11Y-3** Status indicators have text or aria-label, not color-only (already a UI/UX principle, audit & fix any gaps).
+- [x] **A11Y-4** Tables have proper `<th scope>` + caption.
 
 #### Tests
 
-- [ ] **TEST-3** Vitest: tests for the new fetch wrapper 401 handling + the SSE reconnect logic.
-- [ ] **TEST-4** Vitest: tests for the reimage flow's confirm-gate (typed ID match) and rollback on POST failure.
-- [ ] **TEST-5** Server: Go tests for the new GPG endpoints + the SSE image channel.
+- [x] **TEST-3** Vitest: tests for the new fetch wrapper 401 handling + the SSE reconnect logic.
+- [x] **TEST-4** Vitest: tests for the reimage flow's confirm-gate (typed ID match) and rollback on POST failure.
+- [x] **TEST-5** Server: Go tests for the new GPG endpoints + the SSE image channel.
 
 ### Out of scope (Sprint 4+)
 
