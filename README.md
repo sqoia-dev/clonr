@@ -10,30 +10,38 @@ Register nodes, manage base images and bundles, and reimage machines from a sing
 
 ## Install
 
-### Rocky / RHEL / Fedora
+clustr targets RHEL-family distros (Rocky Linux, RHEL, AlmaLinux). Each EL major
+version has its own signed yum/dnf repository.
+
+### Rocky / RHEL / AlmaLinux 9
 
 ```sh
 sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
-sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/clustr.repo
+sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo
 sudo dnf install clustr-serverd
 ```
 
-### Debian / Ubuntu
-
-```sh
-curl -fsSL https://pkg.sqoia.dev/clustr/clustr.gpg | sudo tee /etc/apt/keyrings/clustr.gpg >/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/clustr.gpg] https://pkg.sqoia.dev/clustr/deb stable main" | sudo tee /etc/apt/sources.list.d/clustr.list
-sudo apt update && sudo apt install clustr-serverd
-```
-
-### CLI only (any distro)
+### Rocky / RHEL / AlmaLinux 8
 
 ```sh
 sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
-sudo dnf install clustr   # Rocky/RHEL/Fedora
+sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el8/clustr.repo
+sudo dnf install clustr-serverd
+```
 
-# or
-sudo apt install clustr   # Debian/Ubuntu (after adding the repo above)
+### Rocky / RHEL / AlmaLinux 10
+
+```sh
+sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el10/clustr.repo
+sudo dnf install clustr-serverd
+```
+
+### CLI only
+
+```sh
+# Add the repo for your EL version first (see above), then:
+sudo dnf install clustr
 ```
 
 ## Quick start

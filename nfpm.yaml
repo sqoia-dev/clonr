@@ -1,18 +1,30 @@
-# nfpm.yaml — package configuration for clustr RPM + DEB distribution.
+# nfpm.yaml — package configuration for clustr-serverd RPM distribution.
 #
 # Usage (in CI or locally after building binaries):
 #
-#   # Server package
-#   VERSION=1.13.0 ARCH=amd64 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
-#   VERSION=1.13.0 ARCH=amd64 nfpm pkg --config nfpm.yaml --packager deb --target dist/
+#   # EL9 x86_64
+#   VERSION=1.13.0 ARCH=amd64 EL_RELEASE=el9 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
 #
-#   # CLI package — use nfpm-cli.yaml
+#   # EL8 x86_64
+#   VERSION=1.13.0 ARCH=amd64 EL_RELEASE=el8 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+#
+#   # EL10 x86_64
+#   VERSION=1.13.0 ARCH=amd64 EL_RELEASE=el10 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
 #
 # Environment variables consumed:
-#   VERSION  — semver without leading 'v' (e.g. 1.13.0). Set from git tag in CI.
-#   ARCH     — target architecture: amd64 or arm64.
+#   VERSION     — semver without leading 'v' (e.g. 1.13.0). Set from git tag in CI.
+#   ARCH        — target architecture: amd64 or arm64.
+#   EL_RELEASE  — el8, el9, or el10. Written into the RPM Release field so that
+#                 dnf metadata is correct per repo subdir.
 #
-# Requires binaries to be built first:
+# The Go binary is statically linked (CGO_ENABLED=0) and runs identically on
+# EL8, EL9, and EL10. We build one binary and repackage it three times with
+# the correct Release tag so the RPM filename and dnf metadata are accurate:
+#   clustr-serverd-1.13.0-1.el9.x86_64.rpm
+#   clustr-serverd-1.13.0-1.el8.x86_64.rpm
+#   clustr-serverd-1.13.0-1.el10.x86_64.rpm
+#
+# Requires binary to be built first:
 #   clustr-serverd-linux-${ARCH}  (server binary)
 #
 # See nfpm-cli.yaml for the clustr CLI package.
@@ -22,7 +34,7 @@ arch: "${ARCH}"
 platform: linux
 version: "${VERSION}"
 version_schema: semver
-release: 1
+release: "1.${EL_RELEASE}"
 section: admin
 priority: optional
 maintainer: Sqoia Labs <hello@sqoia.dev>
@@ -34,15 +46,9 @@ vendor: Sqoia Labs
 homepage: https://github.com/sqoia-dev/clustr
 license: MIT
 
-# RPM-specific metadata
 rpm:
   group: System Environment/Daemons
   summary: clustr server — HPC node cloning and image management
-
-# Debian-specific metadata
-deb:
-  fields:
-    Depends: systemd
 
 contents:
   # Server binary
@@ -61,8 +67,8 @@ contents:
       owner: root
       group: root
 
-  # Default environment config — marked as config so package managers
-  # do not overwrite operator edits on upgrade (noreplace for RPM; conffile for DEB)
+  # Default environment config — marked as config so rpm does not overwrite
+  # operator edits on upgrade (noreplace behaviour).
   - src: deploy/clustr-serverd.conf
     dst: /etc/clustr/clustr-serverd.conf
     type: config|noreplace
@@ -72,7 +78,7 @@ contents:
       group: root
 
   # Data directories — nfpm creates these as empty dirs owned by root;
-  # the post-install script chowns them to the clustr user.
+  # the post-install script fixes group ownership to the clustr group.
   - dst: /var/lib/clustr
     type: dir
     file_info:

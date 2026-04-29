@@ -8,13 +8,9 @@ on:
 jobs:
   lab-validate:
     name: Lab Validation Gate (vm201 BIOS + vm202 UEFI)
-    # Calls lab-validate.yml as a reusable workflow.
-    #
     # INFORMATIONAL (non-blocking): GitHub-hosted runners cannot reach the
-    # private lab network (192.168.1.x).  Failures here do NOT block release
-    # publication — this job is intentionally removed from `release` needs.
-    # See lab-validate.yml for the upgrade path to a self-hosted runner.
-    # S1-14 / BUILD-5.
+    # private lab network (192.168.1.x). Failures here do NOT block release
+    # publication. See lab-validate.yml for the upgrade path to a self-hosted runner.
     uses: ./.github/workflows/lab-validate.yml
     secrets: inherit
 
@@ -60,18 +56,24 @@ jobs:
       - name: go test
         run: go test ./... -v -count=1 -timeout 120s
 
+  # ---------------------------------------------------------------------------
+  # Build CLI binary for each arch, then package as RPM for each EL target.
+  #
+  # EL8 / EL9 / EL10 each get their own subdir on pkg.sqoia.dev with the
+  # correct Release field (1.el8 / 1.el9 / 1.el10) in the RPM filename.
+  # The Go static binary is identical across EL targets — same bits, three
+  # packages, so dnf metadata is correct per repo subdir.
+  # ---------------------------------------------------------------------------
   build-client:
-    name: Build client (${{ matrix.goos }}/${{ matrix.goarch }})
+    name: Build client (linux/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     needs: test
     strategy:
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
+          - goarch: amd64
             nfpm_arch: amd64
-          - goos: linux
-            goarch: arm64
+          - goarch: arm64
             nfpm_arch: arm64
     steps:
       - uses: actions/checkout@v5
@@ -85,97 +87,81 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
             go build -trimpath \
               -ldflags="-s -w -X main.version=${TAG}" \
-              -o clustr-${{ matrix.goos }}-${{ matrix.goarch }} \
+              -o clustr-linux-${{ matrix.goarch }} \
               ./cmd/clustr
 
-      - name: SHA256 checksum
-        run: sha256sum clustr-${{ matrix.goos }}-${{ matrix.goarch }} > clustr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+      - name: SHA256 checksum (binary)
+        run: sha256sum clustr-linux-${{ matrix.goarch }} > clustr-linux-${{ matrix.goarch }}.sha256
 
-      # Install nfpm from release tarball — no Go module overhead
-      - name: Install nfpm
+      - name: Install nfpm + rpm tools
         run: |
           NFPM_VERSION=2.41.4
           curl -fsSL \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xz nfpm
-          chmod +x nfpm
-          mv nfpm /usr/local/bin/nfpm
+          chmod +x nfpm && mv nfpm /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends rpm
           nfpm --version
 
-      # Import GPG key for package signing
       - name: Import GPG signing key
         env:
           CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
           echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
-          # Pre-configure gpg-agent so rpmsign can sign non-interactively
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye || true
 
-      - name: Build CLI RPM
+      - name: Build and sign CLI RPMs (el8 / el9 / el10)
         env:
           VERSION: ${{ github.ref_name }}
           ARCH: ${{ matrix.nfpm_arch }}
           CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
-          # Strip leading 'v' from tag for package version
+          set -euo pipefail
           PKG_VERSION="${VERSION#v}"
-          VERSION="${PKG_VERSION}" ARCH="${ARCH}" \
-            nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
-
-      - name: Sign CLI RPM
-        env:
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
-        run: |
-          # Get key fingerprint from the imported key
-          KEY_FP=$(gpg --list-keys --with-colons clustr-release@sqoia.dev 2>/dev/null \
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
             | awk -F: '/^fpr:/{print $10; exit}')
+          mkdir -p dist
+
+          for EL in el8 el9 el10; do
+            VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
+              nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
+          done
+
+          # Sign each RPM with gpg --detach-sign (embeds signature in RPM header).
+          # rpmsign requires gpg passphrase via pinentry; we use loopback mode.
           for rpm_file in dist/*.rpm; do
+            echo "Signing: ${rpm_file}"
             echo "${CLUSTR_GPG_PASSPHRASE}" | \
               rpmsign --addsign \
                 --define "_gpg_name ${KEY_FP}" \
                 --define "_gpg_path ${HOME}/.gnupg" \
+                --define "_gpg_digest_algo sha256" \
+                --define "__gpg /usr/bin/gpg" \
                 --define "__gpg_check_password_cmd /bin/true" \
-                --define "__gpg_sign_cmd %{__gpg} gpg --batch --no-tty --passphrase-fd 0 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor <(cat %{__plaintext_filename}) > %{__signature_filename}" \
-                "${rpm_file}" 2>&1 || true
+                --define "__gpg_sign_cmd %{__gpg} gpg --no-tty --batch --passphrase-fd 3 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor < /dev/null 3<<< \"${CLUSTR_GPG_PASSPHRASE}\" --output %{__signature_filename} %{__plaintext_filename}" \
+                "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file} — package still valid, signature optional at this stage"
           done
 
-      - name: Build CLI DEB
-        env:
-          VERSION: ${{ github.ref_name }}
-          ARCH: ${{ matrix.nfpm_arch }}
-        run: |
-          PKG_VERSION="${VERSION#v}"
-          VERSION="${PKG_VERSION}" ARCH="${ARCH}" \
-            nfpm pkg --config nfpm-cli.yaml --packager deb --target dist/
-
-      - name: Sign CLI DEB
-        env:
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
-        run: |
-          KEY_FP=$(gpg --list-keys --with-colons clustr-release@sqoia.dev 2>/dev/null \
-            | awk -F: '/^fpr:/{print $10; exit}')
-          for deb_file in dist/*.deb; do
-            dpkg-sig --sign builder -k "${KEY_FP}" "${deb_file}" || true
-          done
-
-      - name: SHA256 checksums for packages
-        run: |
-          (cd dist && sha256sum *.rpm *.deb >> ../checksums-cli-${{ matrix.nfpm_arch }}.txt) 2>/dev/null || true
+      - name: SHA256 checksums (packages)
+        run: cd dist && sha256sum *.rpm > ../checksums-cli-${{ matrix.goarch }}.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: client-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: client-linux-${{ matrix.goarch }}
           path: |
-            clustr-${{ matrix.goos }}-${{ matrix.goarch }}
-            clustr-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+            clustr-linux-${{ matrix.goarch }}
+            clustr-linux-${{ matrix.goarch }}.sha256
             dist/
-            checksums-cli-${{ matrix.nfpm_arch }}.txt
+            checksums-cli-${{ matrix.goarch }}.txt
 
+  # ---------------------------------------------------------------------------
+  # Build server binary for each arch, package as RPM per EL target.
+  # ---------------------------------------------------------------------------
   build-server:
     name: Build server (linux/${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -219,10 +205,7 @@ jobs:
       - name: Build server binary
         env:
           TAG: ${{ github.ref_name }}
-          SLURM_VERSION: ${{ vars.SLURM_VERSION || '' }}
-          BUNDLE_SHA256: ${{ vars.BUNDLE_SHA256 || '' }}
         run: |
-          # Read bundle metadata from versions.yml for ldflags
           SLURM_VER=$(awk '/^slurm:/{in_slurm=1} in_slurm && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/slurm/versions.yml)
           CLUSTR_REL=$(awk '/^clustr_release:/{gsub(/[" ]/, "", $2); print $2; exit}' build/slurm/versions.yml)
           BUNDLE_VER="v${SLURM_VER}-clustr${CLUSTR_REL}"
@@ -241,75 +224,60 @@ jobs:
               -o clustr-serverd-linux-${{ matrix.goarch }} \
               ./cmd/clustr-serverd
 
-      - name: SHA256 checksum
+      - name: SHA256 checksum (binary)
         run: sha256sum clustr-serverd-linux-${{ matrix.goarch }} > clustr-serverd-linux-${{ matrix.goarch }}.sha256
 
-      - name: Install nfpm
+      - name: Install nfpm + rpm tools
         run: |
           NFPM_VERSION=2.41.4
           curl -fsSL \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xz nfpm
-          chmod +x nfpm
-          mv nfpm /usr/local/bin/nfpm
+          chmod +x nfpm && mv nfpm /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends rpm
           nfpm --version
 
       - name: Import GPG signing key
         env:
           CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
           echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye || true
 
-      - name: Build server RPM
+      - name: Build and sign server RPMs (el8 / el9 / el10)
         env:
           VERSION: ${{ github.ref_name }}
           ARCH: ${{ matrix.nfpm_arch }}
-        run: |
-          PKG_VERSION="${VERSION#v}"
-          VERSION="${PKG_VERSION}" ARCH="${ARCH}" \
-            nfpm pkg --config nfpm.yaml --packager rpm --target dist/
-
-      - name: Sign server RPM
-        env:
           CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
-          KEY_FP=$(gpg --list-keys --with-colons clustr-release@sqoia.dev 2>/dev/null \
+          set -euo pipefail
+          PKG_VERSION="${VERSION#v}"
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
             | awk -F: '/^fpr:/{print $10; exit}')
+          mkdir -p dist
+
+          for EL in el8 el9 el10; do
+            VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
+              nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+          done
+
           for rpm_file in dist/*.rpm; do
+            echo "Signing: ${rpm_file}"
             echo "${CLUSTR_GPG_PASSPHRASE}" | \
               rpmsign --addsign \
                 --define "_gpg_name ${KEY_FP}" \
                 --define "_gpg_path ${HOME}/.gnupg" \
+                --define "_gpg_digest_algo sha256" \
+                --define "__gpg /usr/bin/gpg" \
                 --define "__gpg_check_password_cmd /bin/true" \
-                --define "__gpg_sign_cmd %{__gpg} gpg --batch --no-tty --passphrase-fd 0 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor <(cat %{__plaintext_filename}) > %{__signature_filename}" \
-                "${rpm_file}" 2>&1 || true
+                --define "__gpg_sign_cmd %{__gpg} gpg --no-tty --batch --passphrase-fd 3 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor < /dev/null 3<<< \"${CLUSTR_GPG_PASSPHRASE}\" --output %{__signature_filename} %{__plaintext_filename}" \
+                "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file} — package still valid, signature optional at this stage"
           done
 
-      - name: Build server DEB
-        env:
-          VERSION: ${{ github.ref_name }}
-          ARCH: ${{ matrix.nfpm_arch }}
-        run: |
-          PKG_VERSION="${VERSION#v}"
-          VERSION="${PKG_VERSION}" ARCH="${ARCH}" \
-            nfpm pkg --config nfpm.yaml --packager deb --target dist/
-
-      - name: Sign server DEB
-        env:
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
-        run: |
-          KEY_FP=$(gpg --list-keys --with-colons clustr-release@sqoia.dev 2>/dev/null \
-            | awk -F: '/^fpr:/{print $10; exit}')
-          for deb_file in dist/*.deb; do
-            dpkg-sig --sign builder -k "${KEY_FP}" "${deb_file}" || true
-          done
-
-      - name: SHA256 checksums for packages
-        run: |
-          (cd dist && sha256sum *.rpm *.deb >> ../checksums-server-${{ matrix.nfpm_arch }}.txt) 2>/dev/null || true
+      - name: SHA256 checksums (packages)
+        run: cd dist && sha256sum *.rpm > ../checksums-server-${{ matrix.goarch }}.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -318,8 +286,23 @@ jobs:
             clustr-serverd-linux-${{ matrix.goarch }}
             clustr-serverd-linux-${{ matrix.goarch }}.sha256
             dist/
-            checksums-server-${{ matrix.nfpm_arch }}.txt
+            checksums-server-${{ matrix.goarch }}.txt
 
+  # ---------------------------------------------------------------------------
+  # Publish signed RPM repo to pkg.sqoia.dev.
+  #
+  # Repo layout on disk:
+  #   /clustr/RPM-GPG-KEY-clustr   — armored public key for rpm --import
+  #   /clustr/el8/clustr.repo      — dnf repo file for EL8
+  #   /clustr/el8/x86_64/          — RPMs + repodata
+  #   /clustr/el8/aarch64/         — RPMs + repodata
+  #   /clustr/el9/clustr.repo
+  #   /clustr/el9/x86_64/
+  #   /clustr/el9/aarch64/
+  #   /clustr/el10/clustr.repo
+  #   /clustr/el10/x86_64/
+  #   /clustr/el10/aarch64/
+  # ---------------------------------------------------------------------------
   publish-repo:
     name: Publish to pkg.sqoia.dev
     runs-on: ubuntu-latest
@@ -327,122 +310,99 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Download all package artifacts from both build jobs
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: all-artifacts/
 
-      - name: Collect packages
-        run: |
-          mkdir -p repo-staging/rpm/x86_64 repo-staging/rpm/aarch64 \
-                   repo-staging/deb/pool/stable/main/amd64 \
-                   repo-staging/deb/pool/stable/main/arm64
-
-          # RPM packages (nfpm uses x86_64 / aarch64 naming)
-          find all-artifacts -name '*amd64*.rpm' -o -name '*x86_64*.rpm' | \
-            xargs -I{} cp {} repo-staging/rpm/x86_64/ 2>/dev/null || true
-          find all-artifacts -name '*arm64*.rpm' -o -name '*aarch64*.rpm' | \
-            xargs -I{} cp {} repo-staging/rpm/aarch64/ 2>/dev/null || true
-
-          # DEB packages
-          find all-artifacts -name '*amd64*.deb' | \
-            xargs -I{} cp {} repo-staging/deb/pool/stable/main/amd64/ 2>/dev/null || true
-          find all-artifacts -name '*arm64*.deb' | \
-            xargs -I{} cp {} repo-staging/deb/pool/stable/main/arm64/ 2>/dev/null || true
-
-          echo "=== Staged packages ==="
-          find repo-staging -name '*.rpm' -o -name '*.deb'
-
       - name: Install repo tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            createrepo-c dpkg-dev apt-utils gnupg2 dpkg-sig
+          sudo apt-get install -y --no-install-recommends createrepo-c gnupg2
 
-      - name: Import GPG signing key
+      - name: Import GPG signing key and export public key
         env:
           CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
-          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
           echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye || true
-          # Export public key in both armored (RPM) and binary (DEB) formats
-          gpg --armor --export clustr-release@sqoia.dev > repo-staging/RPM-GPG-KEY-clustr
-          gpg --dearmor < repo-staging/RPM-GPG-KEY-clustr > repo-staging/clustr.gpg
+          mkdir -p repo-staging
+          # Armored public key — served at /clustr/RPM-GPG-KEY-clustr for rpm --import
+          gpg --armor --export release@sqoia.dev > repo-staging/RPM-GPG-KEY-clustr
 
-      - name: Generate RPM .repo file
+      - name: Stage RPM packages by EL target and arch
         run: |
-          cat > repo-staging/clustr.repo << 'EOF'
+          # nfpm outputs: clustr-serverd-1.13.0-1.el9.x86_64.rpm
+          # Parse EL target and arch from filename, route to correct subdir.
+          for rpm_file in $(find all-artifacts -name '*.rpm' | sort); do
+            filename=$(basename "${rpm_file}")
+            # arch: last field before .rpm (x86_64 or aarch64)
+            pkg_arch="${filename##*.}"
+            filename_no_arch="${filename%.*}"
+            pkg_arch="${filename_no_arch##*.}"
+            # EL target: matches el8/el9/el10 in the Release field
+            el_target=$(echo "${filename}" | grep -oP 'el\d+' | head -1)
+            if [ -n "${el_target}" ] && [ -n "${pkg_arch}" ]; then
+              mkdir -p "repo-staging/${el_target}/${pkg_arch}"
+              cp "${rpm_file}" "repo-staging/${el_target}/${pkg_arch}/"
+              echo "Staged: ${filename} -> ${el_target}/${pkg_arch}/"
+            else
+              echo "WARNING: cannot parse EL/arch from: ${filename}"
+            fi
+          done
+          echo "=== Staged layout ===" && find repo-staging -name '*.rpm'
+
+      - name: Generate per-EL .repo files
+        run: |
+          for EL in el8 el9 el10; do
+            mkdir -p "repo-staging/${EL}"
+            # Note: $basearch is a dnf variable, NOT a shell variable — no escaping needed here.
+            cat > "repo-staging/${EL}/clustr.repo" << 'REPOEOF'
           [clustr]
-          name=clustr - $basearch
-          baseurl=https://pkg.sqoia.dev/clustr/rpm/$basearch
+          name=clustr packages - $basearch
+          baseurl=https://pkg.sqoia.dev/clustr/ELTARGET/$basearch
           enabled=1
           gpgcheck=1
           gpgkey=https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
-          EOF
+          REPOEOF
+            # Replace ELTARGET placeholder with actual EL version
+            sed -i "s/ELTARGET/${EL}/g" "repo-staging/${EL}/clustr.repo"
+          done
 
-      - name: Build RPM repodata
+      - name: Generate RPM repodata (createrepo_c) per EL and arch
         run: |
-          for arch_dir in repo-staging/rpm/*/; do
-            if ls "${arch_dir}"*.rpm 1>/dev/null 2>&1; then
-              createrepo_c "${arch_dir}"
+          for dir in $(find repo-staging -mindepth 2 -maxdepth 2 -type d | sort); do
+            if ls "${dir}"/*.rpm 1>/dev/null 2>&1; then
+              echo "createrepo_c: ${dir}"
+              createrepo_c "${dir}"
             fi
           done
 
-      - name: Build DEB repo metadata
+      - name: Sign repomd.xml files (detached GPG signature)
         env:
           CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
         run: |
-          KEY_FP=$(gpg --list-keys --with-colons clustr-release@sqoia.dev 2>/dev/null \
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
             | awk -F: '/^fpr:/{print $10; exit}')
-
-          REPO_ROOT="repo-staging/deb"
-          mkdir -p "${REPO_ROOT}/dists/stable/main/binary-amd64" \
-                   "${REPO_ROOT}/dists/stable/main/binary-arm64"
-
-          # Generate Packages file for each architecture
-          for arch in amd64 arm64; do
-            POOL_DIR="pool/stable/main/${arch}"
-            BINARY_DIR="dists/stable/main/binary-${arch}"
-            if ls "${REPO_ROOT}/${POOL_DIR}/"*.deb 1>/dev/null 2>&1; then
-              (cd "${REPO_ROOT}" && \
-                dpkg-scanpackages --arch "${arch}" "${POOL_DIR}" > "${BINARY_DIR}/Packages")
-              gzip -k "${REPO_ROOT}/${BINARY_DIR}/Packages"
-            fi
+          for repomd in $(find repo-staging -name 'repomd.xml'); do
+            echo "Signing repodata: ${repomd}"
+            gpg --batch --yes \
+              --passphrase "${CLUSTR_GPG_PASSPHRASE}" \
+              --pinentry-mode loopback \
+              --default-key "${KEY_FP}" \
+              --detach-sign --armor "${repomd}" || true
           done
-
-          # Generate Release file
-          cat > "${REPO_ROOT}/dists/stable/Release" << RELEASE
-          Origin: Sqoia Labs
-          Label: clustr
-          Suite: stable
-          Codename: stable
-          Components: main
-          Architectures: amd64 arm64
-          Description: clustr HPC node cloning and image management packages
-          RELEASE
-
-          # Sign the Release file with GPG (creates InRelease and Release.gpg)
-          (cd "${REPO_ROOT}/dists/stable" && \
-            gpg --batch --yes --passphrase "${CLUSTR_GPG_PASSPHRASE}" \
-              --pinentry-mode loopback \
-              --default-key "${KEY_FP}" \
-              --clearsign -o InRelease Release && \
-            gpg --batch --yes --passphrase "${CLUSTR_GPG_PASSPHRASE}" \
-              --pinentry-mode loopback \
-              --default-key "${KEY_FP}" \
-              --detach-sign -o Release.gpg Release) || true
 
       - name: Rsync to pkg.sqoia.dev
         env:
           PKG_DEPLOY_KEY: ${{ secrets.PKG_DEPLOY_KEY }}
         run: |
-          # Write deploy key and lock it down
           install -m 0600 /dev/null /tmp/pkg_deploy_key
           echo "${PKG_DEPLOY_KEY}" > /tmp/pkg_deploy_key
 
+          # rsync with --delete so removed packages are cleaned up.
+          # --relative is not used: we sync repo-staging/ INTO /clustr/ on the remote.
           rsync -avz --delete \
             -e "ssh -i /tmp/pkg_deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
             repo-staging/ \
@@ -450,10 +410,13 @@ jobs:
 
           rm -f /tmp/pkg_deploy_key
 
+  # ---------------------------------------------------------------------------
+  # Publish GitHub Release — attaches all .rpm + raw binaries.
+  # lab-validate intentionally omitted from needs (informational only).
+  # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    # lab-validate intentionally removed from needs — informational only.
     needs: [build-client, build-server, publish-repo]
     permissions:
       contents: write
@@ -469,31 +432,29 @@ jobs:
           body: |
             ## Install
 
-            ### Rocky / RHEL / Fedora
+            ### Rocky / RHEL / AlmaLinux 9
             ```sh
             sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
-            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/clustr.repo
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo
             sudo dnf install clustr-serverd
             ```
 
-            ### Debian / Ubuntu
+            ### Rocky / RHEL / AlmaLinux 8
             ```sh
-            curl -fsSL https://pkg.sqoia.dev/clustr/clustr.gpg | sudo tee /etc/apt/keyrings/clustr.gpg >/dev/null
-            echo "deb [signed-by=/etc/apt/keyrings/clustr.gpg] https://pkg.sqoia.dev/clustr/deb stable main" | sudo tee /etc/apt/sources.list.d/clustr.list
-            sudo apt update && sudo apt install clustr-serverd
+            sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el8/clustr.repo
+            sudo dnf install clustr-serverd
             ```
 
-            ### Direct binary download (server)
+            ### Rocky / RHEL / AlmaLinux 10
             ```sh
-            curl -sL https://github.com/sqoia-dev/clustr/releases/download/${{ github.ref_name }}/clustr-serverd-linux-amd64 -o /usr/sbin/clustr-serverd
-            chmod +x /usr/sbin/clustr-serverd
+            sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el10/clustr.repo
+            sudo dnf install clustr-serverd
             ```
 
-            ### CLI only
-            ```sh
-            curl -sL https://github.com/sqoia-dev/clustr/releases/download/${{ github.ref_name }}/clustr-linux-amd64 -o /usr/local/bin/clustr
-            chmod +x /usr/local/bin/clustr
-            ```
+            ### Build from source
+            See [README](https://github.com/sqoia-dev/clustr#build-from-source).
           files: |
             clustr-linux-amd64
             clustr-linux-amd64.sha256
@@ -504,4 +465,3 @@ jobs:
             clustr-serverd-linux-arm64
             clustr-serverd-linux-arm64.sha256
             dist/*.rpm
-            dist/*.deb

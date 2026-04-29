@@ -1,5 +1,5 @@
 #!/bin/sh
-# pkg-postinstall.sh — post-install script for clustr-serverd RPM/DEB package.
+# pkg-postinstall.sh — post-install script for the clustr-serverd RPM package.
 #
 # Run by the package manager after binary and config files are placed.
 # Must be idempotent: safe to run on both fresh install and upgrade.

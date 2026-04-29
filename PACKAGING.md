@@ -41,18 +41,29 @@ Completed 2026-04-29.
 
 ## Phase 2 — Design Decisions
 
+### Distribution: RPM only, EL8 / EL9 / EL10
+
+**Decision: RPM packages for RHEL-family distros only. No DEB. No Debian/Ubuntu support.**
+
+Rationale: clustr's audience is HPC / lab / bare-metal operators running Rocky Linux,
+RHEL, or AlmaLinux. The Slurm bundles clustr ships are already EL-targeted RPMs. The
+bundled base image is Rocky 9. DEB support would require maintaining a separate signing
+pipeline, apt metadata generation, and installation path for a user population that is
+negligible in the scientific computing and HPC world. Operators on non-EL systems build
+from source.
+
 ### Build tool: nfpm
 
 **Decision: nfpm.** Justification:
 
-- Produces RPM and DEB from a single YAML config with `nfpm pkg --packager rpm` /
-  `nfpm pkg --packager deb`. No `rpmbuild` spec file, no Ruby/fpm dependency.
-- Go binary, installable in CI with `go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`
-  or via the official release tarball. Zero system-package deps on the GitHub Actions runner.
-- Actively maintained (goreleaser project), well-documented, handles pre/post install
-  scripts, systemd units, config files, and file permissions natively.
-- Alternative evaluated: `fpm` — rejected because it requires Ruby and the gem ecosystem
-  in CI, adds ~2 min to runner setup, and nfpm covers identical functionality.
+- Produces RPM from a single YAML config with `nfpm pkg --packager rpm`.
+  No `rpmbuild` spec file, no Ruby/fpm dependency.
+- Go binary, installable in CI from the official release tarball. Zero system-package
+  deps on the GitHub Actions runner.
+- Actively maintained (goreleaser project). Handles pre/post install scripts, systemd
+  units, config files, and file permissions natively.
+- Alternative evaluated: `fpm` — rejected because it requires Ruby, adds ~2 min to
+  runner setup, and nfpm covers identical functionality.
 
 ### Package layout
 
@@ -68,9 +79,9 @@ Completed 2026-04-29.
 
 Post-install script:
 1. Creates `clustr` user and group (system account, no login shell, no home dir) if absent.
-2. `chown -R clustr:clustr /var/lib/clustr /var/log/clustr` — note: the service itself
-   runs as root due to nspawn/loop/DHCP capability requirements, so the `clustr` user
-   is a convention for file ownership rather than a service account in the traditional sense.
+2. `chown -R root:clustr /var/lib/clustr /var/log/clustr /etc/clustr` — the service itself
+   runs as root due to nspawn/loop/DHCP capability requirements. The `clustr` group is a
+   convention for file ownership rather than a service account in the traditional sense.
    The unit does not carry `User=clustr`.
 3. Runs `systemctl daemon-reload`.
 4. Does NOT run `systemctl enable` or `systemctl start` — operator opts in.
@@ -83,52 +94,92 @@ Post-install script:
 
 No systemd unit, no config directory, no post-install script.
 
+### Filename convention
+
+```
+clustr-serverd-1.13.0-1.el9.x86_64.rpm
+clustr-serverd-1.13.0-1.el8.x86_64.rpm
+clustr-serverd-1.13.0-1.el10.x86_64.rpm
+clustr-1.13.0-1.el9.x86_64.rpm
+clustr-1.13.0-1.el8.x86_64.rpm
+clustr-1.13.0-1.el10.x86_64.rpm
+```
+
+The `el8`/`el9`/`el10` value comes from the `EL_RELEASE` env var passed to nfpm, which
+sets the RPM `Release` field to `1.el9` (etc). The Go static binary is identical across
+EL targets — we repackage it three times so dnf metadata is correct per repo subdir and
+dnf `--releasever` queries work predictably.
+
 ### Repo hosting: pkg.sqoia.dev on the existing Linode Nanode
 
-**Decision: option (a) — `pkg.sqoia.dev` as a Caddy vhost on the existing Linode.**
+**Decision: `pkg.sqoia.dev` as a Caddy vhost on the existing Linode (66.175.212.72).**
 
 Justification:
-- The Nanode serves two static sites and Uptime Kuma; disk (25 GB SSD) is not under
-  pressure. Package artifacts for amd64+arm64 RPM+DEB are ~20–50 MB per release; at
-  12 releases/year the cumulative footprint is well under 1 GB. A retention policy
-  (keep last 3 releases) caps disk usage indefinitely.
-- `pkg.sqoia.dev` is a professional URL. `dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/clustr.repo`
-  is clean and operator-friendly. The GitHub Releases flat-repo approach works but
-  requires a non-standard repo URL format that confuses some dnf/apt versions.
-- Implementation: rsync the package tree from CI to `/var/www/pkg.sqoia.dev/clustr/`
-  after signing. Caddy serves it as static files. createrepo_c generates RPM metadata;
-  dpkg-scanpackages generates DEB metadata. Both run in CI before the rsync.
-- DNS: add `pkg.sqoia.dev` A record pointing to `66.175.212.72` (Linode Nanode IP).
-  Caddy auto-provisions TLS via Let's Encrypt.
+- The Nanode serves two static sites and Uptime Kuma; disk is not under pressure.
+  Package artifacts for amd64+arm64 × 3 EL targets are ~20–50 MB per release.
+  At 12 releases/year the cumulative footprint is well under 1 GB.
+- Clean URL: `dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo`
+- TLS: Caddy auto-provisions Let's Encrypt certificate for `pkg.sqoia.dev`.
+- DNS: `pkg.sqoia.dev` A record → `66.175.212.72`.
 
-**GPG signing key strategy:**
+**Repo layout on disk:**
+```
+/var/www/pkg.sqoia.dev/clustr/
+  RPM-GPG-KEY-clustr        # armored public key for rpm --import
+  el8/
+    clustr.repo             # [clustr] dnf repo file for EL8
+    x86_64/                 # RPM packages + createrepo_c repodata
+    aarch64/                # (if arm64 packages present)
+  el9/
+    clustr.repo
+    x86_64/
+    aarch64/
+  el10/
+    clustr.repo
+    x86_64/
+    aarch64/
+```
 
-- Generate a dedicated Ed25519 GPG key for clustr package signing: `clustr-release@sqoia.dev`.
-  This key is separate from SSL certs and SSH keys — single-purpose, rotatable independently.
-- Private key: stored as a GitHub Actions secret `CLUSTR_GPG_PRIVATE_KEY` (armored export).
-  Passphrase stored as `CLUSTR_GPG_PASSPHRASE`. CI imports the key ephemerally per run;
-  the key never touches disk on any persistent host.
-- Public key: committed to the repo at `build/keys/RPM-GPG-KEY-clustr-packages.asc` and
-  served at `https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr` (RPM) and
-  `https://pkg.sqoia.dev/clustr/clustr.gpg` (DEB binary format via `gpg --dearmor`).
-- The existing `build/slurm/keys/clustr-release.asc.pub` is a bundle signing key for Slurm
-  RPMs inside the initramfs — a different trust domain. Do not reuse it.
+**Deploy access:**
+- `deploy` user on the Linode owns `/var/www/pkg.sqoia.dev/` (755 deploy:deploy).
+- GitHub Actions rsync uses a dedicated SSH key (`PKG_DEPLOY_KEY` GHA secret).
+  The private key is ephemeral in CI; the public key is in `deploy`'s `authorized_keys`.
+- `createrepo_c` runs in CI (on the GitHub Actions runner) before rsync, so the
+  Linode does not need `createrepo_c` installed.
+
+### GPG signing key
+
+**Key identity:** `clustr Release Signing <release@sqoia.dev>`
+**Algorithm:** RSA 4096 (existing key, generated 2026-04-27)
+**Fingerprint:** `9EDB 9E63 AB84 551E 25C1  4168 41E5 1A66 53BB A540`
+**Expires:** 2028-04-26
+
+**Storage:**
+- Private key: `CLUSTR_GPG_PRIVATE_KEY` GitHub Actions secret (armored export).
+  Passphrase: `CLUSTR_GPG_PASSPHRASE` GitHub Actions secret.
+  Private key never written to any persistent host disk.
+- Public key: `build/keys/RPM-GPG-KEY-clustr.pub` in repo (human-readable; operators
+  can verify the key they import matches the repo copy).
+  Also served at `https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr` (fetched by rpm).
+
+**Why not reuse the Slurm bundle key?**
+The Slurm bundle signing key (`build/slurm/keys/clustr-release.asc.pub`) is a different
+trust domain — it signs Slurm RPMs embedded inside initramfs images. Keeping package
+distribution signing and bundle signing separate allows independent rotation.
 
 ### Release flow
 
 ```
 push tag v* →
   CI: go test ./... (gate)
-  CI: go build clustr-serverd (linux/amd64, linux/arm64)
-  CI: go build clustr (linux/amd64, linux/arm64)
-  CI: nfpm pkg --packager rpm  (amd64 + arm64, both packages)
-  CI: nfpm pkg --packager deb  (amd64 + arm64, both packages)
-  CI: gpg sign all .rpm files (rpmsign --addsign)
-  CI: gpg sign all .deb files (debsign or dpkg-sig)
-  CI: createrepo_c → RPM repodata
-  CI: dpkg-scanpackages → DEB Packages + Release + InRelease (gpg-signed)
-  CI: rsync repo tree to pkg.sqoia.dev via SSH (Linode deploy key)
-  CI: attach all .rpm/.deb + .sha256 to GitHub Release
+  CI: go build clustr-serverd (linux/amd64, linux/arm64) — static binary
+  CI: go build clustr (linux/amd64, linux/arm64) — static binary
+  CI: for EL in el8 el9 el10; nfpm pkg --packager rpm (both packages × 2 arches × 3 EL)
+  CI: rpmsign --addsign all .rpm files with CLUSTR_GPG_PRIVATE_KEY
+  CI: createrepo_c per {elN}/{arch}/ subdirectory
+  CI: gpg --detach-sign repomd.xml per subdirectory
+  CI: rsync repo tree to deploy@66.175.212.72:/var/www/pkg.sqoia.dev/clustr/ via PKG_DEPLOY_KEY
+  CI: attach all .rpm + raw binaries + .sha256 to GitHub Release
 ```
 
 ### Versioning
@@ -147,7 +198,7 @@ Semver driven by git tags. `nfpm` reads `${VERSION}` from the environment, set t
 Steps planned:
 1. Provision fresh Rocky 9 VM in Proxmox lab.
 2. `sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr`
-3. `sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/clustr.repo`
+3. `sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo`
 4. `sudo dnf install clustr-serverd`
 5. `sudo systemctl enable --now clustr-serverd`
 6. `sudo clustr-serverd bootstrap-admin`
