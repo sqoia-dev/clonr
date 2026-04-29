@@ -167,6 +167,38 @@ The Slurm bundle signing key (`build/slurm/keys/clustr-release.asc.pub`) is a di
 trust domain — it signs Slurm RPMs embedded inside initramfs images. Keeping package
 distribution signing and bundle signing separate allows independent rotation.
 
+---
+
+## Web Bundle — Build Artifact Policy
+
+`internal/server/web/dist/` is a **build artifact**. It is NOT committed to git.
+
+`.gitignore` excludes it explicitly. Every build path must regenerate it before `go build`:
+
+```
+cd web && pnpm install --frozen-lockfile && pnpm build
+rm -rf internal/server/web/dist
+cp -r web/dist internal/server/web/dist
+go build ./cmd/clustr-serverd
+```
+
+### Build paths that must follow this sequence
+
+| Build path | Where enforced |
+|---|---|
+| CI (lint / test / build / gosec) | `ci.yml` — already correct |
+| autodeploy on cloner (192.168.1.151) | `scripts/autodeploy/clustr-autodeploy.sh` |
+| Release pipeline | `release.yml` — must include web build step before `go build` |
+| Manual developer build | Run `make web` or the sequence above before `go build` |
+
+### Why not commit the dist?
+
+Committing `internal/server/web/dist/` means every web source change requires two
+commits: one for `web/src/` and one to recommit the built bundle. The committed bundle
+drifts silently if the rebuild step is skipped — which is exactly the bug this policy
+fixes (Add Node button missing from production binary despite source having it at the
+relevant commit). Build artifacts in git create false confidence and operational gaps.
+
 ### Release flow
 
 ```

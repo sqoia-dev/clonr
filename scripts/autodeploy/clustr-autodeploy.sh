@@ -144,6 +144,66 @@ git reset --hard origin/main 2>&1 | (sed 's/^/  [git] /' || true)
 log "Tree reset to ${REMOTE_SHA}"
 
 # ---------------------------------------------------------------------------
+# Ensure Node.js 24 + pnpm 10 are available
+# internal/server/web/dist/ is a build artifact — NOT committed to git.
+# We must build it here before `go build` so the embed.FS has current content.
+# ---------------------------------------------------------------------------
+NODE_BIN="/usr/local/node/bin/node"
+NPM_BIN="/usr/local/node/bin/npm"
+PNPM_BIN="/usr/local/node/bin/pnpm"
+NODE_VERSION_TARGET="24"
+NODE_INSTALL_DIR="/usr/local/node"
+
+if [[ ! -x "${NODE_BIN}" ]] || ! "${NODE_BIN}" --version 2>/dev/null | grep -q "^v${NODE_VERSION_TARGET}"; then
+    log "Node.js ${NODE_VERSION_TARGET} not found — installing via nvm tarball..."
+    NODE_TARBALL_URL="https://nodejs.org/dist/latest-v${NODE_VERSION_TARGET}.x/node-v${NODE_VERSION_TARGET}."
+    # Resolve exact version
+    _NODE_EXACT=$(curl -s "https://nodejs.org/dist/latest-v${NODE_VERSION_TARGET}.x/" \
+        | grep -oP "node-v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    if [[ -z "${_NODE_EXACT}" ]]; then
+        log "ERROR: could not resolve Node.js ${NODE_VERSION_TARGET} version from nodejs.org"
+        exit 1
+    fi
+    _NODE_TGZ="node-v${_NODE_EXACT}-linux-x64.tar.xz"
+    _NODE_URL="https://nodejs.org/dist/v${_NODE_EXACT}/${_NODE_TGZ}"
+    log "Downloading ${_NODE_URL}..."
+    _NODE_TMPDIR=$(mktemp -d /tmp/node-install.XXXXXXXX)
+    _CLEANUP_DIRS="${SSHPASS_SHIM_DIR} ${_NODE_TMPDIR}"
+    curl -fsSL "${_NODE_URL}" -o "${_NODE_TMPDIR}/${_NODE_TGZ}"
+    rm -rf "${NODE_INSTALL_DIR}"
+    mkdir -p "${NODE_INSTALL_DIR}"
+    tar -xJf "${_NODE_TMPDIR}/${_NODE_TGZ}" -C "${NODE_INSTALL_DIR}" --strip-components=1
+    rm -rf "${_NODE_TMPDIR}"
+    log "Node.js v${_NODE_EXACT} installed at ${NODE_INSTALL_DIR}"
+fi
+export PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
+
+if [[ ! -x "${PNPM_BIN}" ]]; then
+    log "pnpm not found — installing via npm..."
+    "${NPM_BIN}" install -g pnpm@10 --prefix "${NODE_INSTALL_DIR}" > /dev/null 2>&1
+    log "pnpm installed"
+fi
+
+# ---------------------------------------------------------------------------
+# Build web assets and copy to Go embed target
+# ---------------------------------------------------------------------------
+log "Building web assets (pnpm install + pnpm build)..."
+_WEB_LOG=$(mktemp /tmp/clustr-web-build.XXXXXXXX)
+(
+    cd "${REPO_DIR}/web"
+    "${PNPM_BIN}" install --frozen-lockfile 2>&1
+    "${PNPM_BIN}" build 2>&1
+) > "${_WEB_LOG}" 2>&1 \
+    || { sed 's/^/  [web] /' "${_WEB_LOG}"; rm -f "${_WEB_LOG}"; log "ERROR: web build failed"; exit 1; }
+sed 's/^/  [web] /' "${_WEB_LOG}"; rm -f "${_WEB_LOG}"
+log "web build OK"
+
+log "Copying web/dist → internal/server/web/dist..."
+rm -rf "${REPO_DIR}/internal/server/web/dist"
+cp -r "${REPO_DIR}/web/dist" "${REPO_DIR}/internal/server/web/dist"
+log "web dist copied ($(du -sh "${REPO_DIR}/internal/server/web/dist" | cut -f1))"
+
+# ---------------------------------------------------------------------------
 # Build clustr-serverd
 # ---------------------------------------------------------------------------
 log "Building clustr-serverd..."
