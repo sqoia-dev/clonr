@@ -8,25 +8,65 @@ Register nodes, manage base images and bundles, and reimage machines from a sing
 
 `http://10.99.0.1:8080/` — served from the dev host (`cloner`, 192.168.1.151)
 
+## Install
+
+### Rocky / RHEL / Fedora
+
+```sh
+sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/clustr.repo
+sudo dnf install clustr-serverd
+```
+
+### Debian / Ubuntu
+
+```sh
+curl -fsSL https://pkg.sqoia.dev/clustr/clustr.gpg | sudo tee /etc/apt/keyrings/clustr.gpg >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/clustr.gpg] https://pkg.sqoia.dev/clustr/deb stable main" | sudo tee /etc/apt/sources.list.d/clustr.list
+sudo apt update && sudo apt install clustr-serverd
+```
+
+### CLI only (any distro)
+
+```sh
+sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+sudo dnf install clustr   # Rocky/RHEL/Fedora
+
+# or
+sudo apt install clustr   # Debian/Ubuntu (after adding the repo above)
+```
+
 ## Quick start
 
-```bash
-# 1. Start the server
-CLUSTR_SECRET_KEY=<secret> clustr-serverd
+After installing the package:
 
-# 2. Create the admin user (run once, on the server host)
-clustr-serverd bootstrap-admin
+```bash
+# 1. Configure the server
+#    Set CLUSTR_PXE_INTERFACE and CLUSTR_PXE_SERVER_IP for your provisioning network,
+#    then set CLUSTR_PXE_ENABLED=true.
+sudo vi /etc/clustr/clustr-serverd.conf
+
+# 2. Create a persistent session secret
+openssl rand -hex 64 | sed 's/^/CLUSTR_SESSION_SECRET=/' \
+  | sudo tee /etc/clustr/secrets.env > /dev/null
+sudo chmod 0400 /etc/clustr/secrets.env
+
+# 3. Enable and start the service
+sudo systemctl enable --now clustr-serverd
+
+# 4. Create the admin user (run once, on the server host)
+sudo clustr-serverd bootstrap-admin
 #   Default credentials: clustr / clustr
 #   You will be prompted to change the password on first login.
 #
 #   Override the defaults with flags:
-#     clustr-serverd bootstrap-admin --username ops --password "S3cr3t!"
+#     sudo clustr-serverd bootstrap-admin --username ops --password "S3cr3t!"
 
-# 3. Open the UI and sign in
+# 5. Open the UI and sign in
 open http://localhost:8080/
 ```
 
-## Build
+## Build from source
 
 Requirements: Go 1.25+, Node 24+, pnpm 10+
 
@@ -47,13 +87,3 @@ Binaries land in `bin/`:
 |--------|-------------|
 | `bin/clustr` | Static CLI (CGO_ENABLED=0, linux/amd64) |
 | `bin/clustr-serverd` | Server with embedded web UI |
-
-## Docker
-
-```bash
-docker build -t clustr-server .
-docker run -p 8080:8080 \
-  -v /var/lib/clustr:/var/lib/clustr \
-  -e CLUSTR_SECRET_KEY=<secret> \
-  clustr-server
-```
