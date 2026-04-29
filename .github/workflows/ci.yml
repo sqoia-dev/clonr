@@ -122,10 +122,15 @@ jobs:
 
       - name: Smoke-run clustr-serverd
         run: |
-          TMPDIR=$(mktemp -d)
-          mkdir -p "$TMPDIR/db" "$TMPDIR/images"
-          CLUSTR_DB_PATH="$TMPDIR/db/clustr.db" \
-          CLUSTR_IMAGE_DIR="$TMPDIR/images" \
+          D=$(mktemp -d)
+          mkdir -p "$D/db" "$D/images" "$D/boot" "$D/tftpboot" "$D/repo" "$D/ldap" "$D/log-archive"
+          CLUSTR_DB_PATH="$D/db/clustr.db" \
+          CLUSTR_IMAGE_DIR="$D/images" \
+          CLUSTR_BOOT_DIR="$D/boot" \
+          CLUSTR_TFTP_DIR="$D/tftpboot" \
+          CLUSTR_REPO_DIR="$D/repo" \
+          CLUSTR_LDAP_DATA_DIR="$D/ldap" \
+          CLUSTR_LOG_ARCHIVE_DIR="$D/log-archive" \
           ./bin/clustr-serverd &
           SERVER_PID=$!
           sleep 4
