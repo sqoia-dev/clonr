@@ -138,21 +138,26 @@ jobs:
           done
           rm -f "${NFPM_CLI_RESOLVED}"
 
-          # Sign each RPM with gpg --detach-sign (embeds signature in RPM header).
-          # rpmsign requires gpg passphrase via pinentry; we use loopback mode.
+          # Sign each RPM. Write passphrase to a temp file (600) so the gpg subprocess
+          # can read it via --passphrase-file — avoids the fd-3 heredoc approach that
+          # fails when rpmsign forks gpg as a subprocess with a closed fd.
+          GPG_PASS_FILE=$(mktemp /tmp/gpg-pass-XXXXXX)
+          chmod 600 "${GPG_PASS_FILE}"
+          printf '%s' "${CLUSTR_GPG_PASSPHRASE}" > "${GPG_PASS_FILE}"
+
           for rpm_file in dist/*.rpm; do
             echo "Signing: ${rpm_file}"
-            echo "${CLUSTR_GPG_PASSPHRASE}" | \
-              rpmsign --addsign \
-                --define "_gpg_name ${KEY_FP}" \
-                --define "_gpg_path ${HOME}/.gnupg" \
-                --define "_gpg_digest_algo sha256" \
-                --define "__gpg /usr/bin/gpg" \
-                --define "__gpg_check_password_cmd /bin/true" \
-                --define "__gpg_sign_cmd %{__gpg} gpg --no-tty --batch --passphrase-fd 3 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor < /dev/null 3<<< \"${CLUSTR_GPG_PASSPHRASE}\" --output %{__signature_filename} %{__plaintext_filename}" \
-                "${rpm_file}" 2>&1 || \
-            echo "WARNING: rpmsign failed for ${rpm_file} — package still valid, signature optional at this stage"
+            rpmsign --addsign \
+              --define "_gpg_name ${KEY_FP}" \
+              --define "_gpg_path ${HOME}/.gnupg" \
+              --define "_gpg_digest_algo sha256" \
+              --define "__gpg /usr/bin/gpg" \
+              --define "__gpg_check_password_cmd /bin/true" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor --output %{__signature_filename} %{__plaintext_filename}" \
+              "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file}"
           done
+          rm -f "${GPG_PASS_FILE}"
 
       - name: SHA256 checksums (packages)
         run: cd dist && sha256sum *.rpm > ../checksums-cli-${{ matrix.goarch }}.txt
@@ -275,19 +280,23 @@ jobs:
           done
           rm -f "${NFPM_SERVER_RESOLVED}"
 
+          GPG_PASS_FILE=$(mktemp /tmp/gpg-pass-XXXXXX)
+          chmod 600 "${GPG_PASS_FILE}"
+          printf '%s' "${CLUSTR_GPG_PASSPHRASE}" > "${GPG_PASS_FILE}"
+
           for rpm_file in dist/*.rpm; do
             echo "Signing: ${rpm_file}"
-            echo "${CLUSTR_GPG_PASSPHRASE}" | \
-              rpmsign --addsign \
-                --define "_gpg_name ${KEY_FP}" \
-                --define "_gpg_path ${HOME}/.gnupg" \
-                --define "_gpg_digest_algo sha256" \
-                --define "__gpg /usr/bin/gpg" \
-                --define "__gpg_check_password_cmd /bin/true" \
-                --define "__gpg_sign_cmd %{__gpg} gpg --no-tty --batch --passphrase-fd 3 --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor < /dev/null 3<<< \"${CLUSTR_GPG_PASSPHRASE}\" --output %{__signature_filename} %{__plaintext_filename}" \
-                "${rpm_file}" 2>&1 || \
-            echo "WARNING: rpmsign failed for ${rpm_file} — package still valid, signature optional at this stage"
+            rpmsign --addsign \
+              --define "_gpg_name ${KEY_FP}" \
+              --define "_gpg_path ${HOME}/.gnupg" \
+              --define "_gpg_digest_algo sha256" \
+              --define "__gpg /usr/bin/gpg" \
+              --define "__gpg_check_password_cmd /bin/true" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor --output %{__signature_filename} %{__plaintext_filename}" \
+              "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file}"
           done
+          rm -f "${GPG_PASS_FILE}"
 
       - name: SHA256 checksums (packages)
         run: cd dist && sha256sum *.rpm > ../checksums-server-${{ matrix.goarch }}.txt
