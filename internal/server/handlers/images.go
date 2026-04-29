@@ -35,6 +35,13 @@ import (
 const defaultBlobMaxConcurrent = 8
 
 // ImagesHandler handles all /api/v1/images routes.
+// ImageEventStoreIface is the subset of ImageEventStore used by ImagesHandler.
+// Keeping it as an interface avoids a circular import between handlers and server.
+type ImageEventStoreIface interface {
+	Publish(event api.ImageEvent)
+	Subscribe() (ch <-chan api.ImageEvent, cancel func())
+}
+
 type ImagesHandler struct {
 	DB       *db.DB
 	ImageDir string
@@ -47,6 +54,9 @@ type ImagesHandler struct {
 	GetActorInfo func(r *http.Request) (id, label string)
 	// WebhookDispatcher, when non-nil, fires image.ready on blob finalize (S4-2).
 	WebhookDispatcher *webhook.Dispatcher
+	// ImageEvents, when non-nil, receives lifecycle events for SSE fan-out.
+	// Optional — if nil, no SSE events are published.
+	ImageEvents ImageEventStoreIface
 	// blobSem is the semaphore controlling max concurrent blob streams.
 	// Initialised once on first use via blobSemaphoreOnce; always access via blobSemaphore().
 	blobSem     chan struct{}
@@ -155,6 +165,9 @@ func (h *ImagesHandler) CreateImage(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, nil, map[string]string{"name": img.Name, "format": string(img.Format)})
 	}
 
+	if h.ImageEvents != nil {
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventCreated, Image: &img, ID: img.ID})
+	}
 	writeJSON(w, http.StatusCreated, img)
 }
 
@@ -335,6 +348,10 @@ func (h *ImagesHandler) DeleteImage(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr, map[string]string{"name": img.Name}, nil)
 	}
 
+	// Publish deletion event — image is nil since it's gone.
+	if h.ImageEvents != nil {
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventDeleted, ID: id})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -401,6 +418,10 @@ func (h *ImagesHandler) UpdateImageTags(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if h.ImageEvents != nil {
+		imgCopy := img
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventUpdated, Image: &imgCopy, ID: img.ID})
 	}
 	writeJSON(w, http.StatusOK, img)
 }
@@ -569,6 +590,10 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if h.ImageEvents != nil {
+		updatedCopy := updated
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventFinalized, Image: &updatedCopy, ID: updated.ID})
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
@@ -1083,4 +1108,49 @@ func (cw *countWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
 	return n, err
+}
+
+// StreamImageEvents handles GET /api/v1/images/events — SSE-1.
+// Streams api.ImageEvent as Server-Sent Events whenever an image lifecycle
+// event occurs (create, update, delete, finalize). Replaces the 15s polling
+// in the web /images view.
+func (h *ImagesHandler) StreamImageEvents(w http.ResponseWriter, r *http.Request) {
+	if h.ImageEvents == nil {
+		http.Error(w, "image events not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by this server", http.StatusInternalServerError)
+		return
+	}
+
+	ch, cancel := h.ImageEvents.Subscribe()
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, open := <-ch:
+			if !open {
+				return
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }

@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check } from "lucide-react"
 import { Input } from "@/components/ui/input"
@@ -23,8 +23,9 @@ import {
 } from "@/components/ui/sheet"
 import { StatusDot } from "@/components/StatusDot"
 import { apiFetch } from "@/lib/api"
-import type { BaseImage, ListImagesResponse } from "@/lib/types"
+import type { BaseImage, ImageEvent, ListImagesResponse } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { useSSE } from "@/hooks/use-sse"
 
 interface ImageSearch {
   q?: string
@@ -85,8 +86,11 @@ export function ImagesPage() {
     })
   }
 
+  const queryClient = useQueryClient()
+  const imageQueryKey = ["images", q, sortCol, sortDir]
+
   const { data } = useQuery<ListImagesResponse>({
-    queryKey: ["images", q, sortCol, sortDir],
+    queryKey: imageQueryKey,
     queryFn: () => {
       const params = new URLSearchParams()
       if (q) params.set("search", q)
@@ -94,8 +98,41 @@ export function ImagesPage() {
       if (sortDir) params.set("dir", sortDir)
       return apiFetch<ListImagesResponse>(`/api/v1/images?${params}`)
     },
-    refetchInterval: 15000,
-    staleTime: 10000,
+    // SSE-2: No polling — SSE events trigger targeted invalidation instead.
+    staleTime: Infinity,
+  })
+
+  // SSE-2: Subscribe to image lifecycle events; invalidate the query on any change.
+  useSSE<ImageEvent>({
+    path: "/api/v1/images/events",
+    onMessage: (event) => {
+      if (event.kind === "image.deleted") {
+        // Remove deleted image from cache immediately, then refetch list.
+        queryClient.setQueryData<ListImagesResponse>(imageQueryKey, (old) => {
+          if (!old) return old
+          return { ...old, images: old.images.filter((img) => img.id !== event.id) }
+        })
+      } else if (event.image) {
+        // Update or insert the changed image in the cached list.
+        queryClient.setQueryData<ListImagesResponse>(imageQueryKey, (old) => {
+          if (!old) {
+            queryClient.invalidateQueries({ queryKey: imageQueryKey })
+            return old
+          }
+          const exists = old.images.some((img) => img.id === event.id)
+          if (exists) {
+            return {
+              ...old,
+              images: old.images.map((img) =>
+                img.id === event.id ? (event.image as BaseImage) : img
+              ),
+            }
+          }
+          // New image — prepend and bump total.
+          return { ...old, images: [event.image as BaseImage, ...old.images], total: old.total + 1 }
+        })
+      }
+    },
   })
 
   const allImages = data?.images ?? []

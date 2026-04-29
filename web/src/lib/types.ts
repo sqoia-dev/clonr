@@ -92,6 +92,14 @@ export interface ListImagesResponse {
   next_cursor?: number
 }
 
+export type ImageEventKind = "image.created" | "image.updated" | "image.deleted" | "image.finalized"
+
+export interface ImageEvent {
+  kind: ImageEventKind
+  image?: BaseImage
+  id: string
+}
+
 // ── Audit / Activity ─────────────────────────────────────────────────────────
 
 export interface AuditRecord {

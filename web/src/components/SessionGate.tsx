@@ -19,7 +19,7 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
     if (session.status === "setup_required") {
       navigate({ to: "/setup" })
     } else if (session.status === "unauthed") {
-      navigate({ to: "/login" })
+      navigate({ to: "/login", search: {} })
     } else if (session.status === "authed") {
       // Check for force-password-change cookie (set by the server on login).
       if (document.cookie.includes("clustr_force_password_change=1")) {

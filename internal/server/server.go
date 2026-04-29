@@ -58,6 +58,7 @@ type Server struct {
 	audit               *db.AuditService
 	broker              *LogBroker
 	progress            *ProgressStore
+	imageEvents         *ImageEventStore
 	buildProgress       *BuildProgressStore
 	shells              *image.ShellManager
 	powerCache          *PowerCache
@@ -162,6 +163,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		audit:               db.NewAuditService(database),
 		broker:              NewLogBroker(),
 		progress:            NewProgressStore(),
+		imageEvents:         NewImageEventStore(),
 		buildProgress:       buildProg,
 		shells:              shells,
 		powerCache:          NewPowerCache(15 * time.Second),
@@ -882,6 +884,7 @@ func (s *Server) buildRouter() chi.Router {
 		Audit:             s.audit,
 		GetActorInfo:      getActorInfo,
 		WebhookDispatcher: s.webhookDispatcher,
+		ImageEvents:       s.imageEvents,
 	}
 	nodes := &handlers.NodesHandler{
 		DB:                s.db,
@@ -1424,6 +1427,8 @@ func (s *Server) buildRouter() chi.Router {
 			// Images — mutating operations are admin-only.
 			// GET /images/{id} and GET /images/{id}/blob are registered above with
 			// requireImageAccess so node keys can also reach them.
+			// SSE-1: image lifecycle event stream — must be registered before /images/{id}.
+			r.Get("/images/events", images.StreamImageEvents)
 			r.Get("/images", images.ListImages)
 			r.Post("/images", images.CreateImage)
 			r.Delete("/images/{id}", images.DeleteImage)

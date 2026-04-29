@@ -286,8 +286,8 @@ The first-run UX should be: run one command, open the web UI, type a memorable d
 - [x] **DEF-5** Web Login page shows the default-creds hint as small muted text below the form ONLY when `/auth/status` returned `has_admin: true` AND the operator has not yet successfully logged in *and* the URL has `?firstrun` (set by the redirect from Setup → Login after bootstrap). Don't permanently advertise default creds in the live UI — they should disappear after first login.
 - [x] **DEF-6** README Quick Start: document the default creds in a fenced block, with the force-password-change note.
 
-- [ ] **SSE-1** Add server SSE channel for image lifecycle events (upload, delete, ref-count changes). Mirror the shape of the existing node SSE channel. Replaces the 15s polling in IMG-3.
-- [ ] **SSE-2** Wire `/images` to consume the new channel; remove the `refetchInterval`. No regressions.
+- [x] **SSE-1** Add server SSE channel for image lifecycle events (upload, delete, ref-count changes). Mirror the shape of the existing node SSE channel. Replaces the 15s polling in IMG-3.
+- [x] **SSE-2** Wire `/images` to consume the new channel; remove the `refetchInterval`. No regressions.
 
 #### GPG keys — real surface
 

@@ -900,6 +900,24 @@ type ListImagesResponse struct {
 	NextCursor int         `json:"next_cursor,omitempty"` // next page number, 0 = no more pages
 }
 
+// ImageEventKind classifies an image lifecycle event published on the SSE channel.
+type ImageEventKind string
+
+const (
+	ImageEventCreated   ImageEventKind = "image.created"
+	ImageEventUpdated   ImageEventKind = "image.updated"
+	ImageEventDeleted   ImageEventKind = "image.deleted"
+	ImageEventFinalized ImageEventKind = "image.finalized" // blob upload complete, status → ready
+)
+
+// ImageEvent is published on GET /api/v1/images/events (SSE stream) whenever an
+// image's lifecycle state changes. Consumers can react without polling.
+type ImageEvent struct {
+	Kind  ImageEventKind `json:"kind"`
+	Image *BaseImage     `json:"image,omitempty"` // nil when kind == image.deleted
+	ID    string         `json:"id"`              // always populated (use when image is nil)
+}
+
 // ListNodesResponse wraps the node configs list with pagination metadata.
 // page/per_page/next_cursor are present when ?page= or ?per_page= is used.
 type ListNodesResponse struct {
