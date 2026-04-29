@@ -100,6 +100,20 @@ export interface ImageEvent {
   id: string
 }
 
+// ── GPG Keys ─────────────────────────────────────────────────────────────────
+
+export interface GPGKey {
+  fingerprint: string
+  owner: string
+  armored_key?: string
+  source: "embedded" | "user"
+  created_at: string
+}
+
+export interface ListGPGKeysResponse {
+  keys: GPGKey[]
+}
+
 // ── Audit / Activity ─────────────────────────────────────────────────────────
 
 export interface AuditRecord {

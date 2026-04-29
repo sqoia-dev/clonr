@@ -291,9 +291,9 @@ The first-run UX should be: run one command, open the web UI, type a memorable d
 
 #### GPG keys — real surface
 
-- [ ] **GPG-1** Server: `GET /api/v1/gpg-keys` (list installed keyring entries with fingerprints, owner, trust, created). Read from the same source the bundle deploy uses.
-- [ ] **GPG-2** Server: `POST /api/v1/gpg-keys` accepts ASCII-armored public key block, validates, imports, returns the new entry. `DELETE /api/v1/gpg-keys/{fingerprint}` removes.
-- [ ] **GPG-3** Web: replace the Settings → GPG CLI note with a real list + paste-to-add inline form + inline destructive remove (typed fingerprint to confirm, per UI/UX principle 4).
+- [x] **GPG-1** Server: `GET /api/v1/gpg-keys` (list installed keyring entries with fingerprints, owner, trust, created). Read from the same source the bundle deploy uses.
+- [x] **GPG-2** Server: `POST /api/v1/gpg-keys` accepts ASCII-armored public key block, validates, imports, returns the new entry. `DELETE /api/v1/gpg-keys/{fingerprint}` removes.
+- [x] **GPG-3** Web: replace the Settings → GPG CLI note with a real list + paste-to-add inline form + inline destructive remove (typed fingerprint to confirm, per UI/UX principle 4).
 
 #### Cmd-K reimage picker
 

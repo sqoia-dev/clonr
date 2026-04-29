@@ -900,6 +900,30 @@ type ListImagesResponse struct {
 	NextCursor int         `json:"next_cursor,omitempty"` // next page number, 0 = no more pages
 }
 
+// GPGKey represents a user-imported GPG public key stored in the database.
+// The three embedded release keys (clustr, rocky-9, EPEL-9) are returned by
+// GET /api/v1/gpg-keys with source="embedded"; keys added via POST have source="user".
+type GPGKey struct {
+	Fingerprint string    `json:"fingerprint"`
+	Owner       string    `json:"owner"`
+	ArmoredKey  string    `json:"armored_key,omitempty"` // omitted in list responses
+	Source      string    `json:"source"`                // "embedded" or "user"
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ListGPGKeysResponse is returned by GET /api/v1/gpg-keys.
+type ListGPGKeysResponse struct {
+	Keys []GPGKey `json:"keys"`
+}
+
+// ImportGPGKeyRequest is the body for POST /api/v1/gpg-keys.
+type ImportGPGKeyRequest struct {
+	// ArmoredKey is the ASCII-armored public key block (BEGIN PGP PUBLIC KEY BLOCK).
+	ArmoredKey string `json:"armored_key"`
+	// Owner is a human-readable label for the key (optional).
+	Owner string `json:"owner,omitempty"`
+}
+
 // ImageEventKind classifies an image lifecycle event published on the SSE channel.
 type ImageEventKind string
 

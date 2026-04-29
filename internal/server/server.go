@@ -886,6 +886,14 @@ func (s *Server) buildRouter() chi.Router {
 		WebhookDispatcher: s.webhookDispatcher,
 		ImageEvents:       s.imageEvents,
 	}
+	gpgKeysH := &handlers.GPGKeysHandler{
+		DB: s.db,
+		EmbeddedKeys: []handlers.EmbeddedGPGKey{
+			{Owner: "clustr-release", ArmoredKey: GPGKeyBytes()},
+			{Owner: "RPM-GPG-KEY-rocky-9", ArmoredKey: RockyKeyBytes()},
+			{Owner: "RPM-GPG-KEY-EPEL-9", ArmoredKey: EPELKeyBytes()},
+		},
+	}
 	nodes := &handlers.NodesHandler{
 		DB:                s.db,
 		Audit:             s.audit,
@@ -1415,6 +1423,11 @@ func (s *Server) buildRouter() chi.Router {
 			// Group membership assignment (S3-3).
 			r.With(requireRole("admin")).Get("/users/{id}/group-memberships", usersH.HandleGetGroupMemberships)
 			r.With(requireRole("admin")).Put("/users/{id}/group-memberships", usersH.HandleSetGroupMemberships)
+
+			// GPG keys — list is operator-accessible; import/delete are admin-only.
+			r.Get("/gpg-keys", gpgKeysH.ListGPGKeys)
+			r.With(requireRole("admin")).Post("/gpg-keys", gpgKeysH.ImportGPGKey)
+			r.With(requireRole("admin")).Delete("/gpg-keys/{fingerprint}", gpgKeysH.DeleteGPGKey)
 
 			// Audit log (S3-4) — admin only (operators and readonly cannot read audit log).
 			r.With(requireRole("admin")).Get("/audit", auditH.HandleQuery)

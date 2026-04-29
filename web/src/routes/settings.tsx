@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input"
 import { useSession } from "@/contexts/auth"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { ListAPIKeysResponse, CreateAPIKeyResponse, HealthResponse } from "@/lib/types"
+import type { ListAPIKeysResponse, CreateAPIKeyResponse, HealthResponse, ListGPGKeysResponse, GPGKey } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { formatDistanceToNow } from "date-fns"
 
@@ -267,20 +267,193 @@ function ConfigRow({ label, value, mono }: { label: string; value: string; mono?
   )
 }
 
-// ─── GPG Keys section (SET-4) ─────────────────────────────────────────────────
+// ─── GPG Keys section (SET-4 / GPG-3) ────────────────────────────────────────
 
 function GPGKeysSection() {
+  const qc = useQueryClient()
+  const [showAdd, setShowAdd] = React.useState(false)
+  const [armoredKey, setArmoredKey] = React.useState("")
+  const [owner, setOwner] = React.useState("")
+  const [deleteConfirm, setDeleteConfirm] = React.useState<string | null>(null)
+  const [deleteTyped, setDeleteTyped] = React.useState("")
+
+  const { data, isLoading, isError } = useQuery<ListGPGKeysResponse>({
+    queryKey: ["gpg-keys"],
+    queryFn: () => apiFetch<ListGPGKeysResponse>("/api/v1/gpg-keys"),
+    staleTime: 30000,
+  })
+
+  const importMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<GPGKey>("/api/v1/gpg-keys", {
+        method: "POST",
+        body: JSON.stringify({ armored_key: armoredKey.trim(), owner: owner.trim() }),
+      }),
+    onSuccess: (key) => {
+      qc.setQueryData<ListGPGKeysResponse>(["gpg-keys"], (old) =>
+        old ? { ...old, keys: [...old.keys, key] } : { keys: [key] }
+      )
+      setArmoredKey("")
+      setOwner("")
+      setShowAdd(false)
+      toast({ title: `GPG key imported`, description: key.fingerprint.slice(-16) })
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Failed to import key"
+      toast({ title: "Import failed", description: msg, variant: "destructive" })
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (fingerprint: string) =>
+      apiFetch(`/api/v1/gpg-keys/${fingerprint}`, { method: "DELETE" }),
+    onMutate: async (fingerprint) => {
+      // Optimistic: remove from cache immediately.
+      await qc.cancelQueries({ queryKey: ["gpg-keys"] })
+      const prev = qc.getQueryData<ListGPGKeysResponse>(["gpg-keys"])
+      qc.setQueryData<ListGPGKeysResponse>(["gpg-keys"], (old) =>
+        old ? { ...old, keys: old.keys.filter((k) => k.fingerprint !== fingerprint) } : old
+      )
+      return { prev }
+    },
+    onError: (_err, _fp, ctx) => {
+      // Rollback on error.
+      if (ctx?.prev) qc.setQueryData(["gpg-keys"], ctx.prev)
+      toast({ title: "Delete failed", variant: "destructive" })
+    },
+    onSuccess: () => {
+      setDeleteConfirm(null)
+      setDeleteTyped("")
+      toast({ title: "GPG key removed" })
+    },
+  })
+
+  const keys = data?.keys ?? []
+
   return (
     <section>
-      <h2 className="text-sm font-medium mb-4 flex items-center gap-2">
-        <ShieldCheck className="h-4 w-4" /> GPG Keys
-      </h2>
-      <p className="text-sm text-muted-foreground">
-        GPG key management is available via the CLI:{" "}
-        <code className="font-mono text-xs bg-secondary px-1.5 py-0.5 rounded">
-          clustr-serverd gpg import &lt;keyfile&gt;
-        </code>
-      </p>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-medium flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4" /> GPG Keys
+        </h2>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          onClick={() => setShowAdd((v) => !v)}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add key
+        </Button>
+      </div>
+
+      {showAdd && (
+        <div className="mb-4 rounded-md border border-border bg-card p-4 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Paste an ASCII-armored PGP public key block (BEGIN PGP PUBLIC KEY BLOCK).
+          </p>
+          <textarea
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs font-mono resize-none h-32 focus:outline-none focus:ring-1 focus:ring-ring"
+            placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----&#10;...&#10;-----END PGP PUBLIC KEY BLOCK-----"
+            value={armoredKey}
+            onChange={(e) => setArmoredKey(e.target.value)}
+          />
+          <Input
+            placeholder="Owner / label (optional)"
+            value={owner}
+            onChange={(e) => setOwner(e.target.value)}
+            className="text-sm"
+          />
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              onClick={() => importMutation.mutate()}
+              disabled={importMutation.isPending || !armoredKey.trim()}
+            >
+              {importMutation.isPending ? "Importing…" : "Import"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => { setShowAdd(false); setArmoredKey(""); setOwner("") }}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {isError && <p className="text-sm text-destructive">Failed to load GPG keys.</p>}
+
+      {!isLoading && keys.length === 0 && (
+        <p className="text-sm text-muted-foreground">No keys yet. Add a key above.</p>
+      )}
+
+      {keys.length > 0 && (
+        <div className="space-y-2">
+          {keys.map((key) => (
+            <div key={key.fingerprint} className="rounded-md border border-border bg-card px-4 py-3">
+              {deleteConfirm === key.fingerprint ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-destructive">
+                    Type the last 8 chars of the fingerprint to confirm removal:
+                    <span className="font-mono ml-1">{key.fingerprint.slice(-8)}</span>
+                  </p>
+                  <div className="flex gap-2">
+                    <Input
+                      className="h-7 text-xs font-mono w-32"
+                      placeholder={key.fingerprint.slice(-8)}
+                      value={deleteTyped}
+                      onChange={(e) => setDeleteTyped(e.target.value)}
+                    />
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      className="h-7 text-xs"
+                      disabled={deleteTyped !== key.fingerprint.slice(-8) || deleteMutation.isPending}
+                      onClick={() => deleteMutation.mutate(key.fingerprint)}
+                    >
+                      Remove
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => { setDeleteConfirm(null); setDeleteTyped("") }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-mono text-muted-foreground truncate">{key.fingerprint}</p>
+                    <p className="text-sm font-medium">{key.owner || "—"}</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={cn(
+                      "text-xs px-1.5 py-0.5 rounded",
+                      key.source === "embedded"
+                        ? "bg-secondary text-muted-foreground"
+                        : "bg-primary/10 text-primary"
+                    )}>
+                      {key.source}
+                    </span>
+                    {key.source === "user" && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => { setDeleteConfirm(key.fingerprint); setDeleteTyped("") }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
