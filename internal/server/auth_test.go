@@ -91,8 +91,9 @@ func TestLogin_UsernamePassword_HappyPath(t *testing.T) {
 	if out["ok"] != true {
 		t.Error("expected {ok:true} in login response")
 	}
-	if out["force_password_change"] != true {
-		t.Error("expected force_password_change=true for default clustr user")
+	// ANTI-REGRESSION: force_password_change must never be true — clustr/clustr works permanently.
+	if out["force_password_change"] == true {
+		t.Error("ANTI-REGRESSION: force_password_change must be false for default clustr user")
 	}
 
 	// Verify session cookie is set.
@@ -202,12 +203,10 @@ func TestSetPassword_HappyPath(t *testing.T) {
 		t.Fatalf("set-password: got %d, want 200: %v", pwResp.StatusCode, out)
 	}
 
-	// Verify force-change cookie is cleared.
+	// Verify no force-change cookie is set (the flow is eliminated).
 	for _, c := range pwResp.Cookies() {
-		if c.Name == "clustr_force_password_change" {
-			if c.MaxAge > 0 {
-				t.Error("force_password_change cookie should be cleared after set-password")
-			}
+		if c.Name == "clustr_force_password_change" && c.MaxAge > 0 {
+			t.Error("ANTI-REGRESSION: clustr_force_password_change cookie must not be set")
 		}
 	}
 
@@ -224,7 +223,9 @@ func TestSetPassword_HappyPath(t *testing.T) {
 	}
 }
 
-func TestSetPassword_WeakPassword(t *testing.T) {
+// TestSetPassword_AnyNonEmptyPasswordAccepted confirms that any non-empty password
+// is accepted — no complexity rules, no rejection list.
+func TestSetPassword_AnyNonEmptyPasswordAccepted(t *testing.T) {
 	_, ts, _ := newAuthTestServer(t)
 	client := clientWithJar(t)
 
@@ -235,14 +236,14 @@ func TestSetPassword_WeakPassword(t *testing.T) {
 	resp, _ := client.Do(req)
 	resp.Body.Close()
 
-	// Try to set a weak password.
+	// A short/simple password must now be accepted.
 	pwBody := strings.NewReader(`{"current_password":"clustr","new_password":"short"}`)
 	pwReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/auth/set-password", pwBody)
 	pwReq.Header.Set("Content-Type", "application/json")
 	pwResp, _ := client.Do(pwReq)
 	pwResp.Body.Close()
-	if pwResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("weak password: got %d, want 400", pwResp.StatusCode)
+	if pwResp.StatusCode != http.StatusOK {
+		t.Fatalf("ANTI-REGRESSION: any non-empty password should be accepted, got %d", pwResp.StatusCode)
 	}
 }
 
