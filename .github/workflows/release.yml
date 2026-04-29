@@ -153,7 +153,7 @@ jobs:
               --define "_gpg_digest_algo sha256" \
               --define "__gpg /usr/bin/gpg" \
               --define "__gpg_check_password_cmd /bin/true" \
-              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor --output %{__signature_filename} %{__plaintext_filename}" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --output %{__signature_filename} %{__plaintext_filename}" \
               "${rpm_file}" 2>&1 || \
             echo "WARNING: rpmsign failed for ${rpm_file}"
           done
@@ -292,7 +292,7 @@ jobs:
               --define "_gpg_digest_algo sha256" \
               --define "__gpg /usr/bin/gpg" \
               --define "__gpg_check_password_cmd /bin/true" \
-              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --armor --output %{__signature_filename} %{__plaintext_filename}" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --output %{__signature_filename} %{__plaintext_filename}" \
               "${rpm_file}" 2>&1 || \
             echo "WARNING: rpmsign failed for ${rpm_file}"
           done
