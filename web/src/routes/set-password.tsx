@@ -60,7 +60,7 @@ export function SetPasswordPage() {
         <div className="space-y-2 text-center">
           <h1 className="text-2xl font-semibold">Change your password</h1>
           <p className="text-sm text-muted-foreground">
-            A password change is required before you can continue.
+            Enter your current password and choose a new one.
           </p>
         </div>
 

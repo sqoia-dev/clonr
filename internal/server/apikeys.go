@@ -49,7 +49,7 @@ func BootstrapDefaultUser(ctx context.Context, database *db.DB) error {
 		Username:           "clustr",
 		PasswordHash:       string(hash),
 		Role:               db.UserRoleAdmin,
-		MustChangePassword: true,
+		MustChangePassword: false,
 		CreatedAt:          time.Now(),
 	}
 	if err := database.CreateUser(ctx, rec); err != nil {
@@ -59,7 +59,7 @@ func BootstrapDefaultUser(ctx context.Context, database *db.DB) error {
 	log.Warn().
 		Str("username", "clustr").
 		Str("role", "admin").
-		Msg("SECURITY: default credentials clustr/clustr are active — change password on first login")
+		Msg("SECURITY: default credentials clustr/clustr are active — change the password via Settings when ready")
 
 	return nil
 }

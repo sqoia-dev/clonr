@@ -8,7 +8,6 @@ import { useSession } from "@/contexts/auth"
  *   loading        → render nothing (prevents flash of content)
  *   setup_required → /setup
  *   unauthed       → /login
- *   authed, force_password_change cookie set → /set-password
  *   authed         → render children
  */
 export function SessionGate({ children }: { children: React.ReactNode }) {
@@ -20,11 +19,6 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
       navigate({ to: "/setup" })
     } else if (session.status === "unauthed") {
       navigate({ to: "/login", search: { firstrun: undefined } })
-    } else if (session.status === "authed") {
-      // Check for force-password-change cookie (set by the server on login).
-      if (document.cookie.includes("clustr_force_password_change=1")) {
-        navigate({ to: "/set-password" })
-      }
     }
   }, [session.status, navigate])
 

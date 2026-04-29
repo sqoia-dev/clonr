@@ -104,7 +104,7 @@ func (h *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) handlePasswordLogin(w http.ResponseWriter, r *http.Request, username, password string) {
-	userID, role, mustChange, err := h.LoginWithPassword(username, password)
+	userID, role, _, err := h.LoginWithPassword(username, password)
 	if err != nil {
 		switch err.Error() {
 		case "invalid":
@@ -141,22 +141,9 @@ func (h *AuthHandler) handlePasswordLogin(w http.ResponseWriter, r *http.Request
 
 	http.SetCookie(w, h.sessionCookie(token, int(time.Until(exp).Seconds())))
 
-	// Signal forced password change so the UI can gate access.
-	if mustChange {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "clustr_force_password_change",
-			Value:    "1",
-			Path:     "/",
-			HttpOnly: false, // readable by JS so it can redirect
-			Secure:   h.Secure,
-			SameSite: http.SameSiteStrictMode,
-			MaxAge:   int(exp.Sub(time.Now()).Seconds()),
-		})
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                    true,
-		"force_password_change": mustChange,
+		"force_password_change": false,
 		"role":                  role, // C1-5: exposed for client-side role-based redirect
 	})
 }
@@ -188,16 +175,6 @@ func (h *AuthHandler) handleKeyLogin(w http.ResponseWriter, r *http.Request, raw
 // HandleLogout handles POST /api/v1/auth/logout — clears the session cookie.
 func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, h.sessionCookie("", -1))
-	// Also clear the force-change cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "clustr_force_password_change",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: false,
-		Secure:   h.Secure,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -305,19 +282,11 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// DEF-3: Reject the literal default password to prevent operators from
-	// accidentally "changing" their password to the same insecure default.
-	if req.NewPassword == "clustr" {
+	// Only reject empty passwords — any non-empty value is accepted.
+	// No rejection list, no complexity rules. The operator owns their security posture.
+	if strings.TrimSpace(req.NewPassword) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "Password cannot be 'clustr' — please choose a real password.",
-			"code":  "validation_error",
-		})
-		return
-	}
-
-	if msg := validatePassword(req.NewPassword); msg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": msg,
+			"error": "new_password must not be empty",
 			"code":  "validation_error",
 		})
 		return
@@ -339,16 +308,6 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 	}
 
 	http.SetCookie(w, h.sessionCookie(token, int(time.Until(exp).Seconds())))
-	// Clear force-change cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "clustr_force_password_change",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: false,
-		Secure:   h.Secure,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,

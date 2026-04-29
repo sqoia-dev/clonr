@@ -62,18 +62,16 @@ export function SetupPage() {
           </Button>
         </div>
 
-        {/* DEF-4: default-creds hint immediately below the code block */}
         <p className="text-xs text-muted-foreground text-center">
           Default credentials:{" "}
           <code className="font-mono">clustr</code>{" "}
           /{" "}
           <code className="font-mono">clustr</code>
-          {" "}— you'll be prompted to change on first login.
+          {" "}— change the password via Settings whenever you want.
         </p>
 
         <p className="text-xs text-muted-foreground text-center">
-          Use <code className="font-mono">--bypass-complexity</code> for a temporary password and{" "}
-          <code className="font-mono">--force</code> to overwrite an existing admin account.
+          Use <code className="font-mono">--force</code> to overwrite an existing admin account.
         </p>
 
         <Button

@@ -225,19 +225,16 @@ func TestRunBootstrapAdmin_ForceWithBypass(t *testing.T) {
 	}
 }
 
-// TestBootstrapAdmin_DefaultCredentials_ForceChangeInvariant is the DEF-2
-// invariant test. It must fail loudly if any future change lets the default
-// clustr/clustr path through without force_password_change=true, or changes
-// the default password away from "clustr".
+// TestBootstrapAdmin_DefaultCredentials_AntiRegression is the permanent anti-regression
+// test for the clustr/clustr default credentials contract.
 //
-// POLICY: The default admin path (no --username/--password flags, no env vars)
-// MUST always:
-//   1. Create a user named "clustr"
-//   2. Set that user's password to "clustr"
-//   3. Set MustChangePassword=true
+// POLICY: The default admin path (no --username/--password flags, no env vars) MUST:
+//  1. Create a user named "clustr"
+//  2. Set that user's password to "clustr" (hash matches)
+//  3. Set MustChangePassword=false — the user works permanently, no forced change
 //
 // If this test fails, someone broke the default-credentials contract.
-func TestBootstrapAdmin_DefaultCredentials_ForceChangeInvariant(t *testing.T) {
+func TestBootstrapAdmin_DefaultCredentials_AntiRegression(t *testing.T) {
 	_, dbPath := openTestDB(t)
 	t.Setenv("CLUSTR_DB_PATH", dbPath)
 	// Explicitly clear env vars so no credentials can sneak in.
@@ -261,14 +258,14 @@ func TestBootstrapAdmin_DefaultCredentials_ForceChangeInvariant(t *testing.T) {
 		t.Fatalf("default user %q not found: %v", DefaultAdminUsername, err)
 	}
 
-	// Invariant 1: MustChangePassword MUST be true on the default path.
-	if !u.MustChangePassword {
-		t.Error("INVARIANT FAILED: default clustr/clustr path must set force_password_change=true")
+	// Invariant 1: MustChangePassword MUST be false — no forced change flow.
+	if u.MustChangePassword {
+		t.Error("ANTI-REGRESSION: default clustr/clustr path must set must_change_password=false")
 	}
 
 	// Invariant 2: The stored hash must match the default password "clustr".
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(DefaultAdminPassword)); err != nil {
-		t.Errorf("INVARIANT FAILED: default password hash does not match %q: %v", DefaultAdminPassword, err)
+		t.Errorf("ANTI-REGRESSION: default password hash does not match %q: %v", DefaultAdminPassword, err)
 	}
 }
 

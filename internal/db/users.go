@@ -206,6 +206,19 @@ func (db *DB) DeleteAllUsers(ctx context.Context) error {
 	return nil
 }
 
+// ClearAllMustChangePassword resets must_change_password to 0 for every user.
+// Called on server startup so operators upgrading from a build that set
+// must_change_password=1 are never locked in a forced-change loop.
+// Idempotent — safe to call on every boot.
+func (db *DB) ClearAllMustChangePassword(ctx context.Context) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE users SET must_change_password = 0 WHERE must_change_password = 1`)
+	if err != nil {
+		return fmt.Errorf("db: clear must_change_password: %w", err)
+	}
+	return nil
+}
+
 // SetLastLogin updates last_login_at to now. Called on successful login.
 func (db *DB) SetLastLogin(ctx context.Context, id string) error {
 	_, err := db.sql.ExecContext(ctx,

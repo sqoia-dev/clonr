@@ -329,6 +329,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// One-shot idempotent migration: clear must_change_password for all users.
+	// Operators upgrading from a build that set must_change_password=1 will not
+	// get stuck in a forced-change loop. Safe to run on every boot.
+	if err := database.ClearAllMustChangePassword(ctx); err != nil {
+		return fmt.Errorf("failed to clear must_change_password flags: %w", err)
+	}
+
 	// Bootstrap initial admin API key if none exists.
 	// Prints the raw key to stdout ONCE — operator must capture it.
 	if !cfg.AuthDevMode {

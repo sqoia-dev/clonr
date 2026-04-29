@@ -8,7 +8,6 @@ import { apiFetch } from "@/lib/api"
 interface LoginResponse {
   ok: boolean
   role: string
-  force_password_change?: boolean
 }
 
 export function LoginPage() {
@@ -29,16 +28,10 @@ export function LoginPage() {
     setError(null)
     setLoading(true)
     try {
-      const res = await apiFetch<LoginResponse>("/api/v1/auth/login", {
+      await apiFetch<LoginResponse>("/api/v1/auth/login", {
         method: "POST",
         body: JSON.stringify({ username: username.trim(), password }),
       })
-
-      if (res.force_password_change) {
-        // /auth/me will reflect the force-change cookie; refresh triggers that.
-        refresh()
-        return
-      }
 
       // Fetch /me to populate full session user (role, sub, username, groups).
       try {
@@ -124,7 +117,7 @@ export function LoginPage() {
           </Button>
         </form>
 
-        {/* DEF-5: Show default-creds hint only on the ?firstrun=1 path.
+        {/* Show default-creds hint only on the ?firstrun=1 path.
             This disappears after a successful login (navigate drops the param). */}
         {isFirstRun && (
           <p className="text-xs text-muted-foreground text-center">
@@ -132,7 +125,7 @@ export function LoginPage() {
             <code className="font-mono">clustr</code>{" "}
             /{" "}
             <code className="font-mono">clustr</code>
-            {" "}— you'll be prompted to set a real password.
+            {" "}— change the password via Settings whenever you want.
           </p>
         )}
       </div>

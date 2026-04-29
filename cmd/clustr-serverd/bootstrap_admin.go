@@ -18,11 +18,10 @@ package main
 // Behaviour:
 //   - If admin accounts already exist, refuses to create another unless --force.
 //   - --force deletes ALL existing users and starts fresh. Use with caution.
-//   - Created user has must_change_password=false (operator knows the password
-//     they set). The auto-generated clustr/clustr default (if any) is removed.
+//   - Created user has must_change_password=false. Default clustr/clustr credentials
+//     work permanently until the operator voluntarily changes the password via Settings.
 //   - --bypass-complexity skips the password complexity validator. Use ONLY for
-//     emergency credential recovery (e.g. clustr/clustr). The bypass is recorded
-//     in the audit log so post-incident review can detect weak-password use.
+//     emergency credential recovery. The bypass is recorded in the audit log.
 //   - On success, also prints the web UI login URL based on CLUSTR_LISTEN_ADDR.
 //   - Idempotent when called multiple times with --force (always overwrites).
 
@@ -99,8 +98,8 @@ const AuditActionBootstrapAdminBypassComplexity = "auth.bootstrap_admin.bypass_c
 const DefaultAdminUsername = "clustr"
 
 // DefaultAdminPassword is the default password set when no --password flag is
-// provided. force_password_change=true is always set on this path — the
-// operator MUST change it before using the app.
+// provided. Works permanently until the operator changes it via Settings.
+// No forced password change — the operator owns their security posture.
 const DefaultAdminPassword = "clustr"
 
 func runBootstrapAdmin(username, password string, force, bypassComplexity bool) error {
@@ -115,8 +114,7 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 	}
 
 	// Apply defaults when neither flags nor env vars provide credentials.
-	// force_password_change is set to true below for the default path so the
-	// operator is forced to choose a real password before using the app.
+	// Default clustr/clustr credentials work permanently — no forced change.
 	usingDefaults := false
 	if username == "" && password == "" {
 		username = DefaultAdminUsername
@@ -214,7 +212,7 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		Username:           username,
 		PasswordHash:       string(hash),
 		Role:               db.UserRoleAdmin,
-		MustChangePassword: usingDefaults, // force change on default clustr/clustr path
+		MustChangePassword: false, // default clustr/clustr works permanently; no forced change
 		CreatedAt:          time.Now(),
 	}
 	if err := database.CreateUser(ctx, rec); err != nil {
@@ -275,12 +273,11 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 	fmt.Printf("  Role:     admin\n")
 	fmt.Printf("  Web UI:   %s\n", webURL)
 	if usingDefaults {
-		fmt.Printf("  Password: %s (force password change required)\n", DefaultAdminPassword)
-		fmt.Printf("\nLog in with the default credentials, then set a real password when prompted.\n")
+		fmt.Printf("  Password: %s\n", DefaultAdminPassword)
+		fmt.Printf("\nDefault credentials work permanently. Change the password via Settings whenever you want.\n")
 	} else if bypassComplexity {
 		fmt.Printf("\nACTION REQUIRED: Change this password manually as soon as recovery is complete.\n")
-		fmt.Printf("  The password set with --bypass-complexity does not meet complexity requirements.\n")
-		fmt.Printf("  Log in, then go to Settings > Account to set a strong password.\n")
+		fmt.Printf("  Log in, then go to Settings to set a stronger password.\n")
 	}
 	fmt.Printf("\nStart the server with: clustr-serverd\n")
 	fmt.Printf("Then log in at: %s\n\n", webURL)
