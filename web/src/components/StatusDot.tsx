@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import type { NodeState } from "@/lib/types"
 
-const stateConfig: Record<NodeState, { color: string; label: string; shape: string }> = {
+const nodeStateConfig: Record<NodeState, { color: string; label: string; shape: string }> = {
   registered: { color: "bg-status-neutral", label: "Registered", shape: "rounded-full" },
   configured: { color: "bg-status-warning", label: "Configured", shape: "rounded-full" },
   deploying: { color: "bg-primary animate-pulse", label: "Deploying", shape: "rounded-full" },
@@ -13,12 +13,37 @@ const stateConfig: Record<NodeState, { color: string; label: string; shape: stri
   deploy_verify_timeout: { color: "bg-status-error", label: "Verify Timeout", shape: "rounded-sm" },
 }
 
-export function StatusDot({ state, className }: { state: NodeState; className?: string }) {
-  const cfg = stateConfig[state]
+export type GenericState = "healthy" | "warning" | "error" | "neutral" | "pending"
+
+const genericStateConfig: Record<GenericState, { color: string; shape: string }> = {
+  healthy: { color: "bg-status-healthy", shape: "rounded-full" },
+  warning: { color: "bg-status-warning", shape: "rounded-full" },
+  error: { color: "bg-status-error", shape: "rounded-sm" },
+  neutral: { color: "bg-status-neutral", shape: "rounded-full" },
+  pending: { color: "bg-primary animate-pulse", shape: "rounded-full" },
+}
+
+type Props =
+  | { state: NodeState; label?: string; className?: string }
+  | { state: GenericState; label: string; className?: string }
+
+export function StatusDot({ state, label, className }: Props) {
+  // Check if it's a NodeState key.
+  if (state in nodeStateConfig) {
+    const cfg = nodeStateConfig[state as NodeState]
+    return (
+      <span className={cn("inline-flex items-center gap-1.5 text-xs", className)}>
+        <span className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
+        {label ?? cfg.label}
+      </span>
+    )
+  }
+  // Generic state.
+  const cfg = genericStateConfig[state as GenericState]
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-xs", className)}>
       <span className={cn("inline-block h-2 w-2 shrink-0", cfg.color, cfg.shape)} />
-      {cfg.label}
+      {label ?? state}
     </span>
   )
 }

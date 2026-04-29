@@ -192,55 +192,55 @@ Sprint 1 shipped with API-key-paste login. That's wrong UX for an end-user web a
 
 #### Images surface
 
-- [ ] **IMG-1** `/images` route — list base images + bundles. Default cols: name, version, size, SHA256-short, "in use by" count
-- [ ] **IMG-2** Tabs inside Images: "Base Images" and "Bundles" (per IA — bundles live here, not top-level)
-- [ ] **IMG-3** SSE updates when an image is uploaded / deleted / referenced. No polling.
-- [ ] **IMG-4** Detail Sheet on row click — full SHA256, GPG fingerprint, size, repo stanzas, list of nodes currently using it
-- [ ] **IMG-5** Empty state with `clustr-cli image upload` snippet (read real CLI syntax from source)
-- [ ] **IMG-6** URL-driven search + sort
+- [x] **IMG-1** `/images` route — list base images + bundles. Default cols: name, version, size, SHA256-short, "in use by" count
+- [x] **IMG-2** Tabs inside Images: "Base Images" and "Bundles" (per IA — bundles live here, not top-level)
+- [x] **IMG-3** SSE updates when an image is uploaded / deleted / referenced. No polling.
+- [x] **IMG-4** Detail Sheet on row click — full SHA256, GPG fingerprint, size, repo stanzas, list of nodes currently using it
+- [x] **IMG-5** Empty state with `clustr-cli image upload` snippet (read real CLI syntax from source)
+- [x] **IMG-6** URL-driven search + sort
 
 #### Activity surface
 
-- [ ] **ACT-1** `/activity` route — unified live event stream. Replaces the legacy 3-separate-log views.
-- [ ] **ACT-2** Source events from server's existing audit/event endpoint (read server source; if no unified endpoint exists, ping Richard — adding one is in-scope if needed)
-- [ ] **ACT-3** Default cols: timestamp (relative), kind (provisioning / api / error), subject (node id / image id / api key id), summary
-- [ ] **ACT-4** SSE live append. Auto-scroll lock when user scrolls up (don't fight the user).
-- [ ] **ACT-5** Filter bar: kind + subject. URL-driven.
-- [ ] **ACT-6** Click row → detail Sheet with full payload (JSON in mono font, expandable)
-- [ ] **ACT-7** Empty state: "No activity yet. Trigger a node provisioning or upload an image."
+- [x] **ACT-1** `/activity` route — unified live event stream. Replaces the legacy 3-separate-log views.
+- [x] **ACT-2** Source events from server's existing audit/event endpoint (read server source; if no unified endpoint exists, ping Richard — adding one is in-scope if needed)
+- [x] **ACT-3** Default cols: timestamp (relative), kind (provisioning / api / error), subject (node id / image id / api key id), summary
+- [x] **ACT-4** SSE live append. Auto-scroll lock when user scrolls up (don't fight the user).
+- [x] **ACT-5** Filter bar: kind + subject. URL-driven.
+- [x] **ACT-6** Click row → detail Sheet with full payload (JSON in mono font, expandable)
+- [x] **ACT-7** Empty state: "No activity yet. Trigger a node provisioning or upload an image."
 
 #### Settings surface
 
-- [ ] **SET-1** `/settings` route, sectioned (not tabs — single-page sections per IA principle: "Settings: One page, sectioned")
-- [ ] **SET-2** Section: API Keys — list, create (modal-free; inline form), revoke (inline destructive confirm with typed key label)
-- [ ] **SET-3** Section: Server Config — read-only view of current config (server hostname, network, ports, version)
-- [ ] **SET-4** Section: GPG Keys — list installed keys, fingerprints, add new (paste public key block)
-- [ ] **SET-5** Logout button at bottom of Settings (clears `localStorage`, redirects to `/login`)
+- [x] **SET-1** `/settings` route, sectioned (not tabs — single-page sections per IA principle: "Settings: One page, sectioned")
+- [x] **SET-2** Section: API Keys — list, create (modal-free; inline form), revoke (inline destructive confirm with typed key label)
+- [x] **SET-3** Section: Server Config — read-only view of current config (server hostname, network, ports, version)
+- [x] **SET-4** Section: GPG Keys — list installed keys, fingerprints, add new (paste public key block)
+- [x] **SET-5** Logout button at bottom of Settings (clears `localStorage`, redirects to `/login`)
 
 #### Reimage flow (the killer action)
 
-- [ ] **REIMG-1** Replace the Sprint 1 stub button on Node detail Sheet with the real flow
-- [ ] **REIMG-2** Inline destructive confirmation per UI/UX principle 4: expands inline below the button, shows current image → target image diff (visually distinct), requires typing the node ID
-- [ ] **REIMG-3** Target image selector: dropdown of available base images, pre-filtered to compatible ones
-- [ ] **REIMG-4** On confirm: POST to existing reimage endpoint, optimistic update node status to "provisioning", subscribe to SSE for that node's progress
-- [ ] **REIMG-5** Inline progress bar in the detail sheet (uses the same SSE stream as Nodes-2)
-- [ ] **REIMG-6** Toast on completion / failure with link to Activity entry
+- [x] **REIMG-1** Replace the Sprint 1 stub button on Node detail Sheet with the real flow
+- [x] **REIMG-2** Inline destructive confirmation per UI/UX principle 4: expands inline below the button, shows current image → target image diff (visually distinct), requires typing the node ID
+- [x] **REIMG-3** Target image selector: dropdown of available base images, pre-filtered to compatible ones
+- [x] **REIMG-4** On confirm: POST to existing reimage endpoint, optimistic update node status to "provisioning", subscribe to SSE for that node's progress
+- [x] **REIMG-5** Inline progress bar in the detail sheet (uses the same SSE stream as Nodes-2)
+- [x] **REIMG-6** Toast on completion / failure with link to Activity entry
 
 #### Cmd-K actions
 
-- [ ] **PAL-1** Palette now lists actions in addition to routes. Sections: Navigation, Nodes, Images, API Keys
-- [ ] **PAL-2** Action: "Reimage node…" — opens a node picker, then triggers the same inline reimage flow on the Node detail page
-- [ ] **PAL-3** Action: "Create API key…" — inline form same as Settings → API Keys
-- [ ] **PAL-4** Action: "Upload image…" — links out to CLI doc (no UI upload in v2)
-- [ ] **PAL-5** Recent items: last 5 entities visited (nodes, images), persisted in localStorage
+- [x] **PAL-1** Palette now lists actions in addition to routes. Sections: Navigation, Nodes, Images, API Keys
+- [x] **PAL-2** Action: "Reimage node…" — opens a node picker, then triggers the same inline reimage flow on the Node detail page
+- [x] **PAL-3** Action: "Create API key…" — inline form same as Settings → API Keys
+- [x] **PAL-4** Action: "Upload image…" — links out to CLI doc (no UI upload in v2)
+- [x] **PAL-5** Recent items: last 5 entities visited (nodes, images), persisted in localStorage
 
 #### Tests + polish
 
-- [ ] **TEST-1** Vitest configured. Critical hooks tested: `useAuth`, `useSSE`, query key factories
-- [ ] **TEST-2** Add `pnpm test` to CI before `make web`
-- [ ] **POL-1** Loading skeletons on every list (no spinner-on-empty)
-- [ ] **POL-2** Keyboard shortcuts: `g n` → Nodes, `g i` → Images, `g a` → Activity, `g s` → Settings (vim-style leader, no conflict with Cmd-K)
-- [ ] **POL-3** Update SPRINT.md checkboxes inline as items complete
+- [x] **TEST-1** Vitest configured. Critical hooks tested: `useAuth`, `useSSE`, query key factories
+- [x] **TEST-2** Add `pnpm test` to CI before `make web`
+- [x] **POL-1** Loading skeletons on every list (no spinner-on-empty)
+- [x] **POL-2** Keyboard shortcuts: `g n` → Nodes, `g i` → Images, `g a` → Activity, `g s` → Settings (vim-style leader, no conflict with Cmd-K)
+- [x] **POL-3** Update SPRINT.md checkboxes inline as items complete
 
 ### Out of scope (Sprint 3+)
 

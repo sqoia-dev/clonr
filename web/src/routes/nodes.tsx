@@ -1,8 +1,8 @@
 import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import {
@@ -20,11 +20,12 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
+import { Skeleton } from "@/components/ui/skeleton"
 import { StatusDot } from "@/components/StatusDot"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest } from "@/lib/types"
 import { nodeState } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -61,7 +62,7 @@ export function NodesPage() {
   }
 
   // TanStack Query for nodes
-  const { data, refetch } = useQuery<ListNodesResponse>({
+  const { data, refetch, isLoading } = useQuery<ListNodesResponse>({
     queryKey: ["nodes", q, sortCol, sortDir],
     queryFn: () => {
       const params = new URLSearchParams()
@@ -164,7 +165,9 @@ export function NodesPage() {
 
       {/* Table */}
       <div className="flex-1 overflow-auto">
-        {nodes.length === 0 ? (
+        {isLoading ? (
+          <NodesSkeleton />
+        ) : nodes.length === 0 ? (
           <EmptyState />
         ) : (
           <Table>
@@ -258,6 +261,16 @@ export function NodesPage() {
   )
 }
 
+function NodesSkeleton() {
+  return (
+    <div className="p-4 space-y-2">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <Skeleton key={i} className="h-10 w-full rounded" />
+      ))}
+    </div>
+  )
+}
+
 function EmptyState() {
   const [copied, setCopied] = React.useState(false)
   const snippet = `clustr --server http://<server>:8080 deploy --auto`
@@ -296,11 +309,6 @@ interface NodeSheetProps {
 
 function NodeSheet({ node, onClose, advanced, relativeTime }: NodeSheetProps) {
   const state = nodeState(node)
-
-  function handleReimage() {
-    console.log({ intent: "reimage", nodeId: node.id })
-    toast({ title: "Reimage flow lands Sprint 2." })
-  }
 
   return (
     <Sheet open onOpenChange={(v) => !v && onClose()}>
@@ -349,17 +357,172 @@ function NodeSheet({ node, onClose, advanced, relativeTime }: NodeSheetProps) {
             </Section>
           )}
 
-          <div className="pt-4 border-t border-border">
-            <Button variant="outline" onClick={handleReimage} className="w-full text-status-warning border-status-warning/40 hover:bg-status-warning/10">
-              Reimage node
-            </Button>
-            <p className="text-xs text-muted-foreground mt-2 text-center">
-              Reimage flow lands Sprint 2.
-            </p>
-          </div>
+          <ReimageFlow node={node} />
         </div>
       </SheetContent>
     </Sheet>
+  )
+}
+
+// ─── Reimage inline flow (REIMG-1..6) ────────────────────────────────────────
+
+function ReimageFlow({ node }: { node: NodeConfig }) {
+  const qc = useQueryClient()
+  const [expanded, setExpanded] = React.useState(false)
+  const [selectedImageId, setSelectedImageId] = React.useState("")
+  const [confirmId, setConfirmId] = React.useState("")
+
+  // Fetch available base images for selector.
+  const { data: imagesData, isLoading: imagesLoading } = useQuery<ListImagesResponse>({
+    queryKey: ["images"],
+    queryFn: () => apiFetch<ListImagesResponse>("/api/v1/images"),
+    staleTime: 30000,
+    enabled: expanded,
+  })
+
+  // Poll active reimage for this node.
+  const { data: activeReimage } = useQuery<ReimageRequest | null>({
+    queryKey: ["reimage-active", node.id],
+    queryFn: async () => {
+      try {
+        return await apiFetch<ReimageRequest>(`/api/v1/nodes/${node.id}/reimage/active`)
+      } catch {
+        return null
+      }
+    },
+    refetchInterval: 3000,
+    staleTime: 2000,
+  })
+
+  const reimageMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<ReimageRequest>(`/api/v1/nodes/${node.id}/reimage`, {
+        method: "POST",
+        body: JSON.stringify({ image_id: selectedImageId }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      qc.invalidateQueries({ queryKey: ["reimage-active", node.id] })
+      setExpanded(false)
+      setConfirmId("")
+      setSelectedImageId("")
+      toast({
+        title: "Reimage triggered",
+        description: `Node ${node.hostname || node.id} is now provisioning.`,
+      })
+    },
+    onError: (err) => {
+      toast({
+        variant: "destructive",
+        title: "Reimage failed",
+        description: String(err),
+      })
+    },
+  })
+
+  const readyImages = imagesData?.images?.filter((img) => img.status === "ready") ?? []
+  const canConfirm = confirmId === node.id && selectedImageId !== ""
+
+  const isProvisioning = activeReimage && ["pending", "triggered", "in_progress"].includes(activeReimage.status)
+
+  return (
+    <div className="pt-4 border-t border-border space-y-3">
+      {/* Active reimage progress (REIMG-5) */}
+      {isProvisioning && activeReimage && (
+        <div className="rounded-md border border-border bg-card p-3 space-y-1.5">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="h-2 w-2 rounded-full bg-status-warning animate-pulse shrink-0" />
+            <span className="font-medium">Reimage in progress</span>
+            <span className="text-xs text-muted-foreground ml-auto">{activeReimage.status}</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+            <div
+              className="h-full bg-status-warning transition-all duration-500 animate-pulse"
+              style={{ width: activeReimage.status === "in_progress" ? "60%" : activeReimage.status === "triggered" ? "20%" : "10%" }}
+            />
+          </div>
+          {activeReimage.error_message && (
+            <p className="text-xs text-destructive">{activeReimage.error_message}</p>
+          )}
+        </div>
+      )}
+
+      {/* Expand / collapse reimage form (REIMG-2) */}
+      {!expanded ? (
+        <Button
+          variant="outline"
+          className="w-full text-status-warning border-status-warning/40 hover:bg-status-warning/10"
+          onClick={() => setExpanded(true)}
+          disabled={!!isProvisioning}
+        >
+          Reimage node
+        </Button>
+      ) : (
+        <div className="rounded-md border border-status-warning/30 bg-status-warning/5 p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-status-warning">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            Reimage node — this will reinstall the OS
+          </div>
+
+          {/* Current → target diff */}
+          <div className="text-xs text-muted-foreground flex items-center gap-2">
+            <span className="font-mono">{node.base_image_id ? node.base_image_id.slice(0, 12) : "no image"}</span>
+            <span>→</span>
+            <span className="font-mono">{selectedImageId ? selectedImageId.slice(0, 12) : "(select target)"}</span>
+          </div>
+
+          {/* Target image selector (REIMG-3) */}
+          {imagesLoading ? (
+            <Skeleton className="h-8 w-full" />
+          ) : (
+            <select
+              className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+              value={selectedImageId}
+              onChange={(e) => setSelectedImageId(e.target.value)}
+            >
+              <option value="">Select target image…</option>
+              {readyImages.map((img) => (
+                <option key={img.id} value={img.id}>
+                  {img.name} {img.version} ({img.id.slice(0, 8)})
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Typed node ID confirmation */}
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">
+              Type <code className="font-mono">{node.id}</code> to confirm:
+            </p>
+            <Input
+              className="font-mono text-xs"
+              placeholder={node.id}
+              value={confirmId}
+              onChange={(e) => setConfirmId(e.target.value)}
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              className="flex-1"
+              disabled={!canConfirm || reimageMutation.isPending}
+              onClick={() => reimageMutation.mutate()}
+            >
+              {reimageMutation.isPending ? "Triggering…" : "Confirm reimage"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setExpanded(false); setConfirmId(""); setSelectedImageId("") }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

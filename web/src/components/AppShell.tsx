@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Link, useRouterState } from "@tanstack/react-router"
+import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
 import { Server, Image, Activity, Settings, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -31,21 +31,50 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { status } = useConnection()
   const { session, setUnauthed } = useSession()
   const routerState = useRouterState()
+  const navigate = useNavigate()
   const currentPath = routerState.location.pathname
 
   const username =
     session.status === "authed" ? (session.user.username ?? session.user.sub) : ""
 
+  // Cmd-K + vim-style leader keys (g n/i/a/s)
+  const gKeyPending = React.useRef(false)
+  const gTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
   React.useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // Skip if focused on an input/textarea.
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
+      const editable = (e.target as HTMLElement)?.isContentEditable
+      if (tag === "input" || tag === "textarea" || tag === "select" || editable) return
+
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault()
         setPaletteOpen(true)
+        return
+      }
+
+      // Vim-style leader: g then n/i/a/s
+      if (gKeyPending.current) {
+        gKeyPending.current = false
+        if (gTimer.current) clearTimeout(gTimer.current)
+        switch (e.key) {
+          case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined } }); break
+          case "i": navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined } }); break
+          case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined } }); break
+          case "s": navigate({ to: "/settings" }); break
+        }
+        return
+      }
+
+      if (e.key === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        gKeyPending.current = true
+        gTimer.current = setTimeout(() => { gKeyPending.current = false }, 1000)
       }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [])
+  }, [navigate])
 
   // Close user menu on outside click.
   const userMenuRef = React.useRef<HTMLDivElement>(null)

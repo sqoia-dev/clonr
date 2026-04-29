@@ -58,3 +58,115 @@ export function nodeState(n: NodeConfig): NodeState {
   if (n.base_image_id) return "configured"
   return "registered"
 }
+
+// ── Images ───────────────────────────────────────────────────────────────────
+
+export type ImageStatus = "building" | "ready" | "error" | "archived" | "interrupted"
+
+export interface BaseImage {
+  id: string
+  name: string
+  version: string
+  os: string
+  arch: string
+  status: ImageStatus
+  format: string
+  firmware: string
+  size_bytes: number
+  checksum: string
+  tags: string[]
+  source_url?: string
+  notes?: string
+  error_message?: string
+  build_method?: string
+  built_for_roles?: string[]
+  created_at: string
+  finalized_at?: string
+}
+
+export interface ListImagesResponse {
+  images: BaseImage[]
+  total: number
+  page?: number
+  per_page?: number
+  next_cursor?: number
+}
+
+// ── Audit / Activity ─────────────────────────────────────────────────────────
+
+export interface AuditRecord {
+  id: string
+  actor_id: string
+  actor_label: string
+  action: string
+  resource_type: string
+  resource_id: string
+  old_value?: unknown
+  new_value?: unknown
+  ip_addr?: string
+  created_at: string
+}
+
+export interface AuditQueryResponse {
+  records: AuditRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+// ── API Keys ─────────────────────────────────────────────────────────────────
+
+export interface APIKey {
+  id: string
+  scope: string
+  node_id?: string
+  label?: string
+  created_by?: string
+  hash_prefix: string
+  created_at: string
+  expires_at?: string
+  last_used_at?: string
+}
+
+export interface ListAPIKeysResponse {
+  api_keys: APIKey[]
+}
+
+export interface CreateAPIKeyResponse {
+  key: string
+  api_key: APIKey
+}
+
+// ── Reimage ──────────────────────────────────────────────────────────────────
+
+export type ReimageStatus =
+  | "pending"
+  | "triggered"
+  | "in_progress"
+  | "complete"
+  | "failed"
+  | "canceled"
+
+export interface ReimageRequest {
+  id: string
+  node_id: string
+  image_id: string
+  status: ReimageStatus
+  scheduled_at?: string
+  error_message?: string
+  requested_by?: string
+  dry_run?: boolean
+  created_at: string
+  triggered_at?: string
+  completed_at?: string
+}
+
+// ── Server health / config ────────────────────────────────────────────────────
+
+export interface HealthResponse {
+  status: string
+  version: string
+  commit_sha: string
+  build_time: string
+  flip_back_failures?: number
+}

@@ -4,7 +4,9 @@ import { LoginPage } from "@/routes/login"
 import { SetupPage } from "@/routes/setup"
 import { SetPasswordPage } from "@/routes/set-password"
 import { NodesPage } from "@/routes/nodes"
-import { StubPage } from "@/routes/stub"
+import { ImagesPage } from "@/routes/images"
+import { ActivityPage } from "@/routes/activity"
+import { SettingsPage } from "@/routes/settings"
 import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
@@ -70,19 +72,29 @@ const nodesRoute = createRoute({
 const imagesRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/images",
-  component: () => <StubPage title="Images" />,
+  component: ImagesPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    q: typeof search.q === "string" ? search.q : undefined,
+    tab: typeof search.tab === "string" ? search.tab : undefined,
+    sort: typeof search.sort === "string" ? search.sort : undefined,
+    dir: search.dir === "asc" || search.dir === "desc" ? (search.dir as "asc" | "desc") : undefined,
+  }),
 })
 
 const activityRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/activity",
-  component: () => <StubPage title="Activity" />,
+  component: ActivityPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    q: typeof search.q === "string" ? search.q : undefined,
+    kind: typeof search.kind === "string" ? search.kind : undefined,
+  }),
 })
 
 const settingsRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/settings",
-  component: () => <StubPage title="Settings" />,
+  component: SettingsPage,
 })
 
 const routeTree = rootRoute.addChildren([
