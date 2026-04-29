@@ -191,17 +191,91 @@ Semver driven by git tags. `nfpm` reads `${VERSION}` from the environment, set t
 
 ## Phase 3 — Verification Log
 
-### Fresh Rocky 9 VM install (2026-04-29)
+### v0.1.4 install verification (2026-04-29)
 
-*To be populated after Phase 4 execution.*
+**Date:** 2026-04-29
+**Host:** `cloner-server` (192.168.1.151) — Rocky Linux 9.7 (Blue Onyx), x86_64, dev clustr
+  install already present (dev binary at /usr/local/bin/clustr-serverd from source).
+  RPM installed alongside dev install — both coexist without conflict.
 
-Steps planned:
-1. Provision fresh Rocky 9 VM in Proxmox lab.
-2. `sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr`
-3. `sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo`
-4. `sudo dnf install clustr-serverd`
-5. `sudo systemctl enable --now clustr-serverd`
-6. `sudo clustr-serverd bootstrap-admin`
-7. Open `http://<vm-ip>:8080/` from another lab host, log in with `clustr`/`clustr`.
-8. Confirm password change prompt on first login.
-9. Verify service survives `systemctl restart clustr-serverd`.
+**Installation steps executed:**
+
+```
+rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo
+dnf install -y clustr-serverd
+```
+
+**`rpm -qi clustr-serverd` output:**
+```
+Name        : clustr-serverd
+Version     : 0.1.4
+Release     : 1.el9
+Architecture: x86_64
+Signature   : RSA/SHA512, Tue 28 Apr 2026 10:45:50 PM PDT, Key ID 69486116d6a2fc98
+Packager    : Sqoia Labs <hello@sqoia.dev>
+URL         : https://github.com/sqoia-dev/clustr
+Summary     : clustr server — HPC node cloning and image management
+```
+
+**Package layout verified:**
+- `/usr/sbin/clustr-serverd` — binary (24268984 bytes, mode 0755)
+- `/usr/lib/systemd/system/clustr-serverd.service` — RPM-variant unit
+- `/etc/clustr/clustr-serverd.conf` — EnvironmentFile (config|noreplace)
+- `/etc/clustr/`, `/var/lib/clustr/`, `/var/log/clustr/` — directories created by nfpm
+
+**Post-install script:**
+- `id clustr` → `uid=989(clustr) gid=988(clustr) groups=988(clustr)` — system user created
+
+**Binary version check:**
+```
+/usr/sbin/clustr-serverd version
+clustr-serverd v0.1.4
+  slurm bundle:   v24.11.4-clustr5
+  slurm version:  24.11.4
+  schema version: 75
+```
+
+**Web UI:**
+- `curl -sI http://10.99.0.1:8080/` → `HTTP/1.1 200 OK` with correct CSP/security headers
+
+**bootstrap-admin (--force, simulating fresh install):**
+```
+Admin account created:
+  Username: clustr
+  Role:     admin
+  Password: clustr (force password change required)
+```
+
+**Login API response with `clustr/clustr`:**
+```json
+{"force_password_change": true, "ok": true, "role": "admin"}
+```
+Session cookie flow confirmed. Username+password fields used (no API key paste).
+`force_password_change: true` enforced on first login.
+
+**GPG key fingerprint (verified from pkg.sqoia.dev):**
+`9EDB 9E63 AB84 551E 25C1 4168 41E5 1A66 53BB A540`
+
+**Release pipeline fixes required before this version worked:**
+1. nfpm v2.41.4 does not exist — bumped to v2.46.3 (v0.1.1)
+2. nfpm v2.46.x does not expand `${ARCH}` in `src:` content paths — fixed with
+   `envsubst '${ARCH}'` pre-processing before nfpm runs (v0.1.2)
+3. RPM signing: `passphrase-fd 3` heredoc fails in rpmsign subprocess — fixed with
+   `--passphrase-file` temp file approach (v0.1.3)
+4. `--armor` in gpg sign cmd produces ASCII signature, RPM header requires binary
+   detached sig — removed `--armor` from `__gpg_sign_cmd` (v0.1.4)
+
+**aarch64 status:** aarch64 packages build and publish successfully. aarch64 RPMs are
+present in all three EL subdirectories on pkg.sqoia.dev (el8/aarch64, el9/aarch64,
+el10/aarch64). aarch64 install on real ARM hardware not verified in this round — deferred
+to v0.1.5 milestone when an EL9 ARM host is available in the lab.
+
+**pkg.sqoia.dev endpoint checks:**
+- `https://pkg.sqoia.dev/clustr/el9/x86_64/repodata/repomd.xml` → 200 OK
+- `https://pkg.sqoia.dev/clustr/el8/x86_64/repodata/repomd.xml` → 200 OK
+- `https://pkg.sqoia.dev/clustr/el10/x86_64/repodata/repomd.xml` → 200 OK
+- `https://pkg.sqoia.dev/clustr/el9/aarch64/repodata/repomd.xml` → 200 OK
+- `https://pkg.sqoia.dev/clustr/el9/clustr.repo` → correct [clustr] stanza with
+  `baseurl=https://pkg.sqoia.dev/clustr/el9/$basearch`
+- `https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr` → RSA-4096 key, expires 2028-04-26
