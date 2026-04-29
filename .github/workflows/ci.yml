@@ -122,12 +122,17 @@ jobs:
 
       - name: Smoke-run clustr-serverd
         run: |
-          ./bin/clustr-serverd --help 2>&1 | head -5 || true
+          TMPDIR=$(mktemp -d)
+          mkdir -p "$TMPDIR/db" "$TMPDIR/images"
+          CLUSTR_DB_PATH="$TMPDIR/db/clustr.db" \
+          CLUSTR_IMAGE_DIR="$TMPDIR/images" \
           ./bin/clustr-serverd &
           SERVER_PID=$!
-          sleep 3
-          curl -sf http://localhost:8080/ | grep -q "clustr" || curl -sf http://localhost:8080/
+          sleep 4
+          # The SPA index.html contains "clustr"
+          BODY=$(curl -sf http://localhost:8080/ 2>/dev/null || echo "")
           kill $SERVER_PID 2>/dev/null || true
+          echo "$BODY" | grep -qi "clustr" || (echo "Unexpected body: $BODY" && exit 1)
 
   gosec:
     name: gosec
