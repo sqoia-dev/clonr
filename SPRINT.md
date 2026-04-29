@@ -487,6 +487,7 @@ Use Kubernetes-style key:value tags. "Groups" emerge from filtering by tag — n
 - Sprint 4 green SHA: `e69e76a`. v0.1.4 release SHA: `8b4e9b0` (post-pipeline-fixup).
 - All 6 RPM URLs serving from `pkg.sqoia.dev/clustr/{el8,el9,el10}/{x86_64,aarch64}/`. Repo metadata GPG-signed.
 - v0.1.0–v0.1.3 are pipeline-iteration tags (broken signing); v0.1.4 is the first working release.
+- POST-SPRINT-4 GAP CLOSED: node deletion UI — Delete button in node detail Sheet with inline typed-hostname confirm, DELETE mutation with optimistic remove + 409 rollback, and Cmd-K "Delete node…" picker.
 
 ---
 

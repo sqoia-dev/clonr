@@ -2,7 +2,7 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -22,6 +22,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { StatusDot } from "@/components/StatusDot"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
@@ -467,6 +468,8 @@ interface NodeSearch {
   openNode?: string
   reimage?: string
   addNode?: string
+  // NODE-DEL-4: open node sheet with delete confirm pre-expanded (Cmd-K "Delete node…")
+  deleteNode?: string
   // TAG-4: one or more key:value tag filters (AND semantics, repeated ?tag= param)
   tag?: string[]
 }
@@ -491,7 +494,7 @@ export function NodesPage() {
       setAddNodeOpen(true)
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined },
         replace: true,
       })
     }
@@ -499,6 +502,8 @@ export function NodesPage() {
   // PAL-2-2: auto-open node from URL param (used by Cmd-K "Reimage node…").
   const openNodeId = search.openNode
   const autoReimage = search.reimage === "1"
+  // NODE-DEL-4: auto-open node sheet with delete confirm pre-expanded (Cmd-K "Delete node…").
+  const autoDelete = search.deleteNode === "1"
 
   function updateSearch(patch: Partial<NodeSearch>) {
     navigate({
@@ -512,6 +517,7 @@ export function NodesPage() {
         openNode: undefined,
         reimage: undefined,
         addNode: undefined,
+        deleteNode: undefined,
       },
       replace: true,
     })
@@ -584,7 +590,7 @@ export function NodesPage() {
       // Clear the param so back-navigation doesn't re-open.
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined },
         replace: true,
       })
     }
@@ -853,6 +859,7 @@ export function NodesPage() {
           advanced={advanced}
           relativeTime={relativeTime}
           autoReimage={autoReimage}
+          autoDelete={autoDelete}
         />
       )}
 
@@ -938,12 +945,13 @@ interface NodeSheetProps {
   advanced: boolean
   relativeTime: (iso?: string) => string
   autoReimage?: boolean
+  autoDelete?: boolean
 }
 
 // ─── NodeSheet ────────────────────────────────────────────────────────────────
 // Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
 
-function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeSheetProps) {
+function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete }: NodeSheetProps) {
   const qc = useQueryClient()
   const state = nodeState(node)
   const [editing, setEditing] = React.useState(false)
@@ -1145,6 +1153,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeS
           )}
 
           <ReimageFlow node={node} autoExpand={autoReimage} />
+          <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
             </>
           )}
         </div>
@@ -1314,6 +1323,120 @@ function ReimageFlow({ node, autoExpand }: { node: NodeConfig; autoExpand?: bool
               variant="ghost"
               size="sm"
               onClick={() => { setExpanded(false); setConfirmId(""); setSelectedImageId("") }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── DeleteNodeFlow (NODE-DEL-1..5) ──────────────────────────────────────────
+// Inline destructive confirmation per UI/UX principle 4.
+
+function DeleteNodeFlow({ node, autoExpand, onDeleted }: { node: NodeConfig; autoExpand?: boolean; onDeleted: () => void }) {
+  const qc = useQueryClient()
+  const state = nodeState(node)
+  const isDeploying = state === "deploying" || state === "reimage_pending"
+  const [expanded, setExpanded] = React.useState(autoExpand ?? false)
+  const [confirmHostname, setConfirmHostname] = React.useState("")
+  const [deleteError, setDeleteError] = React.useState("")
+
+  const canDelete = confirmHostname === node.hostname
+
+  const deleteMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<void>(`/api/v1/nodes/${node.id}`, { method: "DELETE" }),
+    onMutate: async () => {
+      // Optimistic remove from list cache.
+      await qc.cancelQueries({ queryKey: ["nodes"] })
+      const prev = qc.getQueryData<{ nodes: NodeConfig[]; total: number }>(["nodes"])
+      if (prev) {
+        qc.setQueryData<{ nodes: NodeConfig[]; total: number }>(["nodes"], {
+          ...prev,
+          nodes: prev.nodes.filter((n) => n.id !== node.id),
+          total: Math.max(0, prev.total - 1),
+        })
+      }
+      return { prev }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      toast({ title: `Node deleted: ${node.hostname}` })
+      onDeleted()
+    },
+    onError: (err, _vars, context) => {
+      // Rollback optimistic remove.
+      if (context?.prev) {
+        qc.setQueryData(["nodes"], context.prev)
+      }
+      const msg = String(err)
+      if (msg.includes("409") || msg.toLowerCase().includes("deploy")) {
+        setDeleteError("Cannot delete: node is currently deploying. Cancel deployment first.")
+      } else {
+        setDeleteError(msg)
+      }
+    },
+  })
+
+  return (
+    <div className="pt-4 border-t border-border space-y-3">
+      {!expanded ? (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-block w-full">
+                <Button
+                  variant="ghost"
+                  className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
+                  onClick={() => { setExpanded(true); setDeleteError("") }}
+                  disabled={isDeploying}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete node
+                </Button>
+              </span>
+            </TooltipTrigger>
+            {isDeploying && (
+              <TooltipContent>Cancel active deployment to delete.</TooltipContent>
+            )}
+          </Tooltip>
+        </TooltipProvider>
+      ) : (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+            <Trash2 className="h-4 w-4 shrink-0" />
+            Delete node — this is permanent
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Type <code className="font-mono font-semibold text-foreground">{node.hostname}</code> to confirm:
+          </p>
+          <Input
+            className="font-mono text-xs"
+            placeholder={node.hostname}
+            value={confirmHostname}
+            onChange={(e) => { setConfirmHostname(e.target.value); setDeleteError("") }}
+          />
+
+          {deleteError && <p className="text-xs text-destructive">{deleteError}</p>}
+
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              className="flex-1"
+              disabled={!canDelete || deleteMutation.isPending}
+              onClick={() => deleteMutation.mutate()}
+            >
+              {deleteMutation.isPending ? "Deleting…" : "Delete permanently"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setExpanded(false); setConfirmHostname(""); setDeleteError("") }}
             >
               Cancel
             </Button>

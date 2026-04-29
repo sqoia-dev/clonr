@@ -53,7 +53,7 @@ const indexRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, tag: undefined } })
+    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined } })
   },
 })
 
@@ -74,6 +74,8 @@ const nodesRoute = createRoute({
     reimage: typeof search.reimage === "string" ? search.reimage : undefined,
     // NODE-CREATE-5: open AddNode sheet from Cmd-K
     addNode: typeof search.addNode === "string" ? search.addNode : undefined,
+    // NODE-DEL-4: open node detail sheet with delete confirm pre-expanded (Cmd-K "Delete node…")
+    deleteNode: typeof search.deleteNode === "string" ? search.deleteNode : undefined,
     // TAG-4: one or more key:value tag filters (AND semantics). Serialised as
     // repeated ?tag= params; TanStack Router coerces a single value to a string
     // and multiple values to an array — normalise both cases to string[].

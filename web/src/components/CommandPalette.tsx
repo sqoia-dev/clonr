@@ -66,7 +66,7 @@ interface Props {
   onClose: () => void
 }
 
-type PaletteMode = "root" | "node-picker" | "edit-node-picker" | "add-image" | "delete-image-picker"
+type PaletteMode = "root" | "node-picker" | "edit-node-picker" | "delete-node-picker" | "add-image" | "delete-image-picker"
 
 export function CommandPalette({ open, onClose }: Props) {
   const navigate = useNavigate()
@@ -81,11 +81,11 @@ export function CommandPalette({ open, onClose }: Props) {
     }
   }, [open])
 
-  // Fetch nodes when picker opens (PAL-2-2 / EDIT-NODE-4).
+  // Fetch nodes when picker opens (PAL-2-2 / EDIT-NODE-4 / NODE-DEL-4).
   const { data: nodesData } = useQuery<ListNodesResponse>({
     queryKey: ["nodes-palette"],
     queryFn: () => apiFetch<ListNodesResponse>("/api/v1/nodes"),
-    enabled: mode === "node-picker" || mode === "edit-node-picker",
+    enabled: mode === "node-picker" || mode === "edit-node-picker" || mode === "delete-node-picker",
     staleTime: 10000,
   })
   const nodes = nodesData?.nodes ?? []
@@ -158,6 +158,26 @@ export function CommandPalette({ open, onClose }: Props) {
     })
   }
 
+  // NODE-DEL-4: navigate to /nodes?openNode=<id>&deleteNode=1 to open detail sheet with delete pre-expanded.
+  function pickNodeForDelete(nodeId: string, nodeLabel: string) {
+    onClose()
+    recordRecentEntity({ kind: "node", id: nodeId, label: nodeLabel })
+    navigate({
+      to: "/nodes",
+      search: {
+        q: undefined,
+        status: undefined,
+        sort: undefined,
+        dir: undefined,
+        openNode: nodeId,
+        reimage: undefined,
+        addNode: undefined,
+        deleteNode: "1",
+        tag: undefined,
+      },
+    })
+  }
+
   // IMG-URL-6: navigate to /images?addImage=1 to auto-open the Add Image sheet.
   function addImageFromURL() {
     onClose()
@@ -203,6 +223,12 @@ export function CommandPalette({ open, onClose }: Props) {
                   <CommandItem value="edit node" onSelect={() => setMode("edit-node-picker")}>
                     <Pencil className="mr-2 h-4 w-4" />
                     Edit node…
+                    <span className="ml-auto text-xs text-muted-foreground">Select node</span>
+                  </CommandItem>
+                  {/* NODE-DEL-4: Cmd-K delete node */}
+                  <CommandItem value="delete node" onSelect={() => setMode("delete-node-picker")}>
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete node…
                     <span className="ml-auto text-xs text-muted-foreground">Select node</span>
                   </CommandItem>
                   {/* PAL-2-2: inline node picker, no redirect */}
@@ -317,6 +343,41 @@ export function CommandPalette({ open, onClose }: Props) {
                         key={node.id}
                         value={`${node.hostname} ${node.id} ${node.primary_mac}`}
                         onSelect={() => pickNodeForEdit(node.id, node.hostname || node.id)}
+                      >
+                        <Server className="mr-2 h-4 w-4" />
+                        <span className="font-medium">{node.hostname || node.id}</span>
+                        <span className="ml-2 text-xs text-muted-foreground font-mono">{node.primary_mac}</span>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                )}
+              </CommandList>
+            </>
+          )}
+
+          {/* NODE-DEL-4: node picker for deletion */}
+          {mode === "delete-node-picker" && (
+            <>
+              <CommandInput placeholder="Search nodes to delete..." autoFocus />
+              <CommandList>
+                <CommandEmpty>
+                  {nodes.length === 0 ? "Loading nodes…" : "No matching nodes."}
+                </CommandEmpty>
+
+                <CommandGroup>
+                  <CommandItem value="__back__" onSelect={() => setMode("root")} className="text-muted-foreground">
+                    <ChevronLeft className="mr-2 h-4 w-4" />
+                    Back
+                  </CommandItem>
+                </CommandGroup>
+
+                {nodes.length > 0 && (
+                  <CommandGroup heading="Select node to delete">
+                    {nodes.map((node) => (
+                      <CommandItem
+                        key={node.id}
+                        value={`${node.hostname} ${node.id} ${node.primary_mac}`}
+                        onSelect={() => pickNodeForDelete(node.id, node.hostname || node.id)}
                       >
                         <Server className="mr-2 h-4 w-4" />
                         <span className="font-medium">{node.hostname || node.id}</span>
