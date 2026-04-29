@@ -74,6 +74,14 @@ const nodesRoute = createRoute({
     reimage: typeof search.reimage === "string" ? search.reimage : undefined,
     // NODE-CREATE-5: open AddNode sheet from Cmd-K
     addNode: typeof search.addNode === "string" ? search.addNode : undefined,
+    // TAG-4: one or more key:value tag filters (AND semantics). Serialised as
+    // repeated ?tag= params; TanStack Router coerces a single value to a string
+    // and multiple values to an array — normalise both cases to string[].
+    tag: Array.isArray(search.tag)
+      ? (search.tag as string[]).filter((v) => typeof v === "string")
+      : typeof search.tag === "string"
+        ? [search.tag]
+        : undefined,
   }),
 })
 

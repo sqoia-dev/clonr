@@ -479,3 +479,54 @@ Use Kubernetes-style key:value tags. "Groups" emerge from filtering by tag — n
 3. Autodeploy on cloner ships the latest SHA.
 4. Operator end-to-end on a fresh deploy: log in → click "Add node" → register a node → click "Add image" / "From URL" → image downloads with live progress → click "Build initramfs" against that image → watch live log → resulting initramfs available → reimage a node onto it. All from the web UI; no CLI required for these flows.
 5. **Tag `v0.1.0` after Sprint 4 ships green.** Gilfoyle's release pipeline fires; RPMs land at `pkg.sqoia.dev/clustr/{el8,el9,el10}/x86_64/`. Verify on a fresh Rocky 9 VM in the Proxmox lab.
+
+---
+
+## Sprint 4 SHIPPED — v0.1.4 RELEASED (2026-04-29)
+
+- Sprint 4 green SHA: `e69e76a`. v0.1.4 release SHA: `8b4e9b0` (post-pipeline-fixup).
+- All 6 RPM URLs serving from `pkg.sqoia.dev/clustr/{el8,el9,el10}/{x86_64,aarch64}/`. Repo metadata GPG-signed.
+- v0.1.0–v0.1.3 are pipeline-iteration tags (broken signing); v0.1.4 is the first working release.
+
+---
+
+## Sprint 5 — Catch-up + Carry-overs
+
+**Started:** 2026-04-29 (immediately after v0.1.4 ship)
+**Target:** 4–6 days. Small sprint.
+
+### Goal
+
+Sprint 4 shipped functionally complete but Dinesh deferred test coverage on the new endpoints, plus a few small UX gaps. Sprint 5 closes those plus tidies the v0.1.x tag visibility.
+
+### In scope
+
+#### Test catch-up (Sprint 4 X-4 / X-5)
+
+- [x] **TEST-S5-1** Vitest: node-create form validation (valid + each invalid field path), Edit-Node optimistic update + rollback on 409, Bulk add CSV/YAML parser preview, image-from-URL mutation flow, TUS upload progress event handling, initramfs build SSE consumption (queued → running → log → completed).
+- [x] **TEST-S5-2** Go httptest: `from-url` (success / scheme reject / SSRF reject / SHA256 mismatch / cancel mid-download), TUS endpoints (POST create + HEAD offset + PATCH chunk + DELETE abort + GC stale), `from-upload` (valid + unknown upload_id), `nodes/batch` (all-success + partial-fail + 0-row), `initramfs/build` (success + cancel mid-run), `audit DELETE` (single + filtered bulk + audit.purged meta-event present + meta-event itself undeletable).
+- [x] **TEST-S5-3** Add `pnpm exec vitest run` and `go test ./...` enforcement to CI lint+test jobs (already enforced post-Sprint 3 — verify the new tests are picked up; expand if not).
+
+#### UX carry-overs
+
+- [x] **TAG-2** `?tag=key:value` URL param filter on `/nodes`. Multiple `tag` params = AND. Server endpoint already supports filter; web reads URL state and passes to the query.
+- [x] **TAG-4** Filter bar tag selector with autocomplete from observed keys (de-dup the keys from the current node list; suggest values per key). URL-driven (existing pattern).
+- [x] **BULK-5** Nodes empty state shows a paste-able CSV sample alongside the existing CLI register snippet. The CSV matches the bulk-add format from BULK-2.
+
+#### Release hygiene
+
+- [x] **REL-1** Mark v0.1.0, v0.1.1, v0.1.2, v0.1.3 GitHub Releases as prerelease (so v0.1.4 is the default download path on the releases page). Tags stay as git history. Use `gh release edit <tag> --prerelease`.
+- [x] **REL-2** Add a one-line note to the v0.1.4 GH Release body: "First working release; v0.1.0–v0.1.3 were pipeline iterations." Don't make it a full changelog or launch announcement.
+
+### Out of scope (Sprint 6+)
+
+- Anything not in this list. If quality issues surface from real operator use of v0.1.4, that becomes Sprint 6.
+- LDAP / sysaccounts / slurm management / portals (still wiped, still gone).
+
+### Definition of done
+
+1. All Sprint 5 checkboxes ticked.
+2. CI green on the merge SHA, with the new tests passing.
+3. Tag `v0.1.5` after merge — RPM pipeline auto-fires, packages land at pkg.sqoia.dev (no manual intervention this time, the pipeline is solid).
+4. Tag URL filter works end-to-end: paste `/nodes?tag=env:prod&tag=role:worker`, see filtered list.
+5. v0.1.0–v0.1.3 are no longer the default visible release on the GH releases page.

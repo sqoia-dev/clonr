@@ -467,6 +467,8 @@ interface NodeSearch {
   openNode?: string
   reimage?: string
   addNode?: string
+  // TAG-4: one or more key:value tag filters (AND semantics, repeated ?tag= param)
+  tag?: string[]
 }
 
 export function NodesPage() {
@@ -478,6 +480,8 @@ export function NodesPage() {
   const q = search.q ?? ""
   const sortCol = search.sort ?? ""
   const sortDir = search.dir ?? "asc"
+  // TAG-4: active tag filters from URL (normalised to string[])
+  const activeTags: string[] = search.tag ?? []
   const [advanced, setAdvanced] = React.useState(false)
   const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
   const [addNodeOpen, setAddNodeOpen] = React.useState(false)
@@ -487,7 +491,7 @@ export function NodesPage() {
       setAddNodeOpen(true)
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined, addNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined },
         replace: true,
       })
     }
@@ -504,6 +508,7 @@ export function NodesPage() {
         status: patch.status !== undefined ? patch.status : search.status,
         sort: patch.sort !== undefined ? patch.sort : sortCol || undefined,
         dir: patch.dir !== undefined ? patch.dir : sortDir === "asc" ? undefined : "desc",
+        tag: patch.tag !== undefined ? (patch.tag?.length ? patch.tag : undefined) : (activeTags.length ? activeTags : undefined),
         openNode: undefined,
         reimage: undefined,
         addNode: undefined,
@@ -514,12 +519,16 @@ export function NodesPage() {
 
   // TanStack Query for nodes
   const { data, refetch, isLoading } = useQuery<ListNodesResponse>({
-    queryKey: ["nodes", q, sortCol, sortDir],
+    queryKey: ["nodes", q, sortCol, sortDir, activeTags],
     queryFn: () => {
       const params = new URLSearchParams()
       if (q) params.set("search", q)
       if (sortCol) params.set("sort", sortCol)
       if (sortDir) params.set("dir", sortDir)
+      // TAG-2: pass each active tag as a repeated ?tag= param (AND semantics on server)
+      for (const t of activeTags) {
+        params.append("tag", t)
+      }
       return apiFetch<ListNodesResponse>(`/api/v1/nodes?${params}`)
     },
     refetchInterval: 30000,
@@ -575,7 +584,7 @@ export function NodesPage() {
       // Clear the param so back-navigation doesn't re-open.
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined, addNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined },
         replace: true,
       })
     }
@@ -607,18 +616,129 @@ export function NodesPage() {
     }
   }
 
+  // TAG-4: collect unique tags from all loaded nodes for autocomplete suggestions.
+  const allObservedTags = React.useMemo(() => {
+    const set = new Set<string>()
+    for (const node of data?.nodes ?? []) {
+      for (const t of node.tags ?? []) {
+        if (!activeTags.includes(t)) set.add(t)
+      }
+    }
+    return Array.from(set).sort()
+  }, [data?.nodes, activeTags])
+
+  const [tagPickerOpen, setTagPickerOpen] = React.useState(false)
+  const [tagInput, setTagInput] = React.useState("")
+  const tagPickerRef = React.useRef<HTMLDivElement>(null)
+
+  // Close tag picker on outside click.
+  React.useEffect(() => {
+    if (!tagPickerOpen) return
+    function handleClick(e: MouseEvent) {
+      if (tagPickerRef.current && !tagPickerRef.current.contains(e.target as Node)) {
+        setTagPickerOpen(false)
+        setTagInput("")
+      }
+    }
+    document.addEventListener("mousedown", handleClick)
+    return () => document.removeEventListener("mousedown", handleClick)
+  }, [tagPickerOpen])
+
+  const filteredTagSuggestions = tagInput
+    ? allObservedTags.filter((t) => t.toLowerCase().includes(tagInput.toLowerCase()))
+    : allObservedTags
+
+  function addTagFilter(tag: string) {
+    const trimmed = tag.trim()
+    if (!trimmed || activeTags.includes(trimmed)) return
+    updateSearch({ tag: [...activeTags, trimmed] })
+    setTagPickerOpen(false)
+    setTagInput("")
+  }
+
+  function removeTagFilter(tag: string) {
+    updateSearch({ tag: activeTags.filter((t) => t !== tag) })
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 border-b border-border px-6 py-3">
-        <div className="relative w-72">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder="Search nodes..."
-            value={q}
-            onChange={(e) => updateSearch({ q: e.target.value || undefined })}
-          />
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <div className="relative w-72 shrink-0">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              className="pl-8"
+              placeholder="Search nodes..."
+              value={q}
+              onChange={(e) => updateSearch({ q: e.target.value || undefined })}
+            />
+          </div>
+          {/* TAG-4: active tag filter chips */}
+          {activeTags.map((tag) => (
+            <span
+              key={tag}
+              className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary px-2.5 py-0.5 text-xs font-mono text-foreground whitespace-nowrap"
+            >
+              <Tag className="h-3 w-3 text-muted-foreground" />
+              {tag}
+              <button
+                onClick={() => removeTagFilter(tag)}
+                className="ml-0.5 rounded-full hover:bg-muted p-0.5"
+                aria-label={`Remove tag filter ${tag}`}
+              >
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </span>
+          ))}
+          {/* TAG-4: tag picker */}
+          <div className="relative" ref={tagPickerRef}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1 text-xs"
+              onClick={() => setTagPickerOpen((o) => !o)}
+            >
+              <Tag className="h-3.5 w-3.5" />
+              Filter by tag
+            </Button>
+            {tagPickerOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 w-56 rounded-md border border-border bg-popover shadow-md">
+                <div className="p-2">
+                  <Input
+                    autoFocus
+                    className="h-7 text-xs"
+                    placeholder="key:value or free text"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && tagInput.trim()) addTagFilter(tagInput)
+                      if (e.key === "Escape") { setTagPickerOpen(false); setTagInput("") }
+                    }}
+                  />
+                </div>
+                {filteredTagSuggestions.length > 0 && (
+                  <div className="max-h-48 overflow-y-auto border-t border-border">
+                    {filteredTagSuggestions.map((tag) => (
+                      <button
+                        key={tag}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs font-mono hover:bg-accent text-left"
+                        onClick={() => addTagFilter(tag)}
+                      >
+                        <Tag className="h-3 w-3 shrink-0 text-muted-foreground" />
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {filteredTagSuggestions.length === 0 && tagInput && (
+                  <div className="px-3 py-2 text-xs text-muted-foreground border-t border-border">
+                    Press Enter to filter by "{tagInput}"
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -752,30 +872,57 @@ function NodesSkeleton() {
   )
 }
 
+// BULK-5: CSV sample shown alongside CLI snippet in empty state.
+const CSV_SAMPLE = `hostname,mac,ip,role
+compute-01,bc:24:11:aa:bb:cc,,worker
+compute-02,bc:24:11:aa:bb:dd,,worker`
+
 function EmptyState({ onAddNode }: { onAddNode: () => void }) {
-  const [copied, setCopied] = React.useState(false)
+  const [copiedCli, setCopiedCli] = React.useState(false)
+  const [copiedCsv, setCopiedCsv] = React.useState(false)
   const snippet = `clustr --server http://<server>:8080 deploy --auto`
 
-  function copy() {
+  function copyCli() {
     navigator.clipboard.writeText(snippet).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      setCopiedCli(true)
+      setTimeout(() => setCopiedCli(false), 2000)
+    })
+  }
+
+  function copyCsv() {
+    navigator.clipboard.writeText(CSV_SAMPLE).then(() => {
+      setCopiedCsv(true)
+      setTimeout(() => setCopiedCsv(false), 2000)
     })
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-full min-h-64 gap-4 p-8 text-center">
+    <div className="flex flex-col items-center justify-center h-full min-h-64 gap-6 p-8 text-center">
       <div className="space-y-1">
         <h2 className="text-base font-semibold">No nodes registered yet</h2>
         <p className="text-sm text-muted-foreground">
-          PXE-boot a node to register it automatically, add one here, or run:
+          PXE-boot a node to register it automatically, add one here, or use one of the options below.
         </p>
       </div>
-      <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 max-w-lg">
-        <code className="text-xs font-mono flex-1 text-left">{snippet}</code>
-        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={copy}>
-          {copied ? <Check className="h-3.5 w-3.5 text-status-healthy" /> : <Copy className="h-3.5 w-3.5" />}
-        </Button>
+      {/* CLI snippet */}
+      <div className="w-full max-w-lg space-y-1 text-left">
+        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">CLI — auto-register on boot</p>
+        <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+          <code className="text-xs font-mono flex-1">{snippet}</code>
+          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={copyCli}>
+            {copiedCli ? <Check className="h-3.5 w-3.5 text-status-healthy" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      </div>
+      {/* CSV sample — BULK-5 */}
+      <div className="w-full max-w-lg space-y-1 text-left">
+        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Bulk import — paste CSV into Add Node › Bulk tab</p>
+        <div className="flex items-start gap-2 rounded-md border border-border bg-card px-3 py-2">
+          <pre className="text-xs font-mono flex-1 whitespace-pre text-left leading-relaxed">{CSV_SAMPLE}</pre>
+          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 mt-0.5" onClick={copyCsv}>
+            {copiedCsv ? <Check className="h-3.5 w-3.5 text-status-healthy" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
       </div>
       <Button onClick={onAddNode} size="sm">
         <Plus className="h-4 w-4 mr-1" />

@@ -178,9 +178,11 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	sortCol := r.URL.Query().Get("sort")
 	sortDir := r.URL.Query().Get("dir")
+	// TAG-2: collect all ?tag= values (multiple allowed, AND semantics).
+	tagFilter := r.URL.Query()["tag"]
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
-	nodes, err := h.DB.SearchNodeConfigs(r.Context(), baseImageID, search)
+	nodes, err := h.DB.SearchNodeConfigs(r.Context(), baseImageID, search, tagFilter)
 	if err != nil {
 		log.Error().Err(err).Msg("list nodes")
 		writeError(w, err)

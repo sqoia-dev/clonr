@@ -833,13 +833,15 @@ func (db *DB) NodeGetHostname(ctx context.Context, nodeID string) (string, error
 // the node list page shows the correct group even when the denormalised fast-path
 // column on node_configs is stale or NULL.
 func (db *DB) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error) {
-	return db.SearchNodeConfigs(ctx, baseImageID, "")
+	return db.SearchNodeConfigs(ctx, baseImageID, "", nil)
 }
 
-// SearchNodeConfigs lists node configs with optional baseImageID and/or a
-// free-text search term. The search term is matched case-insensitively against
-// hostname, primary_mac, and status (LIKE '%term%').
-func (db *DB) SearchNodeConfigs(ctx context.Context, baseImageID, search string) ([]api.NodeConfig, error) {
+// SearchNodeConfigs lists node configs with optional baseImageID, a free-text search
+// term, and an optional list of tag values to filter by (AND semantics).
+// The search term is matched case-insensitively against hostname, primary_mac, and
+// status (LIKE '%term%'). Each tag in tags must be present in the node's JSON tags
+// array for the node to be returned (SQLite JSON1 json_each).
+func (db *DB) SearchNodeConfigs(ctx context.Context, baseImageID, search string, tags []string) ([]api.NodeConfig, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -856,6 +858,14 @@ func (db *DB) SearchNodeConfigs(ctx context.Context, baseImageID, search string)
 		like := "%" + search + "%"
 		whereClauses = append(whereClauses, "(nc.hostname LIKE ? OR nc.primary_mac LIKE ? OR nc.status LIKE ?)")
 		args = append(args, like, like, like)
+	}
+	// TAG-2: each requested tag must appear in the node's JSON tags array (AND semantics).
+	for _, tag := range tags {
+		if tag == "" {
+			continue
+		}
+		whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM json_each(nc.tags) WHERE value = ?)")
+		args = append(args, tag)
 	}
 
 	where := ""
