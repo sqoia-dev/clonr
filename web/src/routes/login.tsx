@@ -53,7 +53,7 @@ export function LoginPage() {
       // Drop the ?firstrun param on successful login — default creds no longer needed.
       navigate({
         to: "/nodes",
-        search: { q: undefined, status: undefined, sort: undefined, dir: undefined },
+        search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined },
       })
     } catch (err) {
       // Try to extract the server's error message verbatim.

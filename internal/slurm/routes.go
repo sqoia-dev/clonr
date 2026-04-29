@@ -308,6 +308,18 @@ func (m *Manager) handleSlurmReseedDefaults(w http.ResponseWriter, r *http.Reque
 		Reason   string `json:"reason,omitempty"`
 	}
 
+	// Build the render context once for all files — reads real controller hostname
+	// and node inventory from the DB (KL-2 fix; replaces hardcoded "clustr-server").
+	renderCtx, err := m.buildRenderContext(r.Context(), "")
+	if err != nil {
+		log.Error().Err(err).Msg("slurm reseed: build render context failed")
+		jsonError(w, fmt.Sprintf("build render context failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	// Ensure cluster name comes from module config (buildRenderContext may return
+	// empty string if cfg was nil, but we already guarded above).
+	renderCtx.ClusterName = clusterName
+
 	var reseeded []string
 	var skipped []reseedResult
 	var missing []string
@@ -330,7 +342,7 @@ func (m *Manager) handleSlurmReseedDefaults(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		// Re-render the embedded template.
+		// Re-render the embedded template using the full cluster render context.
 		tmplName := "templates/" + filename + ".tmpl"
 		tmpl, err := template.ParseFS(templateFS, tmplName)
 		if err != nil {
@@ -339,15 +351,8 @@ func (m *Manager) handleSlurmReseedDefaults(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		data := map[string]interface{}{
-			"ClusterName":        clusterName,
-			"ControllerHostname": "clustr-server",
-			"Timestamp":          time.Now().UTC().Format(time.RFC3339),
-			"Nodes":              []interface{}{},
-		}
-
 		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, data); err != nil {
+		if err := tmpl.Execute(&buf, renderCtx); err != nil {
 			log.Error().Err(err).Str("filename", filename).Msg("slurm reseed: template render failed")
 			jsonError(w, fmt.Sprintf("render failed for %s: %v", filename, err), http.StatusInternalServerError)
 			return

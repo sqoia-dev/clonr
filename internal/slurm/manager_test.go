@@ -282,3 +282,59 @@ func TestReseedDefaults_Idempotent(t *testing.T) {
 		t.Errorf("IsClustrDefault: got false, want true")
 	}
 }
+
+// TestMaybeAutoAssignControllerDualRole_KL1 is the KL-1 invariant test.
+// It verifies that:
+//   1. A controller-only node gets "compute" added automatically.
+//   2. A node already having "compute" is NOT modified.
+//   3. A node with no controller role is NOT modified.
+func TestMaybeAutoAssignControllerDualRole_KL1(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	database, err := db.Open(filepath.Join(dir, "clustr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	m := &Manager{db: database}
+
+	// Case 1: controller-only → should get compute added.
+	const ctrl1 = "ctrl-only-node"
+	if err := database.SlurmSetNodeRoles(ctx, ctrl1, []string{RoleController}, false); err != nil {
+		t.Fatalf("set roles: %v", err)
+	}
+	m.maybeAutoAssignControllerDualRole(ctx, ctrl1)
+	roles, err := database.SlurmGetNodeRoles(ctx, ctrl1)
+	if err != nil {
+		t.Fatalf("get roles: %v", err)
+	}
+	hasCtrl := hasRole(roles, RoleController)
+	hasComp := hasRole(roles, RoleCompute)
+	if !hasCtrl || !hasComp {
+		t.Errorf("KL-1 case 1: expected [controller compute], got %v", roles)
+	}
+
+	// Case 2: already has compute → should not be modified.
+	const ctrl2 = "ctrl-compute-node"
+	initial := []string{RoleController, RoleCompute}
+	if err := database.SlurmSetNodeRoles(ctx, ctrl2, initial, false); err != nil {
+		t.Fatalf("set roles: %v", err)
+	}
+	m.maybeAutoAssignControllerDualRole(ctx, ctrl2)
+	roles2, _ := database.SlurmGetNodeRoles(ctx, ctrl2)
+	if len(roles2) != 2 {
+		t.Errorf("KL-1 case 2: expected 2 roles unchanged, got %v", roles2)
+	}
+
+	// Case 3: compute-only node → should not be modified.
+	const comp1 = "compute-only-node"
+	if err := database.SlurmSetNodeRoles(ctx, comp1, []string{RoleCompute}, false); err != nil {
+		t.Fatalf("set roles: %v", err)
+	}
+	m.maybeAutoAssignControllerDualRole(ctx, comp1)
+	roles3, _ := database.SlurmGetNodeRoles(ctx, comp1)
+	if hasRole(roles3, RoleController) {
+		t.Errorf("KL-1 case 3: compute-only node should not get controller, got %v", roles3)
+	}
+}

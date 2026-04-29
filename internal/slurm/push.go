@@ -340,6 +340,11 @@ func (m *Manager) executePushCore(ctx context.Context, existingOpID string, req 
 			m.updateNodeConfigState(ctx, opID, outcome.nodeID, outcome.result.FileResults, managedFiles, fileVersions)
 			// Update per-script state for this node.
 			m.updateNodeScriptState(ctx, opID, outcome.nodeID, outcome.result.ScriptResults, nodeScriptsSent[outcome.nodeID])
+			// KL-1: Auto-assign controller dual-role (controller+compute) after a
+			// successful slurm bundle deploy to a controller node that currently
+			// only has the controller role. This eliminates the post-provision
+			// API call documented in the v1.0 known limitations.
+			m.maybeAutoAssignControllerDualRole(ctx, outcome.nodeID)
 		} else {
 			failureCount++
 		}
@@ -665,4 +670,42 @@ func intersect(a, b []string) []string {
 		}
 	}
 	return result
+}
+
+// maybeAutoAssignControllerDualRole is the KL-1 fix.
+// After a successful slurm push to a controller node, if the node currently
+// has only the ["controller"] role, it automatically adds "compute" so the
+// controller also runs slurmd and can participate as a worker node.
+//
+// Rationale: HPC clusters are often small enough that the controller also
+// runs jobs. The v1.0 known limitation required a manual API call after
+// provisioning; this eliminates it by promoting the single-role controller
+// to dual-role automatically on the first successful config push.
+//
+// The auto-assignment only fires when:
+//   1. The node is a controller (has RoleController in its current roles).
+//   2. The node does NOT already have a compute role (RoleCompute or RoleWorker).
+// If the node already has a compute role, this is a no-op.
+func (m *Manager) maybeAutoAssignControllerDualRole(ctx context.Context, nodeID string) {
+	roles, err := m.db.SlurmGetNodeRoles(ctx, nodeID)
+	if err != nil {
+		return // non-fatal; node may not have roles yet
+	}
+
+	isController := hasRole(roles, RoleController)
+	alreadyHasCompute := hasRole(roles, RoleCompute) || hasRole(roles, RoleWorker)
+
+	if !isController || alreadyHasCompute {
+		return
+	}
+
+	// Promote to dual-role: controller + compute.
+	newRoles := append(roles, RoleCompute)
+	if err := m.db.SlurmSetNodeRoles(ctx, nodeID, newRoles, false); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).
+			Msg("slurm: KL-1: failed to auto-assign controller dual-role")
+		return
+	}
+	log.Info().Str("node_id", nodeID).
+		Msg("slurm: KL-1: auto-assigned controller dual-role (controller+compute)")
 }

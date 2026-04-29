@@ -1,9 +1,10 @@
 import * as React from "react"
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User } from "lucide-react"
+import { Server, Image, Activity, Settings, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CommandPalette } from "@/components/CommandPalette"
+import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { useTheme } from "@/contexts/theme"
 import { useConnection } from "@/contexts/connection"
 import { useSession } from "@/contexts/auth"
@@ -21,6 +22,7 @@ const connectionConfig = {
   connected: { color: "bg-status-healthy", label: "Connected" },
   reconnecting: { color: "bg-status-warning animate-pulse", label: "Reconnecting" },
   disconnected: { color: "bg-status-neutral", label: "Disconnected" },
+  paused: { color: "bg-status-error", label: "Live updates paused" },
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -28,7 +30,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [userMenuOpen, setUserMenuOpen] = React.useState(false)
   const { theme, toggle } = useTheme()
-  const { status } = useConnection()
+  const { status, paused, retry } = useConnection()
   const { session, setUnauthed } = useSession()
   const routerState = useRouterState()
   const navigate = useNavigate()
@@ -59,7 +61,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         gKeyPending.current = false
         if (gTimer.current) clearTimeout(gTimer.current)
         switch (e.key) {
-          case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined } }); break
+          case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined } }); break
           case "i": navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined } }); break
           case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined } }); break
           case "s": navigate({ to: "/settings" }); break
@@ -99,10 +101,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setUserMenuOpen(false)
   }
 
-  const conn = connectionConfig[status]
+  // POL-6: use "paused" config when SSE has been down for >30s.
+  const conn = paused ? connectionConfig.paused : connectionConfig[status]
 
   return (
     <div className="flex h-full bg-background text-foreground">
+      {/* A11Y-1: skip-to-main link */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:top-2 focus:left-2 focus:px-3 focus:py-1.5 focus:rounded focus:bg-primary focus:text-primary-foreground focus:text-sm"
+      >
+        Skip to main content
+      </a>
+
       {/* Sidebar */}
       <aside
         className={cn(
@@ -220,9 +231,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
+        {/* POL-6: SSE disconnect banner — shown after 30s of no connection */}
+        {paused && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-3 px-4 py-2 bg-destructive/10 border-b border-destructive/30 text-sm text-destructive shrink-0"
+          >
+            <span className="flex items-center gap-2">
+              <WifiOff className="h-4 w-4 shrink-0" aria-hidden="true" />
+              Live updates paused. Check your network connection.
+            </span>
+            <button
+              onClick={retry}
+              className="underline underline-offset-2 hover:no-underline shrink-0 text-sm"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Page content */}
-        <main className="flex-1 overflow-auto">
-          {children}
+        <main id="main-content" className="flex-1 overflow-auto" tabIndex={-1}>
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
         </main>
       </div>
 

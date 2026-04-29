@@ -34,10 +34,12 @@ interface NodeSearch {
   status?: string
   sort?: string
   dir?: "asc" | "desc"
+  openNode?: string
+  reimage?: string
 }
 
 export function NodesPage() {
-  const { setStatus } = useConnection()
+  const { setStatus, retryToken } = useConnection()
   const navigate = useNavigate()
   const search = useSearch({ strict: false }) as NodeSearch
 
@@ -47,6 +49,9 @@ export function NodesPage() {
   const sortDir = search.dir ?? "asc"
   const [advanced, setAdvanced] = React.useState(false)
   const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
+  // PAL-2-2: auto-open node from URL param (used by Cmd-K "Reimage node…").
+  const openNodeId = search.openNode
+  const autoReimage = search.reimage === "1"
 
   function updateSearch(patch: Partial<NodeSearch>) {
     navigate({
@@ -56,6 +61,8 @@ export function NodesPage() {
         status: patch.status !== undefined ? patch.status : search.status,
         sort: patch.sort !== undefined ? patch.sort : sortCol || undefined,
         dir: patch.dir !== undefined ? patch.dir : sortDir === "asc" ? undefined : "desc",
+        openNode: undefined,
+        reimage: undefined,
       },
       replace: true,
     })
@@ -105,7 +112,8 @@ export function NodesPage() {
       es?.close()
       setStatus("disconnected")
     }
-  }, [refetch, setStatus])
+    // retryToken forces reconnect when the banner "Retry" is clicked (POL-6).
+  }, [refetch, setStatus, retryToken])
 
   // Update connection status when query has data
   React.useEffect(() => {
@@ -113,6 +121,21 @@ export function NodesPage() {
   }, [data, setStatus])
 
   const nodes = data?.nodes ?? []
+
+  // PAL-2-2: auto-open node sheet when ?openNode=<id> is in the URL.
+  React.useEffect(() => {
+    if (!openNodeId || nodes.length === 0) return
+    const target = nodes.find((n) => n.id === openNodeId)
+    if (target && !selectedNode) {
+      setSelectedNode(target)
+      // Clear the param so back-navigation doesn't re-open.
+      navigate({
+        to: "/nodes",
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", openNode: undefined, reimage: undefined },
+        replace: true,
+      })
+    }
+  }, [openNodeId, nodes, selectedNode, navigate, q, search.status, sortCol, sortDir])
 
   function handleSort(col: string) {
     if (sortCol === col) {
@@ -255,6 +278,7 @@ export function NodesPage() {
           onClose={() => setSelectedNode(null)}
           advanced={advanced}
           relativeTime={relativeTime}
+          autoReimage={autoReimage}
         />
       )}
     </div>
@@ -305,9 +329,10 @@ interface NodeSheetProps {
   onClose: () => void
   advanced: boolean
   relativeTime: (iso?: string) => string
+  autoReimage?: boolean
 }
 
-function NodeSheet({ node, onClose, advanced, relativeTime }: NodeSheetProps) {
+function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage }: NodeSheetProps) {
   const state = nodeState(node)
 
   return (
@@ -357,7 +382,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime }: NodeSheetProps) {
             </Section>
           )}
 
-          <ReimageFlow node={node} />
+          <ReimageFlow node={node} autoExpand={autoReimage} />
         </div>
       </SheetContent>
     </Sheet>
@@ -366,9 +391,9 @@ function NodeSheet({ node, onClose, advanced, relativeTime }: NodeSheetProps) {
 
 // ─── Reimage inline flow (REIMG-1..6) ────────────────────────────────────────
 
-function ReimageFlow({ node }: { node: NodeConfig }) {
+function ReimageFlow({ node, autoExpand }: { node: NodeConfig; autoExpand?: boolean }) {
   const qc = useQueryClient()
-  const [expanded, setExpanded] = React.useState(false)
+  const [expanded, setExpanded] = React.useState(autoExpand ?? false)
   const [selectedImageId, setSelectedImageId] = React.useState("")
   const [confirmId, setConfirmId] = React.useState("")
 

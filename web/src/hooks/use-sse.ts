@@ -8,18 +8,23 @@ interface UseSSEOptions<T> {
   enabled?: boolean
   onMessage: (data: T) => void
   onStatusChange?: (status: SSEStatus) => void
+  /** Increment this value to force a reconnect (POL-6). */
+  retryToken?: number
 }
 
 /**
  * Shared SSE hook. Opens an EventSource to `path` with credentials (cookie auth),
  * calls `onMessage` on each parsed JSON event, and auto-reconnects with a 5-second
  * delay on error. Cleans up on unmount or when `enabled` becomes false.
+ * When `retryToken` changes, the existing connection is torn down and a new one
+ * is opened immediately (bypassing the 5-second backoff).
  */
 export function useSSE<T>({
   path,
   enabled = true,
   onMessage,
   onStatusChange,
+  retryToken = 0,
 }: UseSSEOptions<T>) {
   const onMessageRef = React.useRef(onMessage)
   onMessageRef.current = onMessage
@@ -68,5 +73,7 @@ export function useSSE<T>({
       es?.close()
       onStatusRef.current?.("disconnected")
     }
-  }, [path, enabled])
+    // retryToken in deps: any change forces teardown + immediate reconnect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, enabled, retryToken])
 }

@@ -297,13 +297,13 @@ The first-run UX should be: run one command, open the web UI, type a memorable d
 
 #### Cmd-K reimage picker
 
-- [ ] **PAL-2-2** "Reimage node…" in the palette opens an inline node picker (search, recent, paginated). Selecting a node opens that node's detail Sheet with the reimage panel already expanded. No more redirect to `/nodes`.
+- [x] **PAL-2-2** "Reimage node…" in the palette opens an inline node picker (search, recent, paginated). Selecting a node opens that node's detail Sheet with the reimage panel already expanded. No more redirect to `/nodes`.
 
 #### v1.0 known-limitations cleanup
 
-- [ ] **KL-1** Auto-assign the dual `["controller","worker"]` role on the controller after slurm bundle deploy completes. Eliminates the post-provision API call. Add a unit test.
-- [ ] **KL-2** Replace D18 reseed endpoint's generic slurm.conf stub with a cluster-specific config generator that reads the deployed node inventory + roles. Existing cluster topology should round-trip through reseed without operator intervention.
-- [ ] **KL-3** Remove `CgroupAutomount=` from generated slurm.conf (deprecated parameter; warning visible in slurmd logs). Confirm no behavior regression with the existing e2e tests.
+- [x] **KL-1** Auto-assign the dual `["controller","worker"]` role on the controller after slurm bundle deploy completes. Eliminates the post-provision API call. Add a unit test.
+- [x] **KL-2** Replace D18 reseed endpoint's generic slurm.conf stub with a cluster-specific config generator that reads the deployed node inventory + roles. Existing cluster topology should round-trip through reseed without operator intervention.
+- [x] **KL-3** Remove `CgroupAutomount=` from generated slurm.conf (deprecated parameter; warning visible in slurmd logs). Confirm no behavior regression with the existing e2e tests.
 
 #### Failure-mode polish
 
