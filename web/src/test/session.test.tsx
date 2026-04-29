@@ -6,7 +6,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, waitFor } from "@testing-library/react"
-import * as React from "react"
 import { SESSION_EXPIRED_EVENT } from "../lib/api"
 import { SessionProvider, useSession } from "../contexts/auth"
 
