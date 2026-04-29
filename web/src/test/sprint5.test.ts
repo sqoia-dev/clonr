@@ -344,10 +344,12 @@ describe("image-from-URL mutation flow (TEST-S5-1)", () => {
     expect(result.image_id).toBe("img-abc123")
     expect(result.status).toBe("building")
 
-    const callArgs = mockFetch.mock.calls[0]
-    expect(callArgs[0]).toContain("/api/v1/images/from-url")
-    const init = callArgs[1] as RequestInit
-    expect(init.method).toBe("POST")
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/images/from-url"),
+      expect.objectContaining({ method: "POST" })
+    )
+    const callArgs = mockFetch.mock.calls as unknown as Array<[string, RequestInit]>
+    const init = callArgs[0][1]
     const body = JSON.parse(init.body as string)
     expect(body.url).toBe("https://example.com/image.iso")
   })
