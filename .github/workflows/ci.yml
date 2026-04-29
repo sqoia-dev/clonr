@@ -131,6 +131,8 @@ jobs:
           CLUSTR_REPO_DIR="$D/repo" \
           CLUSTR_LDAP_DATA_DIR="$D/ldap" \
           CLUSTR_LOG_ARCHIVE_DIR="$D/log-archive" \
+          CLUSTR_SECRET_KEY="ci-smoke-$(openssl rand -hex 16)" \
+          CLUSTR_AUTH_DEV_MODE=1 \
           ./bin/clustr-serverd &
           SERVER_PID=$!
           sleep 4
