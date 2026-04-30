@@ -204,7 +204,6 @@ describe("config editor save flow validation", () => {
 // ─── Role bulk-edit validation ────────────────────────────────────────────────
 
 const VALID_ROLES = ["controller", "worker", "dbd", "login"] as const
-type SlurmRole = typeof VALID_ROLES[number]
 
 /** Validates a role set for bulk assignment. */
 function validateRoleBulkEdit(roles: string[]): { ok: boolean; invalid?: string[] } {
@@ -341,10 +340,9 @@ describe("SlurmBuild status badge class mapping", () => {
 // ─── SlurmUpgradeOperation phase ordering ────────────────────────────────────
 
 const UPGRADE_PHASE_ORDER = ["dbd", "controller", "compute", "login"] as const
-type UpgradePhase = typeof UPGRADE_PHASE_ORDER[number]
 
 function phaseIndex(phase: string): number {
-  const idx = UPGRADE_PHASE_ORDER.indexOf(phase as UpgradePhase)
+  const idx = UPGRADE_PHASE_ORDER.indexOf(phase as typeof UPGRADE_PHASE_ORDER[number])
   return idx === -1 ? UPGRADE_PHASE_ORDER.length : idx
 }
 
