@@ -15,8 +15,8 @@ const navItems = [
   { label: "Nodes", path: "/nodes", icon: Server, active: true },
   { label: "Images", path: "/images", icon: Image, active: true },
   { label: "Activity", path: "/activity", icon: Activity, active: true },
-  { label: "Settings", path: "/settings", icon: Settings, active: true },
   { label: "Identity", path: "/identity", icon: ShieldCheck, active: true },
+  { label: "Settings", path: "/settings", icon: Settings, active: true },
 ]
 
 const connectionConfig = {
