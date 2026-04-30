@@ -194,18 +194,14 @@ func TestQueryStatus_FieldPopulation(t *testing.T) {
 
 // fakeExitViaProcess runs a command that will fail and returns the resulting error.
 // This gives us a real *exec.ExitError which isNotLoadedOrNotFound can type-assert.
+// We use `sh -c 'exit 1'` rather than `false` because `false` binary path varies
+// across environments (e.g., GitHub Actions runners may not have it on PATH in
+// Go subprocess context), whereas sh is always available.
 func fakeExitViaProcess(t *testing.T) error {
 	t.Helper()
-	// Run `false` which always exits 1.
-	err := runCmd("false")
+	_, err := exec.Command("sh", "-c", "exit 1").CombinedOutput()
 	if err == nil {
-		t.Fatal("expected 'false' to return non-nil error")
+		t.Fatal("expected sh -c 'exit 1' to return non-nil error")
 	}
-	return err
-}
-
-// runCmd runs a single command by name with no arguments and returns the error.
-func runCmd(name string) error {
-	_, err := exec.Command(name).CombinedOutput()
 	return err
 }
