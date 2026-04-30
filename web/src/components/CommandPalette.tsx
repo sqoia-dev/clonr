@@ -11,7 +11,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
-import { Server, Image as ImageIcon, Activity, Settings, RefreshCw, Key, Clock, ChevronLeft, Plus, Pencil, Trash2, Layers } from "lucide-react"
+import { Server, Image as ImageIcon, Activity, Settings, ShieldCheck, Cpu, RefreshCw, Key, Clock, ChevronLeft, Plus, Pencil, Trash2, Layers } from "lucide-react"
 import { apiFetch } from "@/lib/api"
 import type { ListNodesResponse, ListImagesResponse } from "@/lib/types"
 
@@ -56,7 +56,9 @@ const navRoutes = [
   { label: "Nodes", path: "/nodes", icon: Server },
   { label: "Images", path: "/images", icon: ImageIcon },
   { label: "Activity", path: "/activity", icon: Activity },
+  { label: "Identity", path: "/identity", icon: ShieldCheck },
   { label: "Settings", path: "/settings", icon: Settings },
+  { label: "Slurm", path: "/slurm", icon: Cpu },
 ]
 
 // ─── CommandPalette ───────────────────────────────────────────────────────────
@@ -104,6 +106,8 @@ export function CommandPalette({ open, onClose }: Props) {
     if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })
     else if (path === "/images") navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } })
     else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined } })
+    else if (path === "/identity") navigate({ to: "/identity" })
+    else if (path === "/slurm") navigate({ to: "/slurm" })
     else navigate({ to: "/settings" })
   }
 
@@ -263,6 +267,11 @@ export function CommandPalette({ open, onClose }: Props) {
                     <Key className="mr-2 h-4 w-4" />
                     Create API key…
                     <span className="ml-auto text-xs text-muted-foreground">Settings → API Keys</span>
+                  </CommandItem>
+                  <CommandItem value="slurm status configs roles scripts builds upgrades" onSelect={() => goTo("/slurm")}>
+                    <Cpu className="mr-2 h-4 w-4" />
+                    Slurm management…
+                    <span className="ml-auto text-xs text-muted-foreground">Slurm</span>
                   </CommandItem>
                 </CommandGroup>
 

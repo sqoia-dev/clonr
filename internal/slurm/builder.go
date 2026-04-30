@@ -80,6 +80,8 @@ func (m *Manager) StartBuild(ctx context.Context, cfg BuildConfig, initiatedBy s
 		if err := m.executeBuild(bgCtx, buildID, cfg); err != nil {
 			log.Error().Err(err).Str("build_id", buildID).Msg("slurm: build pipeline failed")
 		}
+		// Close SSE log stream for this build so waiting subscribers see EOF.
+		m.finishBuildLog(buildID)
 	}()
 
 	return buildID, nil

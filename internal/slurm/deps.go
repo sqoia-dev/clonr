@@ -569,7 +569,42 @@ func checksumFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// logBuildLine emits a log line tagged with the build ID.
+// logBuildLine emits a log line tagged with the build ID and broadcasts to
+// any SSE subscribers watching GET /slurm/builds/{build_id}/log-stream.
 func (m *Manager) logBuildLine(buildID, line string) {
 	log.Info().Str("build_id", buildID).Msg(line)
+	m.buildLogsMu.Lock()
+	s, ok := m.buildLogs[buildID]
+	if !ok {
+		s = &buildLogState{subs: map[chan string]struct{}{}}
+		m.buildLogs[buildID] = s
+	}
+	m.buildLogsMu.Unlock()
+	s.publish(line)
+}
+
+// finishBuildLog marks the build log done and closes subscriber channels.
+// Called by executeBuild (via StartBuild goroutine) on completion or failure.
+func (m *Manager) finishBuildLog(buildID string) {
+	m.buildLogsMu.RLock()
+	s, ok := m.buildLogs[buildID]
+	m.buildLogsMu.RUnlock()
+	if ok {
+		s.close()
+	}
+}
+
+// SubscribeBuildLog returns a channel that delivers all past log lines plus
+// future lines as they arrive. Returns a cancel func to stop the subscription.
+// Used by the SSE handler in routes.go.
+func (m *Manager) SubscribeBuildLog(buildID string) (<-chan string, func()) {
+	m.buildLogsMu.Lock()
+	s, ok := m.buildLogs[buildID]
+	if !ok {
+		// Build hasn't emitted any lines yet (or doesn't exist): create an empty state.
+		s = &buildLogState{subs: map[chan string]struct{}{}}
+		m.buildLogs[buildID] = s
+	}
+	m.buildLogsMu.Unlock()
+	return s.subscribe()
 }

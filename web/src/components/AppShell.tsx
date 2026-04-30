@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ShieldCheck, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff } from "lucide-react"
+import { Server, Image, Activity, Settings, ShieldCheck, Cpu, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { CommandPalette } from "@/components/CommandPalette"
@@ -17,6 +17,7 @@ const navItems = [
   { label: "Activity", path: "/activity", icon: Activity, active: true },
   { label: "Identity", path: "/identity", icon: ShieldCheck, active: true },
   { label: "Settings", path: "/settings", icon: Settings, active: true },
+  { label: "Slurm", path: "/slurm", icon: Cpu, active: true },
 ]
 
 const connectionConfig = {
@@ -67,6 +68,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined } }); break
           case "s": navigate({ to: "/settings" }); break
           case "d": navigate({ to: "/identity" }); break
+          case "l": navigate({ to: "/slurm" }); break
         }
         return
       }

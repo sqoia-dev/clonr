@@ -3,8 +3,8 @@ import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
-  Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users,
+  Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -30,7 +30,7 @@ import { StatusDot } from "@/components/StatusDot"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride } from "@/lib/types"
 import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
@@ -1248,6 +1248,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
 
           <HardwareSection node={node} />
           <SudoersSection node={node} />
+          <SlurmNodeSection node={node} />
           <ReimageFlow node={node} autoExpand={autoReimage} />
           <CaptureNodeFlow node={node} />
           <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
@@ -1423,6 +1424,200 @@ function ReimageFlow({ node, autoExpand }: { node: NodeConfig; autoExpand?: bool
             >
               Cancel
             </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── SlurmNodeSection (NODE-SLURM-1..3) ──────────────────────────────────────
+// Per-node Slurm subsection in the node detail Sheet.
+// Shows: current Slurm role(s), sync status, override count.
+// "Set role" picker + "Edit overrides" expand inline.
+
+function SlurmNodeSection({ node }: { node: NodeConfig }) {
+  const qc = useQueryClient()
+  const [expanded, setExpanded] = React.useState(false)
+  const [editRoles, setEditRoles] = React.useState(false)
+  const [selectedRoles, setSelectedRoles] = React.useState<string[]>([])
+  const [editOverrides, setEditOverrides] = React.useState(false)
+  const [overrideText, setOverrideText] = React.useState("")
+
+  const allRoles = ["controller", "worker", "dbd", "login"]
+
+  const { data: roleData } = useQuery<SlurmNodeRole>({
+    queryKey: ["slurm-node-role", node.id],
+    queryFn: () => apiFetch<SlurmNodeRole>(`/api/v1/nodes/${node.id}/slurm/role`),
+    enabled: expanded,
+    staleTime: 15000,
+  })
+
+  const { data: syncData } = useQuery<SlurmNodeSyncStatus>({
+    queryKey: ["slurm-node-sync", node.id],
+    queryFn: () => apiFetch<SlurmNodeSyncStatus>(`/api/v1/nodes/${node.id}/slurm/sync-status`),
+    enabled: expanded,
+    staleTime: 20000,
+  })
+
+  const { data: overridesData } = useQuery<SlurmNodeOverride>({
+    queryKey: ["slurm-node-overrides", node.id],
+    queryFn: () => apiFetch<SlurmNodeOverride>(`/api/v1/nodes/${node.id}/slurm/overrides`),
+    enabled: expanded,
+    staleTime: 20000,
+  })
+
+  const setRoleMut = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/nodes/${node.id}/slurm/role`, {
+      method: "PUT",
+      body: JSON.stringify({ roles: selectedRoles }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["slurm-node-role", node.id] })
+      qc.invalidateQueries({ queryKey: ["slurm-role-summary"] })
+      qc.invalidateQueries({ queryKey: ["slurm-nodes"] })
+      setEditRoles(false)
+      toast({ title: "Slurm role updated" })
+    },
+    onError: (e: Error) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  })
+
+  const saveOverridesMut = useMutation({
+    mutationFn: () => {
+      let params: Record<string, string> = {}
+      try {
+        params = JSON.parse(overrideText)
+      } catch {
+        throw new Error("Invalid JSON — overrides must be a JSON object")
+      }
+      return apiFetch(`/api/v1/nodes/${node.id}/slurm/overrides`, {
+        method: "PUT",
+        body: JSON.stringify({ params }),
+      })
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["slurm-node-overrides", node.id] })
+      setEditOverrides(false)
+      toast({ title: "Overrides saved" })
+    },
+    onError: (e: Error) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  })
+
+  const roles = roleData?.roles ?? []
+  const syncState = syncData?.state ?? []
+  const overrideCount = Object.keys(overridesData?.params ?? {}).length
+
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span className="text-sm font-medium">Slurm</span>
+        <div className="flex items-center gap-2">
+          {roles.length > 0 && <span className="text-xs text-muted-foreground">{roles.join(", ")}</span>}
+          {expanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border px-3 py-3 space-y-3">
+          {/* Roles */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-muted-foreground">Roles</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 text-xs"
+                onClick={() => { setEditRoles((v) => !v); setSelectedRoles(roles) }}
+              >
+                {editRoles ? "Cancel" : "Set role"}
+              </Button>
+            </div>
+            {editRoles ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-1">
+                  {allRoles.map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setSelectedRoles((prev) => prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r])}
+                      className={cn("rounded border px-2 py-0.5 text-xs capitalize transition-colors",
+                        selectedRoles.includes(r)
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:border-primary/50")}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
+                <Button size="sm" className="h-7 text-xs" onClick={() => setRoleMut.mutate()} disabled={setRoleMut.isPending}>
+                  {setRoleMut.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}Save
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {roles.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">No roles assigned</span>
+                ) : roles.map((r) => (
+                  <span key={r} className="rounded border border-border px-2 py-0.5 text-xs capitalize">{r}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sync status */}
+          <div>
+            <span className="text-xs text-muted-foreground">Config sync</span>
+            <div className="mt-1">
+              {syncState.length === 0 ? (
+                <span className="text-xs text-muted-foreground">No sync state — push configs first</span>
+              ) : (
+                <div className="space-y-1">
+                  {syncState.map((s) => (
+                    <div key={s.filename} className="flex items-center gap-2 text-xs">
+                      <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", s.deployed_version > 0 ? "bg-status-healthy" : "bg-status-neutral")} />
+                      <span className="font-mono flex-1">{s.filename}</span>
+                      <span className="text-muted-foreground">v{s.deployed_version}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Overrides */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-muted-foreground">Overrides ({overrideCount})</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 text-xs"
+                onClick={() => {
+                  setEditOverrides((v) => !v)
+                  if (!editOverrides) {
+                    setOverrideText(JSON.stringify(overridesData?.params ?? {}, null, 2))
+                  }
+                }}
+              >
+                {editOverrides ? "Cancel" : "Edit overrides"}
+              </Button>
+            </div>
+            {editOverrides && (
+              <div className="space-y-2">
+                <textarea
+                  className="w-full min-h-24 rounded border border-border bg-background font-mono text-xs p-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+                  value={overrideText}
+                  onChange={(e) => setOverrideText(e.target.value)}
+                  placeholder='{"NodeName": "node01", "CPUs": "4"}'
+                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                />
+                <Button size="sm" className="h-7 text-xs" onClick={() => saveOverridesMut.mutate()} disabled={saveOverridesMut.isPending}>
+                  {saveOverridesMut.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}Save overrides
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       )}

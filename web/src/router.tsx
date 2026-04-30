@@ -8,6 +8,7 @@ import { ImagesPage } from "@/routes/images"
 import { ActivityPage } from "@/routes/activity"
 import { SettingsPage } from "@/routes/settings"
 import { IdentityPage } from "@/routes/identity"
+import { SlurmPage } from "@/routes/slurm"
 import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
@@ -131,6 +132,12 @@ const identityRoute = createRoute({
   component: IdentityPage,
 })
 
+const slurmRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/slurm",
+  component: SlurmPage,
+})
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
@@ -142,6 +149,7 @@ const routeTree = rootRoute.addChildren([
     activityRoute,
     settingsRoute,
     identityRoute,
+    slurmRoute,
   ]),
 ])
 

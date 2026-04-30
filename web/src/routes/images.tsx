@@ -266,6 +266,16 @@ export function ImagesPage() {
 
           {/* Bundles tab — read-only, shows built-in slurm bundle from binary */}
           <TabsContent value="bundles" className="flex-1 overflow-auto mt-0">
+            {/* IMG-BUNDLE-1: link to Slurm builds */}
+            <div className="px-4 pt-3 pb-1">
+              <a
+                href="/slurm#builds"
+                onClick={(e) => { e.preventDefault(); window.location.href = "/slurm#builds" }}
+                className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+              >
+                Manage custom Slurm builds in the Slurm tab →
+              </a>
+            </div>
             {bundles.length === 0 ? (
               <BundlesEmptyState />
             ) : (

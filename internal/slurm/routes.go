@@ -94,6 +94,7 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	// It is registered as a public route (no admin key required) in server.go so that
 	// nodes can download artifacts using only a HMAC-signed URL. See ServeArtifact.
 	r.Get("/slurm/builds/{build_id}/logs", m.handleBuildLogs)
+	r.Get("/slurm/builds/{build_id}/log-stream", m.handleBuildLogStream)
 	r.Post("/slurm/builds/{build_id}/set-active", m.handleSetActiveBuild)
 
 	// Dependency matrix.
@@ -1021,6 +1022,47 @@ func (m *Manager) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 		"message":  "Build logs are available via GET /api/v1/logs?component=slurm-build or the SSE log stream",
 		"log_key":  buildID,
 	}, http.StatusOK)
+}
+
+// handleBuildLogStream is GET /api/v1/slurm/builds/{build_id}/log-stream.
+// Streams build log lines as Server-Sent Events. Replays past lines on connect,
+// then streams future lines until the build finishes. Returns 200 immediately
+// (no 404 check) so the UI can subscribe before the first log line arrives.
+func (m *Manager) handleBuildLogStream(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "build_id")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonError(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	ch, cancel := m.SubscribeBuildLog(buildID)
+	defer cancel()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case line, open := <-ch:
+			if !open {
+				// Build finished — send a terminal event then close.
+				fmt.Fprintf(w, "event: done\ndata: {\"build_id\":%q}\n\n", buildID)
+				flusher.Flush()
+				return
+			}
+			data, _ := json.Marshal(map[string]string{"line": line, "build_id": buildID})
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 
 func (m *Manager) handleSetActiveBuild(w http.ResponseWriter, r *http.Request) {

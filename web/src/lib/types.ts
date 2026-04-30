@@ -494,3 +494,171 @@ export interface ListLDAPGroupsResponse {
   groups: LDAPGroup[]
   total: number
 }
+
+// ── Slurm (Sprint 10) ─────────────────────────────────────────────────────────
+
+export interface SlurmStatus {
+  status: string       // "not_configured" | "ready" | "disabled" | "error"
+  enabled: boolean
+  cluster_name?: string
+  slurm_repo_url?: string
+  managed_files?: string[]
+}
+
+export interface SlurmConfigFile {
+  filename: string
+  path: string
+  content: string
+  checksum: string
+  file_mode: string
+  owner: string
+  version: number
+}
+
+export interface ListSlurmConfigsResponse {
+  configs: SlurmConfigFile[]
+  total: number
+}
+
+export interface SlurmValidateResponse {
+  filename: string
+  valid: boolean
+  issues: SlurmValidationIssue[]
+}
+
+export interface SlurmValidationIssue {
+  severity: string  // "error" | "warning"
+  line?: number
+  message: string
+}
+
+export interface SlurmRoleSummary {
+  role: string
+  count: number
+}
+
+export interface ListSlurmRoleSummaryResponse {
+  summary: SlurmRoleSummary[]
+}
+
+export interface SlurmNodeEntry {
+  node_id: string
+  roles: string[]
+  connected: boolean
+}
+
+export interface ListSlurmNodesResponse {
+  nodes: SlurmNodeEntry[]
+  total: number
+}
+
+export interface SlurmScriptSummary {
+  script_type: string
+  version: number
+  checksum?: string
+  dest_path?: string
+  enabled: boolean
+  has_content: boolean
+}
+
+export interface ListSlurmScriptsResponse {
+  scripts: SlurmScriptSummary[]
+  total: number
+}
+
+export interface SlurmScriptFile {
+  script_type: string
+  dest_path: string
+  content: string
+  checksum: string
+  version: number
+}
+
+export interface SlurmBuild {
+  id: string
+  version: string
+  arch: string
+  status: string   // "building" | "completed" | "failed"
+  configure_flags?: string[]
+  artifact_path?: string
+  artifact_checksum?: string
+  artifact_size?: number
+  started_at: number
+  completed_at?: number
+  error_message?: string
+  is_active: boolean
+  initiated_by?: string
+}
+
+export interface ListSlurmBuildsResponse {
+  builds: SlurmBuild[]
+  total: number
+  active_build_id: string
+}
+
+export interface SlurmBuildLogEvent {
+  line?: string
+  build_id: string
+}
+
+export interface SlurmUpgradeValidation {
+  valid: boolean
+  warnings?: string[]
+  errors?: string[]
+  upgrade_plan?: SlurmUpgradePlan
+  from_version?: string
+  to_version?: string
+  job_count: number
+}
+
+export interface SlurmUpgradePlan {
+  dbd_nodes: string[]
+  controller_nodes: string[]
+  compute_batches: string[][]
+  login_nodes: string[]
+}
+
+export interface SlurmUpgradeOperation {
+  id: string
+  from_build_id: string
+  to_build_id: string
+  status: string   // "queued" | "in_progress" | "paused" | "completed" | "failed" | "rollback_initiated"
+  phase?: string   // "dbd" | "controller" | "compute" | "login"
+  current_batch: number
+  total_batches: number
+  batch_size: number
+  drain_timeout_min: number
+  confirmed_db_backup: boolean
+  initiated_by: string
+  started_at: number
+  completed_at?: number
+  node_results?: Record<string, { ok: boolean; error?: string; installed_version?: string; phase: string }>
+}
+
+export interface ListSlurmUpgradesResponse {
+  operations: SlurmUpgradeOperation[]
+  total: number
+}
+
+export interface SlurmNodeSyncStatus {
+  node_id: string
+  state: SlurmNodeConfigState[]
+}
+
+export interface SlurmNodeConfigState {
+  filename: string
+  deployed_version: number
+  content_hash: string
+  deployed_at: number
+  push_op_id?: string
+}
+
+export interface SlurmNodeRole {
+  node_id: string
+  roles: string[]
+}
+
+export interface SlurmNodeOverride {
+  node_id: string
+  params: Record<string, string>
+}

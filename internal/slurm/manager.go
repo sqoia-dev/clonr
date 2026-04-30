@@ -103,6 +103,68 @@ type Manager struct {
 	// upgradeMu guards activeUpgrade state (separate from cfg lock to avoid contention).
 	upgradeMu     sync.RWMutex
 	activeUpgrade *upgradeState
+
+	// buildLogs holds in-memory per-build log lines and subscriber channels.
+	// Keyed by buildID. Cleaned up 24h after build completion.
+	buildLogsMu sync.RWMutex
+	buildLogs   map[string]*buildLogState
+}
+
+// buildLogState holds accumulated lines and live subscriber channels for one build.
+type buildLogState struct {
+	mu    sync.Mutex
+	lines []string
+	subs  map[chan string]struct{}
+	done  bool // set when build finishes
+}
+
+// subscribeBuildLog returns a channel that receives all past lines immediately
+// and then future lines as they arrive. Returns a cancel func to unsubscribe.
+func (s *buildLogState) subscribe() (<-chan string, func()) {
+	ch := make(chan string, 512)
+	s.mu.Lock()
+	// Replay existing lines.
+	for _, l := range s.lines {
+		ch <- l
+	}
+	if s.done {
+		close(ch)
+		s.mu.Unlock()
+		return ch, func() {}
+	}
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+	cancel := func() {
+		s.mu.Lock()
+		delete(s.subs, ch)
+		s.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+// publish appends a line and broadcasts to subscribers.
+func (s *buildLogState) publish(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lines = append(s.lines, line)
+	for ch := range s.subs {
+		select {
+		case ch <- line:
+		default:
+			// slow subscriber — drop this line rather than block the build goroutine
+		}
+	}
+}
+
+// close marks the build done and closes all subscriber channels.
+func (s *buildLogState) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.done = true
+	for ch := range s.subs {
+		close(ch)
+	}
+	s.subs = map[chan string]struct{}{}
 }
 
 // New creates a Manager and restores in-memory state from the DB.
@@ -110,8 +172,9 @@ type Manager struct {
 // Seeds the dep matrix from the embedded JSON on every startup (INSERT OR IGNORE).
 func New(database *db.DB, hub ClientdHubIface) *Manager {
 	m := &Manager{
-		db:  database,
-		hub: hub,
+		db:        database,
+		hub:       hub,
+		buildLogs: make(map[string]*buildLogState),
 	}
 	m.restoreFromDB(context.Background())
 	if err := m.seedDepMatrix(context.Background()); err != nil {

@@ -910,3 +910,62 @@ Promote LDAP integration from read-only to read-write. Operators no longer need 
    - Switch back to Internal, typed-confirm, slapd state preserved
    - Disable via status panel; re-enable; data persists
 5. Tag `v0.5.0` after Sprint 9 ships — Internal LDAP auto-deploy is a substantive operator-flow expansion. Pipeline auto-fires.
+
+---
+
+## Sprint 10 — Slurm surfaced (manage / build / upgrade)
+
+**Founder direction (2026-04-30):** "no way to manage/build/upgrade slurm bundles/packages, it would be nice to have slurm surfaced."
+
+Server-side capability is far deeper than v2 webapp surfaces: `internal/slurm/{builder.go,upgrade.go,routes.go,manager.go,scripts}` already implement enable/disable, full config CRUD with validation/history/per-node-render, role assignment, scripts editor, async build pipeline (download → deps → configure → make → package → checksum → store), and rolling upgrade orchestration (DBD → controller → compute → login phase ordering). v2 webapp only surfaces the read-only Bundles tab on /images.
+
+### IA change — sixth top-level surface
+
+`Nodes / Images / Activity / Identity / Settings / Slurm`. Slurm operations are deep enough to deserve their own surface. The "4 surfaces only" original IA constraint was retired with Identity (Sprint 7); Slurm is the natural sixth.
+
+### In scope
+
+#### Slurm surface — anchored sections
+
+- [x] **STAT-1..3** Status section: enabled/disabled badge, role counts, controller hostname, last-sync; Enable/Disable buttons (typed-confirm); "Sync now" button.
+- [x] **CFG-1..5** Configs section: list editable configs, click → editor Sheet (mono `<textarea>` — see editor note below) with Validate/Save/History tabs; Reseed defaults with typed-confirm.
+- [x] **ROLE-1..4** Roles section: node table with current slurm roles, click → inline role editor, multi-select for bulk role change, role-count summary cards.
+- [x] **SCR-1..3** Scripts section: list scripts (prolog/epilog/etc), editor Sheet with history, per-script config (dest_path).
+- [x] **BUILD-1..6** Builds section: table of builds (version/arch/status/SHA), "Build new" Sheet form (BuildConfig fields), SSE-driven live log panel during build (new `GET /slurm/builds/{id}/log-stream` SSE endpoint added), delete build with typed-confirm, click row → detail with set-active action.
+- [x] **UPG-1..5** Upgrades section: list ops, "Start upgrade" Sheet (target build dropdown of completed builds, batch size, drain timeout) with pre-validation; phase stepper (DBD → controller → compute → login); per-node state in detail sheet; pause/resume/rollback controls; completion toast.
+
+#### Per-node integration
+
+- [x] **NODE-SLURM-1..3** Slurm subsection in `/nodes` detail Sheet: current role + sync status + override count display; inline overrides editor (JSON textarea); inline "Set role" picker.
+
+#### IA + sidebar + cleanup
+
+- [x] **IA-S10-1..4** Add `/slurm` route, sidebar entry below Settings with Lucide `Cpu` icon, Cmd-K "Slurm management…" action + `g l` keyboard shortcut, Identity added to Cmd-K nav routes.
+- [x] **IMG-BUNDLE-1** Add a "Manage custom Slurm builds in the Slurm tab →" link on the `/images` Bundles tab pointing to `/slurm#builds`.
+
+#### Cross-cutting
+
+- [x] **X10-1..4** Server: new SSE log-stream endpoint for build progress (`GET /slurm/builds/{id}/log-stream`). Client: Slurm types added to `lib/types.ts`. Editor decision: `<textarea>` with JetBrains Mono — Slurm configs are ≤100 lines; codemirror/monaco adds ~300 kB to the bundle without compelling need at this scale. Note: Activity event-kind enums (`slurm.build.*`, `slurm.upgrade.*`) are already recorded via `db.AuditActionSlurmConfigChange` from the server — no new server instrumentation needed.
+
+### Out of scope (Sprint 11+)
+
+- Job queue / scheduler views (operators have `squeue`/`sinfo`).
+- Accounting reports (sacct) UI.
+- Partition definition UI beyond `slurm.conf` editing.
+- QoS editor.
+- Federation / multi-cluster slurm.
+- Spank plugin management.
+
+### Definition of done
+
+1. All Sprint 10 SPRINT.md checkboxes ticked.
+2. CI green on the merge SHA.
+3. Autodeploy on cloner ships latest. Hard-refresh; new "Slurm" sidebar entry visible. `/slurm` loads with all sections rendered.
+4. Operator end-to-end on cloner, no CLI:
+   - View Slurm status, see role counts
+   - Edit slurm.conf, validate, save, push to nodes
+   - Set a node's slurm role, see it propagate
+   - Build a new slurm bundle (e.g. against an older version like 23.11.10 for fast iteration) and watch the SSE log
+   - Start a rolling upgrade to the new bundle, watch DBD → controller → compute → login progression
+   - Check Activity for the full audit trail
+5. Tag `v0.6.0` after Sprint 10 ships green — Slurm surface is a substantive new top-level capability. Pipeline auto-fires.
