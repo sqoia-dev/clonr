@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, ShieldCheck, Users, Settings, Database, AlertTriangle, CheckCircle2, ToggleLeft, ToggleRight, KeyRound } from "lucide-react"
+import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, ShieldCheck, Users, Settings, Database, AlertTriangle, CheckCircle2, ToggleLeft, ToggleRight, KeyRound, Loader2, Server, ExternalLink } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -20,6 +20,10 @@ import type {
   UserSearchResult,
   LDAPGroupModeResponse,
   LDAPResetPasswordResponse,
+  LDAPSourceModeResponse,
+  LDAPInternalStatusResponse,
+  LDAPInternalEnableError,
+  LDAPAdminPasswordResponse,
 } from "@/lib/types"
 // ─── Identity page ────────────────────────────────────────────────────────────
 
@@ -1082,10 +1086,454 @@ function SystemAccountsSection() {
   )
 }
 
-// ─── LDAP config section (LDAP-1..5, WRITE-CFG-3) ────────────────────────────
+// ─── LDAP config section (Sprint 9 — mode toggle + internal enable) ──────────
 
 function LDAPConfigSection() {
   const qc = useQueryClient()
+
+  // Source mode (internal vs external)
+  const { data: modeData, isLoading: modeLoading } = useQuery<LDAPSourceModeResponse>({
+    queryKey: ["ldap-source-mode"],
+    queryFn: () => apiFetch<LDAPSourceModeResponse>("/api/v1/ldap/source-mode"),
+    staleTime: 10000,
+    retry: false,
+  })
+
+  const sourceMode = modeData?.source_mode ?? "internal"
+
+  // Mode switch confirm state (MODE-4)
+  const [switchTarget, setSwitchTarget] = React.useState<"internal" | "external" | null>(null)
+  const [switchConfirm, setSwitchConfirm] = React.useState("")
+
+  const switchModeMutation = useMutation({
+    mutationFn: (mode: "internal" | "external") =>
+      apiFetch<{ source_mode: string; changed: boolean; slapd_was_running?: boolean }>(
+        "/api/v1/ldap/source-mode",
+        { method: "PUT", body: JSON.stringify({ mode, confirm: mode }) }
+      ),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["ldap-source-mode"] })
+      qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
+      qc.invalidateQueries({ queryKey: ["ldap-config"] })
+      setSwitchTarget(null)
+      setSwitchConfirm("")
+      if (res.slapd_was_running) {
+        toast({
+          title: "Mode switched — slapd is still running",
+          description: "The internal LDAP server is still active. Use Disable to stop it if needed.",
+        })
+      } else {
+        toast({ title: `Switched to ${res.source_mode} mode` })
+      }
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Mode switch failed", description: String(err) }),
+  })
+
+  function handleModeSwitch(target: "internal" | "external") {
+    if (target === sourceMode) return
+    setSwitchTarget(target)
+    setSwitchConfirm("")
+  }
+
+  return (
+    <Section title="LDAP config" icon={Settings} id="ldap-config">
+      <div className="rounded-md border border-border bg-card">
+        {/* Mode toggle header (MODE-1) */}
+        <div className="px-4 py-3 border-b border-border">
+          <p className="text-[11px] text-muted-foreground mb-2">Directory source</p>
+          {modeLoading ? (
+            <Skeleton className="h-7 w-64" />
+          ) : (
+            <div className="flex gap-1 rounded-md border border-border p-0.5 w-fit bg-secondary/30">
+              <button
+                className={cn(
+                  "px-3 py-1 text-xs rounded transition-colors",
+                  sourceMode === "internal"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+                onClick={() => handleModeSwitch("internal")}
+                disabled={switchModeMutation.isPending}
+              >
+                <Server className="h-3 w-3 inline mr-1 mb-0.5" />
+                Internal — clustr-managed
+              </button>
+              <button
+                className={cn(
+                  "px-3 py-1 text-xs rounded transition-colors",
+                  sourceMode === "external"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+                onClick={() => handleModeSwitch("external")}
+                disabled={switchModeMutation.isPending}
+              >
+                <ExternalLink className="h-3 w-3 inline mr-1 mb-0.5" />
+                External — existing directory
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Typed-confirm for mode switch (MODE-4) */}
+        {switchTarget !== null && (
+          <div className="px-4 py-3 border-b border-border bg-amber-500/5 space-y-2">
+            <p className="text-xs font-medium text-amber-400">
+              Switch to {switchTarget === "internal" ? "Internal — clustr-managed" : "External — existing directory"}?
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Type <code className="font-mono">{switchTarget}</code> to confirm.
+            </p>
+            <div className="flex gap-2">
+              <Input
+                className="text-xs h-7 font-mono w-40"
+                placeholder={switchTarget}
+                value={switchConfirm}
+                onChange={(e) => setSwitchConfirm(e.target.value)}
+                autoFocus
+              />
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                disabled={switchConfirm !== switchTarget || switchModeMutation.isPending}
+                onClick={() => switchModeMutation.mutate(switchTarget)}
+              >
+                {switchModeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
+              </Button>
+              <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setSwitchTarget(null); setSwitchConfirm("") }}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Mode-specific content */}
+        {sourceMode === "internal" ? (
+          <LDAPInternalPanel qc={qc} />
+        ) : (
+          <LDAPExternalPanel qc={qc} />
+        )}
+      </div>
+    </Section>
+  )
+}
+
+// ─── Internal LDAP panel (ENABLE-1..6, DISABLE-1..3) ─────────────────────────
+
+function LDAPInternalPanel({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
+  // Poll status when provisioning is in progress.
+  const [polling, setPolling] = React.useState(false)
+
+  const { data: status, refetch: refetchStatus } = useQuery<LDAPInternalStatusResponse>({
+    queryKey: ["ldap-internal-status"],
+    queryFn: () => apiFetch<LDAPInternalStatusResponse>("/api/v1/ldap/internal/status"),
+    staleTime: polling ? 0 : 10000,
+    refetchInterval: polling ? 2000 : false,
+    retry: false,
+  })
+
+  // Start/stop polling based on status.
+  React.useEffect(() => {
+    if (status?.status === "provisioning") {
+      setPolling(true)
+    } else {
+      setPolling(false)
+    }
+  }, [status?.status])
+
+  // Enable form state
+  const [baseDN, setBaseDN] = React.useState("dc=cluster,dc=local")
+  const [adminPwd, setAdminPwd] = React.useState("")
+  const [enableError, setEnableError] = React.useState<LDAPInternalEnableError | null>(null)
+
+  const enableMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ status: string; polling_url: string }>(
+        "/api/v1/ldap/internal/enable",
+        { method: "POST", body: JSON.stringify({ base_dn: baseDN, admin_password: adminPwd || undefined }) }
+      ),
+    onSuccess: () => {
+      setEnableError(null)
+      setPolling(true)
+      refetchStatus()
+      toast({ title: "Provisioning slapd…" })
+    },
+    onError: async (err) => {
+      // Try to parse structured error from response body.
+      try {
+        const body = JSON.parse(String(err).replace(/^Error: /, ""))
+        if (body?.code) {
+          setEnableError(body as LDAPInternalEnableError)
+          return
+        }
+      } catch { /* fallthrough */ }
+      setEnableError({
+        code: "enable_failed",
+        message: String(err),
+        remediation: "Check the server logs for details.",
+        diag_cmd: "journalctl -u clustr-serverd --since '5 minutes ago'",
+      })
+    },
+  })
+
+  // Disable state
+  const [disableOpen, setDisableOpen] = React.useState(false)
+  const [destroyConfirm, setDestroyConfirm] = React.useState("")
+
+  const disableMutation = useMutation({
+    mutationFn: () => apiFetch("/api/v1/ldap/internal/disable", { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
+      qc.invalidateQueries({ queryKey: ["ldap-config"] })
+      setDisableOpen(false)
+      toast({ title: "LDAP stopped (data preserved)" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Disable failed", description: String(err) }),
+  })
+
+  const destroyMutation = useMutation({
+    mutationFn: () => apiFetch("/api/v1/ldap/internal/destroy", { method: "POST", body: JSON.stringify({ confirm: "destroy" }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
+      qc.invalidateQueries({ queryKey: ["ldap-config"] })
+      setDisableOpen(false)
+      setDestroyConfirm("")
+      toast({ title: "LDAP stopped and data wiped" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Destroy failed", description: String(err) }),
+  })
+
+  // Admin password recovery (ENABLE-6 — show once)
+  const [showPwd, setShowPwd] = React.useState(false)
+  const [adminPwdValue, setAdminPwdValue] = React.useState<string | null>(null)
+  const [pwdCopied, setPwdCopied] = React.useState(false)
+
+  async function handleShowAdminPwd() {
+    try {
+      const res = await apiFetch<LDAPAdminPasswordResponse>("/api/v1/ldap/internal/admin-password")
+      setAdminPwdValue(res.admin_password)
+      setShowPwd(true)
+    } catch (err) {
+      toast({ variant: "destructive", title: "Cannot retrieve admin password", description: String(err) })
+    }
+  }
+
+  const isReady = status?.status === "ready"
+  const isProvisioning = status?.status === "provisioning"
+  const isError = status?.status === "error"
+  const isDisabled = !status?.enabled || status?.status === "disabled"
+
+  return (
+    <div className="divide-y divide-border">
+      {/* Status panel (ENABLE-6) — shown when enabled */}
+      {!isDisabled && (
+        <div className="px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[11px] font-medium text-muted-foreground">Internal slapd status</p>
+            {isReady && !disableOpen && (
+              <button
+                className="text-[11px] text-muted-foreground hover:text-destructive underline underline-offset-2"
+                onClick={() => setDisableOpen(true)}
+              >
+                Disable
+              </button>
+            )}
+          </div>
+
+          {/* Provisioning spinner (ENABLE-4) */}
+          {isProvisioning && (
+            <div className="flex items-center gap-2 text-amber-400 text-xs">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>Provisioning slapd… {status?.status_detail && `— ${status.status_detail}`}</span>
+            </div>
+          )}
+
+          {/* Ready panel (green) */}
+          {isReady && (
+            <div className="rounded border border-green-500/30 bg-green-500/5 px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />
+                <span className="text-xs font-medium text-green-400">slapd running</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
+                <span className="text-muted-foreground">Base DN</span>
+                <code className="font-mono">{status?.base_dn || "—"}</code>
+                <span className="text-muted-foreground">Port</span>
+                <span>{status?.port ?? 636} (LDAPS)</span>
+                <span className="text-muted-foreground">Uptime</span>
+                <span>{formatUptime(status?.uptime_sec ?? 0)}</span>
+                <span className="text-muted-foreground">Running</span>
+                <span className={status?.running ? "text-green-400" : "text-amber-400"}>
+                  {status?.running ? "yes" : "no (may be restarting)"}
+                </span>
+              </div>
+
+              {/* Admin password recovery (ENABLE-6) */}
+              <div className="pt-1">
+                {!showPwd ? (
+                  <button
+                    className="text-[11px] text-muted-foreground hover:text-foreground underline underline-offset-2"
+                    onClick={handleShowAdminPwd}
+                  >
+                    Show admin password (one-time recovery)
+                  </button>
+                ) : adminPwdValue ? (
+                  <div className="flex items-center gap-2 mt-1">
+                    <code className="font-mono text-[11px] flex-1 break-all">{adminPwdValue}</code>
+                    <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]"
+                      onClick={() => { navigator.clipboard.writeText(adminPwdValue); setPwdCopied(true); setTimeout(() => setPwdCopied(false), 2000) }}>
+                      {pwdCopied ? "Copied!" : "Copy"}
+                    </Button>
+                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0"
+                      onClick={() => { setShowPwd(false); setAdminPwdValue(null) }}>
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {/* Error panel */}
+          {isError && (
+            <div className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-1">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+                <span className="text-xs font-medium text-destructive">slapd error</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">{status?.status_detail}</p>
+              <button
+                className="text-[11px] text-primary underline underline-offset-2"
+                onClick={() => enableMutation.mutate()}
+                disabled={enableMutation.isPending}
+              >
+                Re-enable to retry provisioning
+              </button>
+            </div>
+          )}
+
+          {/* Disable panel (DISABLE-2) */}
+          {disableOpen && (
+            <div className="rounded border border-border bg-secondary/5 px-3 py-2 space-y-2 mt-1">
+              <p className="text-xs font-medium">Disable internal LDAP</p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-xs h-7"
+                  disabled={disableMutation.isPending}
+                  onClick={() => disableMutation.mutate()}
+                >
+                  {disableMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop (preserve data)"}
+                </Button>
+                <Button size="sm" variant="ghost" className="text-xs h-7" onClick={() => { setDisableOpen(false); setDestroyConfirm("") }}>
+                  Cancel
+                </Button>
+              </div>
+              {/* Stop+Wipe option */}
+              <div className="pt-1 border-t border-border/50">
+                <p className="text-[11px] text-muted-foreground mb-1.5">
+                  Stop + wipe data — type <code className="font-mono">destroy</code> to confirm:
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    className="text-xs h-7 font-mono w-28"
+                    placeholder="destroy"
+                    value={destroyConfirm}
+                    onChange={(e) => setDestroyConfirm(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="text-xs h-7"
+                    disabled={destroyConfirm !== "destroy" || destroyMutation.isPending}
+                    onClick={() => destroyMutation.mutate()}
+                  >
+                    {destroyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop + wipe"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Enable form (MODE-2) — shown when not enabled */}
+      {isDisabled && (
+        <div className="px-4 py-3 space-y-3">
+          <p className="text-xs font-medium text-muted-foreground">Enable built-in slapd</p>
+          <p className="text-[11px] text-muted-foreground">
+            clustr will install openldap-servers, generate TLS certificates, and start slapd on port 636.
+          </p>
+
+          {/* Structured error (ENABLE-4) */}
+          {enableError && (
+            <div className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-1.5">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 text-destructive mt-0.5 shrink-0" />
+                <div className="space-y-1 min-w-0">
+                  <p className="text-xs font-medium text-destructive">{enableError.message}</p>
+                  <p className="text-[11px] text-muted-foreground">{enableError.remediation}</p>
+                  {enableError.diag_cmd && (
+                    <div className="flex items-center gap-2">
+                      <code className="font-mono text-[11px] text-muted-foreground flex-1 truncate">{enableError.diag_cmd}</code>
+                      <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px] shrink-0"
+                        onClick={() => navigator.clipboard.writeText(enableError!.diag_cmd!)}>
+                        Copy
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <div>
+              <label className="text-[11px] text-muted-foreground">Base DN</label>
+              <Input
+                className="text-xs h-7 font-mono mt-0.5"
+                value={baseDN}
+                onChange={(e) => setBaseDN(e.target.value)}
+                placeholder="dc=cluster,dc=local"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-muted-foreground">Admin password (leave blank to auto-generate)</label>
+              <Input
+                className="text-xs h-7 font-mono mt-0.5"
+                type="password"
+                value={adminPwd}
+                onChange={(e) => setAdminPwd(e.target.value)}
+                placeholder="auto-generate"
+              />
+            </div>
+          </div>
+
+          <Button
+            size="sm"
+            className="w-full text-xs"
+            disabled={!baseDN || enableMutation.isPending || isProvisioning}
+            onClick={() => enableMutation.mutate()}
+          >
+            {enableMutation.isPending || isProvisioning ? (
+              <>
+                <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+                Provisioning slapd…
+              </>
+            ) : (
+              "Enable built-in LDAP"
+            )}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── External LDAP panel (Sprint 7+8 form — MODE-3) ──────────────────────────
+
+function LDAPExternalPanel({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
   const { data, isLoading } = useQuery<LDAPConfigResponse>({
     queryKey: ["ldap-config"],
     queryFn: () => apiFetch<LDAPConfigResponse>("/api/v1/ldap/config"),
@@ -1096,7 +1544,6 @@ function LDAPConfigSection() {
   const [testResult, setTestResult] = React.useState<LDAPTestResponse | null>(null)
   const [testing, setTesting] = React.useState(false)
 
-  // Write-bind form state (WRITE-CFG-3)
   const [writeBindOpen, setWriteBindOpen] = React.useState(false)
   const [wbDN, setWbDN] = React.useState("")
   const [wbPass, setWbPass] = React.useState("")
@@ -1126,7 +1573,7 @@ function LDAPConfigSection() {
       )
       setWbResult(res.write_capable ? "Write probe OK" : `Write probe failed: ${res.write_status?.detail ?? "unknown"}`)
       qc.invalidateQueries({ queryKey: ["ldap-config"] })
-      setWbPass("") // clear password from form after save
+      setWbPass("")
     } catch (err) {
       setWbResult(`Error: ${String(err)}`)
     } finally {
@@ -1135,123 +1582,128 @@ function LDAPConfigSection() {
   }
 
   return (
-    <Section title="LDAP config" icon={Settings} id="ldap-config">
-      <div className="rounded-md border border-border bg-card">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <span className="text-xs font-medium text-muted-foreground">Built-in OpenLDAP module</span>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleTest} disabled={testing}>
-              {testing ? "Testing…" : "Test connection"}
-            </Button>
-          </div>
+    <div>
+      {/* Test connection */}
+      <div className="px-4 py-2 border-b border-border flex items-center justify-between">
+        <span className="text-[11px] text-muted-foreground">External LDAP / Active Directory</span>
+        <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={handleTest} disabled={testing}>
+          {testing ? "Testing…" : "Test connection"}
+        </Button>
+      </div>
+
+      {testResult && (
+        <div className={cn(
+          "px-4 py-2 text-xs border-b border-border",
+          testResult.ok ? "bg-green-500/5 text-green-400" : "bg-destructive/5 text-destructive"
+        )}>
+          {testResult.ok
+            ? `Connection OK — ${testResult.user_count ?? 0} users in ${testResult.base_dn}`
+            : `Connection failed: ${testResult.error}`
+          }
         </div>
+      )}
 
-        {testResult && (
-          <div className={cn(
-            "px-4 py-2 text-xs border-b border-border",
-            testResult.ok ? "bg-green-500/5 text-green-400" : "bg-destructive/5 text-destructive"
-          )}>
-            {testResult.ok
-              ? `Connection OK — ${testResult.user_count ?? 0} users in ${testResult.base_dn}`
-              : `Connection failed: ${testResult.error}`
-            }
-          </div>
-        )}
+      {isLoading ? (
+        <div className="p-4 space-y-2"><Skeleton className="h-5 w-full" /></div>
+      ) : (
+        <div className="px-4 py-3 space-y-2">
+          <LDAPConfigRow label="Status">
+            <span className={cn(
+              "rounded px-1.5 py-0.5 text-[10px] font-medium",
+              data?.status === "ready" ? "bg-green-500/10 text-green-400" :
+                data?.status === "provisioning" ? "bg-amber-500/10 text-amber-400" :
+                  "bg-secondary text-muted-foreground"
+            )}>
+              {data?.status ?? "disabled"}
+            </span>
+            {data?.status_detail && (
+              <span className="text-[11px] text-muted-foreground ml-2">{data.status_detail}</span>
+            )}
+          </LDAPConfigRow>
+          <LDAPConfigRow label="Base DN">
+            <code className="font-mono text-[11px]">{data?.base_dn || "—"}</code>
+            {data?.base_dn_locked && (
+              <span className="ml-2 text-[10px] text-amber-400 rounded px-1 bg-amber-500/10">locked</span>
+            )}
+          </LDAPConfigRow>
+          <LDAPConfigRow label="Service bind DN">
+            <code className="font-mono text-[11px]">{data?.service_bind_dn || "—"}</code>
+          </LDAPConfigRow>
+          <LDAPConfigRow label="CA fingerprint">
+            <code className="font-mono text-[11px] break-all">{data?.ca_fingerprint || "—"}</code>
+          </LDAPConfigRow>
+          <LDAPConfigRow label="Read bind">
+            <span className="text-[11px] text-muted-foreground">{data?.bind_password_set ? "set" : "not set"}</span>
+          </LDAPConfigRow>
 
-        {isLoading ? (
-          <div className="p-4 space-y-2"><Skeleton className="h-5 w-full" /></div>
-        ) : (
-          <div className="px-4 py-3 space-y-2">
-            <LDAPConfigRow label="Status">
+          {/* Write-bind config (WRITE-CFG-3) */}
+          <LDAPConfigRow label="Write bind">
+            <div className="flex items-center gap-2">
               <span className={cn(
                 "rounded px-1.5 py-0.5 text-[10px] font-medium",
-                data?.status === "ready" ? "bg-green-500/10 text-green-400" :
-                  data?.status === "provisioning" ? "bg-amber-500/10 text-amber-400" :
+                data?.write_capable === true ? "bg-green-500/10 text-green-400" :
+                  data?.write_bind_dn_set ? "bg-amber-500/10 text-amber-400" :
                     "bg-secondary text-muted-foreground"
               )}>
-                {data?.status ?? "disabled"}
+                {data?.write_capable === true ? "write-capable"
+                  : data?.write_bind_dn_set ? "unverified"
+                  : "not set (DM fallback)"}
               </span>
-              {data?.status_detail && (
-                <span className="text-[11px] text-muted-foreground ml-2">{data.status_detail}</span>
-              )}
-            </LDAPConfigRow>
-            <LDAPConfigRow label="Base DN">
-              <code className="font-mono text-[11px]">{data?.base_dn || "—"}</code>
-              {data?.base_dn_locked && (
-                <span className="ml-2 text-[10px] text-amber-400 rounded px-1 bg-amber-500/10">locked</span>
-              )}
-            </LDAPConfigRow>
-            <LDAPConfigRow label="Service bind DN">
-              <code className="font-mono text-[11px]">{data?.service_bind_dn || "—"}</code>
-            </LDAPConfigRow>
-            <LDAPConfigRow label="CA fingerprint">
-              <code className="font-mono text-[11px] break-all">{data?.ca_fingerprint || "—"}</code>
-            </LDAPConfigRow>
-            <LDAPConfigRow label="Read bind">
-              <span className="text-[11px] text-muted-foreground">{data?.bind_password_set ? "set" : "not set"}</span>
-            </LDAPConfigRow>
+              <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" onClick={() => setWriteBindOpen((v) => !v)}>
+                {writeBindOpen ? "Cancel" : "Configure"}
+              </Button>
+            </div>
+          </LDAPConfigRow>
+          <LDAPConfigRow label="Backend">
+            <span className="text-[11px] text-muted-foreground">{data?.backend_dialect ?? "openldap"}</span>
+            <span className="ml-1 text-[10px] text-green-400 rounded px-1 bg-green-500/10">implemented</span>
+          </LDAPConfigRow>
 
-            {/* Sprint 8 write-bind config (WRITE-CFG-3) */}
-            <LDAPConfigRow label="Write bind">
-              <div className="flex items-center gap-2">
-                <span className={cn(
-                  "rounded px-1.5 py-0.5 text-[10px] font-medium",
-                  data?.write_capable === true ? "bg-green-500/10 text-green-400" :
-                    data?.write_bind_dn_set ? "bg-amber-500/10 text-amber-400" :
-                      "bg-secondary text-muted-foreground"
-                )}>
-                  {data?.write_capable === true ? "write-capable"
-                    : data?.write_bind_dn_set ? "unverified"
-                    : "not set (DM fallback)"}
-                </span>
-                <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" onClick={() => setWriteBindOpen((v) => !v)}>
-                  {writeBindOpen ? "Cancel" : "Configure"}
+          {writeBindOpen && (
+            <div className="mt-2 rounded border border-border bg-secondary/5 px-3 py-2 space-y-2">
+              <p className="text-[11px] font-medium">Write bind credentials</p>
+              <p className="text-[11px] text-muted-foreground">
+                Required to create/edit/delete users and groups in the external directory from clustr.
+                Leave password blank to keep the existing one.
+              </p>
+              <Input className="text-xs h-7 font-mono" placeholder="Write bind DN (e.g. cn=admin,dc=cluster,dc=local)" value={wbDN} onChange={(e) => setWbDN(e.target.value)} />
+              <Input className="text-xs h-7 font-mono" type="password" placeholder="Write bind password (leave blank to keep)" value={wbPass} onChange={(e) => setWbPass(e.target.value)} />
+              {wbResult && (
+                <p className={cn("text-[11px]", wbResult.startsWith("Write probe OK") ? "text-green-400" : "text-destructive")}>{wbResult}</p>
+              )}
+              <div className="flex gap-2">
+                <Button size="sm" className="flex-1 text-xs" disabled={wbSaving} onClick={handleSaveWriteBind}>
+                  {wbSaving ? "Saving & probing…" : "Save + probe write"}
                 </Button>
+                <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setWriteBindOpen(false); setWbResult(null) }}>Cancel</Button>
               </div>
-            </LDAPConfigRow>
-            <LDAPConfigRow label="Backend">
-              <span className="text-[11px] text-muted-foreground">{data?.backend_dialect ?? "openldap"}</span>
-              <span className="ml-1 text-[10px] text-green-400 rounded px-1 bg-green-500/10">implemented</span>
-            </LDAPConfigRow>
+            </div>
+          )}
 
-            {/* Write-bind form */}
-            {writeBindOpen && (
-              <div className="mt-2 rounded border border-border bg-secondary/5 px-3 py-2 space-y-2">
-                <p className="text-[11px] font-medium">Write bind credentials</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Optional. Required only if you want to create/edit/delete users and groups in LDAP from clustr.
-                  Leave password blank to keep the existing one.
-                </p>
-                <Input className="text-xs h-7 font-mono" placeholder="Write bind DN (e.g. cn=admin,dc=cluster,dc=local)" value={wbDN} onChange={(e) => setWbDN(e.target.value)} />
-                <Input className="text-xs h-7 font-mono" type="password" placeholder="Write bind password (leave blank to keep)" value={wbPass} onChange={(e) => setWbPass(e.target.value)} />
-                {wbResult && (
-                  <p className={cn("text-[11px]", wbResult.startsWith("Write probe OK") ? "text-green-400" : "text-destructive")}>{wbResult}</p>
-                )}
-                <div className="flex gap-2">
-                  <Button size="sm" className="flex-1 text-xs" disabled={wbSaving} onClick={handleSaveWriteBind}>
-                    {wbSaving ? "Saving & probing…" : "Save + probe write"}
-                  </Button>
-                  <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setWriteBindOpen(false); setWbResult(null) }}>Cancel</Button>
-                </div>
-              </div>
-            )}
-
-            {!data?.enabled && (
-              <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 mt-3">
-                <p className="text-[11px] text-amber-400 font-medium">LDAP module not enabled</p>
-                <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Use the LDAP enable API or CLI to provision the built-in OpenLDAP server:
-                </p>
-                <code className="block font-mono text-[11px] mt-1 text-muted-foreground">
-                  POST /api/v1/ldap/enable {"{"} "base_dn": "dc=cluster,dc=local", "admin_password": "…" {"}"}
-                </code>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </Section>
+          {!data?.enabled && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 mt-3">
+              <p className="text-[11px] text-amber-400 font-medium">External LDAP not configured</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Configure the connection to your existing directory server using the fields above.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatUptime(sec: number): string {
+  if (sec <= 0) return "—"
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
 
 function LDAPConfigRow({ label, children }: { label: string; children: React.ReactNode }) {

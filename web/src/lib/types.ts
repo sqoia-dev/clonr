@@ -432,6 +432,34 @@ export interface LDAPTestResponse {
   base_dn?: string
 }
 
+// Sprint 9 — internal LDAP auto-deploy
+export interface LDAPSourceModeResponse {
+  source_mode: "internal" | "external"
+}
+
+export interface LDAPInternalStatusResponse {
+  enabled: boolean
+  status: string         // "disabled" | "provisioning" | "ready" | "error"
+  status_detail?: string
+  base_dn?: string
+  running: boolean
+  port: number
+  uptime_sec: number
+  admin_password_set: boolean
+  source_mode: "internal" | "external"
+}
+
+export interface LDAPInternalEnableError {
+  code: string           // "port_in_use" | "slapd_not_installed" | "selinux_denied" | "unit_failed_to_start" | "enable_failed"
+  message: string
+  remediation: string
+  diag_cmd?: string
+}
+
+export interface LDAPAdminPasswordResponse {
+  admin_password: string
+}
+
 export interface SpecialtyGroup {
   id: string
   name: string

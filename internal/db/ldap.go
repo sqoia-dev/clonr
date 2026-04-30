@@ -46,6 +46,11 @@ type LDAPModuleConfig struct {
 	// WriteCapable is the cached probe result: nil = not yet probed, false = probe failed, true = OK.
 	WriteCapable       *bool
 	WriteCapableDetail string
+
+	// Sprint 9 — source mode (migration 080).
+	// SourceMode is "internal" (clustr manages slapd) or "external" (operator-supplied directory).
+	// Defaults to "internal" on first install.
+	SourceMode string
 }
 
 // LDAPGetConfig reads the singleton LDAP module config row.
@@ -63,7 +68,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			sudoers_enabled, sudoers_group_cn,
 			service_bind_password_encrypted, admin_passwd_encrypted,
 			write_bind_dn, write_bind_password, write_bind_password_encrypted,
-			write_capable, write_capable_detail
+			write_capable, write_capable_detail,
+			source_mode
 		FROM ldap_module_config WHERE id = 1
 	`)
 
@@ -85,6 +91,7 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		&sbpEncrypted, &apEncrypted,
 		&cfg.WriteBindDN, &cfg.WriteBindPassword, &wbpEncrypted,
 		&writeCapable, &cfg.WriteCapableDetail,
+		&cfg.SourceMode,
 	)
 	if err != nil {
 		return LDAPModuleConfig{}, err
@@ -508,6 +515,39 @@ func (db *DB) LDAPGetGroupMode(ctx context.Context, cn string) (string, error) {
 		return "", fmt.Errorf("db: LDAPGetGroupMode: %w", err)
 	}
 	return mode, nil
+}
+
+// LDAPGetSourceMode returns the LDAP source mode ("internal" or "external").
+// Returns "internal" if the row does not exist.
+func (db *DB) LDAPGetSourceMode(ctx context.Context) (string, error) {
+	var mode string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT source_mode FROM ldap_module_config WHERE id = 1`,
+	).Scan(&mode)
+	if err == sql.ErrNoRows {
+		return "internal", nil
+	}
+	if err != nil {
+		return "internal", fmt.Errorf("db: LDAPGetSourceMode: %w", err)
+	}
+	if mode == "" {
+		return "internal", nil
+	}
+	return mode, nil
+}
+
+// LDAPSetSourceMode updates the source_mode column on the singleton row.
+// mode must be "internal" or "external".
+func (db *DB) LDAPSetSourceMode(ctx context.Context, mode string) error {
+	if mode != "internal" && mode != "external" {
+		return fmt.Errorf("db: LDAPSetSourceMode: invalid mode %q (must be internal or external)", mode)
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE ldap_module_config SET source_mode = ? WHERE id = 1`, mode)
+	if err != nil {
+		return fmt.Errorf("db: LDAPSetSourceMode: %w", err)
+	}
+	return nil
 }
 
 // LDAPSetGroupMode upserts the mode for a single LDAP group CN.

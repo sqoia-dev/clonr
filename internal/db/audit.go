@@ -98,6 +98,12 @@ const (
 	AuditActionLDAPGroupModeChanged = "ldap.directory.group.mode_changed"
 	AuditActionLDAPWriteBindSaved   = "ldap.write_bind.saved"
 	AuditActionLDAPWriteProbe       = "ldap.write_bind.probe"
+
+	// Sprint 9 — internal slapd lifecycle events (X9-1).
+	AuditActionLDAPInternalEnabled   = "ldap.internal.enabled"
+	AuditActionLDAPInternalDisabled  = "ldap.internal.disabled"
+	AuditActionLDAPInternalDestroyed = "ldap.internal.destroyed"
+	AuditActionLDAPModeSwitched      = "ldap.mode.switched"
 )
 
 // AuditRecord is one row in audit_log.

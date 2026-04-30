@@ -72,6 +72,10 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Get("/ldap/sudoers/members", handleSudoersMembers(mgr))
 	r.Post("/ldap/sudoers/members", handleGrantSudo(mgr))
 	r.Delete("/ldap/sudoers/members/{uid}", handleRevokeSudo(mgr))
+
+	// Sprint 9 — internal slapd auto-deploy + source-mode toggle.
+	mgr.registerInternalRoutes(r)
+	r.Get("/ldap/internal/admin-password", mgr.handleInternalAdminPassword)
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────

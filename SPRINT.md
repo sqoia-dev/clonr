@@ -850,3 +850,63 @@ Promote LDAP integration from read-only to read-write. Operators no longer need 
    - Delete the group → confirmation works
    - Switch a group from overlay-mode to direct-write-mode and back; verify state lands correctly each time
 5. Tag `v0.4.0` after Sprint 8 ships — LDAP write capability is a substantive product expansion. Pipeline auto-fires.
+
+---
+
+## Sprint 9 — Internal LDAP auto-deploy UI
+
+**Founder direction (2026-04-30):** clustr already has internal slapd auto-deploy capability (`internal/ldap/slapd.go`, `install.go`, `embed.go`, `assets/clustr-slapd.service`, `templates/slapd-seed.ldif.tmpl`, `Manager.Enable()` per migration 028). Sprints 7+8 LDAP UI was external-only. Sprint 9 surfaces the internal path.
+
+**Richard's call (Option A — mode toggle, default Internal):** failure modes attach to operator-initiated actions; multi-cluster orgs need a non-silent escape hatch; migration 028 already shows internal state is fragile, surfacing the toggle keeps it legible.
+
+### In scope
+
+#### LDAP config — mode toggle
+
+- [x] **MODE-1** Segmented control at top of Identity → LDAP config: `[Internal — clustr-managed]` / `[External — existing directory]`. Default = Internal on first-run. Persisted in `ldap_module_config`.
+- [x] **MODE-2** Internal mode form: single base DN field defaulting to `dc=cluster,dc=local`, optional admin-password override (blank = clustr generates + stores), one big "Enable" button. No bind-DN/URL fields.
+- [x] **MODE-3** External mode form: the existing Sprint 7+8 form (URL, base DN, read bind, write bind, TLS, write-capable banner).
+- [x] **MODE-4** Mode switch requires typed-confirm.
+
+#### Internal — Enable flow
+
+- [x] **ENABLE-1** Server: `POST /api/v1/ldap/internal/enable` accepts `{base_dn, admin_password?}`. Wraps `Manager.Enable()`. Returns success + slapd status OR structured error with remediation hint.
+- [x] **ENABLE-2** Structured error codes: `port_in_use`, `slapd_not_installed`, `selinux_denied`, `unit_failed_to_start`. Each with one-line remediation.
+- [x] **ENABLE-3** Server: `GET /api/v1/ldap/internal/status` returns `{enabled, running, port, uptime_sec, admin_password_set}`. Polled when Internal mode is active.
+- [x] **ENABLE-4** Web: Enable button → "Provisioning slapd…" spinner → green status panel OR inline structured error with copy-button on diagnostic command (e.g. `systemctl status clustr-slapd`).
+- [x] **ENABLE-5** Web Internal mode: bind fields hidden. Read+write binds auto-configure to localhost.
+- [x] **ENABLE-6** Web: status panel below mode toggle when Internal enabled — slapd state, port, uptime, "Show admin password (one-time)" recovery affordance with copy button.
+
+#### Disable / re-enable / mode switch
+
+- [x] **DISABLE-1** Server: `POST /api/v1/ldap/internal/disable` stops slapd, preserves data dir. `POST /api/v1/ldap/internal/destroy` wipes data — typed-confirm with literal `destroy` required.
+- [x] **DISABLE-2** Web: "Disable" link in status panel → inline panel with Stop only / Stop + Wipe options. Stop only is reversible. Stop+Wipe requires typed-confirm.
+- [x] **DISABLE-3** Mode-switch UX: switching Internal → External while Internal is running prompts: "Internal LDAP is running. Stop it before switching, or leave it running on this host?" Default = leave running, flip config to External.
+
+#### Cross-cutting
+
+- [x] **X9-1** Activity event kinds: `ldap.internal.enabled`, `ldap.internal.disabled`, `ldap.internal.destroyed`, `ldap.mode.switched`.
+- [x] **X9-2** Vitest: mode-toggle UI, Enable mutation each error variant, mode-switch typed-confirm.
+- [x] **X9-3** Go tests: `Enable()` happy path + each error variant, status, disable/destroy paths.
+- [x] **X9-4** README — one sentence: "By default, clustr provisions its own LDAP server on first config. Switch the LDAP mode to External to connect to an existing directory."
+
+### Out of scope (Sprint 10+)
+
+- Internal↔External data migration (export/import).
+- Multi-master / replicated internal LDAP.
+- Internal LDAP schema customization beyond seed LDIF.
+- Internal LDAP backup/restore from web UI (operator rsync `/var/lib/clustr/slapd/` for now).
+
+### Definition of done
+
+1. All Sprint 9 checkboxes ticked.
+2. CI green on the merge SHA.
+3. Autodeploy on cloner ships latest. Hard-refresh; mode toggle visible at top of LDAP config, default Internal.
+4. Operator end-to-end on cloner, no CLI:
+   - Fresh-state instance: open LDAP config, see Internal selected, default base DN populated
+   - Click Enable → spinner → green status panel
+   - LDAP users / groups / read+write all work against the new internal slapd
+   - Switch to External, typed-confirm, see external form
+   - Switch back to Internal, typed-confirm, slapd state preserved
+   - Disable via status panel; re-enable; data persists
+5. Tag `v0.5.0` after Sprint 9 ships — Internal LDAP auto-deploy is a substantive operator-flow expansion. Pipeline auto-fires.
