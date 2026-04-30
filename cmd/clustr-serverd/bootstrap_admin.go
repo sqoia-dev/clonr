@@ -8,22 +8,23 @@ package main
 // start, or who need to recover a locked-out admin account.
 //
 // Usage:
-//   clustr-serverd bootstrap-admin                      # interactive
+//   clustr-serverd bootstrap-admin                      # idempotent: creates clustr/clustr if absent
 //   clustr-serverd bootstrap-admin --username ops \
-//                                  --password "S3cr3t!"  # non-interactive
-//   clustr-serverd bootstrap-admin --force               # clobber existing admins
+//                                  --password "S3cr3t!"  # ADD ops admin alongside existing users
+//   clustr-serverd bootstrap-admin --replace-default     # explicit: wipe clustr default and re-create
+//   clustr-serverd bootstrap-admin --force               # destroy ALL users and start fresh
 //   clustr-serverd bootstrap-admin --force \
 //                                  --bypass-complexity   # emergency recovery only
 //
 // Behaviour:
-//   - If admin accounts already exist, refuses to create another unless --force.
-//   - --force deletes ALL existing users and starts fresh. Use with caution.
-//   - Created user has must_change_password=false. Default clustr/clustr credentials
-//     work permanently until the operator voluntarily changes the password via Settings.
+//   - Default (no flags): if "clustr" admin doesn't exist, create it. If it does, leave it alone.
+//   - --username X: ADD a new admin alongside existing users. Does NOT delete prior admins.
+//   - --replace-default: explicitly wipe the "clustr" default admin and re-create it.
+//   - --force: removes ALL existing users before creating the new account.
 //   - --bypass-complexity skips the password complexity validator. Use ONLY for
 //     emergency credential recovery. The bypass is recorded in the audit log.
-//   - On success, also prints the web UI login URL based on CLUSTR_LISTEN_ADDR.
-//   - Idempotent when called multiple times with --force (always overwrites).
+//   - At server startup, log a WARN line if the default "clustr" admin is missing.
+//   - GET /api/v1/auth/status includes default_admin_present: bool to surface absence.
 
 import (
 	"bufio"
@@ -45,38 +46,51 @@ func init() {
 	var flagUsername string
 	var flagPassword string
 	var flagForce bool
+	var flagReplaceDefault bool
 	var flagBypassComplexity bool
 
 	bootstrapAdminCmd := &cobra.Command{
 		Use:   "bootstrap-admin",
-		Short: "Create the initial admin user for the clustr web UI",
-		Long: `bootstrap-admin creates an admin account for the clustr web UI without
-requiring the server to be running. Use this on fresh installs to set your
-own credentials instead of changing the default clustr/clustr password.
+		Short: "Create or add an admin user for the clustr web UI",
+		Long: `bootstrap-admin manages admin accounts for the clustr web UI without
+requiring the server to be running.
 
-If admin users already exist, the command refuses to proceed unless --force
-is specified. --force removes all existing users before creating the new one.
+DEFAULT BEHAVIOUR (no flags):
+  If the "clustr" default admin does not exist, it is created with password "clustr".
+  If it already exists, this is a no-op. Safe to run repeatedly.
 
-The command reads credentials from --username / --password flags, or from
-the CLUSTR_BOOTSTRAP_USERNAME / CLUSTR_BOOTSTRAP_PASSWORD environment
-variables. If neither is provided, you will be prompted interactively.
+ADD A NEW ADMIN (--username X --password Y):
+  Adds a new admin account alongside all existing users. Does NOT remove or replace
+  any existing admin, including the "clustr" default. If an account with the same
+  username already exists, the command fails — use --force to overwrite explicitly.
+
+REPLACE DEFAULT ADMIN (--replace-default):
+  Removes only the "clustr" default admin and re-creates it with the default
+  credentials. All other users are preserved. Useful when the default account
+  was manually corrupted but other admins must remain intact.
+
+WIPE ALL USERS (--force):
+  Removes ALL existing users before creating the new account. Use with caution.
+
+The command reads credentials from --username / --password flags, or from the
+CLUSTR_BOOTSTRAP_USERNAME / CLUSTR_BOOTSTRAP_PASSWORD environment variables.
 
 WARNING: --bypass-complexity skips the password strength validator and allows
 simple passwords such as "clustr/clustr". This flag is for EMERGENCY CREDENTIAL
-RECOVERY ONLY — for example, when the server binary is the only way back in and
-a strong password cannot be typed interactively. Using it leaves a weak password
-in the database. The bypass is recorded in the audit log. Change the password
-immediately after recovery.`,
+RECOVERY ONLY. Using it leaves a weak password in the database. The bypass is
+recorded in the audit log. Change the password immediately after recovery.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBootstrapAdmin(flagUsername, flagPassword, flagForce, flagBypassComplexity)
+			return runBootstrapAdmin(flagUsername, flagPassword, flagForce, flagReplaceDefault, flagBypassComplexity)
 		},
 	}
 	bootstrapAdminCmd.Flags().StringVar(&flagUsername, "username", "",
-		"Admin username (or set CLUSTR_BOOTSTRAP_USERNAME)")
+		"Admin username to add (or set CLUSTR_BOOTSTRAP_USERNAME)")
 	bootstrapAdminCmd.Flags().StringVar(&flagPassword, "password", "",
 		"Admin password (or set CLUSTR_BOOTSTRAP_PASSWORD; minimum 8 chars)")
 	bootstrapAdminCmd.Flags().BoolVar(&flagForce, "force", false,
-		"Remove all existing users and create the specified admin account")
+		"Remove ALL existing users and create the specified admin account")
+	bootstrapAdminCmd.Flags().BoolVar(&flagReplaceDefault, "replace-default", false,
+		"Remove only the default 'clustr' admin and re-create it (other users are preserved)")
 	bootstrapAdminCmd.Flags().BoolVar(&flagBypassComplexity, "bypass-complexity", false,
 		"[EMERGENCY RECOVERY ONLY] Skip password complexity validation. Leaves a weak password — change it immediately. Recorded in audit log.")
 
@@ -102,7 +116,7 @@ const DefaultAdminUsername = "clustr"
 // No forced password change — the operator owns their security posture.
 const DefaultAdminPassword = "clustr"
 
-func runBootstrapAdmin(username, password string, force, bypassComplexity bool) error {
+func runBootstrapAdmin(username, password string, force, replaceDefault, bypassComplexity bool) error {
 	cfg := config.LoadServerConfig()
 
 	// Resolve from env vars if flags not set.
@@ -113,8 +127,8 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		password = os.Getenv("CLUSTR_BOOTSTRAP_PASSWORD")
 	}
 
-	// Apply defaults when neither flags nor env vars provide credentials.
-	// Default clustr/clustr credentials work permanently — no forced change.
+	// Determine whether we are on the default-credentials path:
+	// no username/password provided via flags, env vars, or interactive input yet.
 	usingDefaults := false
 	if username == "" && password == "" {
 		username = DefaultAdminUsername
@@ -147,12 +161,6 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 
 	if bypassComplexity {
 		// Loud warning — this is a security tradeoff documented in the audit log.
-		// POLICY: must_change_password is left false (same as normal path) so the
-		// operator can log in immediately during recovery. The weak password is not
-		// auto-expired. Forcing must_change_password=true would block access until a
-		// new password is set, defeating the "I need in NOW" emergency use case.
-		// The warning below is the mitigation: the operator is told explicitly to
-		// change the password as soon as the recovery session is complete.
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "WARNING: --bypass-complexity is set.\n")
 		fmt.Fprintf(os.Stderr, "  Password complexity validation is SKIPPED.\n")
@@ -177,27 +185,56 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 
 	ctx := context.Background()
 
-	// Check for existing admins.
-	count, err := database.CountUsers(ctx)
-	if err != nil {
-		return fmt.Errorf("count users: %w", err)
-	}
+	// ── Determine what to do based on flags ───────────────────────────────────
+	//
+	// Three mutually exclusive modes:
+	//   1. --force: wipe ALL users, then create the new account.
+	//   2. --replace-default: remove only the "clustr" default admin, then re-create it.
+	//   3. Default/--username: ADD a new admin without touching existing users.
+	//      Special case for the default "clustr" path: idempotent (skip if already exists).
 
-	if count > 0 && !force {
-		admins, _ := database.CountActiveAdmins(ctx)
-		return fmt.Errorf(
-			"%d user(s) already exist in the database (%d admin(s)).\n"+
-				"  To reset all users and create a fresh admin, re-run with --force.\n"+
-				"  WARNING: --force deletes ALL existing users.",
-			count, admins)
-	}
-
-	if count > 0 && force {
-		fmt.Fprintf(os.Stderr, "WARNING: --force specified — deleting all %d existing user(s)\n", count)
-		if err := database.DeleteAllUsers(ctx); err != nil {
-			return fmt.Errorf("delete existing users: %w", err)
+	if force {
+		count, err := database.CountUsers(ctx)
+		if err != nil {
+			return fmt.Errorf("count users: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "All users removed.\n")
+		if count > 0 {
+			fmt.Fprintf(os.Stderr, "WARNING: --force specified — deleting all %d existing user(s)\n", count)
+			if err := database.DeleteAllUsers(ctx); err != nil {
+				return fmt.Errorf("delete existing users: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "All users removed.\n")
+		}
+	} else if replaceDefault {
+		// Remove only the "clustr" default admin; leave all other users intact.
+		existing, err := database.GetUserByUsername(ctx, DefaultAdminUsername)
+		if err == nil {
+			// Found — delete just this user.
+			if err := database.HardDeleteUser(ctx, existing.ID); err != nil {
+				return fmt.Errorf("replace-default: delete %q admin: %w", DefaultAdminUsername, err)
+			}
+			fmt.Fprintf(os.Stderr, "Removed existing %q admin account.\n", DefaultAdminUsername)
+		}
+		// If not found, that is fine — we are about to create it.
+	} else {
+		// ADD mode: check whether this username already exists.
+		_, lookupErr := database.GetUserByUsername(ctx, username)
+		if lookupErr == nil {
+			// User exists.
+			if usingDefaults {
+				// Default idempotent path: clustr/clustr already present — leave it alone.
+				fmt.Printf("\nDefault admin %q already exists. No changes made.\n", DefaultAdminUsername)
+				fmt.Printf("  To reset it: clustr-serverd bootstrap-admin --replace-default\n")
+				fmt.Printf("  To wipe all users: clustr-serverd bootstrap-admin --force\n\n")
+				return nil
+			}
+			// Explicit --username X with a name that already exists.
+			return fmt.Errorf(
+				"user %q already exists.\n"+
+					"  Use --force to remove all users and recreate, or choose a different username.",
+				username,
+			)
+		}
 	}
 
 	// Hash password.
@@ -219,17 +256,9 @@ func runBootstrapAdmin(username, password string, force, bypassComplexity bool) 
 		return fmt.Errorf("create user: %w", err)
 	}
 
-	// Audit log — POLICY: always record AuditActionUserCreate on every bootstrap-admin
-	// invocation, not just when --bypass-complexity is used. Rationale: bootstrap-admin
-	// is a privileged CLI operation (it can delete all users and create a new admin
-	// account). Every invocation should leave a trail in the audit log regardless of
-	// whether complexity was bypassed, so that post-incident reviews surface all
-	// credential-reset events. This is intentional behavior, not a bug.
-	//
-	// The actorID is "bootstrap-admin" (not a real UUID) because the CLI runs outside
-	// the HTTP request path; there is no authenticated session to attribute the action
-	// to. The actorLabel "bootstrap-admin (cli)" distinguishes it from API-originated
-	// user creates in audit log queries.
+	// Audit log — always record every bootstrap-admin invocation regardless of
+	// whether complexity was bypassed. This makes CLI-originated credential events
+	// visible in post-incident reviews alongside API-originated user creates.
 	auditSvc := db.NewAuditService(database)
 	auditSvc.Record(ctx,
 		"bootstrap-admin",          // actorID — not a real user ID; marks the CLI actor

@@ -329,6 +329,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// WARN if the default "clustr" admin is absent — indicates operator ran
+	// bootstrap-admin --username X without --replace-default and the default
+	// account was never created, or it was explicitly removed. We do NOT
+	// auto-recreate; we just make the absence loud. The web UI exposes the
+	// default_admin_present field from /api/v1/auth/status for the same signal.
+	server.WarnIfDefaultAdminMissing(ctx, database)
+
 	// One-shot idempotent migration: clear must_change_password for all users.
 	// Operators upgrading from a build that set must_change_password=1 will not
 	// get stuck in a forced-change loop. Safe to run on every boot.

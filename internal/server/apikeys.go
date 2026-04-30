@@ -64,6 +64,20 @@ func BootstrapDefaultUser(ctx context.Context, database *db.DB) error {
 	return nil
 }
 
+// WarnIfDefaultAdminMissing logs a WARN line if the default "clustr" admin account
+// does not exist. This surfaces the absence loudly in logs so operators notice when
+// bootstrap-admin --username X was run without creating the default account, or when
+// it was explicitly deleted. We do NOT auto-recreate — that would hide operator intent.
+// The web UI gets the same signal via the default_admin_present field in /api/v1/auth/status.
+func WarnIfDefaultAdminMissing(ctx context.Context, database *db.DB) {
+	_, err := database.GetUserByUsername(ctx, "clustr")
+	if err != nil {
+		log.Warn().
+			Str("username", "clustr").
+			Msg("startup: default admin 'clustr' is absent — run 'clustr-serverd bootstrap-admin' to re-create it, or log in with your custom admin account")
+	}
+}
+
 // BootstrapAdminKey checks whether any admin key exists in the database.
 // If none exists, it generates one, persists the hash, and prints the raw
 // key to stdout ONCE. The operator must capture it immediately.

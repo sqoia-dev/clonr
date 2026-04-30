@@ -26,6 +26,11 @@ type AuthHandler struct {
 	// Used by GET /api/v1/auth/status for first-run detection.
 	HasAdminUser func() (bool, error)
 
+	// HasDefaultAdmin returns true when the default "clustr" admin account exists.
+	// May be nil — if nil, default_admin_present is omitted from /auth/status.
+	// Used to surface explicit removal of the default account without forcing re-creation.
+	HasDefaultAdmin func() (bool, error)
+
 	// LoginWithKey validates a raw API key string (deprecated legacy path).
 	// Returns (keyPrefix, scope, ok). keyPrefix is the first 8 chars of raw key.
 	LoginWithKey func(rawKey string) (keyPrefix string, scope string, ok bool)
@@ -317,13 +322,18 @@ func (h *AuthHandler) HandleSetPassword(w http.ResponseWriter, r *http.Request) 
 }
 
 // HandleStatus handles GET /api/v1/auth/status.
-// Public (no auth required). Returns {"has_admin": bool} so the web UI can
-// detect first-run state and direct the operator to run bootstrap-admin.
+// Public (no auth required). Returns {"has_admin": bool, "default_admin_present": bool}
+// so the web UI can detect first-run state and surface absent default admin accounts.
+//
+// default_admin_present is true when the "clustr" default admin exists. It is false
+// when the operator explicitly removed it (e.g. bootstrap-admin --force with a custom
+// username). The web Setup page uses has_admin to gate first-run; default_admin_present
+// is informational — the server does NOT force re-creation.
 func (h *AuthHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	if h.HasAdminUser == nil {
 		// Safety fallback: if the function is not wired, assume admin exists to
 		// avoid accidentally routing a running server into first-run setup UI.
-		writeJSON(w, http.StatusOK, map[string]bool{"has_admin": true})
+		writeJSON(w, http.StatusOK, map[string]any{"has_admin": true, "default_admin_present": true})
 		return
 	}
 	ok, err := h.HasAdminUser()
@@ -335,7 +345,20 @@ func (h *AuthHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"has_admin": ok})
+	resp := map[string]any{"has_admin": ok}
+
+	// Populate default_admin_present when the function is wired.
+	if h.HasDefaultAdmin != nil {
+		defaultPresent, defErr := h.HasDefaultAdmin()
+		if defErr != nil {
+			log.Error().Err(defErr).Msg("auth/status: default admin check db error")
+			// Non-fatal: omit the field rather than failing the whole request.
+		} else {
+			resp["default_admin_present"] = defaultPresent
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // sessionCookie builds a Set-Cookie value for the session.

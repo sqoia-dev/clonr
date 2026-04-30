@@ -75,14 +75,11 @@ func openTestDB(t *testing.T) (*db.DB, string) {
 // in the audit log.
 func TestRunBootstrapAdmin_BypassComplexity_Succeeds(t *testing.T) {
 	_, dbPath := openTestDB(t)
-	// openTestDB already ran migrations via db.Open; close it so
-	// runBootstrapAdmin can reopen via its own db.Open call.
-	// (db.Open returns the *DB directly; the file is already initialised.)
 
 	// Point CLUSTR_DB_PATH at the temp DB so runBootstrapAdmin picks it up.
 	t.Setenv("CLUSTR_DB_PATH", dbPath)
 
-	err := runBootstrapAdmin("testrecovery", "weak", false, true)
+	err := runBootstrapAdmin("testrecovery", "weak", false, false, true)
 	if err != nil {
 		t.Fatalf("runBootstrapAdmin with bypass should succeed: %v", err)
 	}
@@ -128,7 +125,7 @@ func TestRunBootstrapAdmin_NoBypass_WeakPasswordFails(t *testing.T) {
 	_, dbPath := openTestDB(t)
 	t.Setenv("CLUSTR_DB_PATH", dbPath)
 
-	err := runBootstrapAdmin("testuser", "weak", false, false)
+	err := runBootstrapAdmin("testuser", "weak", false, false, false)
 	if err == nil {
 		t.Fatal("expected error for weak password without bypass, got nil")
 	}
@@ -140,7 +137,7 @@ func TestRunBootstrapAdmin_NoBypass_StrongPasswordSucceeds(t *testing.T) {
 	_, dbPath := openTestDB(t)
 	t.Setenv("CLUSTR_DB_PATH", dbPath)
 
-	err := runBootstrapAdmin("adminuser", "Clustr123!", false, false)
+	err := runBootstrapAdmin("adminuser", "Clustr123!", false, false, false)
 	if err != nil {
 		t.Fatalf("runBootstrapAdmin with strong password should succeed: %v", err)
 	}
@@ -181,12 +178,12 @@ func TestRunBootstrapAdmin_ForceWithBypass(t *testing.T) {
 	t.Setenv("CLUSTR_DB_PATH", dbPath)
 
 	// Create a strong initial user first.
-	if err := runBootstrapAdmin("original", "Clustr123!", false, false); err != nil {
+	if err := runBootstrapAdmin("original", "Clustr123!", false, false, false); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
 	// Force-replace with a weak password via bypass.
-	if err := runBootstrapAdmin("recovery", "clustr", true, true); err != nil {
+	if err := runBootstrapAdmin("recovery", "clustr", true, false, true); err != nil {
 		t.Fatalf("runBootstrapAdmin --force --bypass-complexity: %v", err)
 	}
 
@@ -242,7 +239,7 @@ func TestBootstrapAdmin_DefaultCredentials_AntiRegression(t *testing.T) {
 	t.Setenv("CLUSTR_BOOTSTRAP_PASSWORD", "")
 
 	// Call with empty username and password to exercise the default path.
-	if err := runBootstrapAdmin("", "", false, false); err != nil {
+	if err := runBootstrapAdmin("", "", false, false, false); err != nil {
 		t.Fatalf("runBootstrapAdmin with defaults should succeed: %v", err)
 	}
 
@@ -266,6 +263,150 @@ func TestBootstrapAdmin_DefaultCredentials_AntiRegression(t *testing.T) {
 	// Invariant 2: The stored hash must match the default password "clustr".
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(DefaultAdminPassword)); err != nil {
 		t.Errorf("ANTI-REGRESSION: default password hash does not match %q: %v", DefaultAdminPassword, err)
+	}
+}
+
+// TestBootstrapAdmin_AddUsername_PreservesExisting is the anti-regression test for
+// the ADD behavior introduced in Sprint 11 (#82).
+//
+// CONTRACT: running "bootstrap-admin --username ops" against a DB that already has
+// the "clustr" default admin MUST result in BOTH "clustr" AND "ops" admins existing.
+// The prior "clustr" admin must NOT be deleted or modified.
+func TestBootstrapAdmin_AddUsername_PreservesExisting(t *testing.T) {
+	_, dbPath := openTestDB(t)
+	t.Setenv("CLUSTR_DB_PATH", dbPath)
+	t.Setenv("CLUSTR_BOOTSTRAP_USERNAME", "")
+	t.Setenv("CLUSTR_BOOTSTRAP_PASSWORD", "")
+
+	// Step 1: create the default clustr/clustr admin.
+	if err := runBootstrapAdmin("", "", false, false, false); err != nil {
+		t.Fatalf("setup default admin: %v", err)
+	}
+
+	// Step 2: add "ops" admin alongside clustr.
+	if err := runBootstrapAdmin("ops", "OpsAdmin99!", false, false, false); err != nil {
+		t.Fatalf("add ops admin: %v", err)
+	}
+
+	// Verify both users exist.
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+
+	clustrUser, err := database.GetUserByUsername(ctx, "clustr")
+	if err != nil {
+		t.Fatalf("ANTI-REGRESSION: 'clustr' admin missing after --username ops: %v", err)
+	}
+	if clustrUser.Role != db.UserRoleAdmin {
+		t.Errorf("clustr role = %q, want admin", clustrUser.Role)
+	}
+
+	opsUser, err := database.GetUserByUsername(ctx, "ops")
+	if err != nil {
+		t.Fatalf("'ops' admin missing: %v", err)
+	}
+	if opsUser.Role != db.UserRoleAdmin {
+		t.Errorf("ops role = %q, want admin", opsUser.Role)
+	}
+
+	// Total user count must be exactly 2.
+	count, err := database.CountUsers(ctx)
+	if err != nil {
+		t.Fatalf("CountUsers: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("ANTI-REGRESSION: expected 2 users after adding ops, got %d", count)
+	}
+}
+
+// TestBootstrapAdmin_DefaultIdempotent verifies that calling bootstrap-admin with
+// no flags twice is a no-op on the second call (clustr already exists).
+func TestBootstrapAdmin_DefaultIdempotent(t *testing.T) {
+	_, dbPath := openTestDB(t)
+	t.Setenv("CLUSTR_DB_PATH", dbPath)
+	t.Setenv("CLUSTR_BOOTSTRAP_USERNAME", "")
+	t.Setenv("CLUSTR_BOOTSTRAP_PASSWORD", "")
+
+	// First call creates clustr/clustr.
+	if err := runBootstrapAdmin("", "", false, false, false); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// Second call must succeed without error (idempotent no-op).
+	if err := runBootstrapAdmin("", "", false, false, false); err != nil {
+		t.Fatalf("ANTI-REGRESSION: second default call should be idempotent, got: %v", err)
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer database.Close()
+
+	// Still exactly one user.
+	count, err := database.CountUsers(context.Background())
+	if err != nil {
+		t.Fatalf("CountUsers: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 user after idempotent default call, got %d", count)
+	}
+}
+
+// TestBootstrapAdmin_ReplaceDefault removes only clustr admin and recreates it,
+// leaving any other users untouched.
+func TestBootstrapAdmin_ReplaceDefault(t *testing.T) {
+	_, dbPath := openTestDB(t)
+	t.Setenv("CLUSTR_DB_PATH", dbPath)
+	t.Setenv("CLUSTR_BOOTSTRAP_USERNAME", "")
+	t.Setenv("CLUSTR_BOOTSTRAP_PASSWORD", "")
+
+	// Create clustr/clustr and an ops admin.
+	if err := runBootstrapAdmin("", "", false, false, false); err != nil {
+		t.Fatalf("setup clustr admin: %v", err)
+	}
+	if err := runBootstrapAdmin("ops", "OpsAdmin99!", false, false, false); err != nil {
+		t.Fatalf("setup ops admin: %v", err)
+	}
+
+	// --replace-default should remove clustr, recreate it, leave ops.
+	if err := runBootstrapAdmin("", "", false, true, false); err != nil {
+		t.Fatalf("--replace-default: %v", err)
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+
+	// ops must still be present.
+	if _, err := database.GetUserByUsername(ctx, "ops"); err != nil {
+		t.Fatalf("ops admin should survive --replace-default: %v", err)
+	}
+
+	// clustr must exist (recreated).
+	clustrUser, err := database.GetUserByUsername(ctx, "clustr")
+	if err != nil {
+		t.Fatalf("clustr admin should be re-created by --replace-default: %v", err)
+	}
+	if clustrUser.Role != db.UserRoleAdmin {
+		t.Errorf("clustr role = %q, want admin", clustrUser.Role)
+	}
+
+	// Still exactly 2 users.
+	count, err := database.CountUsers(ctx)
+	if err != nil {
+		t.Fatalf("CountUsers: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 users after --replace-default, got %d", count)
 	}
 }
 

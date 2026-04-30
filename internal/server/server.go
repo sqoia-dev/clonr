@@ -2022,8 +2022,20 @@ func (s *Server) buildAuthHandler() *handlers.AuthHandler {
 		return n > 0, nil
 	}
 
+	// HasDefaultAdmin returns true when the "clustr" default admin exists.
+	// Surfaced in /api/v1/auth/status as default_admin_present so the web UI
+	// can warn operators who removed the default account via bootstrap-admin.
+	hasDefaultAdminFn := func() (bool, error) {
+		_, err := s.db.GetUserByUsername(context.Background(), "clustr")
+		if err != nil {
+			return false, nil //nolint:nilerr // not-found is not an error here
+		}
+		return true, nil
+	}
+
 	return &handlers.AuthHandler{
-		HasAdminUser:      hasAdminUserFn,
+		HasAdminUser:    hasAdminUserFn,
+		HasDefaultAdmin: hasDefaultAdminFn,
 		LoginWithKey:      loginWithKeyFn,
 		LoginWithPassword: loginWithPasswordFn,
 		SignForUser:       signForUserFn,
