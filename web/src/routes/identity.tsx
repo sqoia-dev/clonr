@@ -858,7 +858,7 @@ function LDAPGroupsCard() {
                 {expandedCN === g.cn && (
                   <tr className="border-b border-border/50">
                     <td colSpan={writeCapable ? 5 : 4} className="px-4 py-3 bg-secondary/5">
-                      <LDAPGroupDetail group={g} writeCapable={writeCapable} />
+                      <LDAPGroupDetail group={g} />
                     </td>
                   </tr>
                 )}
@@ -915,7 +915,7 @@ function GroupModeToggle({ cn: groupCN }: { cn: string }) {
   )
 }
 
-function LDAPGroupDetail({ group, writeCapable = false }: { group: LDAPGroup; writeCapable?: boolean }) {
+function LDAPGroupDetail({ group }: { group: LDAPGroup }) {
   const qc = useQueryClient()
   const groupDN = encodeURIComponent(`cn=${group.cn}`)
 

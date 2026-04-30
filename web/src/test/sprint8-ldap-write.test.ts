@@ -12,7 +12,7 @@
  *   - Delete confirm typed-name validation
  */
 
-import { describe, it, expect, vi } from "vitest"
+import { describe, it, expect } from "vitest"
 
 // ─── Shared validation helpers (extracted from identity.tsx forms) ─────────────
 
@@ -307,13 +307,13 @@ describe("delete confirm typed-name validation (WRITE-USER-6, WRITE-GRP safety)"
 
   it("should disable delete button when typed name does not match", () => {
     const entityName = "alice"
-    const typedInput = "alic"
+    const typedInput: string = "alic"
     expect(typedInput === entityName).toBe(false)
   })
 
   it("should be case-sensitive", () => {
     const entityName = "hpc-users"
-    const typedInput = "HPC-Users"
+    const typedInput: string = "HPC-Users"
     expect(typedInput === entityName).toBe(false)
   })
 })
