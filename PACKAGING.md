@@ -79,12 +79,45 @@ from source.
 
 Post-install script:
 1. Creates `clustr` user and group (system account, no login shell, no home dir) if absent.
-2. `chown -R root:clustr /var/lib/clustr /var/log/clustr /etc/clustr` — the service itself
+2. Adds the `ldap` user to the `clustr` group if the `ldap` user exists on the host
+   (see "LDAP directory access" section below).
+3. `chown -R root:clustr /var/lib/clustr /var/log/clustr /etc/clustr` — the service itself
    runs as root due to nspawn/loop/DHCP capability requirements. The `clustr` group is a
    convention for file ownership rather than a service account in the traditional sense.
    The unit does not carry `User=clustr`.
-3. Runs `systemctl daemon-reload`.
-4. Does NOT run `systemctl enable` or `systemctl start` — operator opts in.
+4. Runs `systemctl daemon-reload`.
+5. Does NOT run `systemctl enable` or `systemctl start` — operator opts in.
+
+#### LDAP directory access
+
+`/var/lib/clustr/ldap/` is mode `750 root:clustr`. slapd runs as user `ldap` (from the
+`openldap-servers` package). Without group membership, slapd cannot traverse the parent
+directory to reach its data dir and crash-loops at startup.
+
+**Decision: `usermod -aG clustr ldap` (group membership), not `chmod 755`.**
+
+Rationale: `chmod 755` would allow any user on the host to enter the parent directory.
+The `750 root:clustr` + `ldap`-in-`clustr` approach restricts traversal to processes
+running as a member of the `clustr` group — a smaller blast radius. The data subdirectory
+(`/var/lib/clustr/ldap/data/`) is `700 ldap:ldap` so only slapd itself can read the
+directory service contents even after traversal is granted.
+
+The post-install script applies `usermod -aG clustr ldap` only if the `ldap` user already
+exists (idempotent check with `getent passwd ldap`). If `openldap-servers` is installed
+after `clustr-serverd`, the membership must be applied manually (see recovery command below).
+
+**One-shot recovery command for existing installs** (run as root on any host where
+`clustr-slapd.service` is crash-looping due to EACCES on `/var/lib/clustr/ldap/`):
+
+```bash
+usermod -aG clustr ldap && systemctl restart clustr-slapd
+```
+
+Verify with:
+```bash
+id ldap       # should show groups=...,clustr,...
+systemctl status clustr-slapd
+```
 
 #### `clustr` package (CLI)
 

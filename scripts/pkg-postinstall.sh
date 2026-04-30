@@ -30,6 +30,29 @@ if ! getent passwd clustr > /dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# Add ldap user to the clustr group so slapd can traverse /var/lib/clustr/ldap/
+# ---------------------------------------------------------------------------
+# /var/lib/clustr/ldap/ is mode 750 root:clustr.  slapd runs as user `ldap`
+# (provided by openldap-servers, which is installed when LDAP is enabled).
+# Without group membership, slapd cannot traverse the directory to reach its
+# data dir and crash-loops with EACCES.
+#
+# We add ldap to the clustr group here unconditionally.  If the `ldap` user
+# does not exist yet (openldap-servers not installed), getent returns nothing
+# and usermod is skipped — safe no-op.  Once openldap-servers is installed,
+# re-running `dnf reinstall clustr-serverd` or the one-shot recovery command
+# below will apply the membership.
+#
+# We chose group membership over chmod 755 on the parent directory because
+# 750 root:clustr + ldap-in-clustr means only processes in the clustr group
+# can traverse the dir.  chmod 755 would allow any user on the host to enter
+# the parent — weaker than necessary given the ldap data sub-dir holds
+# directory service credentials.
+if getent passwd ldap > /dev/null 2>&1; then
+    usermod -aG clustr ldap
+fi
+
+# ---------------------------------------------------------------------------
 # Fix ownership on data and log directories
 # ---------------------------------------------------------------------------
 chown -R root:clustr /var/lib/clustr
