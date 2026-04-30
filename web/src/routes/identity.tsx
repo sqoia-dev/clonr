@@ -533,7 +533,6 @@ function LDAPGroupDetail({ group }: { group: LDAPGroup }) {
   })
 
   const [addingMember, setAddingMember] = React.useState(false)
-  const [pendingUser, setPendingUser] = React.useState<UserSearchResult | null>(null)
 
   const addOverlayMutation = useMutation({
     mutationFn: (u: UserSearchResult) =>
@@ -543,7 +542,6 @@ function LDAPGroupDetail({ group }: { group: LDAPGroup }) {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["group-overlay", group.cn] })
-      setPendingUser(null)
       setAddingMember(false)
       toast({ title: "Supplementary member added" })
     },
@@ -601,7 +599,7 @@ function LDAPGroupDetail({ group }: { group: LDAPGroup }) {
         {addingMember ? (
           <div className="mt-2 flex gap-2 items-center">
             <UserPicker
-              onSelect={(u) => { setPendingUser(u); addOverlayMutation.mutate(u) }}
+              onSelect={(u) => addOverlayMutation.mutate(u)}
               placeholder="Add supplementary member…"
               className="flex-1"
             />

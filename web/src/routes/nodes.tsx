@@ -35,7 +35,7 @@ import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
-import type { NodeSudoer, ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
+import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
 const hostnameRe = /^[a-z0-9-]{1,63}$/
