@@ -46,6 +46,11 @@ vendor: Sqoia Labs
 homepage: https://github.com/sqoia-dev/clustr
 license: MIT
 
+# systemd-container provides systemd-nspawn, required by the image-shell feature.
+# Package name is identical across EL8, EL9, and EL10.
+depends:
+  - systemd-container
+
 rpm:
   group: System Environment/Daemons
   summary: clustr server — HPC node cloning and image management
