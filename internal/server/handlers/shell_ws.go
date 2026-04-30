@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,8 +15,37 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
+
+// shellDepError is the structured JSON payload sent to the browser when a
+// required server-side dependency (e.g. systemd-nspawn) is missing.
+// The browser xterm component matches on Code == "shell_dependency_missing"
+// and renders an inline error panel instead of the raw terminal.
+type shellDepError struct {
+	Code        string   `json:"code"`
+	Missing     []string `json:"missing"`
+	Remediation string   `json:"remediation"`
+}
+
+// checkShellDeps verifies that all binaries required to run an image shell
+// session are present on PATH. Returns a non-nil shellDepError if any are
+// missing, ready to be serialised and sent to the client.
+func checkShellDeps() *shellDepError {
+	missing := []string{}
+	if _, err := exec.LookPath("systemd-nspawn"); err != nil {
+		missing = append(missing, "systemd-nspawn")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return &shellDepError{
+		Code:        "shell_dependency_missing",
+		Missing:     missing,
+		Remediation: "On the server: `sudo dnf install systemd-container` (RHEL/Rocky/AlmaLinux)",
+	}
+}
 
 // systemdRunAvailable returns true if systemd-run(1) is present on PATH.
 // Used to decide whether to wrap nspawn in a systemd-run --scope.
@@ -106,11 +136,19 @@ var wsUpgrader = websocket.Upgrader{
 //	"data"   — terminal I/O bytes (base64 encoded for reliable JSON transport)
 //	"resize" — terminal resize, carries Cols and Rows
 //	"ping"   — keepalive from client (server ignores)
+//	"error"  — structured error from server; Data is JSON-encoded error payload
 type wsMsg struct {
 	Type string `json:"type"`
 	Data string `json:"data,omitempty"` // raw bytes as string (browser sends UTF-8)
 	Cols uint16 `json:"cols,omitempty"`
 	Rows uint16 `json:"rows,omitempty"`
+}
+
+// marshalShellDepError serialises a shellDepError as a JSON string suitable
+// for embedding in a wsMsg.Data field so the browser can decode it.
+func marshalShellDepError(e *shellDepError) string {
+	b, _ := json.Marshal(e)
+	return string(b)
 }
 
 // ShellWSHandler handles GET /api/v1/images/:id/shell-session/:sid/ws
@@ -155,8 +193,52 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Extract actor identity now that we have the request in scope.
+	var actorID, actorLabel string
+	if h.GetActorInfo != nil {
+		actorID, actorLabel = h.GetActorInfo(r)
+	}
+
+	// --- Dependency pre-check (after WebSocket upgrade) ---
+	// Upgrading first ensures the structured error JSON reaches the browser
+	// over the established WebSocket connection rather than being dropped as a
+	// failed HTTP handshake. systemd-nspawn presence is checked at session open
+	// time (not at server start) so a dnf install fixes it without a restart.
+	if depErr := checkShellDeps(); depErr != nil {
+		log.Error().
+			Str("session_id", sessionID).
+			Str("image_id", imageID).
+			Strs("missing", depErr.Missing).
+			Msg("shell ws: dependency pre-check failed — closing with structured error")
+		// Audit the failure so Activity shows the event.
+		if h.Audit != nil {
+			h.Audit.Record(r.Context(), actorID, actorLabel,
+				db.AuditActionImageShellDepMissing, "image", imageID,
+				r.RemoteAddr, nil,
+				map[string]any{"missing": depErr.Missing, "session_id": sessionID},
+			)
+		}
+		// Send the structured error as a JSON message so the browser xterm
+		// component can intercept it and render an inline error panel.
+		_ = conn.WriteJSON(wsMsg{Type: "error", Data: marshalShellDepError(depErr)})
+		_ = conn.WriteMessage(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shell_dependency_missing"),
+		)
+		return
+	}
+
 	log.Info().Str("session_id", sessionID).Str("image_id", imageID).Str("rootdir", rootDir).
 		Msg("shell ws: terminal session started")
+
+	// Audit: shell session opened.
+	if h.Audit != nil {
+		h.Audit.Record(r.Context(), actorID, actorLabel,
+			db.AuditActionImageShellStart, "image", imageID,
+			r.RemoteAddr, nil,
+			map[string]any{"session_id": sessionID},
+		)
+	}
 
 	// Determine which shell binary is available inside the image.
 	shell := "/bin/bash"
@@ -202,6 +284,14 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		_ = cmd.Wait()
 		log.Info().Str("session_id", sessionID).Str("image_id", imageID).
 			Msg("shell ws: terminal session ended")
+		// Audit: shell session closed.
+		if h.Audit != nil {
+			h.Audit.Record(r.Context(), actorID, actorLabel,
+				db.AuditActionImageShellEnd, "image", imageID,
+				r.RemoteAddr, nil,
+				map[string]any{"session_id": sessionID},
+			)
+		}
 		// Invalidate the tar-sha256 sidecar so the next blob fetch recomputes
 		// the tarball hash. The shell session may have written files into the
 		// rootfs (e.g. /root/.bash_history) that would cause a hash mismatch

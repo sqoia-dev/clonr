@@ -975,6 +975,8 @@ func (s *Server) buildRouter() chi.Router {
 		Factory:  imgFactory,
 		Shells:   s.shells,
 	}
+	factory.Audit = s.audit
+	factory.GetActorInfo = getActorInfo
 	buildProgressH := &handlers.BuildProgressHandler{
 		Store:    s.buildProgress,
 		ImageDir: s.cfg.ImageDir,

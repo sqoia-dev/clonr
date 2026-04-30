@@ -70,9 +70,10 @@ const (
 	AuditActionNodeBootPXE      = "node.power.boot_pxe"
 	AuditActionNodeBootDisk     = "node.power.boot_disk"
 	AuditActionNodeBMCUpdated   = "node.bmc.updated"
-	AuditActionImageCaptured    = "image.captured"
-	AuditActionImageShellStart  = "image.shell.started"
-	AuditActionImageShellEnd    = "image.shell.ended"
+	AuditActionImageCaptured        = "image.captured"
+	AuditActionImageShellStart      = "image.shell.started"
+	AuditActionImageShellEnd        = "image.shell.ended"
+	AuditActionImageShellDepMissing = "image.shell.dep_missing"
 )
 
 // AuditRecord is one row in audit_log.

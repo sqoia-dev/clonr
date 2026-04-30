@@ -19,10 +19,12 @@ import (
 
 // FactoryHandler handles image ingest operations and chroot shell sessions.
 type FactoryHandler struct {
-	DB       *db.DB
-	ImageDir string
-	Factory  *image.Factory
-	Shells   *image.ShellManager
+	DB           *db.DB
+	ImageDir     string
+	Factory      *image.Factory
+	Shells       *image.ShellManager
+	Audit        *db.AuditService
+	GetActorInfo func(r *http.Request) (id, label string)
 }
 
 // ListImageRoles handles GET /api/v1/image-roles.
