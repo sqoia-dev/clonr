@@ -531,3 +531,106 @@ Sprint 4 shipped functionally complete but Dinesh deferred test coverage on the 
 3. Tag `v0.1.5` after merge — RPM pipeline auto-fires, packages land at pkg.sqoia.dev (no manual intervention this time, the pipeline is solid).
 4. Tag URL filter works end-to-end: paste `/nodes?tag=env:prod&tag=role:worker`, see filtered list.
 5. v0.1.0–v0.1.3 are no longer the default visible release on the GH releases page.
+
+---
+
+## Sprint 6 — Operational depth (the CLI gaps that matter)
+
+**Started:** 2026-04-30
+**Target:** 12–16 days. Bigger sprint than 5 — seven workstreams.
+
+### Goal
+
+Sprint 6 closes the operational depth gaps that force operators into the CLI today: power control, hardware/IPMI config, group operations, and image lifecycle (shell, capture, reuse-files).
+
+### In scope
+
+#### Power buttons on the Nodes list
+
+- [ ] **PWR-LIST-1** Per-row action cluster on `/nodes` (compact, hover-revealed or always-on column): on/off/cycle/reset/boot-PXE/boot-disk. Keyboard accessible, ARIA labels.
+- [ ] **PWR-LIST-2** Each click → existing `POST /api/v1/nodes/{id}/power/<action>`. Optimistic state update; toast on success/failure with BMC error verbatim.
+- [ ] **PWR-LIST-3** Multi-select rows + bulk action bar: "Power off N nodes…" with typed-confirm. Same for power-cycle.
+- [ ] **PWR-LIST-4** Power-state column shows live state (on/off/unknown) via SSE; per-row hover-poll fallback.
+
+#### IPMI / Proxmox config under node detail
+
+- [ ] **CFG-1** New "Hardware" section in node detail Sheet — read-mode default. Fields: BMC (address, username, interface, vendor, last sensor snapshot); Proxmox fields (node-name, vmid, host-IP, credentials reference) only for VM-backed nodes.
+- [ ] **CFG-2** Sensors panel (read-only IPMI temp/fan/voltage). Refresh button + auto-refresh while sheet open.
+- [ ] **CFG-3** Edit BMC config: typed-confirm on save (BMC IP changes can lock the operator out). Server: `PATCH /api/v1/nodes/{id}/bmc` (read source first; add if missing).
+- [ ] **CFG-4** Test connection button: `POST /api/v1/nodes/{id}/bmc/test` returns OK or BMC error verbatim.
+
+#### Node groups — display + UI
+
+- [ ] **GRP-1** Server endpoints (some exist per `server.go:1562-1565`; extend as needed):
+  - `GET /api/v1/node-groups` (list with member counts)
+  - `GET /api/v1/node-groups/{id}` (detail with members)
+  - `POST/DELETE /api/v1/node-groups/{id}/members[/{node_id}]`
+  - `POST /api/v1/node-groups/{id}/reimage` (rolling — see REIMG-BULK)
+- [ ] **GRP-2** Web: Groups as a **tab on `/nodes`**, not a top-level surface (keeps IA at 4 surfaces). Toggles between "All nodes" and "Groups" view.
+- [ ] **GRP-3** Group detail Sheet: name, member list (+/- buttons or drag-drop), tags, last reimage timestamp. Inline destructive delete with typed group name.
+- [ ] **GRP-4** Create group: toolbar button → Sheet form (name, optional description, optional initial members from a node picker).
+- [ ] **GRP-5** Cmd-K: "Create node group…", "Edit group…", "Delete group…".
+
+#### Bulk reimage (rolling, group-scoped)
+
+- [ ] **REIMG-BULK-1** Server: `POST /api/v1/node-groups/{id}/reimage` accepts `{target_image_id, kernel_args?, parallelism?}`. Returns `{job_id}`. SSE per-node progress events. Default parallelism = 1.
+- [ ] **REIMG-BULK-2** Web: "Reimage group" button on group detail Sheet. Inline confirm panel: target image dropdown (compatible only), parallelism slider (1..N), typed group name to confirm.
+- [ ] **REIMG-BULK-3** Live progress panel inside sheet via SSE — per-node status (queued/imaging/verifying/done/failed). Cancel button cancels remaining queued; in-flight nodes finish or fail naturally.
+- [ ] **REIMG-BULK-4** On completion: toast "Reimaged N/M nodes in <group> (X failed)" with link to filtered Activity.
+
+#### ISO import — reuse files already on server filesystem
+
+- [ ] **ISO-FS-1** Server: `GET /api/v1/images/local-files` lists ISO/image files in import dir (e.g. `/var/lib/clustr/imports/`). Returns `[{path, name, size, mtime, sha256?}]`. Path configurable via `CLUSTR_IMPORT_DIR`.
+- [ ] **ISO-FS-2** Server: `POST /api/v1/images/from-local-file` accepts `{path, name?, expected_sha256?}`. Validates path within import dir (no traversal). Registers file as base image in-place (hardlink/symlink — document choice). Standard image SSE events.
+- [ ] **ISO-FS-3** Web: Add Image Sheet gains a third tab **"From server filesystem"** alongside "From URL" and "Upload ISO". Lists files with size, mtime, SHA256 (lazy on click). Operator picks + names + submits.
+- [ ] **ISO-FS-4** Empty state: explains where to drop files (the import dir path) so they appear.
+
+#### Image shell (interactive chroot via web terminal)
+
+- [ ] **SHELL-1** Server: `WebSocket /api/v1/images/{id}/shell` opens PTY-backed shell inside chroot of the image. Bidirectional binary stream. Idle timeout 15min, hard timeout 60min.
+- [ ] **SHELL-2** Server: admin role only. Audit-log every shell session (operator + image + duration).
+- [ ] **SHELL-3** Reuse existing `clustr image shell` code path if present (`cmd/clustr/`). Wrap chroot mount/unmount in clean session lifecycle.
+- [ ] **SHELL-4** Web: image detail Sheet "Shell" button → full-screen drawer (or new tab) with xterm.js + xterm-addon-fit + WebSocket. Disconnect on tab close.
+- [ ] **SHELL-5** Add `@xterm/xterm` + `@xterm/addon-fit` via pnpm if not already in deps.
+- [ ] **SHELL-6** Cmd-K: "Shell into image…" picker.
+
+#### Image capture from a live node
+
+- [ ] **CAP-1** Server: `POST /api/v1/images/capture` accepts `{source_node_id, name, version?, exclude_paths?}`. Returns `{image_id, capture_id, status:"queued"}`. SSE: `image.capture.started/progress/completed/failed`.
+- [ ] **CAP-2** Server-side: SSH from clustr-server to source node, rsync live filesystem, materialize as base image. Reuse existing `clustr image capture` logic if present.
+- [ ] **CAP-3** Auth: capture requires admin. Source node must already have a registered key.
+- [ ] **CAP-4** Web: node detail Sheet "Capture as base image" button below reimage panel. Inline form: image name, version, exclude paths textarea. Typed source hostname to confirm.
+- [ ] **CAP-5** Live progress in Sheet via SSE — bytes transferred + rsync output streaming.
+- [ ] **CAP-6** Toast on completion linking to new image.
+- [ ] **CAP-7** Cmd-K: "Capture image from node…" picker.
+
+#### Cross-cutting
+
+- [ ] **X6-1** New Activity event kinds: `node.power.on/off/cycled`, `node.bmc.updated`, `node-group.*` (created/updated/deleted/reimaged), `image.captured`, `image.shell.started/ended`.
+- [ ] **X6-2** Vitest: power button mutation, group create flow, capture progress SSE, xterm.js mount + WebSocket reconnect.
+- [ ] **X6-3** Go tests: BMC patch + test, group reimage SSE, local-files listing with traversal-rejection cases, capture happy path.
+- [ ] **X6-4** README — add a sentence under Quick Start showing the new operator workflows are now web-first.
+
+### Out of scope (Sprint 7+)
+
+- LDAP / sysaccounts / portals (still wiped, still gone).
+- Multi-tenancy / orgs.
+- BMC firmware updates / cluster-wide IPMI policy push.
+- Image diff (compare two images).
+- Multi-node parallel shell (broadcast tmux-style).
+- Live disk capture without quiesce.
+
+### Definition of done
+
+1. All Sprint 6 checkboxes ticked.
+2. CI green on the merge SHA. New Vitest + Go test counts visible in CI logs.
+3. Autodeploy on cloner ships the latest. Hard-refresh required (cache headers ensure that's enough).
+4. Operator end-to-end on cloner, **no CLI required**:
+   - Power-cycle a node from the `/nodes` list (single click).
+   - Open node detail → Hardware section shows BMC + Proxmox config + sensors → edit BMC IP.
+   - Create a node group with 2 members.
+   - Trigger rolling reimage on the group, watch per-node progress.
+   - Open image shell into a base image, run a command, close.
+   - Capture a live node as a new base image.
+   - Add an image from a file already on the server filesystem.
+5. Tag `v0.2.0` after Sprint 6 ships green — substantive feature release. RPM pipeline auto-fires.

@@ -53,7 +53,7 @@ const indexRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined } })
+    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })
   },
 })
 
@@ -84,6 +84,13 @@ const nodesRoute = createRoute({
       : typeof search.tag === "string"
         ? [search.tag]
         : undefined,
+    // GRP-2: toggle between "nodes" and "groups" view
+    view:
+      search.view === "groups"
+        ? ("groups" as const)
+        : undefined,
+    // GRP-5: open create group sheet from Cmd-K
+    createGroup: typeof search.createGroup === "string" ? search.createGroup : undefined,
   }),
 })
 

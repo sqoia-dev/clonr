@@ -208,3 +208,86 @@ export interface HealthResponse {
   build_time: string
   flip_back_failures?: number
 }
+
+// ── Node Groups ───────────────────────────────────────────────────────────────
+
+export interface NodeGroup {
+  id: string
+  name: string
+  description?: string
+  role?: string
+  expires_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface NodeGroupWithCount extends NodeGroup {
+  member_count: number
+}
+
+export interface ListNodeGroupsResponse {
+  groups: NodeGroupWithCount[]
+  total: number
+}
+
+export interface GroupMembersResponse {
+  group: NodeGroup
+  members: NodeConfig[]
+}
+
+export interface GroupReimageRequest {
+  image_id: string
+  concurrency?: number
+  pause_on_failure_pct?: number
+}
+
+export interface GroupReimageJobStatus {
+  job_id: string
+  group_id: string
+  image_id: string
+  status: "queued" | "running" | "paused" | "completed" | "failed"
+  total_nodes: number
+  triggered_nodes: number
+  succeeded_nodes: number
+  failed_nodes: number
+  concurrency: number
+  pause_on_failure_pct: number
+  error_message?: string
+  created_at: string
+  updated_at: string
+}
+
+// ── Power ─────────────────────────────────────────────────────────────────────
+
+export interface PowerStatusResponse {
+  status: "on" | "off" | "unknown"
+  last_checked: string
+  error?: string
+}
+
+export interface SensorReading {
+  name: string
+  value: string
+  unit: string
+  state: string
+}
+
+export interface SensorsResponse {
+  node_id: string
+  sensors: SensorReading[]
+  last_checked: string
+}
+
+// ── Local Files ───────────────────────────────────────────────────────────────
+
+export interface LocalFileInfo {
+  path: string
+  name: string
+  size: number
+  mtime: string
+}
+
+export interface ListLocalFilesResponse {
+  files: LocalFileInfo[]
+  import_dir: string
+}

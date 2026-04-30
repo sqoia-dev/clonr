@@ -2,7 +2,10 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2 } from "lucide-react"
+import {
+  Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users,
+} from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -27,9 +30,10 @@ import { StatusDot } from "@/components/StatusDot"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse } from "@/lib/types"
 import { nodeState } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { GroupsPanel } from "@/routes/groups"
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
 const hostnameRe = /^[a-z0-9-]{1,63}$/
@@ -472,6 +476,10 @@ interface NodeSearch {
   deleteNode?: string
   // TAG-4: one or more key:value tag filters (AND semantics, repeated ?tag= param)
   tag?: string[]
+  // GRP-2: toggle between "nodes" and "groups" view (tab on /nodes)
+  view?: "nodes" | "groups"
+  // GRP-5: open create group sheet from Cmd-K
+  createGroup?: string
 }
 
 export function NodesPage() {
@@ -485,16 +493,30 @@ export function NodesPage() {
   const sortDir = search.dir ?? "asc"
   // TAG-4: active tag filters from URL (normalised to string[])
   const activeTags: string[] = search.tag ?? []
+  // GRP-2: current view tab (nodes | groups)
+  const view = search.view ?? "nodes"
   const [advanced, setAdvanced] = React.useState(false)
   const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
   const [addNodeOpen, setAddNodeOpen] = React.useState(false)
+  // GRP-5: open create group sheet from URL param (Cmd-K)
+  const [createGroupOpen, setCreateGroupOpen] = React.useState(false)
+  React.useEffect(() => {
+    if (search.createGroup === "1") {
+      setCreateGroupOpen(true)
+      navigate({
+        to: "/nodes",
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", view: view === "nodes" ? undefined : view, tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, createGroup: undefined },
+        replace: true,
+      })
+    }
+  }, [search.createGroup]) // eslint-disable-line react-hooks/exhaustive-deps
   // NODE-CREATE-5: auto-open AddNode sheet from URL param (used by Cmd-K "Add node…").
   React.useEffect(() => {
     if (search.addNode === "1") {
       setAddNodeOpen(true)
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined },
         replace: true,
       })
     }
@@ -514,10 +536,12 @@ export function NodesPage() {
         sort: patch.sort !== undefined ? patch.sort : sortCol || undefined,
         dir: patch.dir !== undefined ? patch.dir : sortDir === "asc" ? undefined : "desc",
         tag: patch.tag !== undefined ? (patch.tag?.length ? patch.tag : undefined) : (activeTags.length ? activeTags : undefined),
+        view: patch.view !== undefined ? (patch.view === "nodes" ? undefined : patch.view) : (view === "nodes" ? undefined : view),
         openNode: undefined,
         reimage: undefined,
         addNode: undefined,
         deleteNode: undefined,
+        createGroup: undefined,
       },
       replace: true,
     })
@@ -590,7 +614,7 @@ export function NodesPage() {
       // Clear the param so back-navigation doesn't re-open.
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined },
         replace: true,
       })
     }
@@ -671,6 +695,21 @@ export function NodesPage() {
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 border-b border-border px-6 py-3">
         <div className="flex items-center gap-2 flex-1 min-w-0">
+          {/* GRP-2: view toggle — Nodes / Groups tabs */}
+          <Tabs value={view} onValueChange={(v) => updateSearch({ view: v as "nodes" | "groups" })} className="shrink-0">
+            <TabsList className="h-8">
+              <TabsTrigger value="nodes" className="text-xs px-3 h-6">
+                <Cpu className="h-3.5 w-3.5 mr-1" />
+                Nodes
+              </TabsTrigger>
+              <TabsTrigger value="groups" className="text-xs px-3 h-6">
+                <Users className="h-3.5 w-3.5 mr-1" />
+                Groups
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {view === "nodes" && (
           <div className="relative w-72 shrink-0">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -680,6 +719,7 @@ export function NodesPage() {
               onChange={(e) => updateSearch({ q: e.target.value || undefined })}
             />
           </div>
+          )}
           {/* TAG-4: active tag filter chips */}
           {activeTags.map((tag) => (
             <span
@@ -697,7 +737,8 @@ export function NodesPage() {
               </button>
             </span>
           ))}
-          {/* TAG-4: tag picker */}
+          {/* TAG-4: tag picker — only shown in nodes view */}
+          {view === "nodes" && (
           <div className="relative" ref={tagPickerRef}>
             <Button
               variant="outline"
@@ -745,29 +786,47 @@ export function NodesPage() {
               </div>
             )}
           </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => setAddNodeOpen(true)}
-          >
-            <Plus className="h-4 w-4 mr-1" />
-            Add Node
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setAdvanced((a) => !a)}
-            className={cn(advanced && "bg-secondary")}
-          >
-            {advanced ? "Basic view" : "Advanced"}
-          </Button>
+          {view === "nodes" ? (
+            <>
+              <Button
+                size="sm"
+                onClick={() => setAddNodeOpen(true)}
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Add Node
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setAdvanced((a) => !a)}
+                className={cn(advanced && "bg-secondary")}
+              >
+                {advanced ? "Basic view" : "Advanced"}
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => setCreateGroupOpen(true)}
+            >
+              <Plus className="h-4 w-4 mr-1" />
+              New Group
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Table */}
+      {/* Main content — Nodes table or Groups panel */}
       <div className="flex-1 overflow-auto">
-        {isLoading ? (
+        {view === "groups" ? (
+          <GroupsPanel
+            createOpen={createGroupOpen}
+            onCreateClose={() => setCreateGroupOpen(false)}
+          />
+        ) : isLoading ? (
           <NodesSkeleton />
         ) : nodes.length === 0 ? (
           <EmptyState onAddNode={() => setAddNodeOpen(true)} />
@@ -802,6 +861,8 @@ export function NodesPage() {
                   </button>
                 </TableHead>
                 <TableHead scope="col">Image</TableHead>
+                {/* PWR-LIST-1: power column */}
+                <TableHead scope="col" aria-label="Power actions">Power</TableHead>
                 {advanced && (
                   <>
                     <TableHead scope="col">MAC</TableHead>
@@ -833,6 +894,10 @@ export function NodesPage() {
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {node.base_image_id ? node.base_image_id.slice(0, 8) : "—"}
+                  </TableCell>
+                  {/* PWR-LIST-1..2: per-row power action icons */}
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <PowerButtons nodeId={node.id} />
                   </TableCell>
                   {advanced && (
                     <>
@@ -1152,7 +1217,9 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
             </Section>
           )}
 
+          <HardwareSection node={node} />
           <ReimageFlow node={node} autoExpand={autoReimage} />
+          <CaptureNodeFlow node={node} />
           <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
             </>
           )}
@@ -1463,6 +1530,399 @@ function Row({ label, value, mono }: { label: string; value?: string; mono?: boo
       <span className={cn("text-right break-all", mono && "font-mono text-xs")}>
         {value ?? "—"}
       </span>
+    </div>
+  )
+}
+
+// ─── PowerButtons — PWR-LIST-1..2 ────────────────────────────────────────────
+// Compact icon-only cluster shown in each nodes table row.
+
+function PowerButtons({ nodeId }: { nodeId: string }) {
+  const qc = useQueryClient()
+
+  const { data: powerStatus } = useQuery<PowerStatusResponse>({
+    queryKey: ["power-status", nodeId],
+    queryFn: () => apiFetch<PowerStatusResponse>(`/api/v1/nodes/${nodeId}/power`),
+    refetchInterval: 30000,
+    staleTime: 15000,
+    retry: false,
+  })
+
+  async function doAction(action: string) {
+    try {
+      await apiFetch(`/api/v1/nodes/${nodeId}/power/${action}`, { method: "POST" })
+      qc.invalidateQueries({ queryKey: ["power-status", nodeId] })
+      toast({ title: `Power ${action} sent`, description: nodeId.slice(0, 8) })
+    } catch (err) {
+      toast({ variant: "destructive", title: `Power ${action} failed`, description: String(err) })
+    }
+  }
+
+  const statusColor = powerStatus?.status === "on"
+    ? "bg-status-healthy"
+    : powerStatus?.status === "off"
+    ? "bg-muted-foreground"
+    : "bg-status-warning"
+
+  return (
+    <TooltipProvider>
+      <div className="flex items-center gap-0.5" role="group" aria-label="Power actions">
+        {/* Power state indicator */}
+        <span className={cn("h-2 w-2 rounded-full mr-1 shrink-0", statusColor)} aria-label={`Power ${powerStatus?.status ?? "unknown"}`} />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="h-6 w-6 rounded hover:bg-secondary flex items-center justify-center text-muted-foreground hover:text-foreground"
+              onClick={() => doAction("on")}
+              aria-label="Power on"
+            >
+              <Power className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Power on</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="h-6 w-6 rounded hover:bg-secondary flex items-center justify-center text-muted-foreground hover:text-foreground"
+              onClick={() => doAction("off")}
+              aria-label="Power off"
+            >
+              <PowerOff className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Power off</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="h-6 w-6 rounded hover:bg-secondary flex items-center justify-center text-muted-foreground hover:text-foreground"
+              onClick={() => doAction("cycle")}
+              aria-label="Power cycle"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Power cycle</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="h-6 w-6 rounded hover:bg-secondary flex items-center justify-center text-muted-foreground hover:text-foreground"
+              onClick={() => doAction("pxe")}
+              aria-label="Boot PXE"
+            >
+              <Network className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Boot PXE</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="h-6 w-6 rounded hover:bg-secondary flex items-center justify-center text-muted-foreground hover:text-foreground"
+              onClick={() => doAction("disk")}
+              aria-label="Boot disk"
+            >
+              <HardDrive className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Boot disk</TooltipContent>
+        </Tooltip>
+      </div>
+    </TooltipProvider>
+  )
+}
+
+// ─── HardwareSection — CFG-1..4 ──────────────────────────────────────────────
+// New "Hardware" section in node detail Sheet.
+
+function HardwareSection({ node }: { node: NodeConfig }) {
+  const [bmcEditOpen, setBmcEditOpen] = React.useState(false)
+  const [bmcIp, setBmcIp] = React.useState((node as unknown as Record<string, unknown>).bmc_ip_address as string ?? "")
+  const [bmcUser, setBmcUser] = React.useState((node as unknown as Record<string, unknown>).bmc_username as string ?? "")
+  const [bmcPass, setBmcPass] = React.useState("")
+  const [bmcConfirm, setBmcConfirm] = React.useState("")
+  const [bmcError, setBmcError] = React.useState("")
+  const [testResult, setTestResult] = React.useState<{ ok: boolean; message: string } | null>(null)
+  const [testing, setTesting] = React.useState(false)
+  const [sensorsOpen, setSensorsOpen] = React.useState(false)
+
+  const { data: sensors, isLoading: sensorsLoading, refetch: refetchSensors } = useQuery<SensorsResponse>({
+    queryKey: ["sensors", node.id],
+    queryFn: () => apiFetch<SensorsResponse>(`/api/v1/nodes/${node.id}/sensors`),
+    enabled: sensorsOpen,
+    staleTime: 30000,
+    retry: false,
+  })
+
+  const bmcMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${node.id}/bmc`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          ip_address: bmcIp,
+          username: bmcUser,
+          password: bmcPass || undefined,
+          confirm: node.id,
+        }),
+      }),
+    onSuccess: () => {
+      toast({ title: "BMC config updated" })
+      setBmcEditOpen(false)
+      setBmcError("")
+      setBmcConfirm("")
+      setBmcPass("")
+    },
+    onError: (err) => setBmcError(String(err)),
+  })
+
+  async function handleTestBMC() {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const res = await apiFetch<{ ok: boolean; error?: string; power_status?: string }>(`/api/v1/nodes/${node.id}/bmc/test`, {
+        method: "POST",
+      })
+      setTestResult({
+        ok: res.ok,
+        message: res.ok
+          ? `Connected — power ${res.power_status ?? "unknown"}`
+          : (res.error ?? "Connection failed"),
+      })
+    } catch (err) {
+      setTestResult({ ok: false, message: String(err) })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const bmc = node as unknown as {
+    bmc?: { ip_address?: string; username?: string }
+    power_provider?: { type?: string; fields?: Record<string, string> }
+  }
+  const hasBMC = !!(bmc.bmc?.ip_address || bmc.power_provider?.type)
+
+  return (
+    <div className="space-y-3">
+      <Section title="Hardware">
+        {/* BMC / IPMI */}
+        {hasBMC ? (
+          <>
+            <Row label="BMC IP" value={bmc.bmc?.ip_address || bmc.power_provider?.fields?.host || "—"} mono />
+            <Row label="BMC User" value={bmc.bmc?.username || bmc.power_provider?.fields?.username || "—"} />
+            {bmc.power_provider?.type && <Row label="Provider" value={bmc.power_provider.type} mono />}
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">No BMC / power provider configured</p>
+        )}
+
+        {/* Edit BMC — CFG-3 */}
+        {!bmcEditOpen ? (
+          <div className="flex gap-2 pt-1">
+            <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setBmcEditOpen(true)}>
+              <Pencil className="h-3 w-3 mr-1" /> Edit BMC config
+            </Button>
+            <Button size="sm" variant="outline" className="text-xs" onClick={handleTestBMC} disabled={testing || !hasBMC}>
+              {testing ? "Testing…" : "Test"}
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded border border-border p-3 space-y-2 bg-secondary/20 mt-2">
+            <p className="text-xs font-medium text-muted-foreground">Edit BMC config — confirm with node ID to avoid lockout</p>
+            <Input className="text-xs font-mono" placeholder="BMC IP" value={bmcIp} onChange={(e) => setBmcIp(e.target.value)} />
+            <Input className="text-xs" placeholder="BMC username" value={bmcUser} onChange={(e) => setBmcUser(e.target.value)} />
+            <Input className="text-xs" type="password" placeholder="BMC password (leave blank to keep)" value={bmcPass} onChange={(e) => setBmcPass(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Type node ID <code className="font-mono">{node.id.slice(0, 8)}…</code> to confirm:</p>
+            <Input
+              className="text-xs font-mono"
+              placeholder={node.id}
+              value={bmcConfirm}
+              onChange={(e) => setBmcConfirm(e.target.value)}
+            />
+            {bmcError && <p className="text-xs text-destructive">{bmcError}</p>}
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                className="flex-1 text-xs"
+                disabled={bmcConfirm !== node.id || bmcMutation.isPending}
+                onClick={() => bmcMutation.mutate()}
+              >
+                {bmcMutation.isPending ? "Saving…" : "Save BMC config"}
+              </Button>
+              <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setBmcEditOpen(false); setBmcError(""); setBmcConfirm(""); setBmcPass("") }}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Test result */}
+        {testResult && (
+          <p className={cn("text-xs mt-1", testResult.ok ? "text-status-healthy" : "text-destructive")}>
+            {testResult.ok ? "✓" : "✗"} {testResult.message}
+          </p>
+        )}
+
+        {/* Sensors panel — CFG-2 */}
+        <div className="pt-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="w-full text-xs text-muted-foreground"
+            onClick={() => { setSensorsOpen((o) => !o); if (!sensorsOpen) refetchSensors() }}
+          >
+            <RotateCcw className="h-3 w-3 mr-1" />
+            {sensorsOpen ? "Hide sensors" : "Show IPMI sensors"}
+          </Button>
+          {sensorsOpen && (
+            <div className="mt-2 rounded border border-border overflow-auto max-h-44">
+              {sensorsLoading ? (
+                <div className="p-3 text-xs text-muted-foreground">Loading sensors…</div>
+              ) : sensors?.sensors && sensors.sensors.length > 0 ? (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40">
+                      <th className="text-left p-2 font-normal text-muted-foreground">Sensor</th>
+                      <th className="text-right p-2 font-normal text-muted-foreground">Value</th>
+                      <th className="text-right p-2 font-normal text-muted-foreground">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sensors.sensors.map((s, i) => (
+                      <tr key={i} className="border-b border-border last:border-0">
+                        <td className="p-2 font-mono">{s.name}</td>
+                        <td className="p-2 text-right font-mono">{s.value} {s.unit}</td>
+                        <td className={cn("p-2 text-right", s.state === "ok" ? "text-status-healthy" : "text-status-warning")}>{s.state}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="p-3 text-xs text-muted-foreground">No sensor data (BMC may not be configured)</div>
+              )}
+            </div>
+          )}
+        </div>
+      </Section>
+    </div>
+  )
+}
+
+// ─── CaptureNodeFlow — CAP-4..7 ──────────────────────────────────────────────
+// "Capture as base image" flow in node detail Sheet.
+
+function CaptureNodeFlow({ node }: { node: NodeConfig }) {
+  const qc = useQueryClient()
+  const [expanded, setExpanded] = React.useState(false)
+  const [imageName, setImageName] = React.useState("")
+  const [version, setVersion] = React.useState("1.0.0")
+  const [sshUser, setSshUser] = React.useState("root")
+  const [excludePaths, setExcludePaths] = React.useState("/proc\n/sys\n/dev\n/tmp\n/run")
+  const [confirmHostname, setConfirmHostname] = React.useState("")
+  const [captureError, setCaptureError] = React.useState("")
+  const [inProgress, setInProgress] = React.useState(false)
+  const [progressImageId, setProgressImageId] = React.useState<string | null>(null)
+
+  const captureMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ id: string }>("/api/v1/factory/capture", {
+        method: "POST",
+        body: JSON.stringify({
+          source_host: node.hostname || node.fqdn || node.id,
+          ssh_user: sshUser,
+          name: imageName || `${node.hostname}-capture`,
+          version,
+          exclude_paths: excludePaths.split("\n").map((p) => p.trim()).filter(Boolean),
+        }),
+      }),
+    onSuccess: (res) => {
+      setInProgress(true)
+      setProgressImageId(res.id)
+      qc.invalidateQueries({ queryKey: ["images"] })
+      toast({ title: "Capture started", description: `Capturing ${node.hostname} in background.` })
+    },
+    onError: (err) => setCaptureError(String(err)),
+  })
+
+  return (
+    <div className="pt-4 border-t border-border space-y-3">
+      {!expanded ? (
+        <Button
+          variant="outline"
+          className="w-full text-xs"
+          size="sm"
+          onClick={() => setExpanded(true)}
+        >
+          <Camera className="h-3.5 w-3.5 mr-1.5" />
+          Capture as base image
+        </Button>
+      ) : (
+        <div className="rounded-md border border-border bg-secondary/10 p-4 space-y-3">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Capture node as base image</p>
+
+          {inProgress ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="h-2 w-2 rounded-full bg-status-warning animate-pulse shrink-0" />
+                <span>Capturing {node.hostname}…</span>
+              </div>
+              <p className="text-xs text-muted-foreground font-mono">Image ID: {progressImageId?.slice(0, 12)}</p>
+              <p className="text-xs text-muted-foreground">Check /images for progress. Capture runs async via rsync.</p>
+              <Button size="sm" variant="ghost" className="w-full text-xs" onClick={() => { setExpanded(false); setInProgress(false); setProgressImageId(null) }}>
+                Close
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Image name</label>
+                <Input className="text-xs" placeholder={`${node.hostname}-capture`} value={imageName} onChange={(e) => setImageName(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Version</label>
+                <Input className="text-xs" value={version} onChange={(e) => setVersion(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">SSH user</label>
+                <Input className="text-xs" value={sshUser} onChange={(e) => setSshUser(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Exclude paths (one per line)</label>
+                <textarea
+                  className="w-full font-mono text-xs border border-border bg-background rounded-md px-2 py-1.5 resize-none"
+                  rows={4}
+                  value={excludePaths}
+                  onChange={(e) => setExcludePaths(e.target.value)}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Type <code className="font-mono">{node.hostname}</code> to confirm:
+              </p>
+              <Input
+                className="font-mono text-xs"
+                placeholder={node.hostname}
+                value={confirmHostname}
+                onChange={(e) => { setConfirmHostname(e.target.value); setCaptureError("") }}
+              />
+              {captureError && <p className="text-xs text-destructive">{captureError}</p>}
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1 text-xs"
+                  disabled={confirmHostname !== node.hostname || captureMutation.isPending}
+                  onClick={() => captureMutation.mutate()}
+                >
+                  {captureMutation.isPending ? "Starting…" : "Start capture"}
+                </Button>
+                <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setExpanded(false); setCaptureError(""); setConfirmHostname("") }}>
+                  Cancel
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -61,6 +61,18 @@ const (
 	AuditActionPublicationDelete    = "publication.delete"
 	AuditActionReviewCycleCreate    = "review_cycle.create"
 	AuditActionReviewResponseSubmit = "review_response.submit"
+
+	// Sprint 6 — power, BMC, image lifecycle events (X6-1).
+	AuditActionNodePowerOn      = "node.power.on"
+	AuditActionNodePowerOff     = "node.power.off"
+	AuditActionNodePowerCycled  = "node.power.cycled"
+	AuditActionNodePowerReset   = "node.power.reset"
+	AuditActionNodeBootPXE      = "node.power.boot_pxe"
+	AuditActionNodeBootDisk     = "node.power.boot_disk"
+	AuditActionNodeBMCUpdated   = "node.bmc.updated"
+	AuditActionImageCaptured    = "image.captured"
+	AuditActionImageShellStart  = "image.shell.started"
+	AuditActionImageShellEnd    = "image.shell.ended"
 )
 
 // AuditRecord is one row in audit_log.

@@ -414,3 +414,121 @@ func (h *FactoryHandler) ExecInSession(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, api.ExecResponse{Output: string(out)})
 }
+
+// ─── ISO-FS-1: GET /api/v1/images/local-files ────────────────────────────────
+
+// LocalFileInfo describes a single ISO file in the import directory.
+type LocalFileInfo struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	MTime string `json:"mtime"`
+}
+
+// ListLocalFiles handles GET /api/v1/images/local-files.
+// Lists ISO/image files in the import dir (CLUSTR_ISO_DIR, default /var/lib/clustr/iso).
+// Returns [{path, name, size, mtime}] for each .iso or .img file found.
+func (h *FactoryHandler) ListLocalFiles(w http.ResponseWriter, r *http.Request) {
+	isoDir := os.Getenv("CLUSTR_ISO_DIR")
+	if isoDir == "" {
+		isoDir = defaultISODir
+	}
+	isoDir = filepath.Clean(isoDir)
+
+	entries, err := os.ReadDir(isoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"files":      []LocalFileInfo{},
+				"import_dir": isoDir,
+			})
+			return
+		}
+		log.Error().Err(err).Str("iso_dir", isoDir).Msg("local-files: readdir failed")
+		writeError(w, err)
+		return
+	}
+
+	files := []LocalFileInfo{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".iso" && ext != ".img" && ext != ".qcow2" && ext != ".raw" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, LocalFileInfo{
+			Path:  filepath.Join(isoDir, name),
+			Name:  name,
+			Size:  info.Size(),
+			MTime: info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"files":      files,
+		"import_dir": isoDir,
+	})
+}
+
+// ─── ISO-FS-2: POST /api/v1/images/from-local-file ───────────────────────────
+
+// FromLocalFile handles POST /api/v1/images/from-local-file.
+// Registers a file already in the import directory as a base image.
+// Path traversal is rejected — the path must be within CLUSTR_ISO_DIR.
+// Uses a hard-link (same filesystem) or falls back to symlink so no copy is made.
+func (h *FactoryHandler) FromLocalFile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path    string `json:"path"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if body.Path == "" {
+		writeValidationError(w, "path is required")
+		return
+	}
+	if body.Name == "" {
+		writeValidationError(w, "name is required")
+		return
+	}
+	if body.Version == "" {
+		body.Version = "1.0.0"
+	}
+
+	absPath, err := filepath.Abs(body.Path)
+	if err != nil {
+		writeValidationError(w, "cannot resolve path")
+		return
+	}
+
+	// Path traversal guard: must be within the configured ISO dir.
+	isoDir := os.Getenv("CLUSTR_ISO_DIR")
+	if isoDir == "" {
+		isoDir = defaultISODir
+	}
+	isoDir = filepath.Clean(isoDir)
+	if !strings.HasPrefix(absPath, isoDir+string(filepath.Separator)) && absPath != isoDir {
+		log.Warn().Str("path", absPath).Str("iso_dir", isoDir).Msg("from-local-file: path outside allowed directory")
+		writeValidationError(w, "path must be within the configured ISO directory (CLUSTR_ISO_DIR)")
+		return
+	}
+
+	// Delegate to ImportISO — it already handles hardlink/symlink in-place registration.
+	img, err := h.Factory.ImportISO(r.Context(), absPath, body.Name, body.Version)
+	if err != nil {
+		log.Error().Err(err).Str("path", absPath).Msg("from-local-file: import failed")
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, img)
+}

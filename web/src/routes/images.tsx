@@ -2,7 +2,7 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, Plus, Trash2, AlertTriangle, Upload, Link, Layers } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, Plus, Trash2, AlertTriangle, Upload, Link, Layers, Terminal, FolderOpen, HardDrive } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -21,13 +21,15 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
+import { Skeleton } from "@/components/ui/skeleton"
 import { StatusDot } from "@/components/StatusDot"
 import { apiFetch } from "@/lib/api"
-import type { BaseImage, Bundle, ImageEvent, ListImagesResponse, ListBundlesResponse } from "@/lib/types"
+import type { BaseImage, Bundle, ImageEvent, ListImagesResponse, ListBundlesResponse, ListLocalFilesResponse, LocalFileInfo } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useSSE } from "@/hooks/use-sse"
 import { toast } from "@/hooks/use-toast"
 import * as tus from "tus-js-client"
+import { ImageShell } from "@/components/ImageShell"
 
 interface ImageSearch {
   q?: string
@@ -323,7 +325,7 @@ interface AddImageSheetProps {
 }
 
 export function AddImageSheet({ open, onClose }: AddImageSheetProps) {
-  const [tab, setTab] = React.useState<"url" | "upload">("url")
+  const [tab, setTab] = React.useState<"url" | "upload" | "filesystem">("url")
 
   function handleClose() {
     setTab("url")
@@ -335,10 +337,10 @@ export function AddImageSheet({ open, onClose }: AddImageSheetProps) {
       <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
         <SheetHeader>
           <SheetTitle>Add Image</SheetTitle>
-          <SheetDescription>Download from a URL or upload an ISO file.</SheetDescription>
+          <SheetDescription>Download from a URL, upload an ISO, or use a file already on the server.</SheetDescription>
         </SheetHeader>
         <div className="mt-6">
-          <Tabs value={tab} onValueChange={(v) => setTab(v as "url" | "upload")}>
+          <Tabs value={tab} onValueChange={(v) => setTab(v as "url" | "upload" | "filesystem")}>
             <TabsList className="w-full">
               <TabsTrigger value="url" className="flex-1">
                 <Link className="h-3.5 w-3.5 mr-1.5" />
@@ -348,12 +350,19 @@ export function AddImageSheet({ open, onClose }: AddImageSheetProps) {
                 <Upload className="h-3.5 w-3.5 mr-1.5" />
                 Upload ISO
               </TabsTrigger>
+              <TabsTrigger value="filesystem" className="flex-1">
+                <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+                Server files
+              </TabsTrigger>
             </TabsList>
             <TabsContent value="url" className="mt-4">
               <AddImageFromURL onSuccess={handleClose} />
             </TabsContent>
             <TabsContent value="upload" className="mt-4">
               <AddImageFromISO onSuccess={handleClose} />
+            </TabsContent>
+            <TabsContent value="filesystem" className="mt-4">
+              <AddImageFromFilesystem onSuccess={handleClose} />
             </TabsContent>
           </Tabs>
         </div>
@@ -705,6 +714,129 @@ function AddImageField({ label, hint, children }: { label: string; hint?: string
   )
 }
 
+// ─── AddImageFromFilesystem ───────────────────────────────────────────────────
+// ISO-FS-3..4: list and register files already on the server import dir.
+
+function AddImageFromFilesystem({ onSuccess }: { onSuccess: () => void }) {
+  const qc = useQueryClient()
+  const [selectedFile, setSelectedFile] = React.useState<LocalFileInfo | null>(null)
+  const [name, setName] = React.useState("")
+  const [submitting, setSubmitting] = React.useState(false)
+  const [error, setError] = React.useState("")
+
+  const { data, isLoading, isError, refetch } = useQuery<ListLocalFilesResponse>({
+    queryKey: ["images-local-files"],
+    queryFn: () => apiFetch<ListLocalFilesResponse>("/api/v1/images/local-files"),
+    staleTime: 15000,
+  })
+
+  const files = data?.files ?? []
+  const importDir = data?.import_dir ?? "/var/lib/clustr/iso"
+
+  function handleSelectFile(f: LocalFileInfo) {
+    setSelectedFile(f)
+    setName((prev) => prev || f.name.replace(/\.(iso|img|qcow2|raw)$/i, ""))
+    setError("")
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!selectedFile) { setError("Select a file first"); return }
+    if (!name.trim()) { setError("Name is required"); return }
+    setSubmitting(true)
+    setError("")
+    try {
+      await apiFetch<{ id: string }>("/api/v1/images/from-local-file", {
+        method: "POST",
+        body: JSON.stringify({ path: selectedFile.path, name: name.trim() }),
+      })
+      qc.invalidateQueries({ queryKey: ["images"] })
+      toast({ title: "Image registered", description: `${name} added from server filesystem.` })
+      onSuccess()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2 py-4">
+        {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
+      </div>
+    )
+  }
+
+  if (isError) {
+    return (
+      <div className="py-4 text-center space-y-2">
+        <p className="text-sm text-destructive">Failed to list server files</p>
+        <Button size="sm" variant="outline" onClick={() => refetch()}>Retry</Button>
+      </div>
+    )
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-muted-foreground">
+        <HardDrive className="h-3.5 w-3.5 inline mr-1.5 align-text-bottom" />
+        Files in <code className="font-mono">{importDir}</code> — drop ISOs here to make them appear.
+      </div>
+
+      {files.length === 0 ? (
+        <div className="py-6 text-center space-y-1">
+          <p className="text-sm text-muted-foreground">No .iso, .img, .qcow2 or .raw files found</p>
+          <p className="text-xs text-muted-foreground">Copy files to <code className="font-mono">{importDir}</code> on the server.</p>
+          <Button size="sm" variant="outline" className="mt-2" onClick={() => refetch()}>Refresh</Button>
+        </div>
+      ) : (
+        <div className="space-y-1 max-h-52 overflow-y-auto rounded-md border border-border">
+          {files.map((f) => (
+            <button
+              key={f.path}
+              type="button"
+              className={cn(
+                "w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors",
+                selectedFile?.path === f.path && "bg-secondary"
+              )}
+              onClick={() => handleSelectFile(f)}
+            >
+              <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-mono truncate">{f.name}</p>
+                <p className="text-xs text-muted-foreground">{formatBytes(f.size)} · {new Date(f.mtime).toLocaleDateString()}</p>
+              </div>
+              {selectedFile?.path === f.path && (
+                <Check className="h-4 w-4 text-primary shrink-0" />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selectedFile && (
+        <AddImageField label="Image name *">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="rocky9-base"
+          />
+        </AddImageField>
+      )}
+
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      <div className="flex gap-2 pt-2">
+        <Button type="submit" className="flex-1" disabled={!selectedFile || submitting}>
+          {submitting ? "Registering…" : "Register Image"}
+        </Button>
+        <Button type="button" variant="ghost" onClick={onSuccess}>Cancel</Button>
+      </div>
+    </form>
+  )
+}
+
 // ─── ImageTable ───────────────────────────────────────────────────────────────
 // Shared table component for both Base Images and Initramfs tabs.
 
@@ -883,6 +1015,7 @@ function ImageSheet({ image, onClose, relativeTime }: { image: BaseImage; onClos
   const [deleteExpanded, setDeleteExpanded] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState("")
   const [deleteError, setDeleteError] = React.useState("")
+  const [shellOpen, setShellOpen] = React.useState(false)
 
   function copySHA() {
     navigator.clipboard.writeText(image.checksum).then(() => {
@@ -992,6 +1125,24 @@ function ImageSheet({ image, onClose, relativeTime }: { image: BaseImage; onClos
             <Section title="Error">
               <p className="text-sm text-destructive font-mono text-xs">{image.error_message}</p>
             </Section>
+          )}
+
+          {/* SHELL-4..6: xterm.js shell drawer — renders outside the sheet stack to cover full viewport */}
+          {shellOpen && <ImageShell image={image} onClose={() => setShellOpen(false)} />}
+
+          {/* SHELL-4: shell button — opens xterm.js full-screen drawer (admin-only on server) */}
+          {image.status === "ready" && (
+            <div className="pt-4 border-t border-border">
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => setShellOpen(true)}
+              >
+                <Terminal className="h-3.5 w-3.5 mr-1.5" />
+                Open shell
+              </Button>
+            </div>
           )}
 
           {/* IMG-DEL-2: inline destructive delete with typed name confirm */}

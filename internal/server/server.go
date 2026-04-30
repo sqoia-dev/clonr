@@ -1500,6 +1500,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/factory/capture", factory.Capture)
 			r.Post("/factory/probe-iso", factory.ProbeISO)
 			r.Post("/factory/build-from-iso", factory.BuildFromISO)
+			// ISO-FS-1/2: list and register local files from the import dir.
+			// Must be registered before /images/{id} to avoid chi wildcard match.
+			r.Get("/images/local-files", factory.ListLocalFiles)
+			r.Post("/images/from-local-file", factory.FromLocalFile)
 
 			// ISO build observability — stream must come before plain snapshot route.
 			r.Get("/images/{id}/build-progress/stream", buildProgressH.StreamBuildProgress)
@@ -1610,6 +1614,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
 			r.Get("/nodes/{id}/sensors", ipmiH.GetSensors)
+			// CFG-3: BMC config update (admin-only, typed confirm required).
+			r.With(requireRole("admin")).Patch("/nodes/{id}/bmc", ipmiH.PatchBMC)
+			// CFG-4: BMC connection test.
+			r.Post("/nodes/{id}/bmc/test", ipmiH.TestBMC)
 
 			// Reimage — queue, track and retry node reimages via the power provider.
 			// Create requires group-scoped operator access.

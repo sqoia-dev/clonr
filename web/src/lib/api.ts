@@ -39,3 +39,13 @@ export async function apiFetch<T>(
 export function sseUrl(path: string): string {
   return `${BASE}${path}`
 }
+
+// wsUrl returns a WebSocket URL for the given path.
+// In dev (Vite proxy) the host is localhost:5173 but the proxy forwards to :8080.
+// In production the server and UI share the same origin.
+export function wsUrl(path: string): string {
+  const base = BASE || window.location.origin
+  const url = new URL(path, base)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  return url.toString()
+}

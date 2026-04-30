@@ -9,6 +9,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -373,5 +374,103 @@ func (h *IPMIHandler) GetSensors(w http.ResponseWriter, r *http.Request) {
 		NodeID:      nodeID,
 		Sensors:     sensors,
 		LastChecked: time.Now().UTC(),
+	})
+}
+
+// ─── PATCH /api/v1/nodes/{id}/bmc ────────────────────────────────────────────
+
+// PatchBMC handles PATCH /api/v1/nodes/{id}/bmc.
+// Updates the BMC config for a node. Admin-only. Requires typed confirm equal
+// to the node ID because a wrong BMC IP can lock the operator out.
+func (h *IPMIHandler) PatchBMC(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	cfg, err := h.DB.GetNodeConfig(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var body struct {
+		IPAddress string `json:"ip_address"`
+		Netmask   string `json:"netmask"`
+		Gateway   string `json:"gateway"`
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		// Confirm must equal the node ID before saving (prevents accidental lockout).
+		Confirm string `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if body.Confirm != nodeID {
+		writeValidationError(w, "confirm must equal the node ID to update BMC config")
+		return
+	}
+
+	bmc := &api.BMCNodeConfig{
+		IPAddress: body.IPAddress,
+		Netmask:   body.Netmask,
+		Gateway:   body.Gateway,
+		Username:  body.Username,
+		Password:  body.Password,
+	}
+	// Preserve existing password if not supplied.
+	if body.Password == "" && cfg.BMC != nil {
+		bmc.Password = cfg.BMC.Password
+	}
+
+	cfg.BMC = bmc
+	if err := h.DB.UpdateNodeConfig(r.Context(), cfg); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("bmc: update failed")
+		writeError(w, err)
+		return
+	}
+
+	// Invalidate power cache — new BMC IP may have different status.
+	if h.Cache != nil {
+		h.Cache.Invalidate(nodeID)
+	}
+
+	log.Info().Str("node_id", nodeID).Str("bmc_ip", body.IPAddress).Msg("bmc: config updated")
+
+	// Return the updated BMC config without the password.
+	out := *bmc
+	out.Password = ""
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"node_id": nodeID,
+		"bmc":     out,
+	})
+}
+
+// ─── POST /api/v1/nodes/{id}/bmc/test ────────────────────────────────────────
+
+// TestBMC handles POST /api/v1/nodes/{id}/bmc/test.
+// Attempts to connect to the BMC and returns the current power status or an error.
+func (h *IPMIHandler) TestBMC(w http.ResponseWriter, r *http.Request) {
+	nodeID, prov, ok := h.nodeProvider(w, r)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), bmcTimeout)
+	defer cancel()
+
+	ps, err := prov.Status(ctx)
+	if err != nil {
+		log.Warn().Str("node_id", nodeID).Err(err).Msg("bmc: test connection failed")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"node_id": nodeID,
+			"ok":      false,
+			"error":   fmt.Sprintf("BMC unreachable: %v", err),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"node_id":      nodeID,
+		"ok":           true,
+		"power_status": string(ps),
 	})
 }
