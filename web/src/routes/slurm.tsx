@@ -21,7 +21,6 @@ import {
   RefreshCw, ChevronRight, Loader2,
   FileText, Code2, History, TerminalSquare, Package, ArrowUpCircle,
   ScrollText, CircleDot, Check, X, Wrench, Eye, KeyRound, Table2,
-  ActivitySquare,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
