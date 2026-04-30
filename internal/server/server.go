@@ -64,6 +64,7 @@ type Server struct {
 	broker              *LogBroker
 	progress            *ProgressStore
 	imageEvents         *ImageEventStore
+	groupReimageEvents  *GroupReimageEventStore
 	buildProgress       *BuildProgressStore
 	shells              *image.ShellManager
 	powerCache          *PowerCache
@@ -162,6 +163,9 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	// GAP-20: wire audit service into slurm manager for config change recording.
 	slurmMgr.Audit = db.NewAuditService(database)
 
+	groupReimageEvents := NewGroupReimageEventStore()
+	reimageOrch.Events = groupReimageEvents
+
 	s := &Server{
 		cfg:                 cfg,
 		db:                  database,
@@ -169,6 +173,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 		broker:              NewLogBroker(),
 		progress:            NewProgressStore(),
 		imageEvents:         NewImageEventStore(),
+		groupReimageEvents:  groupReimageEvents,
 		buildProgress:       buildProg,
 		shells:              shells,
 		powerCache:          NewPowerCache(15 * time.Second),
@@ -944,10 +949,11 @@ func (s *Server) buildRouter() chi.Router {
 		ServerIP:        s.cfg.PXE.ServerIP,
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{
-		DB:           s.db,
-		Orchestrator: s.reimageOrchestrator,
-		Audit:        s.audit,
-		GetActorInfo: getActorInfo,
+		DB:                 s.db,
+		Orchestrator:       s.reimageOrchestrator,
+		Audit:              s.audit,
+		GetActorInfo:       getActorInfo,
+		GroupReimageEvents: s.groupReimageEvents,
 	}
 	layoutH := &handlers.LayoutHandler{DB: s.db}
 	// Use NewFactory so the build semaphore is initialised (capacity from
@@ -1598,6 +1604,8 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Put("/node-groups/{id}/ldap-restrictions", nodeGroups.SetNodeGroupRestrictions)
 			// Rolling group reimage — requires admin or group-scoped operator access.
 			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
+			// Group reimage SSE event stream — GET /api/v1/node-groups/{id}/reimage/events?job_id=<jid>
+			r.Get("/node-groups/{id}/reimage/events", nodeGroups.StreamGroupReimageEvents)
 			// Group reimage job status polling.
 			r.Get("/reimages/jobs/{jobID}", nodeGroups.GetGroupReimageJob)
 			r.Post("/reimages/jobs/{jobID}/resume", nodeGroups.ResumeGroupReimageJob)

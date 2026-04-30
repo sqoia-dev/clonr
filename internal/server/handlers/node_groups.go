@@ -23,6 +23,13 @@ var allowedRoles = map[string]bool{
 	"admin":   true,
 }
 
+// GroupReimageEventStoreIface is the subset of GroupReimageEventStore used by
+// NodeGroupsHandler. Defined as an interface to avoid a circular import.
+type GroupReimageEventStoreIface interface {
+	Publish(event api.GroupReimageEvent)
+	Subscribe() (ch <-chan api.GroupReimageEvent, cancel func())
+}
+
 // NodeGroupsHandler handles all /api/v1/node-groups routes.
 type NodeGroupsHandler struct {
 	DB           *db.DB
@@ -30,6 +37,9 @@ type NodeGroupsHandler struct {
 	Audit        *db.AuditService
 	// GetActorInfo returns (actorID, actorLabel) for audit records.
 	GetActorInfo func(r *http.Request) (id, label string)
+	// GroupReimageEvents, when non-nil, receives per-node and job-level events
+	// for SSE fan-out on GET /api/v1/node-groups/{id}/reimage/events.
+	GroupReimageEvents GroupReimageEventStoreIface
 }
 
 // ListNodeGroups handles GET /api/v1/node-groups.
@@ -569,4 +579,65 @@ func (h *NodeGroupsHandler) SetNodeGroupRestrictions(w http.ResponseWriter, r *h
 		"group_id":            id,
 		"allowed_ldap_groups": req.AllowedLDAPGroups,
 	})
+}
+
+// StreamGroupReimageEvents handles
+// GET /api/v1/node-groups/{id}/reimage/events?job_id=<jid>
+//
+// Streams api.GroupReimageEvent as Server-Sent Events for the given job.
+// The stream terminates after receiving a reimage.completed event for the
+// requested job, or when the client disconnects.
+func (h *NodeGroupsHandler) StreamGroupReimageEvents(w http.ResponseWriter, r *http.Request) {
+	if h.GroupReimageEvents == nil {
+		http.Error(w, "group reimage events not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported by this server", http.StatusInternalServerError)
+		return
+	}
+
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		writeValidationError(w, "job_id query parameter is required")
+		return
+	}
+
+	ch, cancel := h.GroupReimageEvents.Subscribe()
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, open := <-ch:
+			if !open {
+				return
+			}
+			// Filter: only forward events for this job.
+			if event.JobID != jobID {
+				continue
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", string(event.Kind), data)
+			flusher.Flush()
+			// Terminal event — close the stream.
+			if event.Kind == api.GroupReimageEventCompleted {
+				return
+			}
+		}
+	}
 }

@@ -21,8 +21,10 @@ import type {
   GroupMembersResponse,
   ListImagesResponse,
   GroupReimageJobStatus,
+  GroupReimageEvent,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { useSSE } from "@/hooks/use-sse"
 
 // ─── GroupsPanel ──────────────────────────────────────────────────────────────
 
@@ -482,7 +484,7 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
   )
 }
 
-// ─── GroupReimageFlow — REIMG-BULK-2..4 ──────────────────────────────────────
+// ─── GroupReimageFlow — REIMG-BULK-2..4 (SSE-driven per REIMG-BULK-1) ─────────
 
 interface GroupReimageFlowProps {
   group: NodeGroupWithCount
@@ -491,13 +493,68 @@ interface GroupReimageFlowProps {
   onToggle: () => void
 }
 
+// NodeReimageRow tracks per-node progress state derived from SSE events.
+interface NodeReimageRow {
+  nodeId: string
+  position: number
+  status: "queued" | "started" | "imaging" | "verifying" | "done" | "failed"
+  progress?: number
+  durationMs?: number
+  error?: string
+}
+
+function applyGroupReimageEvent(
+  rows: NodeReimageRow[],
+  event: GroupReimageEvent,
+): NodeReimageRow[] {
+  switch (event.kind) {
+    case "reimage.queued":
+      // Add the node row if not already present.
+      if (rows.some((r) => r.nodeId === event.node_id)) return rows
+      return [
+        ...rows,
+        { nodeId: event.node_id!, position: event.position ?? rows.length + 1, status: "queued" },
+      ]
+    case "reimage.started":
+      return rows.map((r) =>
+        r.nodeId === event.node_id ? { ...r, status: "started" as const } : r
+      )
+    case "reimage.imaging":
+      return rows.map((r) =>
+        r.nodeId === event.node_id
+          ? { ...r, status: "imaging" as const, progress: event.progress }
+          : r
+      )
+    case "reimage.verifying":
+      return rows.map((r) =>
+        r.nodeId === event.node_id ? { ...r, status: "verifying" as const } : r
+      )
+    case "reimage.done":
+      return rows.map((r) =>
+        r.nodeId === event.node_id
+          ? { ...r, status: "done" as const, durationMs: event.duration_ms }
+          : r
+      )
+    case "reimage.failed":
+      return rows.map((r) =>
+        r.nodeId === event.node_id
+          ? { ...r, status: "failed" as const, error: event.error }
+          : r
+      )
+    default:
+      return rows
+  }
+}
+
 function GroupReimageFlow({ group, memberCount, expanded, onToggle }: GroupReimageFlowProps) {
   const [selectedImageId, setSelectedImageId] = React.useState("")
   const [parallelism, setParallelism] = React.useState(1)
   const [confirmName, setConfirmName] = React.useState("")
   const [jobStatus, setJobStatus] = React.useState<GroupReimageJobStatus | null>(null)
   const [jobError, setJobError] = React.useState("")
-  const jobPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+  // Per-node rows driven by SSE events.
+  const [nodeRows, setNodeRows] = React.useState<NodeReimageRow[]>([])
+  const [sseJobDone, setSseJobDone] = React.useState(false)
 
   const { data: imagesData } = useQuery<ListImagesResponse>({
     queryKey: ["images"],
@@ -506,6 +563,42 @@ function GroupReimageFlow({ group, memberCount, expanded, onToggle }: GroupReima
     enabled: expanded,
   })
   const readyImages = imagesData?.images?.filter((img) => img.status === "ready" && img.build_method !== "initramfs") ?? []
+
+  // SSE subscription — active once we have a job ID, closed after reimage.completed.
+  useSSE<GroupReimageEvent>({
+    path: jobStatus ? `/api/v1/node-groups/${group.id}/reimage/events?job_id=${jobStatus.job_id}` : "",
+    enabled: !!jobStatus && !sseJobDone,
+    onMessage: (event) => {
+      if (event.kind === "reimage.completed") {
+        // Terminal event — update the job status summary and stop the stream.
+        setSseJobDone(true)
+        setJobStatus((prev) => {
+          if (!prev) return prev
+          const succeeded = event.succeeded ?? 0
+          const failed = event.failed ?? 0
+          const total = event.total ?? prev.total_nodes
+          const termStatus = failed > 0 ? "failed" : "completed"
+          toast({
+            title: termStatus === "completed"
+              ? `Reimaged ${succeeded}/${total} nodes in ${group.name}`
+              : `Group reimage finished with failures`,
+            description: failed > 0 ? `${failed} node(s) failed` : undefined,
+            variant: failed > 0 ? "destructive" : "default",
+          })
+          return {
+            ...prev,
+            status: termStatus,
+            succeeded_nodes: succeeded,
+            failed_nodes: failed,
+            total_nodes: total,
+          }
+        })
+      } else {
+        // Per-node transition — patch the row list.
+        setNodeRows((prev) => applyGroupReimageEvent(prev, event))
+      }
+    },
+  })
 
   const reimageMutation = useMutation({
     mutationFn: () =>
@@ -519,34 +612,13 @@ function GroupReimageFlow({ group, memberCount, expanded, onToggle }: GroupReima
       }),
     onSuccess: (job) => {
       setJobStatus(job)
+      setNodeRows([])
+      setSseJobDone(false)
       setConfirmName("")
       setJobError("")
-      // Poll job status every 3s until done.
-      jobPollRef.current = setInterval(async () => {
-        try {
-          const updated = await apiFetch<GroupReimageJobStatus>(`/api/v1/reimages/jobs/${job.job_id}`)
-          setJobStatus(updated)
-          if (updated.status === "completed" || updated.status === "failed") {
-            if (jobPollRef.current) clearInterval(jobPollRef.current)
-            const failedCount = updated.failed_nodes
-            const successCount = updated.succeeded_nodes
-            toast({
-              title: updated.status === "completed"
-                ? `Reimaged ${successCount}/${updated.total_nodes} nodes in ${group.name}`
-                : `Group reimage finished with failures`,
-              description: failedCount > 0 ? `${failedCount} node(s) failed` : undefined,
-              variant: failedCount > 0 ? "destructive" : "default",
-            })
-          }
-        } catch { /* ignore poll errors */ }
-      }, 3000)
     },
     onError: (err) => setJobError(String(err)),
   })
-
-  React.useEffect(() => {
-    return () => { if (jobPollRef.current) clearInterval(jobPollRef.current) }
-  }, [])
 
   const canConfirm = confirmName === group.name && selectedImageId !== ""
 
@@ -612,7 +684,7 @@ function GroupReimageFlow({ group, memberCount, expanded, onToggle }: GroupReima
 
           {/* Progress panel */}
           {jobStatus && (
-            <GroupReimageProgress job={jobStatus} />
+            <GroupReimageProgress job={jobStatus} nodeRows={nodeRows} />
           )}
 
           {!jobStatus && (
@@ -642,7 +714,22 @@ function GroupReimageFlow({ group, memberCount, expanded, onToggle }: GroupReima
 
 // ─── GroupReimageProgress ─────────────────────────────────────────────────────
 
-function GroupReimageProgress({ job }: { job: GroupReimageJobStatus }) {
+const NODE_STATUS_LABEL: Record<NodeReimageRow["status"], string> = {
+  queued: "Queued",
+  started: "Starting…",
+  imaging: "Imaging…",
+  verifying: "Verifying…",
+  done: "Done",
+  failed: "Failed",
+}
+
+function GroupReimageProgress({
+  job,
+  nodeRows,
+}: {
+  job: GroupReimageJobStatus
+  nodeRows: NodeReimageRow[]
+}) {
   const pct = job.total_nodes > 0 ? Math.round(((job.succeeded_nodes + job.failed_nodes) / job.total_nodes) * 100) : 0
   const statusColor = job.status === "completed" ? "bg-status-healthy"
     : job.status === "failed" ? "bg-destructive"
@@ -650,6 +737,7 @@ function GroupReimageProgress({ job }: { job: GroupReimageJobStatus }) {
 
   return (
     <div className="rounded border border-border bg-card p-3 space-y-2">
+      {/* Summary row */}
       <div className="flex items-center justify-between text-xs">
         <span className="font-medium">
           {job.status === "running" ? "Reimaging…" : job.status === "completed" ? "Complete" : job.status === "paused" ? "Paused" : job.status === "failed" ? "Failed" : "Queued"}
@@ -659,12 +747,40 @@ function GroupReimageProgress({ job }: { job: GroupReimageJobStatus }) {
           {job.failed_nodes > 0 && <span className="text-destructive ml-1">({job.failed_nodes} failed)</span>}
         </span>
       </div>
+      {/* Overall progress bar */}
       <div className="h-2 rounded-full bg-secondary overflow-hidden">
         <div
           className={`h-full transition-all duration-500 ${statusColor}`}
           style={{ width: `${pct}%` }}
         />
       </div>
+      {/* Per-node rows (SSE-driven) */}
+      {nodeRows.length > 0 && (
+        <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+          {nodeRows
+            .slice()
+            .sort((a, b) => a.position - b.position)
+            .map((row) => (
+              <div key={row.nodeId} className="flex items-center justify-between text-xs gap-2">
+                <span className="font-mono text-muted-foreground truncate max-w-[120px]" title={row.nodeId}>
+                  {row.nodeId.slice(0, 8)}…
+                </span>
+                <span
+                  className={cn(
+                    "shrink-0",
+                    row.status === "done" && "text-status-healthy",
+                    row.status === "failed" && "text-destructive",
+                    (row.status === "imaging" || row.status === "started" || row.status === "verifying") && "text-status-warning",
+                  )}
+                >
+                  {NODE_STATUS_LABEL[row.status]}
+                  {row.status === "imaging" && row.progress != null && ` ${row.progress}%`}
+                  {row.status === "done" && row.durationMs != null && ` (${(row.durationMs / 1000).toFixed(1)}s)`}
+                </span>
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   )
 }

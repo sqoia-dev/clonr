@@ -54,12 +54,22 @@ func powerCycleStagger() time.Duration {
 	return defaultPowerCycleStagger
 }
 
+// EventPublisher is implemented by any fan-out store that accepts
+// GroupReimageEvents. Defined here to avoid a circular import with the server
+// package that owns the concrete implementation.
+type EventPublisher interface {
+	Publish(event api.GroupReimageEvent)
+}
+
 // Orchestrator wires together the database, power registry, and logging to
 // execute reimage requests.
 type Orchestrator struct {
 	DB       *db.DB
 	Registry *power.Registry
 	Logger   zerolog.Logger
+	// Events, when non-nil, receives per-node and job-level reimage progress
+	// events for SSE fan-out. Optional — no events are published when nil.
+	Events EventPublisher
 }
 
 // New constructs an Orchestrator.

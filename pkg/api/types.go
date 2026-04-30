@@ -942,6 +942,35 @@ type ImageEvent struct {
 	ID    string         `json:"id"`              // always populated (use when image is nil)
 }
 
+// GroupReimageEventKind classifies a group reimage SSE event.
+type GroupReimageEventKind string
+
+const (
+	GroupReimageEventQueued    GroupReimageEventKind = "reimage.queued"    // node enqueued
+	GroupReimageEventStarted   GroupReimageEventKind = "reimage.started"   // node reimage triggered
+	GroupReimageEventImaging   GroupReimageEventKind = "reimage.imaging"   // node is being imaged
+	GroupReimageEventVerifying GroupReimageEventKind = "reimage.verifying" // node verify-boot in progress
+	GroupReimageEventDone      GroupReimageEventKind = "reimage.done"      // node completed successfully
+	GroupReimageEventFailed    GroupReimageEventKind = "reimage.failed"    // node failed
+	GroupReimageEventCompleted GroupReimageEventKind = "reimage.completed" // whole job terminal
+)
+
+// GroupReimageEvent is published on
+// GET /api/v1/node-groups/{id}/reimage/events?job_id=<jid>
+// for each per-node state transition and the final job summary.
+type GroupReimageEvent struct {
+	Kind       GroupReimageEventKind `json:"kind"`
+	JobID      string                `json:"job_id"`
+	NodeID     string                `json:"node_id,omitempty"`
+	Position   int                   `json:"position,omitempty"`    // for reimage.queued
+	Progress   *int                  `json:"progress,omitempty"`    // 0-100, for reimage.imaging
+	DurationMS int64                 `json:"duration_ms,omitempty"` // for reimage.done
+	Error      string                `json:"error,omitempty"`       // for reimage.failed
+	Succeeded  int                   `json:"succeeded,omitempty"`   // for reimage.completed
+	Failed     int                   `json:"failed,omitempty"`      // for reimage.completed
+	Total      int                   `json:"total,omitempty"`       // for reimage.completed
+}
+
 // ListNodesResponse wraps the node configs list with pagination metadata.
 // page/per_page/next_cursor are present when ?page= or ?per_page= is used.
 type ListNodesResponse struct {

@@ -85,6 +85,19 @@ func (o *Orchestrator) TriggerGroupReimage(
 		Int("pause_on_failure_pct", pauseOnFailurePct).
 		Msg("group reimage: dispatching rolling reimage")
 
+	// Emit queued events for every member upfront so the SSE consumer can
+	// render the full node list before any reimages begin.
+	if o.Events != nil {
+		for i, m := range members {
+			o.Events.Publish(api.GroupReimageEvent{
+				Kind:     api.GroupReimageEventQueued,
+				JobID:    jobID,
+				NodeID:   m.ID,
+				Position: i + 1,
+			})
+		}
+	}
+
 	// Dispatch background goroutine — this returns immediately to the caller.
 	go o.runGroupReimage(context.Background(), job, members)
 
@@ -134,6 +147,8 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 			go func(n api.NodeConfig, pos int) {
 				defer wg.Done()
 
+				nodeStart := time.Now()
+
 				// Create the individual reimage request.
 				reqID, reqErr := o.createReimageRequest(ctx, n.ID, job.ImageID)
 				if reqErr != nil {
@@ -143,6 +158,14 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 						Msg("group reimage: failed to create reimage request")
 					atomic.AddInt64(&waveFailed, 1)
 					atomic.AddInt64(&failed, 1)
+					if o.Events != nil {
+						o.Events.Publish(api.GroupReimageEvent{
+							Kind:   api.GroupReimageEventFailed,
+							JobID:  job.ID,
+							NodeID: n.ID,
+							Error:  reqErr.Error(),
+						})
+					}
 					return
 				}
 
@@ -155,6 +178,15 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 					}
 				}
 
+				// Publish started event before triggering.
+				if o.Events != nil {
+					o.Events.Publish(api.GroupReimageEvent{
+						Kind:   api.GroupReimageEventStarted,
+						JobID:  job.ID,
+						NodeID: n.ID,
+					})
+				}
+
 				if trigErr := o.Trigger(ctx, reqID); trigErr != nil {
 					o.Logger.Error().Err(trigErr).
 						Str("job_id", job.ID).
@@ -162,9 +194,25 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 						Msg("group reimage: node reimage trigger failed")
 					atomic.AddInt64(&waveFailed, 1)
 					atomic.AddInt64(&failed, 1)
+					if o.Events != nil {
+						o.Events.Publish(api.GroupReimageEvent{
+							Kind:   api.GroupReimageEventFailed,
+							JobID:  job.ID,
+							NodeID: n.ID,
+							Error:  trigErr.Error(),
+						})
+					}
 				} else {
 					atomic.AddInt64(&waveSucceeded, 1)
 					atomic.AddInt64(&succeeded, 1)
+					if o.Events != nil {
+						o.Events.Publish(api.GroupReimageEvent{
+							Kind:       api.GroupReimageEventDone,
+							JobID:      job.ID,
+							NodeID:     n.ID,
+							DurationMS: time.Since(nodeStart).Milliseconds(),
+						})
+					}
 				}
 				atomic.AddInt64(&triggered, 1)
 
@@ -243,6 +291,17 @@ func (o *Orchestrator) runGroupReimage(ctx context.Context, job db.GroupReimageJ
 	if err := o.DB.UpdateGroupReimageJob(ctx, finalJob); err != nil {
 		o.Logger.Error().Err(err).Str("job_id", job.ID).
 			Msg("group reimage: failed to finalize job")
+	}
+
+	// Publish terminal job event so SSE consumers know to close the stream.
+	if o.Events != nil {
+		o.Events.Publish(api.GroupReimageEvent{
+			Kind:      api.GroupReimageEventCompleted,
+			JobID:     job.ID,
+			Succeeded: int(atomic.LoadInt64(&succeeded)),
+			Failed:    int(atomic.LoadInt64(&failed)),
+			Total:     job.TotalNodes,
+		})
 	}
 
 	o.Logger.Info().

@@ -257,6 +257,28 @@ export interface GroupReimageJobStatus {
   updated_at: string
 }
 
+export type GroupReimageEventKind =
+  | "reimage.queued"
+  | "reimage.started"
+  | "reimage.imaging"
+  | "reimage.verifying"
+  | "reimage.done"
+  | "reimage.failed"
+  | "reimage.completed"
+
+export interface GroupReimageEvent {
+  kind: GroupReimageEventKind
+  job_id: string
+  node_id?: string
+  position?: number
+  progress?: number
+  duration_ms?: number
+  error?: string
+  succeeded?: number
+  failed?: number
+  total?: number
+}
+
 // ── Power ─────────────────────────────────────────────────────────────────────
 
 export interface PowerStatusResponse {
