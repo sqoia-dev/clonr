@@ -221,19 +221,42 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	}
 
 	// ── Step 0c: Ensure clustr parent dirs are world-traversable ──────────────
-	// /etc/clustr and /var/lib/clustr must be 0755 root:root so unprivileged
-	// daemons (slapd as uid ldap) can traverse into their subdirectories.
-	// A partial prior install may have left /etc/clustr at 0700 if MkdirAll
-	// inherited a tight umask; repair that every run before touching anything
-	// inside these trees.
+	// All directories on the path to slapd's data dir must be 0755 so the
+	// unprivileged slapd daemon (running as uid "ldap" or "openldap") can
+	// traverse them. A partial prior install may have left /var/lib/clustr/ldap
+	// at 0750 root:clustr (from the RPM post-install scriptlet) — that blocks
+	// traversal entirely because the "ldap" OS user is not in the "clustr" group.
+	// The fix: always chmod each parent to 0755 before proceeding.
+	//
+	// Security posture: slapd needs only execute (traverse) on these directories.
+	// The data dir itself (/var/lib/clustr/ldap/data) is 0700 chowned to slapdUser,
+	// so slapd's mdb files are still exclusively accessible to slapd.
 	log.Info().Msg("ldap: step 0c/6: ensuring parent dir permissions")
-	for _, d := range []string{"/etc/clustr", "/etc/clustr/ldap", "/var/lib/clustr"} {
+	for _, d := range []string{
+		"/etc/clustr",
+		"/etc/clustr/ldap",
+		"/var/lib/clustr",
+		ldapDataDir, // /var/lib/clustr/ldap — may be 0750 from RPM post-install; must be 0755
+	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			setError(fmt.Sprintf("mkdir %s failed: %v", d, err))
 			return
 		}
 		if err := os.Chmod(d, 0o755); err != nil {
 			setError(fmt.Sprintf("chmod %s failed: %v", d, err))
+			return
+		}
+	}
+
+	// Validate the data dir is now traversable as the slapd system user.
+	// If stat fails after the explicit chmod above, something deeper is wrong
+	// (e.g. SELinux, stacked permissions, filesystem issue) and we must fail fast
+	// rather than letting slapd crash-loop later with a cryptic permission error.
+	if slapdUser != "" {
+		if err := validateDataDirTraversable(ldapDataDir, slapdUser); err != nil {
+			setError(fmt.Sprintf("permission_denied_data_dir: %v — "+
+				"remediation: verify SELinux context (restorecon -Rv /var/lib/clustr/ldap) "+
+				"or check for ACLs blocking %s; data dir must be executable by the slapd user", err, slapdUser))
 			return
 		}
 	}

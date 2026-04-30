@@ -208,6 +208,41 @@ func verifySlapdInstall() (string, error) {
 	return "", fmt.Errorf("openldap-servers installed but neither 'ldap' nor 'openldap' user found. Manual investigation required.")
 }
 
+// validateDataDirTraversable checks that slapdUser can traverse dir.
+// It does this by running "sudo -u <slapdUser> test -x <dir>" — a lightweight
+// exec that does not require the user to be interactive or have a login shell.
+//
+// Rationale for the exec approach: Go's os.Stat reflects root-perspective permissions,
+// not what an unprivileged uid sees (ACLs, SELinux, uid mapping can all diverge).
+// We exec as the actual user so the kernel enforces the real access check.
+//
+// If sudo is unavailable (minimal containers, CI) we fall back to permission-bit
+// inspection: the directory must have world-execute (o+x) set. This is the correct
+// minimum for any non-owner, non-group traversal.
+func validateDataDirTraversable(dir, slapdUser string) error {
+	// Prefer the authoritative exec-as-user check.
+	if _, err := exec.LookPath("sudo"); err == nil {
+		out, err := exec.Command("sudo", "-n", "-u", slapdUser, "test", "-x", dir).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("slapd data dir %s is not traversable as user %q (sudo test -x failed: %v, output: %s)",
+				dir, slapdUser, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
+	// Fallback: check world-execute bit on the directory.
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
+	mode := info.Mode().Perm()
+	if mode&0o001 == 0 {
+		return fmt.Errorf("slapd data dir %s mode %04o lacks world-execute — slapd user %q cannot traverse it",
+			dir, mode, slapdUser)
+	}
+	return nil
+}
+
 // EnsureOpenLDAP installs openldap-servers if slapd is not already present, then
 // verifies the installation and returns the slapd system username ("ldap" or "openldap").
 //
