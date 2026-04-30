@@ -37,6 +37,15 @@ type LDAPModuleConfig struct {
 	SudoersEnabled bool
 	// SudoersGroupCN is the CN of the LDAP group written into /etc/sudoers.d on deployed nodes.
 	SudoersGroupCN string
+
+	// Sprint 8 — write-bind credentials (migration 079).
+	// WriteBindDN / WriteBindPassword: optional elevated bind used for directory writes.
+	// If unset, falls back to AdminPasswd (the DM bind). Encrypted at rest.
+	WriteBindDN       string
+	WriteBindPassword string
+	// WriteCapable is the cached probe result: nil = not yet probed, false = probe failed, true = OK.
+	WriteCapable       *bool
+	WriteCapableDetail string
 }
 
 // LDAPGetConfig reads the singleton LDAP module config row.
@@ -52,7 +61,9 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			base_dn_locked, last_provisioned_at, last_checked_at, last_check_error,
 			admin_passwd,
 			sudoers_enabled, sudoers_group_cn,
-			service_bind_password_encrypted, admin_passwd_encrypted
+			service_bind_password_encrypted, admin_passwd_encrypted,
+			write_bind_dn, write_bind_password, write_bind_password_encrypted,
+			write_capable, write_capable_detail
 		FROM ldap_module_config WHERE id = 1
 	`)
 
@@ -60,7 +71,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 	var serverCertNotAfter sql.NullString
 	var lastProvisionedAt sql.NullString
 	var lastCheckedAt sql.NullString
-	var sbpEncrypted, apEncrypted bool
+	var sbpEncrypted, apEncrypted, wbpEncrypted bool
+	var writeCapable sql.NullBool
 
 	err := row.Scan(
 		&cfg.Enabled, &cfg.Status, &cfg.StatusDetail, &cfg.BaseDN,
@@ -71,6 +83,8 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		&cfg.AdminPasswd,
 		&cfg.SudoersEnabled, &cfg.SudoersGroupCN,
 		&sbpEncrypted, &apEncrypted,
+		&cfg.WriteBindDN, &cfg.WriteBindPassword, &wbpEncrypted,
+		&writeCapable, &cfg.WriteCapableDetail,
 	)
 	if err != nil {
 		return LDAPModuleConfig{}, err
@@ -89,6 +103,11 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 			cfg.AdminPasswd = string(plain)
 		}
 	}
+	if wbpEncrypted && cfg.WriteBindPassword != "" {
+		if plain, derr := secrets.Decrypt(cfg.WriteBindPassword); derr == nil {
+			cfg.WriteBindPassword = string(plain)
+		}
+	}
 
 	if serverCertNotAfter.Valid && serverCertNotAfter.String != "" {
 		if t, err := time.Parse(time.RFC3339, serverCertNotAfter.String); err == nil {
@@ -104,6 +123,10 @@ func (db *DB) LDAPGetConfig(ctx context.Context) (LDAPModuleConfig, error) {
 		if t, err := time.Parse(time.RFC3339, lastCheckedAt.String); err == nil {
 			cfg.LastCheckedAt = t
 		}
+	}
+	if writeCapable.Valid {
+		b := writeCapable.Bool
+		cfg.WriteCapable = &b
 	}
 
 	return cfg, nil
@@ -394,6 +417,116 @@ func (db *DB) LDAPSetSudoersEnabled(ctx context.Context, enabled bool, groupCN s
 		if err != nil {
 			return fmt.Errorf("db: LDAPSetSudoersEnabled(false): %w", err)
 		}
+	}
+	return nil
+}
+
+// ─── Sprint 8: write-bind credentials (migration 079) ────────────────────────
+
+// LDAPSetWriteBind persists the optional elevated write-bind credentials.
+// Both are encrypted at rest. Pass empty strings to clear the write bind.
+func (db *DB) LDAPSetWriteBind(ctx context.Context, bindDN, bindPassword string) error {
+	wbpCiphertext := bindPassword
+	wbpEncrypted := false
+	if bindPassword != "" {
+		enc, err := secrets.Encrypt([]byte(bindPassword))
+		if err != nil {
+			return fmt.Errorf("db: LDAPSetWriteBind: encrypt write_bind_password: %w", err)
+		}
+		wbpCiphertext = enc
+		wbpEncrypted = true
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE ldap_module_config SET write_bind_dn = ?, write_bind_password = ?, write_bind_password_encrypted = ? WHERE id = 1`,
+		bindDN, wbpCiphertext, boolToInt(wbpEncrypted),
+	)
+	if err != nil {
+		return fmt.Errorf("db: LDAPSetWriteBind: %w", err)
+	}
+	return nil
+}
+
+// LDAPSetWriteCapable records the result of the probe-write operation.
+// capable=nil clears the cached result (unknown). capable=true/false sets it.
+func (db *DB) LDAPSetWriteCapable(ctx context.Context, capable *bool, detail string) error {
+	if capable == nil {
+		_, err := db.sql.ExecContext(ctx,
+			`UPDATE ldap_module_config SET write_capable = NULL, write_capable_detail = ? WHERE id = 1`,
+			detail,
+		)
+		return err
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE ldap_module_config SET write_capable = ?, write_capable_detail = ? WHERE id = 1`,
+		boolToInt(*capable), detail,
+	)
+	return err
+}
+
+// ─── Sprint 8: LDAP group mode (migration 079) ───────────────────────────────
+
+// LDAPGroupMode represents the write-mode for a single LDAP group.
+type LDAPGroupMode struct {
+	CN        string
+	Mode      string // "overlay" | "direct"
+	UpdatedAt time.Time
+	UpdatedBy string
+}
+
+// LDAPGetGroupModes returns all rows from clustr_ldap_group_mode.
+func (db *DB) LDAPGetGroupModes(ctx context.Context) ([]LDAPGroupMode, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT cn, mode, updated_at, updated_by FROM clustr_ldap_group_mode`)
+	if err != nil {
+		return nil, fmt.Errorf("db: LDAPGetGroupModes: %w", err)
+	}
+	defer rows.Close()
+	var out []LDAPGroupMode
+	for rows.Next() {
+		var gm LDAPGroupMode
+		var ts int64
+		if err := rows.Scan(&gm.CN, &gm.Mode, &ts, &gm.UpdatedBy); err != nil {
+			return nil, err
+		}
+		gm.UpdatedAt = time.Unix(ts, 0).UTC()
+		out = append(out, gm)
+	}
+	return out, rows.Err()
+}
+
+// LDAPGetGroupMode returns the mode for a single group CN.
+// Returns "overlay" and nil error when no row exists (default).
+func (db *DB) LDAPGetGroupMode(ctx context.Context, cn string) (string, error) {
+	var mode string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT mode FROM clustr_ldap_group_mode WHERE cn = ?`, cn,
+	).Scan(&mode)
+	if err == sql.ErrNoRows {
+		return "overlay", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("db: LDAPGetGroupMode: %w", err)
+	}
+	return mode, nil
+}
+
+// LDAPSetGroupMode upserts the mode for a single LDAP group CN.
+// updatedBy is the actor's identifier (user ID or "system").
+func (db *DB) LDAPSetGroupMode(ctx context.Context, cn, mode, updatedBy string) error {
+	if mode != "overlay" && mode != "direct" {
+		return fmt.Errorf("db: LDAPSetGroupMode: invalid mode %q (must be overlay or direct)", mode)
+	}
+	now := time.Now().Unix()
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO clustr_ldap_group_mode (cn, mode, updated_at, updated_by)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(cn) DO UPDATE SET
+			mode       = excluded.mode,
+			updated_at = excluded.updated_at,
+			updated_by = excluded.updated_by
+	`, cn, mode, now, updatedBy)
+	if err != nil {
+		return fmt.Errorf("db: LDAPSetGroupMode: %w", err)
 	}
 	return nil
 }

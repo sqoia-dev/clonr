@@ -391,6 +391,38 @@ export interface LDAPConfigResponse {
   service_bind_dn: string
   ca_fingerprint: string
   bind_password_set: boolean
+  // Sprint 8 — write-bind fields (WRITE-CFG-3)
+  write_bind_dn_set?: boolean
+  write_capable?: boolean
+  write_status?: string
+  write_capable_detail?: string
+  backend_dialect?: string
+}
+
+// Sprint 8 — write-bind config payload
+export interface LDAPWriteBindRequest {
+  write_bind_dn: string
+  write_bind_password: string
+}
+
+export interface LDAPWriteBindResponse {
+  write_bind_dn_set: boolean
+  write_capable: boolean
+  write_status: { capable: boolean; detail: string }
+}
+
+// Sprint 8 — group mode
+export interface LDAPGroupModeResponse {
+  cn: string
+  mode: "overlay" | "direct"
+}
+
+// Sprint 8 — reset password response
+export interface LDAPResetPasswordResponse {
+  uid: string
+  temp_password: string
+  force_change: boolean
+  note: string
 }
 
 export interface LDAPTestResponse {

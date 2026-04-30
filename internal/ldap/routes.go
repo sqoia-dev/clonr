@@ -5,11 +5,14 @@ package ldap
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
+
+	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // RegisterRoutes wires all LDAP API endpoints into the given chi router group.
@@ -39,6 +42,9 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Post("/ldap/users/{uid}/lock", mgr.handleLockUser)
 	r.Post("/ldap/users/{uid}/unlock", mgr.handleUnlockUser)
 
+	// Sprint 8 — WRITE-USER-4: admin-driven password reset (generates temp pwd)
+	r.Post("/ldap/users/{uid}/reset-password", mgr.handleResetPassword)
+
 	// Logs
 	r.Get("/ldap/logs", mgr.handleLogs)
 	r.Get("/ldap/logs/stream", mgr.handleLogsStream)
@@ -50,6 +56,14 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Delete("/ldap/groups/{cn}", mgr.handleDeleteGroup)
 	r.Post("/ldap/groups/{cn}/members", mgr.handleAddGroupMember)
 	r.Delete("/ldap/groups/{cn}/members/{uid}", mgr.handleRemoveGroupMember)
+
+	// Sprint 8 — WRITE-GRP-4: per-group direct-write mode toggle
+	r.Put("/ldap/groups/{cn}/mode", mgr.handleSetGroupMode)
+	r.Get("/ldap/groups/{cn}/mode", mgr.handleGetGroupMode)
+
+	// Sprint 8 — WRITE-CFG-1..3: write-bind config + probe
+	r.Put("/ldap/write-bind", mgr.handlePutWriteBind)
+	r.Get("/ldap/write-capable", mgr.handleGetWriteCapable)
 
 	// Sudoers
 	r.Get("/ldap/sudoers/status", handleSudoersStatus(mgr))
@@ -183,7 +197,7 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -193,6 +207,18 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Audit — hash password value, include other attrs as-is.
+	attrMap := map[string]string{
+		"uid":       req.UID,
+		"cn":        req.CN,
+		"uidNumber": strings.TrimSpace(fmt.Sprintf("%d", req.UIDNumber)),
+	}
+	if req.Password != "" {
+		attrMap["userPassword"] = req.Password
+	}
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserCreated, "ldap_user", req.UID, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(req.UID), "add", attrMap))
 
 	user, err := dit.GetUser(req.UID)
 	if err != nil {
@@ -210,7 +236,7 @@ func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -220,6 +246,15 @@ func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Build attr map for audit (only changed attributes).
+	attrMap := map[string]string{}
+	if req.CN != "" { attrMap["cn"] = req.CN }
+	if req.SN != "" { attrMap["sn"] = req.SN }
+	if req.HomeDirectory != "" { attrMap["homeDirectory"] = req.HomeDirectory }
+	if req.LoginShell != "" { attrMap["loginShell"] = req.LoginShell }
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserUpdated, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(uid), "modify", attrMap))
 
 	user, err := dit.GetUser(uid)
 	if err != nil {
@@ -231,15 +266,49 @@ func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
-	dit, err := m.DIT(r.Context())
+
+	// Safety: check group membership count before deleting.
+	readerDIT, rErr := m.ReaderDIT(r.Context())
+	if rErr == nil {
+		groups, gErr := readerDIT.ListGroups()
+		if gErr == nil {
+			memberCount := 0
+			for _, g := range groups {
+				for _, m := range g.MemberUIDs {
+					if m == uid {
+						memberCount++
+						break
+					}
+				}
+			}
+			// WRITE-USER-3: 409 if removing would orphan memberships beyond threshold (5).
+			const orphanThreshold = 5
+			if memberCount > orphanThreshold {
+				jsonResponse(w, map[string]interface{}{
+					"error":         fmt.Sprintf("user is a member of %d groups; set force=true to proceed", memberCount),
+					"code":          "group_member_safety",
+					"member_of_count": memberCount,
+				}, http.StatusConflict)
+				return
+			}
+		}
+	}
+
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+
+	dn := dit.userDN(uid)
 	if err := dit.DeleteUser(uid); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserDeleted, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dn, "delete", map[string]string{"uid": uid}))
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -254,7 +323,7 @@ func (m *Manager) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -263,12 +332,18 @@ func (m *Manager) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPPasswordReset, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(uid), "password_set", map[string]string{
+			"userPassword": body.Password, // value is hashed inside directoryWriteAudit
+		}))
+
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
 func (m *Manager) handleLockUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -277,12 +352,14 @@ func (m *Manager) handleLockUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserUpdated, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(uid), "lock", map[string]string{"shadowExpire": "1"}))
 	jsonResponse(w, map[string]string{"status": "locked"}, http.StatusOK)
 }
 
 func (m *Manager) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -291,6 +368,8 @@ func (m *Manager) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserUpdated, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(uid), "unlock", map[string]string{"shadowExpire": "deleted"}))
 	jsonResponse(w, map[string]string{"status": "unlocked"}, http.StatusOK)
 }
 
@@ -311,11 +390,14 @@ func (m *Manager) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"groups": groups, "total": len(groups)}, http.StatusOK)
 }
 
+// handleCreateGroup handles POST /api/v1/ldap/groups.
+// Accepts optional initial_members list for WRITE-GRP-1.
 func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		CN          string `json:"cn"`
-		GIDNumber   int    `json:"gid_number"`
-		Description string `json:"description"`
+		CN             string   `json:"cn"`
+		GIDNumber      int      `json:"gid_number"`
+		Description    string   `json:"description"`
+		InitialMembers []string `json:"initial_members"` // WRITE-GRP-1
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -330,7 +412,7 @@ func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -339,13 +421,31 @@ func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, LDAPGroup{CN: body.CN, GIDNumber: body.GIDNumber, MemberUIDs: []string{}, Description: body.Description}, http.StatusCreated)
+
+	// Add initial members if provided.
+	for _, uid := range body.InitialMembers {
+		if addErr := dit.AddGroupMember(body.CN, uid); addErr != nil {
+			log.Warn().Err(addErr).Str("cn", body.CN).Str("uid", uid).Msg("ldap: create group: add initial member failed")
+		}
+	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupCreated, "ldap_group", body.CN, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.groupDN(body.CN), "add", map[string]string{
+			"cn":        body.CN,
+			"gidNumber": fmt.Sprintf("%d", body.GIDNumber),
+		}))
+
+	jsonResponse(w, LDAPGroup{CN: body.CN, GIDNumber: body.GIDNumber, MemberUIDs: body.InitialMembers, Description: body.Description}, http.StatusCreated)
 }
 
+// handleUpdateGroup handles PUT /api/v1/ldap/groups/{cn}.
+// Supports description update and member-list edits (WRITE-GRP-2).
 func (m *Manager) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 	cn := chi.URLParam(r, "cn")
 	var body struct {
-		Description string `json:"description"`
+		Description    string   `json:"description"`
+		AddMembers     []string `json:"add_members"`    // WRITE-GRP-2
+		RemoveMembers  []string `json:"remove_members"` // WRITE-GRP-2
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -356,29 +456,74 @@ func (m *Manager) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if err := dit.UpdateGroup(cn, body.Description); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
-		return
+
+	// Update description (may be empty string to clear it).
+	if body.Description != "" || len(body.AddMembers)+len(body.RemoveMembers) == 0 {
+		if err := dit.UpdateGroup(cn, body.Description); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
+
+	// Apply member changes per memberUid dialect (WRITE-GRP-2).
+	for _, uid := range body.AddMembers {
+		if addErr := dit.AddGroupMember(cn, uid); addErr != nil {
+			log.Warn().Err(addErr).Str("cn", cn).Str("uid", uid).Msg("ldap: update group: add member failed")
+		}
+	}
+	for _, uid := range body.RemoveMembers {
+		if rmErr := dit.RemoveGroupMember(cn, uid); rmErr != nil {
+			log.Warn().Err(rmErr).Str("cn", cn).Str("uid", uid).Msg("ldap: update group: remove member failed")
+		}
+	}
+
+	attrMap := map[string]string{"cn": cn}
+	if body.Description != "" {
+		attrMap["description"] = body.Description
+	}
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupUpdated, "ldap_group", cn, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.groupDN(cn), "modify", attrMap))
+
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
 func (m *Manager) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	cn := chi.URLParam(r, "cn")
-	dit, err := m.DIT(r.Context())
+
+	// WRITE-GRP-3: 409 if any system reference still uses this group
+	// (sudoers group is the primary check in v0.4.0).
+	row, cfgErr := m.db.LDAPGetConfig(r.Context())
+	if cfgErr == nil && row.SudoersEnabled && row.SudoersGroupCN == cn {
+		jsonResponse(w, map[string]interface{}{
+			"error": fmt.Sprintf("group %q is the active sudoers group; disable sudoers before deleting", cn),
+			"code":  "system_reference",
+		}, http.StatusConflict)
+		return
+	}
+
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+
+	dn := dit.groupDN(cn)
 	if err := dit.DeleteGroup(cn); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupDeleted, "ldap_group", cn, r.RemoteAddr,
+		nil, directoryWriteAudit(dn, "delete", map[string]string{"cn": cn}))
+
+	// Also remove the group mode row if it exists.
+	_ = m.db.LDAPSetGroupMode(r.Context(), cn, "overlay", "system")
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -392,7 +537,16 @@ func (m *Manager) handleAddGroupMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dit, err := m.DIT(r.Context())
+	// Check group mode — only write to the directory if mode is "direct".
+	// In overlay mode, use the supplementary overlay (Sprint 7 path).
+	mode, _ := m.db.LDAPGetGroupMode(r.Context(), cn)
+	if mode != "direct" {
+		// Overlay mode: caller should use the overlay endpoint instead.
+		jsonError(w, `group is in overlay mode; use /api/v1/groups/<dn>/supplementary-members to add members without writing the directory`, http.StatusConflict)
+		return
+	}
+
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -401,6 +555,10 @@ func (m *Manager) handleAddGroupMember(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupUpdated, "ldap_group", cn, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.groupDN(cn), "modify_add_member", map[string]string{"memberUid": body.UID}))
+
 	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
@@ -408,7 +566,13 @@ func (m *Manager) handleRemoveGroupMember(w http.ResponseWriter, r *http.Request
 	cn := chi.URLParam(r, "cn")
 	uid := chi.URLParam(r, "uid")
 
-	dit, err := m.DIT(r.Context())
+	mode, _ := m.db.LDAPGetGroupMode(r.Context(), cn)
+	if mode != "direct" {
+		jsonError(w, `group is in overlay mode; use /api/v1/groups/<dn>/supplementary-members to manage members`, http.StatusConflict)
+		return
+	}
+
+	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -417,6 +581,10 @@ func (m *Manager) handleRemoveGroupMember(w http.ResponseWriter, r *http.Request
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupUpdated, "ldap_group", cn, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.groupDN(cn), "modify_remove_member", map[string]string{"memberUid": uid}))
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -535,6 +703,10 @@ func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusOK)
 		return
 	}
+
+	// Build write-capable status for the WRITE-SAFETY-2 banner.
+	writeStatus, writeCapable := m.WriteCapableStatus(r.Context())
+
 	// Return the config, masking the password.
 	jsonResponse(w, map[string]interface{}{
 		"enabled":         row.Enabled,
@@ -546,6 +718,13 @@ func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"ca_fingerprint":  row.CACertFingerprint,
 		// bind_password is write-only — never returned. Placeholder indicates if set.
 		"bind_password_set": row.AdminPasswd != "",
+		// Sprint 8 write-bind fields (WRITE-CFG-3).
+		"write_bind_dn_set":   row.WriteBindDN != "",
+		"write_capable":       writeCapable,
+		"write_status":        writeStatus,
+		"write_capable_detail": row.WriteCapableDetail,
+		// dialect is always openldap for the built-in slapd (WRITE-DIALECT-1).
+		"backend_dialect": string(DialectOpenLDAP),
 	}, http.StatusOK)
 }
 
@@ -639,6 +818,177 @@ func (m *Manager) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
 		users = []LDAPUser{}
 	}
 	jsonResponse(w, map[string]interface{}{"users": users, "total": len(users)}, http.StatusOK)
+}
+
+// ─── Sprint 8: write-bind config (WRITE-CFG-1..3) ────────────────────────────
+
+// handlePutWriteBind handles PUT /api/v1/ldap/write-bind.
+// Accepts write_bind_dn and write_bind_password, persists them, runs a probe, and
+// returns the probe result. Passing empty strings clears the write bind.
+func (m *Manager) handlePutWriteBind(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WriteBindDN       string `json:"write_bind_dn"`
+		WriteBindPassword string `json:"write_bind_password"` // write-only — never returned
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Audit before saving so we capture intent even if the probe fails.
+	actorIP := r.RemoteAddr
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPWriteBindSaved, "ldap", "write_bind", actorIP,
+		nil,
+		map[string]interface{}{
+			"write_bind_dn_set":       body.WriteBindDN != "",
+			"write_bind_password_set": body.WriteBindPassword != "",
+			"directory_write":         true,
+		},
+	)
+
+	var probeCapable bool
+	var probeDetail string
+	err := m.SaveWriteBind(r.Context(), body.WriteBindDN, body.WriteBindPassword,
+		func(capable bool, detail string) {
+			probeCapable = capable
+			probeDetail = detail
+			m.audit.Record(r.Context(), "", "", db.AuditActionLDAPWriteProbe, "ldap", "write_bind", actorIP,
+				nil,
+				map[string]interface{}{
+					"directory_write": true,
+					"capable":         capable,
+					"detail":          detail,
+				},
+			)
+		},
+	)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, map[string]interface{}{
+		"write_bind_dn_set": body.WriteBindDN != "",
+		"write_capable":     probeCapable,
+		"write_status":      map[string]interface{}{"capable": probeCapable, "detail": probeDetail},
+	}, http.StatusOK)
+}
+
+// handleGetWriteCapable handles GET /api/v1/ldap/write-capable.
+// Returns the cached probe result and write-bind status.
+func (m *Manager) handleGetWriteCapable(w http.ResponseWriter, r *http.Request) {
+	row, err := m.db.LDAPGetConfig(r.Context())
+	if err != nil {
+		jsonError(w, "failed to read LDAP config", http.StatusInternalServerError)
+		return
+	}
+
+	status, capable := m.WriteCapableStatus(r.Context())
+	jsonResponse(w, map[string]interface{}{
+		"write_bind_dn_set": row.WriteBindDN != "",
+		"write_capable":     capable,
+		"write_status":      status,
+		"write_capable_detail": row.WriteCapableDetail,
+	}, http.StatusOK)
+}
+
+// ─── Sprint 8: WRITE-USER-4 — admin password reset ───────────────────────────
+
+// handleResetPassword handles POST /api/v1/ldap/users/{uid}/reset-password.
+// Generates a cryptographically random temp password, applies it to the LDAP
+// entry with forceChange=true, and returns the temp password once in the
+// response. The caller MUST show it to the operator and then discard it.
+func (m *Manager) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	uid := chi.URLParam(r, "uid")
+
+	dit, err := m.WriteBind(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Generate a 20-char random password.
+	tempPwd, err := generateRandomPassword(20)
+	if err != nil {
+		jsonError(w, "failed to generate temporary password", http.StatusInternalServerError)
+		return
+	}
+
+	if err := dit.SetPassword(uid, tempPwd, true); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Audit — attribute hash only, never the password value.
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPPasswordReset, "ldap_user", uid, r.RemoteAddr,
+		nil,
+		directoryWriteAudit(dit.userDN(uid), "password_reset", map[string]string{
+			"userPassword": tempPwd, // value is hashed inside directoryWriteAudit
+		}),
+	)
+
+	// Return the temp password exactly once.
+	jsonResponse(w, map[string]interface{}{
+		"uid":          uid,
+		"temp_password": tempPwd,
+		"force_change":  true,
+		"note":          "Show this to the operator once. It will not be returned again.",
+	}, http.StatusOK)
+}
+
+// ─── Sprint 8: WRITE-GRP-4 — per-group mode toggle ───────────────────────────
+
+// handleSetGroupMode handles PUT /api/v1/ldap/groups/{cn}/mode.
+// Body: {"mode": "overlay"|"direct"}
+func (m *Manager) handleSetGroupMode(w http.ResponseWriter, r *http.Request) {
+	cn := chi.URLParam(r, "cn")
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Mode != "overlay" && body.Mode != "direct" {
+		jsonError(w, `mode must be "overlay" or "direct"`, http.StatusBadRequest)
+		return
+	}
+
+	// When switching to direct, check write capability.
+	if body.Mode == "direct" {
+		_, capable := m.WriteCapableStatus(r.Context())
+		if !capable {
+			jsonError(w, "write bind is not configured or write probe failed — configure a write bind before enabling direct mode", http.StatusConflict)
+			return
+		}
+	}
+
+	if err := m.db.LDAPSetGroupMode(r.Context(), cn, body.Mode, r.RemoteAddr); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPGroupModeChanged, "ldap_group", cn, r.RemoteAddr,
+		nil,
+		map[string]interface{}{
+			"directory_write": true,
+			"cn":              cn,
+			"mode":            body.Mode,
+		},
+	)
+
+	jsonResponse(w, map[string]interface{}{"cn": cn, "mode": body.Mode}, http.StatusOK)
+}
+
+// handleGetGroupMode handles GET /api/v1/ldap/groups/{cn}/mode.
+func (m *Manager) handleGetGroupMode(w http.ResponseWriter, r *http.Request) {
+	cn := chi.URLParam(r, "cn")
+	mode, err := m.db.LDAPGetGroupMode(r.Context(), cn)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"cn": cn, "mode": mode}, http.StatusOK)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

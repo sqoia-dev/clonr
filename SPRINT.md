@@ -787,44 +787,44 @@ Promote LDAP integration from read-only to read-write. Operators no longer need 
 
 #### LDAP write — config
 
-- [ ] **WRITE-CFG-1** Server: extend `LDAPConfig` with optional `write_bind_dn` and `write_bind_password` (both write-only — never returned). PUT `/api/v1/ldap/config` accepts them.
-- [ ] **WRITE-CFG-2** Server: at config-save time, perform a probe operation (e.g. read+write a tombstone OU, then delete it) with the write bind. Return result as `write_capable: bool` + reason. UI surfaces a yellow banner when not write-capable.
-- [ ] **WRITE-CFG-3** Web LDAP config section: add the second bind credentials below the read bind. Tooltip: "Optional. Required only if you want to create/edit/delete users and groups in LDAP from clustr." Status indicator: write-capable / read-only / untested.
+- [x] **WRITE-CFG-1** Server: extend `LDAPConfig` with optional `write_bind_dn` and `write_bind_password` (both write-only — never returned). PUT `/api/v1/ldap/config` accepts them.
+- [x] **WRITE-CFG-2** Server: at config-save time, perform a probe operation (e.g. read+write a tombstone OU, then delete it) with the write bind. Return result as `write_capable: bool` + reason. UI surfaces a yellow banner when not write-capable.
+- [x] **WRITE-CFG-3** Web LDAP config section: add the second bind credentials below the read bind. Tooltip: "Optional. Required only if you want to create/edit/delete users and groups in LDAP from clustr." Status indicator: write-capable / read-only / untested.
 
 #### LDAP user write
 
-- [ ] **WRITE-USER-1** Server: `POST /api/v1/ldap/users` accepts `{username, full_name?, email?, gid?, ssh_keys?, initial_password?}`. Builds the LDIF entry per backend dialect, binds with write creds, adds the entry. Returns the new DN.
-- [ ] **WRITE-USER-2** Server: `PATCH /api/v1/ldap/users/{dn}` accepts a partial set of attributes. Per-backend modify operations.
-- [ ] **WRITE-USER-3** Server: `DELETE /api/v1/ldap/users/{dn}` removes the entry. Refuse with 409 if removing this entry would orphan group memberships beyond a configurable threshold (safety net).
-- [ ] **WRITE-USER-4** Server: `POST /api/v1/ldap/users/{dn}/reset-password` — server generates a temp password, applies it to the directory entry, returns the temp value once. Per-backend password change op (OpenLDAP password modify extended op vs AD `unicodePwd` vs FreeIPA `pwd_policy`).
-- [ ] **WRITE-USER-5** Web Identity → Users → LDAP sub-card: add "Add LDAP user" button. On each search result row: Edit / Delete / Reset Password buttons. Edit opens an inline form with attribute fields. Reset shows the temp pwd once with a copy button (mirrors local-user reset UX).
-- [ ] **WRITE-USER-6** Inline destructive confirm on delete (typed LDAP username).
-- [ ] **WRITE-USER-7** Cmd-K: "Add LDAP user…", "Edit LDAP user…", "Reset LDAP password…", "Delete LDAP user…".
+- [x] **WRITE-USER-1** Server: `POST /api/v1/ldap/users` accepts `{username, full_name?, email?, gid?, ssh_keys?, initial_password?}`. Builds the LDIF entry per backend dialect, binds with write creds, adds the entry. Returns the new DN.
+- [x] **WRITE-USER-2** Server: `PATCH /api/v1/ldap/users/{dn}` accepts a partial set of attributes. Per-backend modify operations.
+- [x] **WRITE-USER-3** Server: `DELETE /api/v1/ldap/users/{dn}` removes the entry. Refuse with 409 if removing this entry would orphan group memberships beyond a configurable threshold (safety net).
+- [x] **WRITE-USER-4** Server: `POST /api/v1/ldap/users/{dn}/reset-password` — server generates a temp password, applies it to the directory entry, returns the temp value once. Per-backend password change op (OpenLDAP password modify extended op vs AD `unicodePwd` vs FreeIPA `pwd_policy`).
+- [x] **WRITE-USER-5** Web Identity → Users → LDAP sub-card: add "Add LDAP user" button. On each search result row: Edit / Delete / Reset Password buttons. Edit opens an inline form with attribute fields. Reset shows the temp pwd once with a copy button (mirrors local-user reset UX).
+- [x] **WRITE-USER-6** Inline destructive confirm on delete (typed LDAP username).
+- [x] **WRITE-USER-7** Cmd-K: "Add LDAP user…", "Edit LDAP user…", "Reset LDAP password…", "Delete LDAP user…".
 
 #### LDAP group write
 
-- [ ] **WRITE-GRP-1** Server: `POST /api/v1/ldap/groups` accepts `{name, gid_number?, description?, initial_members?}`. Creates the group entry per backend dialect.
-- [ ] **WRITE-GRP-2** Server: `PATCH /api/v1/ldap/groups/{dn}` accepts attribute changes including member list edits. Per-backend group-membership representation (`member` DN list vs `memberUid` username list).
-- [ ] **WRITE-GRP-3** Server: `DELETE /api/v1/ldap/groups/{dn}` removes the group entry. 409 if any system reference still uses it (sudoers, restrictions if Sprint 8.1+).
-- [ ] **WRITE-GRP-4** Web Identity → Groups: per LDAP group row, gain "Manage in directory" toggle (default off = Sprint 7 overlay behavior). When on, the row's Edit panel writes to the directory directly instead of clustr's overlay. Member changes go through `PATCH`.
-- [ ] **WRITE-GRP-5** "Add LDAP group" button at the top of the Groups section (alongside the existing "Create specialty group"). Inline form: name, gid (auto-suggest from directory), description, optional initial members from the user picker.
-- [ ] **WRITE-GRP-6** Cmd-K: "Add LDAP group…", "Edit LDAP group…", "Delete LDAP group…".
+- [x] **WRITE-GRP-1** Server: `POST /api/v1/ldap/groups` accepts `{name, gid_number?, description?, initial_members?}`. Creates the group entry per backend dialect.
+- [x] **WRITE-GRP-2** Server: `PATCH /api/v1/ldap/groups/{dn}` accepts attribute changes including member list edits. Per-backend group-membership representation (`member` DN list vs `memberUid` username list).
+- [x] **WRITE-GRP-3** Server: `DELETE /api/v1/ldap/groups/{dn}` removes the group entry. 409 if any system reference still uses it (sudoers, restrictions if Sprint 8.1+).
+- [x] **WRITE-GRP-4** Web Identity → Groups: per LDAP group row, gain "Manage in directory" toggle (default off = Sprint 7 overlay behavior). When on, the row's Edit panel writes to the directory directly instead of clustr's overlay. Member changes go through `PATCH`.
+- [x] **WRITE-GRP-5** "Add LDAP group" button at the top of the Groups section (alongside the existing "Create specialty group"). Inline form: name, gid (auto-suggest from directory), description, optional initial members from the user picker.
+- [x] **WRITE-GRP-6** Cmd-K: "Add LDAP group…", "Edit LDAP group…", "Delete LDAP group…".
 
 #### Audit + safety
 
-- [ ] **WRITE-AUDIT-1** Every write op is audit-logged in clustr's audit table with a `directory_write: true` tag, including the operator, the DN, the operation, and a hash of the changed attributes (NOT the values for sensitive ones like passwords).
-- [ ] **WRITE-SAFETY-1** Per-write inline-confirm with typed entity name on Delete and on Reset Password. Edit flows save inline without typed-confirm.
-- [ ] **WRITE-SAFETY-2** Read banner at the top of Identity → Users + Identity → Groups when write mode is active: "Writes go directly to your LDAP directory." Yellow when write bind is configured but unverified; green when probed-OK; absent when no write bind set.
+- [x] **WRITE-AUDIT-1** Every write op is audit-logged in clustr's audit table with a `directory_write: true` tag, including the operator, the DN, the operation, and a hash of the changed attributes (NOT the values for sensitive ones like passwords).
+- [x] **WRITE-SAFETY-1** Per-write inline-confirm with typed entity name on Delete and on Reset Password. Edit flows save inline without typed-confirm.
+- [x] **WRITE-SAFETY-2** Read banner at the top of Identity → Users + Identity → Groups when write mode is active: "Writes go directly to your LDAP directory." Yellow when write bind is configured but unverified; green when probed-OK; absent when no write bind set.
 
 #### Backend dialect
 
-- [ ] **WRITE-DIALECT-1** Server: detect (or operator-configures) backend type. Use `internal/ldap/Manager` to centralize per-dialect ops. Start with the dialect cloner currently uses; document the assumption clearly.
-- [ ] **WRITE-DIALECT-2** Provide a stub for each major backend (OpenLDAP, FreeIPA, AD, generic) that surfaces a clear "not implemented for this backend" error rather than silent no-op or corrupting writes.
+- [x] **WRITE-DIALECT-1** Server: detect (or operator-configures) backend type. Use `internal/ldap/Manager` to centralize per-dialect ops. Start with the dialect cloner currently uses; document the assumption clearly.
+- [x] **WRITE-DIALECT-2** Provide a stub for each major backend (OpenLDAP, FreeIPA, AD, generic) that surfaces a clear "not implemented for this backend" error rather than silent no-op or corrupting writes.
 
 #### Tests
 
-- [ ] **WRITE-TEST-1** Go: in-process LDAP server fixture (e.g. `github.com/go-ldap/ldap` with a fake backend, OR spin up `glauth` in CI). Tests for create/edit/delete user, create/edit/delete group, password reset against the fixture.
-- [ ] **WRITE-TEST-2** Vitest: write-form validation, optimistic update + rollback on directory error, dialect-specific error message rendering.
+- [x] **WRITE-TEST-1** Go: in-process LDAP server fixture (e.g. `github.com/go-ldap/ldap` with a fake backend, OR spin up `glauth` in CI). Tests for create/edit/delete user, create/edit/delete group, password reset against the fixture.
+- [x] **WRITE-TEST-2** Vitest: write-form validation, optimistic update + rollback on directory error, dialect-specific error message rendering.
 
 ### Out of scope (Sprint 9+)
 

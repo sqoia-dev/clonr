@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, RefreshCw, ShieldCheck, Users, Settings, Database } from "lucide-react"
+import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, RefreshCw, ShieldCheck, Users, Settings, Database, AlertTriangle, CheckCircle2, ToggleLeft, ToggleRight, KeyRound } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -20,6 +20,8 @@ import type {
   ListLDAPGroupsResponse,
   GroupOverlay,
   UserSearchResult,
+  LDAPGroupModeResponse,
+  LDAPResetPasswordResponse,
 } from "@/lib/types"
 import { formatDistanceToNow } from "date-fns"
 
@@ -366,9 +368,75 @@ function LocalUsersCard() {
   )
 }
 
+// ─── Write-mode banner (WRITE-SAFETY-2) ──────────────────────────────────────
+
+function WriteModeBanner({ config }: { config?: LDAPConfigResponse }) {
+  if (!config?.enabled) return null
+  // No write bind set at all — no banner
+  if (!config.write_bind_dn_set && config.write_capable === undefined) return null
+
+  const isGreen = config.write_capable === true
+  const isYellow = config.write_bind_dn_set && !config.write_capable
+
+  if (!isGreen && !isYellow) return null
+
+  return (
+    <div className={cn(
+      "flex items-center gap-2 px-3 py-1.5 text-[11px] rounded border mb-3",
+      isGreen
+        ? "border-green-500/30 bg-green-500/5 text-green-400"
+        : "border-amber-500/30 bg-amber-500/5 text-amber-400"
+    )}>
+      {isGreen
+        ? <CheckCircle2 className="h-3 w-3 shrink-0" />
+        : <AlertTriangle className="h-3 w-3 shrink-0" />
+      }
+      {isGreen
+        ? "Writes go directly to your LDAP directory."
+        : "Write bind configured but write probe not verified — save config to re-probe."
+      }
+    </div>
+  )
+}
+
+// ─── LDAP Users Card (WRITE-USER-5) ──────────────────────────────────────────
+
 function LDAPUsersCard() {
+  const qc = useQueryClient()
   const [q, setQ] = React.useState("")
   const [searched, setSearched] = React.useState(false)
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [editUser, setEditUser] = React.useState<LDAPUser | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = React.useState<LDAPUser | null>(null)
+  const [deleteInput, setDeleteInput] = React.useState("")
+  const [resetResult, setResetResult] = React.useState<{ uid: string; pwd: string } | null>(null)
+  const [showTempPwd, setShowTempPwd] = React.useState(false)
+  const [copyDone, setCopyDone] = React.useState(false)
+
+  // Add form state
+  const [fUID, setFUID] = React.useState("")
+  const [fCN, setFCN] = React.useState("")
+  const [fSN, setFSN] = React.useState("")
+  const [fUID_num, setFUID_num] = React.useState("")
+  const [fGID_num, setFGID_num] = React.useState("")
+  const [fHome, setFHome] = React.useState("")
+  const [fShell, setFShell] = React.useState("/bin/bash")
+  const [fPassword, setFPassword] = React.useState("")
+  const [addError, setAddError] = React.useState("")
+
+  // Edit form state
+  const [eCN, setECN] = React.useState("")
+  const [eSN, setESN] = React.useState("")
+  const [eHome, setEHome] = React.useState("")
+  const [eShell, setEShell] = React.useState("")
+
+  // Get write-capable status for banner
+  const { data: configData } = useQuery<LDAPConfigResponse>({
+    queryKey: ["ldap-config"],
+    queryFn: () => apiFetch<LDAPConfigResponse>("/api/v1/ldap/config"),
+    staleTime: 15000,
+    retry: false,
+  })
 
   const { data, isFetching, refetch } = useQuery<{ users: LDAPUser[]; total: number }>({
     queryKey: ["ldap-users-search", q],
@@ -377,18 +445,146 @@ function LDAPUsersCard() {
     staleTime: 30000,
   })
 
+  const createMutation = useMutation({
+    mutationFn: () => apiFetch("/api/v1/ldap/users", {
+      method: "POST",
+      body: JSON.stringify({
+        uid: fUID, cn: fCN || fUID, sn: fSN || fUID,
+        uid_number: Number(fUID_num) || 0, gid_number: Number(fGID_num) || 0,
+        home_directory: fHome || `/home/${fUID}`, login_shell: fShell,
+        password: fPassword,
+      }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
+      setAddOpen(false)
+      setFUID(""); setFCN(""); setFSN(""); setFUID_num(""); setFGID_num("")
+      setFHome(""); setFShell("/bin/bash"); setFPassword(""); setAddError("")
+      toast({ title: "LDAP user created" })
+      if (searched) refetch()
+    },
+    onError: (err) => setAddError(String(err)),
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (uid: string) => apiFetch(`/api/v1/ldap/users/${encodeURIComponent(uid)}`, {
+      method: "PUT",
+      body: JSON.stringify({ cn: eCN, sn: eSN, home_directory: eHome, login_shell: eShell }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
+      setEditUser(null)
+      toast({ title: "User updated" })
+      refetch()
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Update failed", description: String(err) }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (uid: string) => apiFetch(`/api/v1/ldap/users/${encodeURIComponent(uid)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
+      setDeleteConfirm(null); setDeleteInput("")
+      toast({ title: "LDAP user deleted" })
+      refetch()
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Delete failed", description: String(err) }),
+  })
+
+  const resetPwdMutation = useMutation({
+    mutationFn: (uid: string) => apiFetch<LDAPResetPasswordResponse>(
+      `/api/v1/ldap/users/${encodeURIComponent(uid)}/reset-password`, { method: "POST" }
+    ),
+    onSuccess: (res) => {
+      setResetResult({ uid: res.uid, pwd: res.temp_password })
+      setShowTempPwd(false)
+      toast({ title: "Password reset — show the operator the temp password" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Reset failed", description: String(err) }),
+  })
+
   function handleSearch() {
     setSearched(true)
     refetch()
   }
 
+  function startEdit(u: LDAPUser) {
+    setEditUser(u)
+    setECN(u.cn ?? "")
+    setESN(u.sn ?? "")
+    setEHome(u.home_directory ?? "")
+    setEShell(u.login_shell ?? "/bin/bash")
+  }
+
   const users = data?.users ?? []
+  const writeCapable = configData?.write_capable ?? false
 
   return (
     <div className="rounded-md border border-border bg-card">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-        <span className="text-xs font-medium text-muted-foreground">LDAP users (read-only)</span>
+        <span className="text-xs font-medium text-muted-foreground">LDAP users</span>
+        {writeCapable && (
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAddOpen(true)}>
+            <Plus className="h-3 w-3 mr-1" /> Add LDAP user
+          </Button>
+        )}
       </div>
+
+      {/* Write-mode banner */}
+      {configData && <div className="px-4 pt-3"><WriteModeBanner config={configData} /></div>}
+
+      {/* Temp password panel (WRITE-USER-5 — show once) */}
+      {resetResult && (
+        <div className="px-4 py-3 border-b border-border bg-amber-500/5 space-y-2">
+          <p className="text-xs font-medium text-amber-400">Temp password for {resetResult.uid} — show ONCE to user</p>
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-sm flex-1">
+              {showTempPwd ? resetResult.pwd : "••••••••••••••••••••"}
+            </code>
+            <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => setShowTempPwd((v) => !v)}>
+              {showTempPwd ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]"
+              onClick={() => { navigator.clipboard.writeText(resetResult.pwd); setCopyDone(true); setTimeout(() => setCopyDone(false), 2000) }}>
+              {copyDone ? "Copied!" : "Copy"}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => { setResetResult(null); setCopyDone(false) }}>
+              <X className="h-3 w-3" />
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">User must change password at next login.</p>
+        </div>
+      )}
+
+      {/* Add form */}
+      {addOpen && (
+        <div className="px-4 py-3 border-b border-border bg-secondary/10 space-y-2">
+          <p className="text-xs font-medium">New LDAP user</p>
+          <div className="grid grid-cols-3 gap-2">
+            <Input className="text-xs h-7 font-mono" placeholder="UID (username)" value={fUID} onChange={(e) => setFUID(e.target.value)} autoFocus />
+            <Input className="text-xs h-7" placeholder="Display name (CN)" value={fCN} onChange={(e) => setFCN(e.target.value)} />
+            <Input className="text-xs h-7" placeholder="Surname (SN)" value={fSN} onChange={(e) => setFSN(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Input className="text-xs h-7 font-mono" placeholder="UID number (0=auto)" type="number" value={fUID_num} onChange={(e) => setFUID_num(e.target.value)} />
+            <Input className="text-xs h-7 font-mono" placeholder="GID number (0=auto)" type="number" value={fGID_num} onChange={(e) => setFGID_num(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Input className="text-xs h-7 font-mono" placeholder={`Home dir (/home/${fUID})`} value={fHome} onChange={(e) => setFHome(e.target.value)} />
+            <Input className="text-xs h-7 font-mono" placeholder="Shell (/bin/bash)" value={fShell} onChange={(e) => setFShell(e.target.value)} />
+          </div>
+          <Input className="text-xs h-7 font-mono" type="password" placeholder="Initial password (optional)" value={fPassword} onChange={(e) => setFPassword(e.target.value)} />
+          {addError && <p className="text-xs text-destructive">{addError}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" className="flex-1 text-xs" disabled={!fUID || createMutation.isPending} onClick={() => createMutation.mutate()}>
+              {createMutation.isPending ? "Creating…" : "Create LDAP user"}
+            </Button>
+            <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setAddOpen(false); setAddError("") }}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {/* Search */}
       <div className="px-4 py-3 space-y-3">
         <div className="flex gap-2">
           <Input
@@ -403,10 +599,7 @@ function LDAPUsersCard() {
           </Button>
         </div>
 
-        {!searched && (
-          <p className="text-xs text-muted-foreground">Search to browse LDAP directory users. Results are read-only.</p>
-        )}
-
+        {!searched && <p className="text-xs text-muted-foreground">Search to browse LDAP directory users.</p>}
         {searched && !isFetching && users.length === 0 && (
           <p className="text-xs text-muted-foreground">No LDAP users found. Check that the LDAP module is enabled and ready.</p>
         )}
@@ -419,16 +612,68 @@ function LDAPUsersCard() {
                 <th className="py-1.5 text-left text-[11px] font-medium text-muted-foreground">Name</th>
                 <th className="py-1.5 text-left text-[11px] font-medium text-muted-foreground">Email</th>
                 <th className="py-1.5 text-left text-[11px] font-medium text-muted-foreground">GID</th>
+                {writeCapable && <th className="py-1.5 text-right text-[11px] font-medium text-muted-foreground">Actions</th>}
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.uid} className="border-b border-border/50 hover:bg-secondary/20">
-                  <td className="py-1.5 font-mono pr-4">{u.uid}</td>
-                  <td className="py-1.5 pr-4">{[u.given_name, u.sn].filter(Boolean).join(" ") || "—"}</td>
-                  <td className="py-1.5 pr-4 text-muted-foreground">{u.mail || "—"}</td>
-                  <td className="py-1.5 font-mono text-muted-foreground">{u.gid_number ?? "—"}</td>
-                </tr>
+                <React.Fragment key={u.uid}>
+                  <tr className="border-b border-border/50 hover:bg-secondary/20">
+                    <td className="py-1.5 font-mono pr-4">{u.uid}</td>
+                    <td className="py-1.5 pr-4">
+                      {editUser?.uid === u.uid ? (
+                        <Input className="h-6 text-[11px] w-full" value={eCN} onChange={(e) => setECN(e.target.value)} placeholder="Display name" />
+                      ) : (
+                        [u.given_name, u.sn].filter(Boolean).join(" ") || "—"
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-4 text-muted-foreground">{u.mail || "—"}</td>
+                    <td className="py-1.5 font-mono text-muted-foreground">{u.gid_number ?? "—"}</td>
+                    {writeCapable && (
+                      <td className="py-1.5 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          {editUser?.uid === u.uid ? (
+                            <>
+                              <Button size="sm" className="h-6 px-2 text-[11px]" onClick={() => updateMutation.mutate(u.uid)} disabled={updateMutation.isPending}>Save</Button>
+                              <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => setEditUser(null)}><X className="h-3 w-3" /></Button>
+                            </>
+                          ) : (
+                            <>
+                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => startEdit(u)} title="Edit user">
+                                <Pencil className="h-3 w-3" />
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => resetPwdMutation.mutate(u.uid)} disabled={resetPwdMutation.isPending} title="Reset password">
+                                <KeyRound className="h-3 w-3" />
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-destructive hover:text-destructive" onClick={() => setDeleteConfirm(u)} title="Delete user">
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                  {/* Delete confirm row (WRITE-USER-6) */}
+                  {deleteConfirm?.uid === u.uid && (
+                    <tr className="border-b border-border/50 bg-destructive/5">
+                      <td colSpan={writeCapable ? 5 : 4} className="px-1 py-2">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-muted-foreground">Type <code className="font-mono">{u.uid}</code> to delete from directory:</span>
+                          <Input className="h-6 w-32 text-[11px] font-mono" value={deleteInput} onChange={(e) => setDeleteInput(e.target.value)} autoFocus />
+                          <Button size="sm" variant="destructive" className="h-6 px-2 text-[11px]"
+                            disabled={deleteInput !== u.uid || deleteMutation.isPending}
+                            onClick={() => deleteMutation.mutate(u.uid)}>
+                            Delete
+                          </Button>
+                          <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => { setDeleteConfirm(null); setDeleteInput("") }}>
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -464,19 +709,93 @@ function GroupsSection() {
 }
 
 function LDAPGroupsCard() {
-  const [expandedDN, setExpandedDN] = React.useState<string | null>(null)
+  const qc = useQueryClient()
+  const [expandedCN, setExpandedCN] = React.useState<string | null>(null)
+  const [addGroupOpen, setAddGroupOpen] = React.useState(false)
+  const [deleteConfirm, setDeleteConfirm] = React.useState<LDAPGroup | null>(null)
+  const [deleteInput, setDeleteInput] = React.useState("")
 
-  const { data, isLoading } = useQuery<ListLDAPGroupsResponse>({
+  // Add group form
+  const [fCN, setFCN] = React.useState("")
+  const [fGID, setFGID] = React.useState("")
+  const [fDesc, setFDesc] = React.useState("")
+  const [addError, setAddError] = React.useState("")
+
+  const { data: configData } = useQuery<LDAPConfigResponse>({
+    queryKey: ["ldap-config"],
+    queryFn: () => apiFetch<LDAPConfigResponse>("/api/v1/ldap/config"),
+    staleTime: 15000,
+    retry: false,
+  })
+  const writeCapable = configData?.write_capable ?? false
+
+  const { data, isLoading, refetch } = useQuery<ListLDAPGroupsResponse>({
     queryKey: ["ldap-groups"],
     queryFn: () => apiFetch<ListLDAPGroupsResponse>("/api/v1/ldap/groups"),
     staleTime: 30000,
     retry: false,
   })
 
+  const createGroupMutation = useMutation({
+    mutationFn: () => apiFetch("/api/v1/ldap/groups", {
+      method: "POST",
+      body: JSON.stringify({ cn: fCN, gid_number: Number(fGID) || 0, description: fDesc }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-groups"] })
+      setAddGroupOpen(false)
+      setFCN(""); setFGID(""); setFDesc(""); setAddError("")
+      toast({ title: "LDAP group created" })
+    },
+    onError: (err) => setAddError(String(err)),
+  })
+
+  const deleteGroupMutation = useMutation({
+    mutationFn: (cn: string) => apiFetch(`/api/v1/ldap/groups/${encodeURIComponent(cn)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-groups"] })
+      setDeleteConfirm(null); setDeleteInput("")
+      toast({ title: "LDAP group deleted" })
+      refetch()
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Delete failed", description: String(err) }),
+  })
+
   const groups = data?.groups ?? []
 
   return (
     <div className="rounded-md border border-border bg-card">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <span className="text-xs font-medium text-muted-foreground">LDAP groups</span>
+        {writeCapable && (
+          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAddGroupOpen(true)}>
+            <Plus className="h-3 w-3 mr-1" /> Add LDAP group
+          </Button>
+        )}
+      </div>
+
+      {/* Write-mode banner */}
+      {configData && <div className="px-4 pt-3"><WriteModeBanner config={configData} /></div>}
+
+      {/* Add group form (WRITE-GRP-5) */}
+      {addGroupOpen && (
+        <div className="px-4 py-3 border-b border-border bg-secondary/10 space-y-2">
+          <p className="text-xs font-medium">New LDAP group</p>
+          <div className="grid grid-cols-2 gap-2">
+            <Input className="text-xs h-7 font-mono" placeholder="CN (group name)" value={fCN} onChange={(e) => setFCN(e.target.value)} autoFocus />
+            <Input className="text-xs h-7 font-mono" placeholder="GID number (0=auto)" type="number" value={fGID} onChange={(e) => setFGID(e.target.value)} />
+          </div>
+          <Input className="text-xs h-7" placeholder="Description (optional)" value={fDesc} onChange={(e) => setFDesc(e.target.value)} />
+          {addError && <p className="text-xs text-destructive">{addError}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" className="flex-1 text-xs" disabled={!fCN || createGroupMutation.isPending} onClick={() => createGroupMutation.mutate()}>
+              {createGroupMutation.isPending ? "Creating…" : "Create group"}
+            </Button>
+            <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setAddGroupOpen(false); setAddError("") }}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="p-4 space-y-2"><Skeleton className="h-5 w-full" /><Skeleton className="h-5 w-2/3" /></div>
       ) : groups.length === 0 ? (
@@ -488,7 +807,8 @@ function LDAPGroupsCard() {
               <th className="px-4 py-2 text-left text-[11px] font-medium text-muted-foreground">CN</th>
               <th className="px-4 py-2 text-left text-[11px] font-medium text-muted-foreground">GID</th>
               <th className="px-4 py-2 text-left text-[11px] font-medium text-muted-foreground">Members</th>
-              <th className="px-4 py-2 text-left text-[11px] font-medium text-muted-foreground">Source</th>
+              <th className="px-4 py-2 text-left text-[11px] font-medium text-muted-foreground">Mode</th>
+              {writeCapable && <th className="px-4 py-2 text-right text-[11px] font-medium text-muted-foreground">Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -496,19 +816,49 @@ function LDAPGroupsCard() {
               <React.Fragment key={g.cn}>
                 <tr
                   className="border-b border-border/50 hover:bg-secondary/20 cursor-pointer"
-                  onClick={() => setExpandedDN(expandedDN === g.cn ? null : g.cn)}
+                  onClick={() => setExpandedCN(expandedCN === g.cn ? null : g.cn)}
                 >
                   <td className="px-4 py-2 font-mono">{g.cn}</td>
                   <td className="px-4 py-2 font-mono text-muted-foreground">{g.gid_number}</td>
                   <td className="px-4 py-2 text-muted-foreground">{g.member_uids?.length ?? 0}</td>
-                  <td className="px-4 py-2">
-                    <span className="rounded px-1.5 py-0.5 text-[10px] bg-blue-500/10 text-blue-400">LDAP</span>
+                  <td className="px-4 py-2" onClick={(e) => e.stopPropagation()}>
+                    {writeCapable
+                      ? <GroupModeToggle cn={g.cn} />
+                      : <span className="rounded px-1.5 py-0.5 text-[10px] bg-blue-500/10 text-blue-400">LDAP</span>
+                    }
                   </td>
+                  {writeCapable && (
+                    <td className="px-4 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+                      <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+                        onClick={() => setDeleteConfirm(g)} title="Delete group">
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </td>
+                  )}
                 </tr>
-                {expandedDN === g.cn && (
+                {/* Delete confirm */}
+                {deleteConfirm?.cn === g.cn && (
+                  <tr className="border-b border-border/50 bg-destructive/5">
+                    <td colSpan={writeCapable ? 5 : 4} className="px-4 py-2">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">Type <code className="font-mono">{g.cn}</code> to delete from directory:</span>
+                        <Input className="h-6 w-32 text-[11px] font-mono" value={deleteInput} onChange={(e) => setDeleteInput(e.target.value)} autoFocus />
+                        <Button size="sm" variant="destructive" className="h-6 px-2 text-[11px]"
+                          disabled={deleteInput !== g.cn || deleteGroupMutation.isPending}
+                          onClick={() => deleteGroupMutation.mutate(g.cn)}>
+                          Delete
+                        </Button>
+                        <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => { setDeleteConfirm(null); setDeleteInput("") }}>
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {expandedCN === g.cn && (
                   <tr className="border-b border-border/50">
-                    <td colSpan={4} className="px-4 py-3 bg-secondary/5">
-                      <LDAPGroupDetail group={g} />
+                    <td colSpan={writeCapable ? 5 : 4} className="px-4 py-3 bg-secondary/5">
+                      <LDAPGroupDetail group={g} writeCapable={writeCapable} />
                     </td>
                   </tr>
                 )}
@@ -521,7 +871,51 @@ function LDAPGroupsCard() {
   )
 }
 
-function LDAPGroupDetail({ group }: { group: LDAPGroup }) {
+// ─── Group mode toggle (WRITE-GRP-4) ─────────────────────────────────────────
+
+function GroupModeToggle({ cn: groupCN }: { cn: string }) {
+  const qc = useQueryClient()
+  const { data } = useQuery<LDAPGroupModeResponse>({
+    queryKey: ["ldap-group-mode", groupCN],
+    queryFn: () => apiFetch<LDAPGroupModeResponse>(`/api/v1/ldap/groups/${encodeURIComponent(groupCN)}/mode`),
+    staleTime: 10000,
+    retry: false,
+  })
+
+  const toggleMutation = useMutation({
+    mutationFn: (newMode: "overlay" | "direct") =>
+      apiFetch(`/api/v1/ldap/groups/${encodeURIComponent(groupCN)}/mode`, {
+        method: "PUT",
+        body: JSON.stringify({ mode: newMode }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-group-mode", groupCN] })
+      toast({ title: "Group mode updated" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Mode change failed", description: String(err) }),
+  })
+
+  const isDirect = data?.mode === "direct"
+
+  return (
+    <button
+      className={cn(
+        "inline-flex items-center gap-1 text-[10px] rounded px-1.5 py-0.5 transition-colors",
+        isDirect
+          ? "bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+          : "bg-blue-500/10 text-blue-400 hover:bg-blue-500/20"
+      )}
+      onClick={() => toggleMutation.mutate(isDirect ? "overlay" : "direct")}
+      title={isDirect ? "Switch to overlay mode (no directory writes)" : "Switch to direct mode (writes to directory)"}
+      disabled={toggleMutation.isPending}
+    >
+      {isDirect ? <ToggleRight className="h-3 w-3" /> : <ToggleLeft className="h-3 w-3" />}
+      {isDirect ? "direct" : "overlay"}
+    </button>
+  )
+}
+
+function LDAPGroupDetail({ group, writeCapable = false }: { group: LDAPGroup; writeCapable?: boolean }) {
   const qc = useQueryClient()
   const groupDN = encodeURIComponent(`cn=${group.cn}`)
 
@@ -980,9 +1374,10 @@ function SystemAccountsSection() {
   )
 }
 
-// ─── LDAP config section (LDAP-1..5) ─────────────────────────────────────────
+// ─── LDAP config section (LDAP-1..5, WRITE-CFG-3) ────────────────────────────
 
 function LDAPConfigSection() {
+  const qc = useQueryClient()
   const { data, isLoading } = useQuery<LDAPConfigResponse>({
     queryKey: ["ldap-config"],
     queryFn: () => apiFetch<LDAPConfigResponse>("/api/v1/ldap/config"),
@@ -992,6 +1387,13 @@ function LDAPConfigSection() {
 
   const [testResult, setTestResult] = React.useState<LDAPTestResponse | null>(null)
   const [testing, setTesting] = React.useState(false)
+
+  // Write-bind form state (WRITE-CFG-3)
+  const [writeBindOpen, setWriteBindOpen] = React.useState(false)
+  const [wbDN, setWbDN] = React.useState("")
+  const [wbPass, setWbPass] = React.useState("")
+  const [wbSaving, setWbSaving] = React.useState(false)
+  const [wbResult, setWbResult] = React.useState<string | null>(null)
 
   async function handleTest() {
     setTesting(true)
@@ -1006,14 +1408,34 @@ function LDAPConfigSection() {
     }
   }
 
+  async function handleSaveWriteBind() {
+    setWbSaving(true)
+    setWbResult(null)
+    try {
+      const res = await apiFetch<{ write_capable: boolean; write_status: { capable: boolean; detail: string } }>(
+        "/api/v1/ldap/write-bind",
+        { method: "PUT", body: JSON.stringify({ write_bind_dn: wbDN, write_bind_password: wbPass }) }
+      )
+      setWbResult(res.write_capable ? "Write probe OK" : `Write probe failed: ${res.write_status?.detail ?? "unknown"}`)
+      qc.invalidateQueries({ queryKey: ["ldap-config"] })
+      setWbPass("") // clear password from form after save
+    } catch (err) {
+      setWbResult(`Error: ${String(err)}`)
+    } finally {
+      setWbSaving(false)
+    }
+  }
+
   return (
     <Section title="LDAP config" icon={Settings} id="ldap-config">
       <div className="rounded-md border border-border bg-card">
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <span className="text-xs font-medium text-muted-foreground">Built-in OpenLDAP module</span>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleTest} disabled={testing}>
-            {testing ? "Testing…" : "Test connection"}
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleTest} disabled={testing}>
+              {testing ? "Testing…" : "Test connection"}
+            </Button>
+          </div>
         </div>
 
         {testResult && (
@@ -1057,9 +1479,54 @@ function LDAPConfigSection() {
             <LDAPConfigRow label="CA fingerprint">
               <code className="font-mono text-[11px] break-all">{data?.ca_fingerprint || "—"}</code>
             </LDAPConfigRow>
-            <LDAPConfigRow label="Bind password">
+            <LDAPConfigRow label="Read bind">
               <span className="text-[11px] text-muted-foreground">{data?.bind_password_set ? "set" : "not set"}</span>
             </LDAPConfigRow>
+
+            {/* Sprint 8 write-bind config (WRITE-CFG-3) */}
+            <LDAPConfigRow label="Write bind">
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                  data?.write_capable === true ? "bg-green-500/10 text-green-400" :
+                    data?.write_bind_dn_set ? "bg-amber-500/10 text-amber-400" :
+                      "bg-secondary text-muted-foreground"
+                )}>
+                  {data?.write_capable === true ? "write-capable"
+                    : data?.write_bind_dn_set ? "unverified"
+                    : "not set (DM fallback)"}
+                </span>
+                <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px]" onClick={() => setWriteBindOpen((v) => !v)}>
+                  {writeBindOpen ? "Cancel" : "Configure"}
+                </Button>
+              </div>
+            </LDAPConfigRow>
+            <LDAPConfigRow label="Backend">
+              <span className="text-[11px] text-muted-foreground">{data?.backend_dialect ?? "openldap"}</span>
+              <span className="ml-1 text-[10px] text-green-400 rounded px-1 bg-green-500/10">implemented</span>
+            </LDAPConfigRow>
+
+            {/* Write-bind form */}
+            {writeBindOpen && (
+              <div className="mt-2 rounded border border-border bg-secondary/5 px-3 py-2 space-y-2">
+                <p className="text-[11px] font-medium">Write bind credentials</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Optional. Required only if you want to create/edit/delete users and groups in LDAP from clustr.
+                  Leave password blank to keep the existing one.
+                </p>
+                <Input className="text-xs h-7 font-mono" placeholder="Write bind DN (e.g. cn=admin,dc=cluster,dc=local)" value={wbDN} onChange={(e) => setWbDN(e.target.value)} />
+                <Input className="text-xs h-7 font-mono" type="password" placeholder="Write bind password (leave blank to keep)" value={wbPass} onChange={(e) => setWbPass(e.target.value)} />
+                {wbResult && (
+                  <p className={cn("text-[11px]", wbResult.startsWith("Write probe OK") ? "text-green-400" : "text-destructive")}>{wbResult}</p>
+                )}
+                <div className="flex gap-2">
+                  <Button size="sm" className="flex-1 text-xs" disabled={wbSaving} onClick={handleSaveWriteBind}>
+                    {wbSaving ? "Saving & probing…" : "Save + probe write"}
+                  </Button>
+                  <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setWriteBindOpen(false); setWbResult(null) }}>Cancel</Button>
+                </div>
+              </div>
+            )}
 
             {!data?.enabled && (
               <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 mt-3">

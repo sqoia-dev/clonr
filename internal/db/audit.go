@@ -85,6 +85,19 @@ const (
 	AuditActionSysAccountCreated = "system-account.created"
 	AuditActionSysAccountUpdated = "system-account.updated"
 	AuditActionSysAccountDeleted = "system-account.deleted"
+
+	// Sprint 8 — LDAP directory write events (WRITE-AUDIT-1).
+	// All directory writes carry directory_write:true in new_value JSON.
+	AuditActionLDAPUserCreated      = "ldap.directory.user.created"
+	AuditActionLDAPUserUpdated      = "ldap.directory.user.updated"
+	AuditActionLDAPUserDeleted      = "ldap.directory.user.deleted"
+	AuditActionLDAPPasswordReset    = "ldap.directory.user.password_reset"    //#nosec G101 -- audit event name, not a credential
+	AuditActionLDAPGroupCreated     = "ldap.directory.group.created"
+	AuditActionLDAPGroupUpdated     = "ldap.directory.group.updated"
+	AuditActionLDAPGroupDeleted     = "ldap.directory.group.deleted"
+	AuditActionLDAPGroupModeChanged = "ldap.directory.group.mode_changed"
+	AuditActionLDAPWriteBindSaved   = "ldap.write_bind.saved"
+	AuditActionLDAPWriteProbe       = "ldap.write_bind.probe"
 )
 
 // AuditRecord is one row in audit_log.

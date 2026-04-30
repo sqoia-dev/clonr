@@ -44,9 +44,10 @@ const certExpiryWarnDays = 30
 // Manager owns the LDAP module lifecycle and provides the API surface for
 // users/groups/status. It is safe for concurrent use.
 type Manager struct {
-	cfg config.ServerConfig
-	db  *db.DB
-	mu  sync.RWMutex
+	cfg   config.ServerConfig
+	db    *db.DB
+	audit *db.AuditService
+	mu    sync.RWMutex
 
 	// In-memory DM password — set on Enable(), cleared on Disable().
 	// Never persisted; the DB only stores its bcrypt hash.
@@ -72,6 +73,7 @@ func New(cfg config.ServerConfig, database *db.DB) *Manager {
 	m := &Manager{
 		cfg:              cfg,
 		db:               database,
+		audit:            db.NewAuditService(database),
 		projectPluginCfg: defaultProjectPluginConfig(),
 	}
 	// Restore in-memory passwords from DB on startup if module is ready.
