@@ -1,6 +1,10 @@
 // ErrorBoundary — route-level error boundary (POL-4).
 // Catches render errors in children, shows a recovery card.
 // Shows error details only when ?debug=1 is in the URL.
+//
+// SectionErrorBoundary — lightweight per-section boundary.
+// Wraps individual page sections so one broken section doesn't kill the page.
+// Always logs the error to console with the section name for DevTools diagnosis.
 import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { AlertTriangle } from "lucide-react"
@@ -22,6 +26,48 @@ export function recordAction(label: string) {
   actionLog.unshift(label)
   if (actionLog.length > 5) actionLog.length = 5
 }
+
+// ─── SectionErrorBoundary ─────────────────────────────────────────────────────
+
+interface SectionBoundaryProps {
+  section: string
+  children: React.ReactNode
+}
+
+interface SectionBoundaryState {
+  error: Error | null
+}
+
+export class SectionErrorBoundary extends React.Component<SectionBoundaryProps, SectionBoundaryState> {
+  constructor(props: SectionBoundaryProps) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error: Error): SectionBoundaryState {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // Always log with section name so DevTools shows exactly which section crashed.
+    console.error(`[SectionErrorBoundary:${this.props.section}] render error:`, error, info.componentStack)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="rounded border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive flex items-center gap-2">
+        <AlertTriangle className="h-4 w-4 shrink-0" />
+        <span>
+          <span className="font-medium">{this.props.section}</span> failed to render.
+          Check DevTools console for details.
+        </span>
+      </div>
+    )
+  }
+}
+
+// ─── ErrorBoundary ────────────────────────────────────────────────────────────
 
 export class ErrorBoundary extends React.Component<Props, State> {
   constructor(props: Props) {

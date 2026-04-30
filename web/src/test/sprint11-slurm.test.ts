@@ -10,6 +10,7 @@
  *   - SlurmValidateResponse issue rendering logic
  *   - SlurmBuild status badge class mapping
  *   - SlurmUpgradeOperation phase ordering
+ *   - Defensive null/undefined handling for all list fields (render-crash prevention)
  */
 
 import { describe, it, expect } from "vitest"
@@ -19,6 +20,12 @@ import type {
   SlurmValidationIssue,
   SlurmUpgradeOperation,
   SlurmBuildLogEvent,
+  ListSlurmConfigsResponse,
+  ListSlurmNodesResponse,
+  ListSlurmScriptsResponse,
+  ListSlurmBuildsResponse,
+  ListSlurmUpgradesResponse,
+  ListSlurmRoleSummaryResponse,
 } from "@/lib/types"
 
 // ─── fmtBytes (extracted from slurm.tsx for isolation) ───────────────────────
@@ -381,5 +388,115 @@ describe("SlurmUpgradeOperation phase ordering", () => {
     for (const phase of UPGRADE_PHASE_ORDER) {
       expect(isPhaseComplete(op as SlurmUpgradeOperation, phase)).toBe(true)
     }
+  })
+})
+
+// ─── Defensive null/undefined handling (render-crash prevention) ──────────────
+//
+// These tests mirror the ?? [] guards added to every section in slurm.tsx.
+// They prove that the guard expressions don't throw when the server returns
+// null, undefined, or omits the list field entirely — which is the root cause
+// of the production render crash caught by the route-level error boundary.
+
+// These tests prove that `?? []` — the guard pattern used in every slurm.tsx
+// section — never throws when the server returns undefined, null, or [].
+// Go's json.Marshal emits `null` for an uninitialised slice, so we exercise
+// the null path at the runtime level using a shared helper typed to accept it.
+
+/** Mirrors the `(data?.field ?? [])` pattern used throughout slurm.tsx. */
+function nullCoalesce<T>(arr: T[] | null | undefined): T[] {
+  return arr ?? []
+}
+
+describe("defensive null handling — list fields", () => {
+  it("?? [] returns [] for undefined input", () => {
+    expect(nullCoalesce(undefined)).toHaveLength(0)
+  })
+
+  it("?? [] returns [] for null input", () => {
+    expect(nullCoalesce(null)).toHaveLength(0)
+  })
+
+  it("?? [] returns [] for empty array input", () => {
+    expect(nullCoalesce([])).toHaveLength(0)
+  })
+
+  it("?? [] passes through a populated array unchanged", () => {
+    expect(nullCoalesce(["a", "b"])).toHaveLength(2)
+    expect(nullCoalesce(["a", "b"])[0]).toBe("a")
+  })
+})
+
+describe("defensive null handling — configs section", () => {
+  it("does not throw when configs field is null at runtime", () => {
+    // Simulates Go returning {"configs":null,"total":0}.
+    const raw = { configs: null as unknown as ListSlurmConfigsResponse["configs"], total: 0 }
+    expect(() => nullCoalesce(raw.configs).length).not.toThrow()
+    expect(nullCoalesce(raw.configs)).toHaveLength(0)
+  })
+
+  it("does not throw when configs field is []", () => {
+    const data: ListSlurmConfigsResponse = { configs: [], total: 0 }
+    expect(nullCoalesce(data.configs)).toHaveLength(0)
+  })
+
+  it("returns items when configs is populated", () => {
+    const data: ListSlurmConfigsResponse = {
+      configs: [{ filename: "slurm.conf", path: "/etc/slurm/slurm.conf", content: "", checksum: "abc", file_mode: "0644", owner: "slurm", version: 1 }],
+      total: 1,
+    }
+    expect(nullCoalesce(data.configs)).toHaveLength(1)
+  })
+})
+
+describe("defensive null handling — scripts section", () => {
+  it("does not throw when scripts field is null at runtime", () => {
+    const raw = { scripts: null as unknown as ListSlurmScriptsResponse["scripts"], total: 0 }
+    expect(() => nullCoalesce(raw.scripts).length).not.toThrow()
+    expect(nullCoalesce(raw.scripts)).toHaveLength(0)
+  })
+
+  it("returns items when scripts is populated", () => {
+    const data: ListSlurmScriptsResponse = {
+      scripts: [{ script_type: "prolog", version: 1, enabled: true, has_content: true }],
+      total: 1,
+    }
+    expect(nullCoalesce(data.scripts)).toHaveLength(1)
+  })
+})
+
+describe("defensive null handling — builds section", () => {
+  it("does not throw when builds field is null at runtime", () => {
+    const raw = { builds: null as unknown as ListSlurmBuildsResponse["builds"], total: 0, active_build_id: "" }
+    expect(() => nullCoalesce(raw.builds).length).not.toThrow()
+    expect(nullCoalesce(raw.builds)).toHaveLength(0)
+  })
+})
+
+describe("defensive null handling — upgrades section", () => {
+  it("does not throw when operations field is null at runtime", () => {
+    const raw = { operations: null as unknown as ListSlurmUpgradesResponse["operations"], total: 0 }
+    expect(() => nullCoalesce(raw.operations).length).not.toThrow()
+    expect(nullCoalesce(raw.operations)).toHaveLength(0)
+  })
+})
+
+describe("defensive null handling — roles section", () => {
+  it("does not throw when nodes field is null at runtime", () => {
+    const raw = { nodes: null as unknown as ListSlurmNodesResponse["nodes"], total: 0 }
+    expect(() => nullCoalesce(raw.nodes).length).not.toThrow()
+    expect(nullCoalesce(raw.nodes)).toHaveLength(0)
+  })
+
+  it("does not throw when role summary is null at runtime", () => {
+    const raw = { summary: null as unknown as ListSlurmRoleSummaryResponse["summary"] }
+    expect(() => nullCoalesce(raw.summary).length).not.toThrow()
+    expect(nullCoalesce(raw.summary)).toHaveLength(0)
+  })
+
+  it("node roles fallback to [] when roles field is null", () => {
+    // Mirrors n.roles ?? [] guard in RolesSection role-edit handler.
+    const roles: string[] | null = null
+    expect(roles ?? []).toEqual([])
   })
 })

@@ -35,6 +35,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet"
 import { apiFetch, sseUrl } from "@/lib/api"
+import { SectionErrorBoundary } from "@/components/ErrorBoundary"
 import { toast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 import type {
@@ -201,9 +202,9 @@ function StatusSection() {
             )}
           </div>
           {/* Role counts */}
-          {roleSummary?.summary && roleSummary.summary.length > 0 && (
+          {(roleSummary?.summary ?? []).length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {roleSummary.summary.map((r) => (
+              {(roleSummary?.summary ?? []).map((r) => (
                 <div key={r.role} className="flex items-center gap-1.5 rounded border border-border px-2 py-1 text-xs">
                   <span className="font-medium capitalize">{r.role}</span>
                   <span className="text-muted-foreground">{r.count}</span>
@@ -469,11 +470,11 @@ function ConfigsSection() {
     <Section id="configs" icon={<FileText className="h-4 w-4 text-muted-foreground" />} title="Configs">
       {isLoading ? (
         <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
-      ) : data?.configs?.length === 0 ? (
+      ) : (data?.configs ?? []).length === 0 ? (
         <p className="text-sm text-muted-foreground">No configs found. Enable the Slurm module first.</p>
       ) : (
         <div className="divide-y divide-border rounded border border-border">
-          {data?.configs?.map((cfg) => (
+          {(data?.configs ?? []).map((cfg) => (
             <button
               key={cfg.filename}
               className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
@@ -530,9 +531,9 @@ function RolesSection() {
   return (
     <Section id="roles" icon={<Wrench className="h-4 w-4 text-muted-foreground" />} title="Roles">
       {/* Role summary cards */}
-      {roleSummary?.summary && (
+      {(roleSummary?.summary ?? []).length > 0 && (
         <div className="mb-4 flex flex-wrap gap-3">
-          {roleSummary.summary.map((r) => (
+          {(roleSummary?.summary ?? []).map((r) => (
             <div key={r.role} className="rounded border border-border bg-background px-3 py-2 text-center min-w-20">
               <div className="text-xl font-bold tabular-nums">{r.count}</div>
               <div className="text-xs text-muted-foreground capitalize">{r.role}</div>
@@ -543,11 +544,11 @@ function RolesSection() {
 
       {nodesLoading ? (
         <div className="space-y-2">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
-      ) : nodesData?.nodes?.length === 0 ? (
+      ) : (nodesData?.nodes ?? []).length === 0 ? (
         <p className="text-sm text-muted-foreground">No nodes with Slurm roles assigned yet.</p>
       ) : (
         <div className="divide-y divide-border rounded border border-border">
-          {nodesData?.nodes?.map((n) => (
+          {(nodesData?.nodes ?? []).map((n) => (
             <div key={n.node_id} className="flex items-center gap-3 px-3 py-2.5">
               <span className="flex-1 font-mono text-xs text-muted-foreground truncate">{n.node_id.slice(0, 8)}</span>
               <div className="flex flex-wrap gap-1">
@@ -737,9 +738,11 @@ function ScriptsSection() {
     <Section id="scripts" icon={<ScrollText className="h-4 w-4 text-muted-foreground" />} title="Scripts">
       {isLoading ? (
         <div className="space-y-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+      ) : (data?.scripts ?? []).length === 0 ? (
+        <p className="text-sm text-muted-foreground">No scripts found. Enable the Slurm module first.</p>
       ) : (
         <div className="divide-y divide-border rounded border border-border">
-          {data?.scripts?.map((s) => (
+          {(data?.scripts ?? []).map((s) => (
             <button
               key={s.script_type}
               className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
@@ -1054,11 +1057,11 @@ function BuildsSection() {
 
       {isLoading ? (
         <div className="space-y-2">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-      ) : data?.builds?.length === 0 ? (
+      ) : (data?.builds ?? []).length === 0 ? (
         <p className="text-sm text-muted-foreground">No builds yet. Start one above.</p>
       ) : (
         <div className="divide-y divide-border rounded border border-border">
-          {data?.builds?.map((b) => (
+          {(data?.builds ?? []).map((b) => (
             <button
               key={b.id}
               className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
@@ -1426,11 +1429,11 @@ function UpgradesSection() {
 
       {isLoading ? (
         <div className="space-y-2">{[...Array(2)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-      ) : data?.operations?.length === 0 ? (
+      ) : (data?.operations ?? []).length === 0 ? (
         <p className="text-sm text-muted-foreground">No upgrades yet.</p>
       ) : (
         <div className="divide-y divide-border rounded border border-border">
-          {data?.operations?.map((op) => (
+          {(data?.operations ?? []).map((op) => (
             <button
               key={op.id}
               className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
@@ -1493,12 +1496,24 @@ export function SlurmPage() {
         ))}
       </nav>
 
-      <StatusSection />
-      <ConfigsSection />
-      <RolesSection />
-      <ScriptsSection />
-      <BuildsSection />
-      <UpgradesSection />
+      <SectionErrorBoundary section="Status">
+        <StatusSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Configs">
+        <ConfigsSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Roles">
+        <RolesSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Scripts">
+        <ScriptsSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Builds">
+        <BuildsSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Upgrades">
+        <UpgradesSection />
+      </SectionErrorBoundary>
     </div>
   )
 }

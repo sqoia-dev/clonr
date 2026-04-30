@@ -14,10 +14,10 @@ import { cn } from "@/lib/utils"
 const navItems = [
   { label: "Nodes", path: "/nodes", icon: Server, active: true },
   { label: "Images", path: "/images", icon: Image, active: true },
+  { label: "Slurm", path: "/slurm", icon: Cpu, active: true },
   { label: "Activity", path: "/activity", icon: Activity, active: true },
   { label: "Identity", path: "/identity", icon: ShieldCheck, active: true },
   { label: "Settings", path: "/settings", icon: Settings, active: true },
-  { label: "Slurm", path: "/slurm", icon: Cpu, active: true },
 ]
 
 const connectionConfig = {
