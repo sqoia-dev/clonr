@@ -20,7 +20,8 @@ import {
   Cpu, CheckCircle2, XCircle, AlertCircle, Play, StopCircle,
   RefreshCw, ChevronRight, Loader2,
   FileText, Code2, History, TerminalSquare, Package, ArrowUpCircle,
-  ScrollText, CircleDot, Check, X, Wrench,
+  ScrollText, CircleDot, Check, X, Wrench, Eye, KeyRound, Table2,
+  ActivitySquare,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -53,6 +54,11 @@ import type {
   SlurmUpgradeValidation,
   SlurmUpgradeOperation,
   ListSlurmUpgradesResponse,
+  // Sprint 12 — TAIL-1..4
+  SlurmRenderPreviewResponse,
+  SlurmDepMatrixResponse,
+  SlurmPushOperation,
+  SlurmMungeKeyResponse,
 } from "@/lib/types"
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -153,6 +159,11 @@ function StatusSection() {
   const [enableOpen, setEnableOpen] = React.useState(false)
   const [disableConfirm, setDisableConfirm] = React.useState("")
   const [clusterName, setClusterName] = React.useState("")
+  // TAIL-4: push-op status polling drawer
+  const [pushOpID, setPushOpID] = React.useState<string | null>(null)
+  const [pushOpOpen, setPushOpOpen] = React.useState(false)
+  // TAIL-2: munge key panel
+  const [mungeOpen, setMungeOpen] = React.useState(false)
 
   const enableMut = useMutation({
     mutationFn: () => apiFetch("/api/v1/slurm/enable", {
@@ -179,10 +190,28 @@ function StatusSection() {
     onError: (e: Error) => toast({ title: "Disable failed", description: e.message, variant: "destructive" }),
   })
 
+  // TAIL-4: sync returns a push-op; open polling drawer on success.
   const syncMut = useMutation({
-    mutationFn: () => apiFetch("/api/v1/slurm/sync", { method: "POST" }),
-    onSuccess: () => toast({ title: "Sync triggered", description: "Config push in progress" }),
+    mutationFn: () => apiFetch<SlurmPushOperation>("/api/v1/slurm/sync", { method: "POST" }),
+    onSuccess: (op) => {
+      setPushOpID(op.id)
+      setPushOpOpen(true)
+      toast({ title: "Sync started", description: `Push op ${op.id.slice(0, 8)}…` })
+    },
     onError: (e: Error) => toast({ title: "Sync failed", description: e.message, variant: "destructive" }),
+  })
+
+  // TAIL-2: munge key mutations.
+  const generateMungeMut = useMutation({
+    mutationFn: () => apiFetch<SlurmMungeKeyResponse>("/api/v1/slurm/munge-key/generate", { method: "POST" }),
+    onSuccess: (r) => { toast({ title: "Munge key generated", description: r.message }) },
+    onError: (e: Error) => toast({ title: "Generate failed", description: e.message, variant: "destructive" }),
+  })
+
+  const rotateMungeMut = useMutation({
+    mutationFn: () => apiFetch<SlurmMungeKeyResponse>("/api/v1/slurm/munge-key/rotate", { method: "POST" }),
+    onSuccess: (r) => { toast({ title: "Munge key rotated", description: r.message }) },
+    onError: (e: Error) => toast({ title: "Rotate failed", description: e.message, variant: "destructive" }),
   })
 
   if (isLoading) return <div className="space-y-2"><Skeleton className="h-8 w-48" /><Skeleton className="h-20 w-full" /></div>
@@ -245,6 +274,11 @@ function StatusSection() {
                 {syncMut.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
                 Sync now
               </Button>
+              {/* TAIL-2: munge key panel toggle */}
+              <Button size="sm" variant="outline" onClick={() => setMungeOpen((v) => !v)}>
+                <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                Munge key
+              </Button>
               <div className="flex items-center gap-2">
                 <Input
                   className="h-8 w-32 text-sm"
@@ -266,7 +300,151 @@ function StatusSection() {
           )}
         </div>
       </div>
+
+      {/* TAIL-2: munge key panel */}
+      {enabled && mungeOpen && (
+        <div className="mt-4 rounded border border-border bg-secondary/5 px-4 py-3 space-y-2">
+          <p className="text-xs font-medium flex items-center gap-1.5">
+            <KeyRound className="h-3.5 w-3.5" />
+            Munge key management
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Generate creates a new random munge key and stores it in clustr's secrets store.
+            Rotate replaces the existing key and schedules a push on next sync.
+            Both operations require a subsequent "Sync now" to deploy to nodes.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs"
+              onClick={() => generateMungeMut.mutate()}
+              disabled={generateMungeMut.isPending || rotateMungeMut.isPending}
+            >
+              {generateMungeMut.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+              Generate new key
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs"
+              onClick={() => rotateMungeMut.mutate()}
+              disabled={generateMungeMut.isPending || rotateMungeMut.isPending}
+            >
+              {rotateMungeMut.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+              Rotate existing key
+            </Button>
+            <Button size="sm" variant="ghost" className="text-xs ml-auto" onClick={() => setMungeOpen(false)}>
+              Close
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* TAIL-4: push-op status drawer */}
+      {pushOpID && (
+        <PushOpDrawer
+          opID={pushOpID}
+          open={pushOpOpen}
+          onClose={() => { setPushOpOpen(false); setPushOpID(null) }}
+        />
+      )}
     </Section>
+  )
+}
+
+// ─── TAIL-4: Push-op status polling drawer ────────────────────────────────────
+
+function PushOpDrawer({ opID, open, onClose }: { opID: string; open: boolean; onClose: () => void }) {
+  const { data: op, isLoading } = useQuery<SlurmPushOperation>({
+    queryKey: ["slurm-push-op", opID],
+    queryFn: () => apiFetch<SlurmPushOperation>(`/api/v1/slurm/push-ops/${opID}`),
+    refetchInterval: (query) => {
+      const d = query.state.data
+      if (!d) return 2000
+      // Stop polling when completed or failed.
+      return (d.status === "completed" || d.status === "failed") ? false : 2000
+    },
+    enabled: open && !!opID,
+    staleTime: 0,
+  })
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
+      <SheetContent side="right" className="w-full sm:max-w-xl flex flex-col gap-0 p-0">
+        <SheetHeader className="border-b border-border px-6 py-4">
+          <SheetTitle className="text-sm">Sync push status</SheetTitle>
+          <SheetDescription className="text-xs font-mono">{opID}</SheetDescription>
+        </SheetHeader>
+        <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
+          {isLoading && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading…</div>}
+          {op && (
+            <>
+              <div className="flex items-center gap-3">
+                <PushOpStatusBadge status={op.status} />
+                <span className="text-xs text-muted-foreground">
+                  {op.node_count} node{op.node_count !== 1 ? "s" : ""}
+                  {" · "}{op.success_count} ok
+                  {op.failure_count > 0 && <span className="text-status-error"> · {op.failure_count} failed</span>}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground space-y-1">
+                <div>Apply: <span className="font-mono">{op.apply_action}</span></div>
+                <div>Files: {(op.filenames ?? []).join(", ") || "all"}</div>
+                <div>Started: {fmtUnix(op.started_at)}</div>
+                {op.completed_at && <div>Completed: {fmtUnix(op.completed_at)}</div>}
+              </div>
+              {/* Per-node results */}
+              {op.node_results && Object.keys(op.node_results).length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium">Node results</p>
+                  {Object.entries(op.node_results).map(([nodeID, result]) => (
+                    <div key={nodeID} className={cn(
+                      "rounded border p-3 text-xs space-y-1",
+                      result.ok ? "border-status-healthy/30 bg-status-healthy/5" : "border-status-error/30 bg-status-error/5"
+                    )}>
+                      <div className="flex items-center gap-2">
+                        {result.ok
+                          ? <CheckCircle2 className="h-3.5 w-3.5 text-status-healthy" />
+                          : <XCircle className="h-3.5 w-3.5 text-status-error" />
+                        }
+                        <code className="font-mono">{nodeID.slice(0, 8)}…</code>
+                        {result.error && <span className="text-status-error">{result.error}</span>}
+                      </div>
+                      {(result.file_results ?? []).map((fr) => (
+                        <div key={fr.filename} className="flex items-center gap-2 pl-5 text-muted-foreground">
+                          {fr.ok
+                            ? <Check className="h-3 w-3 text-status-healthy" />
+                            : <X className="h-3 w-3 text-status-error" />
+                          }
+                          <span className="font-mono">{fr.filename}</span>
+                          {fr.error && <span className="text-status-error">{fr.error}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+function PushOpStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; className: string; icon?: React.ReactNode }> = {
+    pending:   { label: "Pending",   className: "bg-status-neutral/10 text-status-neutral border-status-neutral/30", icon: <Loader2 className="h-3 w-3 animate-spin" /> },
+    running:   { label: "Running",   className: "bg-status-warning/10 text-status-warning border-status-warning/30", icon: <Loader2 className="h-3 w-3 animate-spin" /> },
+    completed: { label: "Completed", className: "bg-status-healthy/10 text-status-healthy border-status-healthy/30", icon: <CheckCircle2 className="h-3 w-3" /> },
+    failed:    { label: "Failed",    className: "bg-status-error/10 text-status-error border-status-error/30",       icon: <XCircle className="h-3 w-3" /> },
+  }
+  const cfg = map[status] ?? { label: status, className: "bg-muted/30 text-muted-foreground border-border" }
+  return (
+    <Badge variant="outline" className={cn("text-xs flex items-center gap-1", cfg.className)}>
+      {cfg.icon}{cfg.label}
+    </Badge>
   )
 }
 
@@ -282,10 +460,12 @@ function ConfigEditorSheet({ file, open, onClose }: ConfigEditorSheetProps) {
   const qc = useQueryClient()
   const [content, setContent] = React.useState("")
   const [message, setMessage] = React.useState("")
-  const [tab, setTab] = React.useState<"edit" | "history">("edit")
+  const [tab, setTab] = React.useState<"edit" | "history" | "preview">("edit")
   const [validation, setValidation] = React.useState<SlurmValidateResponse | null>(null)
   const [validating, setValidating] = React.useState(false)
   const [reseedConfirm, setReseedConfirm] = React.useState("")
+  // TAIL-1: per-node render preview
+  const [previewNodeID, setPreviewNodeID] = React.useState("")
 
   React.useEffect(() => {
     if (file) {
@@ -293,6 +473,7 @@ function ConfigEditorSheet({ file, open, onClose }: ConfigEditorSheetProps) {
       setMessage("")
       setValidation(null)
       setTab("edit")
+      setPreviewNodeID("")
     }
   }, [file])
 
@@ -300,6 +481,15 @@ function ConfigEditorSheet({ file, open, onClose }: ConfigEditorSheetProps) {
     queryKey: ["slurm-config-history", file?.filename],
     queryFn: () => apiFetch(`/api/v1/slurm/configs/${file!.filename}/history`),
     enabled: open && !!file && tab === "history",
+  })
+
+  // TAIL-1: per-node render preview query.
+  const { data: previewData, isFetching: previewFetching, error: previewError } = useQuery<SlurmRenderPreviewResponse>({
+    queryKey: ["slurm-render-preview", file?.filename, previewNodeID],
+    queryFn: () => apiFetch(`/api/v1/slurm/configs/${file!.filename}/render/${previewNodeID}`),
+    enabled: open && !!file && tab === "preview" && previewNodeID.trim().length > 0,
+    staleTime: 0,
+    retry: false,
   })
 
   const saveMut = useMutation({
@@ -352,10 +542,11 @@ function ConfigEditorSheet({ file, open, onClose }: ConfigEditorSheetProps) {
           </SheetDescription>
         </SheetHeader>
 
-        <Tabs value={tab} onValueChange={(v) => setTab(v as "edit" | "history")} className="flex-1 flex flex-col overflow-hidden">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "edit" | "history" | "preview")} className="flex-1 flex flex-col overflow-hidden">
           <TabsList className="mx-6 mt-4 w-fit">
             <TabsTrigger value="edit"><Code2 className="mr-1.5 h-3.5 w-3.5" />Edit</TabsTrigger>
             <TabsTrigger value="history"><History className="mr-1.5 h-3.5 w-3.5" />History</TabsTrigger>
+            <TabsTrigger value="preview"><Eye className="mr-1.5 h-3.5 w-3.5" />Preview</TabsTrigger>
           </TabsList>
 
           <TabsContent value="edit" className="flex-1 flex flex-col gap-3 overflow-auto px-6 pb-6 mt-4">
@@ -451,6 +642,50 @@ function ConfigEditorSheet({ file, open, onClose }: ConfigEditorSheetProps) {
                 </div>
               ))}
             </div>
+          </TabsContent>
+
+          {/* TAIL-1: per-node render preview tab */}
+          <TabsContent value="preview" className="flex-1 flex flex-col gap-3 overflow-auto px-6 pb-6 mt-4">
+            <p className="text-xs text-muted-foreground">
+              Renders this config file with all template variables resolved for a specific node.
+              Enter a node ID below to preview the exact content that would be deployed.
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                className="h-8 flex-1 text-xs font-mono"
+                placeholder="Node ID (UUID)"
+                value={previewNodeID}
+                onChange={(e) => setPreviewNodeID(e.target.value)}
+              />
+            </div>
+            {previewFetching && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Rendering…
+              </div>
+            )}
+            {previewError && !previewFetching && (
+              <div className="rounded border border-status-error/30 bg-status-error/5 px-3 py-2 text-xs text-status-error">
+                {String(previewError)}
+              </div>
+            )}
+            {previewData && !previewFetching && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Node: <code className="font-mono">{previewData.node_id}</code></span>
+                  <span className="font-mono">sha256:{previewData.checksum?.slice(0, 12)}</span>
+                </div>
+                <textarea
+                  readOnly
+                  className="w-full min-h-[400px] rounded border border-border bg-secondary/10 font-mono text-xs leading-5 p-3 resize-none focus:outline-none"
+                  value={previewData.rendered_content}
+                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                />
+              </div>
+            )}
+            {!previewNodeID.trim() && !previewData && !previewFetching && (
+              <p className="text-xs text-muted-foreground italic">Enter a node ID above to render the preview.</p>
+            )}
           </TabsContent>
         </Tabs>
       </SheetContent>
@@ -1461,6 +1696,56 @@ function UpgradesSection() {
   )
 }
 
+// ─── TAIL-3: Dep matrix viewer section ───────────────────────────────────────
+
+function DepMatrixSection() {
+  const { data, isLoading } = useQuery<SlurmDepMatrixResponse>({
+    queryKey: ["slurm-dep-matrix"],
+    queryFn: () => apiFetch<SlurmDepMatrixResponse>("/api/v1/slurm/deps/matrix"),
+    staleTime: 60000,
+  })
+
+  return (
+    <Section id="deps" icon={<Table2 className="h-4 w-4 text-muted-foreground" />} title="Dependency matrix">
+      <p className="text-xs text-muted-foreground mb-3">
+        Version constraints for Slurm dependencies used during the build pipeline.
+      </p>
+      {isLoading ? (
+        <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
+      ) : (data?.matrix ?? []).length === 0 ? (
+        <p className="text-sm text-muted-foreground">No dependency matrix entries.</p>
+      ) : (
+        <div className="overflow-auto rounded border border-border">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border bg-secondary/30">
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Slurm range</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dependency</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dep version range</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {(data?.matrix ?? []).map((row) => (
+                <tr key={row.id} className="hover:bg-secondary/20">
+                  <td className="px-3 py-2 font-mono">
+                    {row.slurm_version_min}–{row.slurm_version_max}
+                  </td>
+                  <td className="px-3 py-2 font-medium">{row.dep_name}</td>
+                  <td className="px-3 py-2 font-mono text-muted-foreground">
+                    {row.dep_version_min}–{row.dep_version_max}
+                  </td>
+                  <td className="px-3 py-2 text-muted-foreground">{row.source}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
 // ─── Main Slurm page ──────────────────────────────────────────────────────────
 
 export function SlurmPage() {
@@ -1485,6 +1770,7 @@ export function SlurmPage() {
           { href: "#scripts",  label: "Scripts" },
           { href: "#builds",   label: "Builds" },
           { href: "#upgrades", label: "Upgrades" },
+          { href: "#deps",     label: "Dep matrix" },
         ].map((l) => (
           <a
             key={l.href}
@@ -1513,6 +1799,9 @@ export function SlurmPage() {
       </SectionErrorBoundary>
       <SectionErrorBoundary section="Upgrades">
         <UpgradesSection />
+      </SectionErrorBoundary>
+      <SectionErrorBoundary section="Dep matrix">
+        <DepMatrixSection />
       </SectionErrorBoundary>
     </div>
   )

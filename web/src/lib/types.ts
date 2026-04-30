@@ -447,6 +447,12 @@ export interface LDAPInternalStatusResponse {
   uptime_sec: number
   admin_password_set: boolean
   source_mode: "internal" | "external"
+  // Sprint 12 — live systemd state (sysd.Status fields)
+  systemd_active?: string    // "active" | "inactive" | "failed" | "unknown" | ...
+  systemd_enabled?: string   // "enabled" | "disabled" | "masked" | ...
+  // ui_buttons is the recommended action set derived from live systemd state.
+  // Values: "enable" | "disable" | "takeover" | "stop" | "start"
+  ui_buttons?: string[]
 }
 
 export interface LDAPInternalEnableError {
@@ -661,4 +667,60 @@ export interface SlurmNodeRole {
 export interface SlurmNodeOverride {
   node_id: string
   params: Record<string, string>
+}
+
+// ── Slurm Sprint 12 — TAIL-1..4 types ────────────────────────────────────────
+
+export interface SlurmRenderPreviewResponse {
+  filename: string
+  node_id: string
+  rendered_content: string
+  checksum: string
+}
+
+export interface SlurmDepMatrixRow {
+  id: string
+  slurm_version_min: string
+  slurm_version_max: string
+  dep_name: string
+  dep_version_min: string
+  dep_version_max: string
+  source: string
+}
+
+export interface SlurmDepMatrixResponse {
+  matrix: SlurmDepMatrixRow[]
+  total: number
+}
+
+export interface SlurmPushOperation {
+  id: string
+  filenames: string[]
+  file_versions: Record<string, number>
+  apply_action: string
+  status: string   // "pending" | "running" | "completed" | "failed"
+  node_count: number
+  success_count: number
+  failure_count: number
+  started_at: number
+  completed_at?: number
+  node_results?: Record<string, SlurmPushNodeResult>
+}
+
+export interface SlurmPushNodeResult {
+  ok: boolean
+  error?: string
+  file_results: SlurmPushFileResult[]
+  apply_result: { ok: boolean; error?: string; output?: string }
+}
+
+export interface SlurmPushFileResult {
+  filename: string
+  ok: boolean
+  error?: string
+}
+
+export interface SlurmMungeKeyResponse {
+  status: string
+  message: string
 }

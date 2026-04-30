@@ -32,6 +32,8 @@ import (
 	"text/template"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/sqoia-dev/clustr/internal/sysd"
 )
 
 // slapdSeedTemplate is the template for the cn=config seed LDIF.
@@ -339,33 +341,35 @@ func EnsureSystemdUnit(ctx context.Context) error {
 	return nil
 }
 
-// StartSlapd starts the clustr-slapd.service via systemctl.
-func StartSlapd(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "start", "clustr-slapd.service").CombinedOutput()
+// StartSlapd enables and starts clustr-slapd.service via sysd.Enable.
+// Port 636 is checked before starting — returns sysd.PortInUseError if bound.
+func StartSlapd(_ context.Context) error {
+	_, err := sysd.Enable("clustr-slapd.service", 636)
 	if err != nil {
-		return fmt.Errorf("ldap slapd: systemctl start clustr-slapd: %w (output: %s)", err, string(out))
+		return fmt.Errorf("ldap slapd: enable+start clustr-slapd: %w", err)
 	}
 	return nil
 }
 
-// StopSlapd stops the clustr-slapd.service via systemctl.
-func StopSlapd(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "stop", "clustr-slapd.service").CombinedOutput()
-	if err != nil {
-		// Non-fatal: service may already be stopped.
-		log.Warn().Err(err).Str("output", string(out)).
-			Msg("ldap slapd: systemctl stop clustr-slapd (may already be stopped)")
+// StopSlapd stops AND disables clustr-slapd.service so it does not restart on
+// boot. Uses sysd.Disable which calls stop + disable + reset-failed.
+// Idempotent — no error if the unit is already stopped or does not exist.
+func StopSlapd(_ context.Context) error {
+	if err := sysd.Disable("clustr-slapd.service"); err != nil {
+		log.Warn().Err(err).Msg("ldap slapd: sysd.Disable clustr-slapd (non-fatal)")
 	}
 	return nil
 }
 
-// EnableSlapdService runs systemctl enable clustr-slapd.service so it starts on boot.
-func EnableSlapdService(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "systemctl", "enable", "clustr-slapd.service").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ldap slapd: systemctl enable clustr-slapd: %w (output: %s)", err, string(out))
-	}
-	return nil
+// EnableSlapdService is a no-op shim kept for backward-compatibility.
+// Callers should use StartSlapd instead, which performs enable + start +
+// port-conflict check in a single call.
+func EnableSlapdService(_ context.Context) error { return nil }
+
+// SlapdStatus returns the live systemd state of clustr-slapd.service.
+// Every call queries systemd — no cached fields.
+func SlapdStatus() (sysd.Status, error) {
+	return sysd.QueryStatus("clustr-slapd.service")
 }
 
 // SlapcatBackup runs slapcat -n 1 to export the mdb data DIT to a backup LDIF file.

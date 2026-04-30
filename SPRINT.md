@@ -968,4 +968,63 @@ Server-side capability is far deeper than v2 webapp surfaces: `internal/slurm/{b
    - Build a new slurm bundle (e.g. against an older version like 23.11.10 for fast iteration) and watch the SSE log
    - Start a rolling upgrade to the new bundle, watch DBD → controller → compute → login progression
    - Check Activity for the full audit trail
+
+---
+
+## Sprint 12 — systemd lifecycle hardening + Slurm tail
+
+**Shipped:** 2026-04-29
+
+### Audit findings (#88)
+
+Systemd callsites scanned across `internal/`, `cmd/`, `pkg/`. Services with a UI Enable/Disable/Status surface: **1** (`clustr-slapd`). Kill criterion (>3 affected) was **NOT triggered**.
+
+| Service | UI surface | Was Disable missing systemctl disable? | Status reads cached? | Enable port-check? |
+|---|---|---|---|---|
+| `clustr-slapd` | YES (ldap/internal) | YES — #87 bug class confirmed | YES — `isSlapdRunning()` only ran `is-active` | NO — pre-flight used `ss` but not wired into enable path |
+| `slurmctld/slurmd/munge` | NO — node-side only via clientd | n/a | n/a | n/a |
+| `slurmdbd` | NO — node-side only | n/a | n/a | n/a |
+| `clustr-serverd` | NO — not self-managed | n/a | n/a | n/a |
+
+### Shipped (#89)
+
+- **`internal/sysd/sysd.go`** — shared helpers: `Disable` (stop+disable+reset-failed, idempotent), `QueryStatus` (live, no cache; returns `Active/Enabled/LoadState/ActiveState/UnitFileState`), `Enable` (port-check → daemon-reload → enable → start).
+- **`internal/sysd/sysd_test.go`** — anti-regression tests: ButtonState all 4 states, PortInUseError, idempotency gating, FormatPort.
+- **`internal/ldap/slapd.go`** — `StopSlapd` now calls `sysd.Disable` (stop+disable+reset-failed); `StartSlapd` calls `sysd.Enable` with port 636 check; `EnableSlapdService` is a shim.
+- **`internal/ldap/slapd.go`** — `SlapdStatus()` exported; returns `sysd.Status` from live systemd query.
+- **`internal/ldap/internal_routes.go`** — `InternalStatusResponse` extended: `systemd_active`, `systemd_enabled`, `ui_buttons` (derived from `sysd.ButtonState`). Both `isSlapdRunning()` calls removed; all status queries live.
+- **`internal/ldap/internal_routes.go`** — `mapEnableError` now handles `*sysd.PortInUseError` → structured `port_in_use` error code.
+- **`web/src/lib/types.ts`** — `LDAPInternalStatusResponse` extended with `systemd_active`, `systemd_enabled`, `ui_buttons`. Sprint 12 Slurm TAIL types added: `SlurmRenderPreviewResponse`, `SlurmDepMatrixResponse`, `SlurmPushOperation`, `SlurmMungeKeyResponse`.
+
+### Slurm tail shipped (#91)
+
+- [x] **TAIL-1** Config editor sheet gains "Preview" tab — enter node ID → renders config via `GET /slurm/configs/{filename}/render/{node_id}` → read-only textarea.
+- [x] **TAIL-2** Munge key "generate" / "rotate" panel on Status section, toggled by "Munge key" button (visible when module enabled).
+- [x] **TAIL-3** Dep matrix section added to `/slurm` page — table of all version constraints from `GET /slurm/deps/matrix`.
+- [x] **TAIL-4** Sync now returns push-op from `POST /slurm/sync`; polling drawer opens and polls `GET /slurm/push-ops/{op_id}` every 2s until completed/failed. Per-node results with file-level breakdown.
+
+All four TAIL endpoints verified 401 (not 404) on cloner before scoping.
+
+### KL verification (#90)
+
+- **KL-VERIFY-1 PASS**: Controller node `cbf2c958` has roles `["controller","worker"]` — dual-role auto-assignment works. Sprint 11 carry-over note was stale. No re-implementation needed.
+- **KL-VERIFY-2 PASS**: `POST /slurm/configs/reseed-defaults` correctly skips operator-customized files (`is_clustr_default=0`). slurm.conf has `ClusterName=test-cluster`, cluster-specific hostnames. Operator topology round-trips without intervention.
+- **Stale notes**: Both Sprint 11 KL carry-over notes are stale and deleted (see above checkboxes).
+
+### Tests
+
+- Go: `internal/sysd/sysd_test.go` — ButtonState×4 states, PortInUseError, idempotency, FormatPort.
+- Vitest: `sprint12-sysd-tail.test.ts` — 22 new tests covering ButtonState derivation, ui_buttons field, TAIL-1..4 response shapes, push-op poll stop condition. All 216 tests green.
+
+### Definition of done
+
+1. All Sprint 12 checkboxes ticked. CI green. Autodeploy on cloner picks up.
+2. LDAP internal disable/enable cycle works without `port_in_use` (sysd.Disable now also disables unit, eliminating survival-across-reboot bug).
+3. Slurm: Preview tab renders per-node config. Munge key generate/rotate works. Dep matrix loads. Sync now opens push-op drawer.
+
+### Carry-overs to Sprint 13
+
+- UI: Wire `ui_buttons` from `LDAPInternalStatusResponse` into identity.tsx button visibility (currently buttons are hardcoded based on `enabled` flag; with Sprint 12 server changes the 4-state rendering can now be driven by `ui_buttons`).
+- LDAP: `slapdUptimeSec()` in `internal_routes.go` still queries `systemctl show` directly — migrate to `sysd.QueryStatus` or a dedicated uptime helper in Sprint 13.
+- Any tangential items found during audit (LDAP project plugin per-group restrictions, etc.) remain deferred.
 5. Tag `v0.6.0` after Sprint 10 ships green — Slurm surface is a substantive new top-level capability. Pipeline auto-fires.

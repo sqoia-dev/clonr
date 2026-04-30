@@ -11,6 +11,7 @@ package ldap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/sysd"
 )
 
 // ─── Internal route registration (called from RegisterRoutes) ─────────────────
@@ -97,11 +99,13 @@ func (m *Manager) handlePutSourceMode(w http.ResponseWriter, r *http.Request) {
 
 	// If switching away from internal, report whether slapd is currently running
 	// so the web layer can surface the leave-running-or-stop prompt (DISABLE-3).
-	slapdRunning := isSlapdRunning()
+	// Use live systemd query — no cached state.
+	slapdSt, _ := SlapdStatus()
+	slapdRunning := slapdSt.Active == "active" || slapdSt.ActiveState == "active"
 
 	jsonResponse(w, map[string]interface{}{
-		"source_mode":    req.Mode,
-		"changed":        true,
+		"source_mode":       req.Mode,
+		"changed":           true,
 		"slapd_was_running": slapdRunning && current == "internal",
 	}, http.StatusOK)
 }
@@ -215,6 +219,17 @@ func isPortInUse(port int) bool {
 
 // mapEnableError converts a raw Enable() error into a structured InternalEnableError.
 func mapEnableError(err error) *InternalEnableError {
+	// Check for port-in-use error from sysd.Enable first.
+	var piue *sysd.PortInUseError
+	if errors.As(err, &piue) {
+		return &InternalEnableError{
+			Code:        "port_in_use",
+			Message:     fmt.Sprintf("Port %s (LDAPS) is already in use", sysd.FormatPort(piue.Port)),
+			Remediation: fmt.Sprintf("Stop the process occupying port %s before enabling the internal LDAP server.", sysd.FormatPort(piue.Port)),
+			DiagCmd:     fmt.Sprintf("ss -tlnp | grep :%s", sysd.FormatPort(piue.Port)),
+		}
+	}
+
 	msg := err.Error()
 
 	switch {
@@ -262,6 +277,7 @@ type InternalStatusResponse struct {
 	// BaseDN is the base distinguished name (populated after provisioning).
 	BaseDN string `json:"base_dn,omitempty"`
 	// Running is true when clustr-slapd.service is active.
+	// Derived from live systemd state — never cached.
 	Running bool `json:"running"`
 	// Port is the LDAPS port (always 636 for internal mode).
 	Port int `json:"port"`
@@ -271,9 +287,19 @@ type InternalStatusResponse struct {
 	AdminPasswordSet bool `json:"admin_password_set"`
 	// SourceMode mirrors ldap_module_config.source_mode.
 	SourceMode string `json:"source_mode"`
+	// SystemdActive is the live ActiveState from systemd ("active", "inactive",
+	// "failed", etc.). Populated from sysd.QueryStatus on every request.
+	SystemdActive string `json:"systemd_active,omitempty"`
+	// SystemdEnabled is the live UnitFileState from systemd ("enabled",
+	// "disabled", "masked", etc.). Populated from sysd.QueryStatus.
+	SystemdEnabled string `json:"systemd_enabled,omitempty"`
+	// UIButtons is the recommended button set for the UI derived from live
+	// systemd state. Values: "enable", "disable", "takeover", "stop", "start".
+	UIButtons []string `json:"ui_buttons,omitempty"`
 }
 
 // handleInternalStatus returns the runtime state of the internal slapd.
+// Always queries systemd live — no cached state.
 func (m *Manager) handleInternalStatus(w http.ResponseWriter, r *http.Request) {
 	mode, _ := m.db.LDAPGetSourceMode(r.Context())
 
@@ -288,8 +314,11 @@ func (m *Manager) handleInternalStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	running := isSlapdRunning()
+	// Query live systemd state — no caching.
+	slapdSt, _ := SlapdStatus()
+	running := slapdSt.Active == "active" || slapdSt.ActiveState == "active"
 	uptime := slapdUptimeSec()
+	buttons := sysd.ButtonState(slapdSt)
 
 	jsonResponse(w, InternalStatusResponse{
 		Enabled:          row.Enabled,
@@ -301,14 +330,10 @@ func (m *Manager) handleInternalStatus(w http.ResponseWriter, r *http.Request) {
 		UptimeSec:        uptime,
 		AdminPasswordSet: row.AdminPasswd != "",
 		SourceMode:       mode,
+		SystemdActive:    slapdSt.Active,
+		SystemdEnabled:   slapdSt.UnitFileState,
+		UIButtons:        buttons,
 	}, http.StatusOK)
-}
-
-// isSlapdRunning checks whether clustr-slapd.service is currently active.
-func isSlapdRunning() bool {
-	out, err := exec.Command("systemctl", "is-active", "--quiet", "clustr-slapd.service").Output()
-	_ = out
-	return err == nil
 }
 
 // slapdUptimeSec returns the uptime of clustr-slapd.service in seconds.
