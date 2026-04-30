@@ -52,7 +52,20 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveIndex(w, r)
 		return
 	}
+	// Vite content-hashes filenames under /assets/ — safe to cache forever.
+	// Everything else (favicon, etc.) is not hashed, so use no-cache.
+	if len(path) >= 8 && path[:8] == "/assets/" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		setCacheNoStore(w)
+	}
 	h.fileServer.ServeHTTP(w, r)
+}
+
+// setCacheNoStore sets headers that prevent all caching.
+func setCacheNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 }
 
 func (h *spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +80,7 @@ func (h *spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "index.html read failed", http.StatusInternalServerError)
 		return
 	}
+	setCacheNoStore(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(data))
 }
