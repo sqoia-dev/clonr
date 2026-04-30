@@ -390,6 +390,21 @@ type HostEntry struct {
 	Aliases  []string `json:"aliases,omitempty"`
 }
 
+// NodeProviderValues lists the valid values for NodeConfig.Provider.
+// Empty string means "not set / unknown". "ipmi" and "proxmox" match the
+// registered power-backend types in internal/power/.
+var NodeProviderValues = []string{"", "ipmi", "proxmox"}
+
+// IsValidNodeProvider reports whether s is an accepted provider value.
+func IsValidNodeProvider(s string) bool {
+	for _, v := range NodeProviderValues {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
@@ -401,6 +416,10 @@ type NodeConfig struct {
 	Interfaces      []InterfaceConfig    `json:"interfaces"`
 	SSHKeys         []string             `json:"ssh_keys"`
 	KernelArgs      string               `json:"kernel_args"`
+	// Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or ""
+	// (unset). This is a metadata label — it does not automatically reconfigure BMC.
+	// Added in migration 076.
+	Provider        string               `json:"provider,omitempty"`
 	// Tags holds unstructured node labels used for filtering and Slurm role assignment.
 	// Renamed from Groups in S2-4; the JSON field "groups" is also emitted for one
 	// release (v0.x) for backward compatibility with existing CLI versions.
@@ -685,6 +704,8 @@ type CreateNodeConfigRequest struct {
 	Groups      []string          `json:"groups"`
 	CustomVars  map[string]string `json:"custom_vars"`
 	BaseImageID string            `json:"base_image_id"`
+	// Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "".
+	Provider    string            `json:"provider,omitempty"`
 }
 
 // UpdateNodeConfigRequest is the body for PUT /api/v1/nodes/:id.

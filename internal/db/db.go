@@ -559,8 +559,8 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 power_provider, created_at, updated_at, disk_layout_override, extra_mounts,
-			 detected_firmware, bmc_config_encrypted, power_provider_encrypted)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 detected_firmware, bmc_config_encrypted, power_provider_encrypted, provider)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -569,7 +569,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		cfg.CreatedAt.Unix(), cfg.UpdatedAt.Unix(),
 		diskLayoutOverride, extraMounts,
 		cfg.DetectedFirmware,
-		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
+		boolToInt(bmcEncrypted), boolToInt(ppEncrypted), cfg.Provider,
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
@@ -758,6 +758,7 @@ func nullableString(s string) interface{} {
 // Migration 048 (S6-6): group_id column dropped; resolved via correlated subquery.
 // Migration 049 (S6-8): last_deploy_succeeded_at column dropped; use deploy_completed_preboot_at.
 // Migration 054: verify_timeout_override added after power_provider_encrypted.
+// Migration 076: provider added after verify_timeout_override.
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_failed_at,
@@ -767,13 +768,14 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
 	       deploy_verify_timeout_at, last_seen_at, detected_firmware,
 	       bmc_config_encrypted, power_provider_encrypted,
-	       verify_timeout_override`
+	       verify_timeout_override, provider`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
 // the "nc" table alias. The caller must LEFT JOIN node_group_memberships m ON
 // m.node_id = nc.id AND m.is_primary = 1 to populate the group_id column.
 // Migration 048 (S6-6): group_id now comes exclusively from the is_primary join row.
 // Migration 049 (S6-8): last_deploy_succeeded_at removed; use deploy_completed_preboot_at.
+// Migration 076: provider added after verify_timeout_override.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
 	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
@@ -784,7 +786,7 @@ const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.
 	       nc.deploy_completed_preboot_at, nc.deploy_verified_booted_at,
 	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware,
 	       nc.bmc_config_encrypted, nc.power_provider_encrypted,
-	       nc.verify_timeout_override`
+	       nc.verify_timeout_override, nc.provider`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -963,7 +965,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		    disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
 		    detected_firmware = ?,
 		    bmc_config_encrypted = ?, power_provider_encrypted = ?,
-		    verify_timeout_override = ?
+		    verify_timeout_override = ?, provider = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
@@ -973,7 +975,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		diskLayoutOverride, extraMounts,
 		time.Now().Unix(), cfg.DetectedFirmware,
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
-		verifyTimeoutOverrideSQL,
+		verifyTimeoutOverrideSQL, cfg.Provider,
 		cfg.ID,
 	)
 	if err != nil {
@@ -1609,6 +1611,8 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		powerProviderEncrypted bool
 		// Migration 054: per-node verify timeout override (nullable seconds).
 		verifyTimeoutOverrideVal sql.NullInt64
+		// Migration 076: hardware/power backend label ("ipmi", "proxmox", or "").
+		providerVal string
 	)
 
 	// Column order matches nodeConfigCols / nodeConfigColsJoined:
@@ -1628,7 +1632,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&deployVerifyTimeoutAtVal, &lastSeenAtVal,
 		&cfg.DetectedFirmware,
 		&bmcConfigEncrypted, &powerProviderEncrypted,
-		&verifyTimeoutOverrideVal,
+		&verifyTimeoutOverrideVal, &providerVal,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
@@ -1695,6 +1699,8 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		v := int(verifyTimeoutOverrideVal.Int64)
 		cfg.VerifyTimeoutOverride = &v
 	}
+	// Migration 076: hardware/power backend label.
+	cfg.Provider = providerVal
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
 	cfg.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()

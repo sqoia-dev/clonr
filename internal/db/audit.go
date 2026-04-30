@@ -10,10 +10,11 @@ import (
 
 // Audit action constants — used as the action column in audit_log.
 const (
-	AuditActionNodeCreate       = "node.create"
-	AuditActionNodeUpdate       = "node.update"
-	AuditActionNodeDelete       = "node.delete"
-	AuditActionNodeReimage      = "node.reimage"
+	AuditActionNodeCreate          = "node.create"
+	AuditActionNodeUpdate          = "node.update"
+	AuditActionNodeDelete          = "node.delete"
+	AuditActionNodeReimage         = "node.reimage"
+	AuditActionNodeProviderChanged = "node.provider.changed"
 	AuditActionImageCreate      = "image.create"
 	AuditActionImageDelete      = "image.delete"
 	AuditActionImageArchive     = "image.archive"

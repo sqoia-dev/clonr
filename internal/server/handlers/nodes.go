@@ -240,6 +240,10 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.PrimaryMAC = strings.ToLower(req.PrimaryMAC)
+	if !api.IsValidNodeProvider(req.Provider) {
+		writeValidationError(w, "provider must be one of: ipmi, proxmox, or empty string")
+		return
+	}
 
 	// S2-9: Validate BaseImageID exists before INSERT to surface a clear 400 rather
 	// than letting the SQLite FK constraint produce an opaque 500.
@@ -267,6 +271,7 @@ func (h *NodesHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		Groups:      reqTags, // dual-emit: mirror tags into deprecated field
 		CustomVars:  req.CustomVars,
 		BaseImageID: req.BaseImageID,
+		Provider:    req.Provider,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -500,7 +505,7 @@ func (h *NodesHandler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 // PatchNode handles PATCH /api/v1/nodes/:id — Sprint 4 EDIT-NODE-1.
 // Accepts a partial update: only fields present in the JSON body are changed.
 // Fields not present are preserved from the existing record.
-// Supported fields: hostname, fqdn, primary_mac, tags, kernel_args, notes, base_image_id.
+// Supported fields: hostname, fqdn, primary_mac, tags, kernel_args, notes, base_image_id, provider.
 func (h *NodesHandler) PatchNode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -566,6 +571,15 @@ func (h *NodesHandler) PatchNode(w http.ResponseWriter, r *http.Request) {
 		}
 		updated.CustomVars["notes"] = s
 	}
+	if v, ok := patch["provider"]; ok {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		if !api.IsValidNodeProvider(s) {
+			writeValidationError(w, "provider must be one of: ipmi, proxmox, or empty string")
+			return
+		}
+		updated.Provider = s
+	}
 
 	if err := h.DB.UpdateNodeConfig(r.Context(), updated); err != nil {
 		writeError(w, err)
@@ -582,7 +596,12 @@ func (h *NodesHandler) PatchNode(w http.ResponseWriter, r *http.Request) {
 				log.Warn().Err(recErr).Str("node_id", id).Msg("patch node: record config history failed (non-fatal)")
 			}
 		}
-		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeUpdate, "node", id,
+		// Emit a specific audit event when only the provider changed.
+		auditAction := db.AuditActionNodeUpdate
+		if existing.Provider != updated.Provider {
+			auditAction = db.AuditActionNodeProviderChanged
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, auditAction, "node", id,
 			r.RemoteAddr, sanitizeNodeConfig(existing), sanitizeNodeConfig(updated))
 	}
 

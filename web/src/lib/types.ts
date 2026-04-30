@@ -30,9 +30,18 @@ export interface NodeConfig {
   deploy_verify_timeout_at?: string
   last_seen_at?: string
   detected_firmware?: string
+  /** Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "" (unset). */
+  provider?: string
   created_at: string
   updated_at: string
 }
+
+/** Valid values for the provider field. Mirrors api.NodeProviderValues on the server. */
+export const NODE_PROVIDERS = [
+  { value: "",        label: "Not set" },
+  { value: "ipmi",    label: "IPMI" },
+  { value: "proxmox", label: "Proxmox" },
+] as const
 
 export interface InterfaceConfig {
   name: string

@@ -31,7 +31,7 @@ import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse } from "@/lib/types"
-import { nodeState } from "@/lib/types"
+import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 
@@ -57,11 +57,12 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
   const [mac, setMac] = React.useState("")
   const [ip, setIp] = React.useState("")
   const [roles, setRoles] = React.useState<string[]>([])
+  const [provider, setProvider] = React.useState("")
   const [notes, setNotes] = React.useState("")
   const [errors, setErrors] = React.useState<Record<string, string>>({})
 
   function reset() {
-    setHostname(""); setMac(""); setIp(""); setRoles([]); setNotes(""); setErrors({})
+    setHostname(""); setMac(""); setIp(""); setRoles([]); setProvider(""); setNotes(""); setErrors({})
   }
 
   function handleClose() { reset(); onClose() }
@@ -95,6 +96,7 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
         base_image_id: baseImageId || (readyImages[0]?.id ?? ""),
         tags: roles.length ? roles : [],
       }
+      if (provider) body.provider = provider
       if (ip) body.interfaces = [{ name: "eth0", mac_address: normMac, ip_address: ip }]
       if (notes) body.notes = notes
       return apiFetch<NodeConfig>("/api/v1/nodes", {
@@ -198,6 +200,17 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
                       </label>
                     ))}
                   </div>
+                </Field>
+                <Field label="Provider">
+                  <select
+                    className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+                    value={provider}
+                    onChange={(e) => setProvider(e.target.value)}
+                  >
+                    {NODE_PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
                 </Field>
                 <Field label="Notes (optional)">
                   <textarea
@@ -1023,6 +1036,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
   const [editHostname, setEditHostname] = React.useState(node.hostname)
   const [editFqdn, setEditFqdn] = React.useState(node.fqdn || "")
   const [editTags, setEditTags] = React.useState<string[]>(node.tags ?? [])
+  const [editProvider, setEditProvider] = React.useState(node.provider ?? "")
   const [editRoleConfirm, setEditRoleConfirm] = React.useState("")
   const [editError, setEditError] = React.useState("")
   // TAG-3/5: inline tag add
@@ -1039,6 +1053,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
           hostname: editHostname || undefined,
           fqdn: editFqdn || undefined,
           tags: editTags,
+          provider: editProvider,
         }),
       }),
     onSuccess: (updated) => {
@@ -1131,6 +1146,17 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                   </Button>
                 </div>
               </EditField>
+              <EditField label="Provider">
+                <select
+                  className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+                  value={editProvider}
+                  onChange={(e) => setEditProvider(e.target.value)}
+                >
+                  {NODE_PROVIDERS.map((p) => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                </select>
+              </EditField>
               {/* EDIT-NODE-3: typed confirm for controller demotion */}
               {editRemovesController && (
                 <EditField label={`Type "${node.hostname}" to confirm removing controller role:`}>
@@ -1147,7 +1173,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                 <Button size="sm" className="flex-1" onClick={handleSave} disabled={editMutation.isPending}>
                   {editMutation.isPending ? "Saving…" : "Save"}
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setEditError(""); setEditHostname(node.hostname); setEditFqdn(node.fqdn || ""); setEditTags(node.tags ?? []) }}>
+                <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setEditError(""); setEditHostname(node.hostname); setEditFqdn(node.fqdn || ""); setEditTags(node.tags ?? []); setEditProvider(node.provider ?? "") }}>
                   Cancel
                 </Button>
               </div>
@@ -1160,6 +1186,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
             <Row label="FQDN" value={node.fqdn || "—"} />
             <Row label="MAC" value={node.primary_mac} mono />
             <Row label="Firmware" value={node.detected_firmware || "—"} />
+            <Row label="Provider" value={NODE_PROVIDERS.find((p) => p.value === (node.provider ?? ""))?.label ?? "—"} />
           </Section>
 
           <Section title="Deployment">
