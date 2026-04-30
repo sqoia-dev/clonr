@@ -7,6 +7,7 @@ import { NodesPage } from "@/routes/nodes"
 import { ImagesPage } from "@/routes/images"
 import { ActivityPage } from "@/routes/activity"
 import { SettingsPage } from "@/routes/settings"
+import { IdentityPage } from "@/routes/identity"
 import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
@@ -124,6 +125,12 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 })
 
+const identityRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/identity",
+  component: IdentityPage,
+})
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
@@ -134,6 +141,7 @@ const routeTree = rootRoute.addChildren([
     imagesRoute,
     activityRoute,
     settingsRoute,
+    identityRoute,
   ]),
 ])
 

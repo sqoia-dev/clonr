@@ -34,6 +34,8 @@ import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest,
 import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
+import { UserPicker } from "@/components/UserPicker"
+import type { NodeSudoer, ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
 const hostnameRe = /^[a-z0-9-]{1,63}$/
@@ -1245,6 +1247,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
           )}
 
           <HardwareSection node={node} />
+          <SudoersSection node={node} />
           <ReimageFlow node={node} autoExpand={autoReimage} />
           <CaptureNodeFlow node={node} />
           <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
@@ -1951,5 +1954,187 @@ function CaptureNodeFlow({ node }: { node: NodeConfig }) {
         </div>
       )}
     </div>
+  )
+}
+
+// ─── SudoersSection — NODE-SUDO-4 ─────────────────────────────────────────────
+// Per-node sudoers management in the node detail Sheet.
+
+function SudoersSection({ node }: { node: NodeConfig }) {
+  const qc = useQueryClient()
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [commands, setCommands] = React.useState("ALL")
+  const [pendingUser, setPendingUser] = React.useState<UserSearchResult | null>(null)
+  const [removeConfirm, setRemoveConfirm] = React.useState<string | null>(null)
+  const [removeInput, setRemoveInput] = React.useState("")
+  const [error, setError] = React.useState("")
+
+  const { data, isLoading } = useQuery<ListNodeSudoersResponse>({
+    queryKey: ["node-sudoers", node.id],
+    queryFn: () => apiFetch<ListNodeSudoersResponse>(`/api/v1/nodes/${node.id}/sudoers`),
+    staleTime: 10000,
+  })
+
+  const addMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${node.id}/sudoers`, {
+        method: "POST",
+        body: JSON.stringify({
+          user_identifier: pendingUser!.identifier,
+          source: pendingUser!.source,
+          commands,
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["node-sudoers", node.id] })
+      setPendingUser(null)
+      setCommands("ALL")
+      setAddOpen(false)
+      setError("")
+      toast({ title: "Sudoer added" })
+    },
+    onError: (err) => setError(String(err)),
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: (uid: string) =>
+      apiFetch(`/api/v1/nodes/${node.id}/sudoers/${encodeURIComponent(uid)}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["node-sudoers", node.id] })
+      setRemoveConfirm(null)
+      setRemoveInput("")
+      toast({ title: "Sudoer removed" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Failed to remove sudoer", description: String(err) }),
+  })
+
+  const syncMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${node.id}/sudoers/sync`, { method: "POST" }),
+    onSuccess: (res: unknown) => {
+      const r = res as { message?: string }
+      toast({ title: "Sync queued", description: r?.message })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Sync failed", description: String(err) }),
+  })
+
+  const sudoers = data?.sudoers ?? []
+
+  return (
+    <Section title="Sudoers">
+      {isLoading ? (
+        <div className="space-y-1.5">
+          <div className="h-4 bg-muted rounded animate-pulse" />
+          <div className="h-4 bg-muted rounded animate-pulse w-2/3" />
+        </div>
+      ) : sudoers.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No sudoers assigned to this node.</p>
+      ) : (
+        <div className="space-y-1">
+          {sudoers.map((s) => (
+            <div key={s.user_identifier} className="flex items-center gap-2 text-xs">
+              <span className="font-mono flex-1 truncate">{s.user_identifier}</span>
+              <span className={cn(
+                "rounded px-1 py-0.5 text-[10px] font-medium shrink-0",
+                s.source === "ldap" ? "bg-blue-500/10 text-blue-400" : "bg-green-500/10 text-green-400"
+              )}>{s.source}</span>
+              <span className="text-muted-foreground font-mono shrink-0">{s.commands}</span>
+              {removeConfirm === s.user_identifier ? (
+                <div className="flex items-center gap-1 shrink-0">
+                  <Input
+                    className="h-6 w-32 text-[11px] font-mono"
+                    placeholder={s.user_identifier}
+                    value={removeInput}
+                    onChange={(e) => setRemoveInput(e.target.value)}
+                    autoFocus
+                  />
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="h-6 px-2 text-[11px]"
+                    disabled={removeInput !== s.user_identifier || removeMutation.isPending}
+                    onClick={() => removeMutation.mutate(s.user_identifier)}
+                  >
+                    Remove
+                  </Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => { setRemoveConfirm(null); setRemoveInput("") }}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ) : (
+                <Button size="sm" variant="ghost" className="h-6 w-6 p-0 shrink-0" onClick={() => setRemoveConfirm(s.user_identifier)}>
+                  <X className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add sudoer inline form */}
+      {addOpen ? (
+        <div className="rounded border border-border p-3 space-y-2 bg-secondary/20 mt-2">
+          <p className="text-xs font-medium text-muted-foreground">Add sudoer</p>
+          <UserPicker
+            onSelect={(u) => setPendingUser(u)}
+            placeholder="Search LDAP + local users…"
+          />
+          {pendingUser && (
+            <div className="flex items-center gap-2 text-xs rounded bg-secondary px-2 py-1">
+              <span className="font-mono flex-1">{pendingUser.identifier}</span>
+              <span className={cn(
+                "rounded px-1 py-0.5 text-[10px] font-medium",
+                pendingUser.source === "ldap" ? "bg-blue-500/10 text-blue-400" : "bg-green-500/10 text-green-400"
+              )}>{pendingUser.source}</span>
+              <button className="text-muted-foreground hover:text-foreground" onClick={() => setPendingUser(null)}>
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Commands</label>
+            <Input
+              className="text-xs font-mono h-7"
+              placeholder="ALL"
+              value={commands}
+              onChange={(e) => setCommands(e.target.value)}
+            />
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              className="flex-1 text-xs"
+              disabled={!pendingUser || addMutation.isPending}
+              onClick={() => addMutation.mutate()}
+            >
+              {addMutation.isPending ? "Adding…" : "Add sudoer"}
+            </Button>
+            <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setAddOpen(false); setPendingUser(null); setError("") }}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2 pt-1">
+          <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setAddOpen(true)}>
+            <Plus className="h-3 w-3 mr-1" /> Add sudoer
+          </Button>
+          {sudoers.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs"
+              disabled={syncMutation.isPending}
+              onClick={() => syncMutation.mutate()}
+            >
+              {syncMutation.isPending ? "Syncing…" : "Sync to node"}
+            </Button>
+          )}
+        </div>
+      )}
+    </Section>
   )
 }

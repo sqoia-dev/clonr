@@ -634,3 +634,219 @@ Sprint 6 closes the operational depth gaps that force operators into the CLI tod
    - Capture a live node as a new base image.
    - Add an image from a file already on the server filesystem.
 5. Tag `v0.2.0` after Sprint 6 ships green — substantive feature release. RPM pipeline auto-fires.
+
+---
+
+## Sprint 7 — Identity (LDAP / Sudoers / System Accounts)
+
+**Started:** 2026-04-30
+**Target:** 8–12 days. Medium sprint.
+
+### Goal
+
+Bring back the operator-facing UI for LDAP and identity management. The server-side LDAP integration is fully intact (`internal/ldap/Manager`, migrations 028/029/036/069/070, endpoints already mounted) — only the UI was wiped with the legacy webapp. This sprint surfaces the core identity workflows again so operators can configure LDAP, preview sudoers, and manage local system accounts from the web.
+
+### IA change — fifth top-level surface
+
+Adding **Identity** as a top-level sidebar entry. Founder explicitly authorized breaking the "4 surfaces only" rule for this — identity ops are core HPC operator work. New IA:
+
+```
+Nodes / Images / Activity / Settings / Identity
+```
+
+The order in the sidebar puts Identity after Settings (admin-y category cluster).
+
+### In scope
+
+#### Identity surface — anchored sections in this exact order
+
+```
+/identity
+  ├── #users           ← Local clustr users CRUD + LDAP user browse
+  ├── #groups          ← LDAP groups browse (read-only)
+  ├── #system-accounts ← Linux accounts the cloning process provisions on nodes
+  └── #ldap-config     ← LDAP server config + test
+```
+
+Sudoers is **not** on this surface — it moves to per-node (see "Per-node sudoers" section below).
+
+#### Users section (CRUD for local clustr users + LDAP browse)
+
+- [ ] **USERS-1** Server: confirm/extend endpoints under `/api/v1/admin/users` (the CLI hits these — read `cmd/clustr/users.go` for the exact paths). Operations: list, create (admin sets initial password), reset-password (admin sets temp password, marks `must_change_password`), edit (role, username), disable (soft delete preserving audit history), enable.
+- [ ] **USERS-2** Web Users section, top sub-card "Local users": table with username, role, last login, status. Add/Edit/Reset-password/Disable inline flows.
+  - **Add**: inline form with username, initial role dropdown (admin/operator/readonly/viewer), initial password (auto-generated suggestion + show toggle).
+  - **Edit**: same fields editable except username (immutable for audit integrity), inline-save.
+  - **Reset password**: click button → server generates a temp password → modal-free panel shows it ONCE with a copy button + a one-time hint "Send this to the user; they'll be prompted to change on next login."
+  - **Disable**: inline destructive confirm with typed username. Soft delete only (preserves audit). Re-enable is its own action.
+- [ ] **USERS-3** Web Users section, second sub-card "LDAP users": search box + result list (read-only). Hits `GET /api/v1/ldap/users?q=<query>` (server endpoint to add — wraps an LDAP search via the existing `Manager`). Fields shown: uid, full name, email, primary group, member-of (collapsed). NO edit/delete — directory is read-only from clustr.
+- [ ] **USERS-4** Cmd-K: "Add user…", "Reset user password…", "Search LDAP users…".
+
+#### Groups section (LDAP browse + supplementary overlay + specialty groups)
+
+Three behaviors in one section. **The existing auto-creation / auto-membership flow stays intact** — clustr keeps deriving group state from LDAP at deploy time. This UI adds operator overlay on top.
+
+- [ ] **GRP-LDAP-1** Server: confirm or add `GET /api/v1/ldap/groups?q=<query>` returning LDAP group entries via `Manager`. Fields: cn, dn, gidNumber, ldap_members (collapsed list), clustr_supplementary_members (clustr overlay).
+- [ ] **GRP-OVERLAY-1** Server: data model for clustr-supplementary memberships (membership rows that overlay LDAP groups without writing to the directory). Read source first — there may already be a table for this. If not, add `clustr_group_overlays` (group_dn, user_identifier, source). Endpoints: `POST /api/v1/groups/{group_dn}/supplementary-members` (`{user_identifier, source}`), `DELETE /api/v1/groups/{group_dn}/supplementary-members/{user_identifier}`.
+- [ ] **GRP-OVERLAY-2** Server: at deploy/reimage time, the rendered `/etc/group` on each node merges LDAP-native members + clustr supplementary overlay. Verify the existing `Manager.NodeConfig` path, extend if it doesn't already do this merge.
+- [ ] **GRP-SPECIALTY-1** Server: data model for clustr-only specialty groups (groups that exist entirely in clustr, no LDAP backing). If a table doesn't exist, add `clustr_specialty_groups` (id, name, gid, description, members). Endpoints: `GET/POST/PATCH/DELETE /api/v1/groups/specialty[/{id}]`.
+- [ ] **GRP-SPECIALTY-2** Server: specialty groups deploy alongside system accounts via the existing cloning pipeline. Verify deploy logic handles them; extend if not.
+- [ ] **GRP-WEB-1** Web Groups section: unified table with columns: name, source (LDAP / Specialty), gidNumber, member count. Filter by source. Search across both.
+- [ ] **GRP-WEB-2** Click an LDAP group row → expand to show: LDAP-native members (read-only, from directory) + clustr-supplementary members (manage via add/remove buttons with the same user-picker dropdown the per-node sudoer flow uses).
+- [ ] **GRP-WEB-3** Click a specialty group row → expand to show: full member list, edit name/gid/description, manage members via the user picker. Inline destructive delete (typed group name).
+- [ ] **GRP-WEB-4** "Create specialty group" button at top of Groups section → inline form: name, gid (auto-suggest next available), description, optional initial members.
+- [ ] **GRP-WEB-5** Cmd-K: "Add user to group…", "Create specialty group…", "Search groups…".
+- [ ] **GRP-AUTO-1** **Important — preserve existing auto-creation behavior.** Whatever clustr currently does to auto-create or auto-populate groups during deploy MUST keep working. The new UI is additive overlay; it does not replace the auto-flow. Read `internal/ldap/Manager` to confirm what auto-creation/auto-membership logic exists, document it briefly in PR description so it's clear the new code preserves it.
+
+#### System accounts section
+
+- [ ] **SYSACCT-1** Server: confirm or add CRUD for `system_accounts` (migration 029). Endpoints: `GET /api/v1/system-accounts`, `POST`, `PATCH /{id}`, `DELETE /{id}`.
+- [ ] **SYSACCT-2** Fields per existing schema: username, uid, gid, primary group, supplementary groups, home dir, shell, comment, target node-groups.
+- [ ] **SYSACCT-3** Web System accounts section: table with username, uid, gid, target groups, status. Add/Edit/Delete via inline-confirm (typed username for delete).
+- [ ] **SYSACCT-4** Validation: username `^[a-z][a-z0-9_-]{0,30}$`, uid/gid integer; warn-don't-block on collision with system reserved (0..999).
+- [ ] **SYSACCT-5** Existing cloning pipeline already consumes the schema — UI is read/write only. Verify by reading `internal/ldap/Manager.NodeConfig`.
+- [ ] **SYSACCT-6** Cmd-K: "Add system account…".
+
+#### LDAP config section
+
+- [ ] **LDAP-1** Server: confirm/add `GET /api/v1/ldap/config` and `PUT /api/v1/ldap/config`. Read `internal/ldap/Manager` for the current config struct shape and reuse it. Fields: server URL, base DN, bind DN, bind password (write-only — never returned), user search filter, group search filter, TLS mode (none/starttls/tls), CA cert (optional, paste PEM).
+- [ ] **LDAP-2** Server: `POST /api/v1/ldap/test` — bind + sample search using either submitted-but-not-yet-saved config OR saved config. Returns success or structured error.
+- [ ] **LDAP-3** Web LDAP config section: read-mode shows current config (password masked). Edit-form on click. Test button visible in both modes. Save persists; test-result banner persists until next test or save.
+- [ ] **LDAP-4** Bind password input never echoes saved value (placeholder "leave blank to keep"). Audit-log every config change as `ldap.config.updated` with field names (NOT values).
+- [ ] **LDAP-5** Cmd-K: "LDAP config…", "Test LDAP connection…".
+
+#### Per-node sudoers (in /nodes detail Sheet — NOT on Identity surface)
+
+Founder direction: sudoers should be **per-node and explicit**, not a global LDAP-derived push. Operators add/edit/delete sudoers on a specific node via a dropdown user picker (LDAP users + local users). The existing global LDAP-derived sudoers stays as a background mechanism but isn't surfaced in the operator UI — explicit per-node assignments are the operator-facing model.
+
+- [ ] **NODE-SUDO-1** Server: new model — `node_sudoers` table (or extension of existing). Fields: node_id, user_identifier (LDAP DN or local username), source (ldap/local), commands (default `ALL`), assigned_at, assigned_by. Add migration if needed.
+- [ ] **NODE-SUDO-2** Server endpoints: `GET /api/v1/nodes/{id}/sudoers` (list), `POST /api/v1/nodes/{id}/sudoers` (`{user_identifier, source, commands?}`), `DELETE /api/v1/nodes/{id}/sudoers/{user_identifier}`.
+- [ ] **NODE-SUDO-3** Server: each per-node sudoer assignment must end up in the actual `/etc/sudoers.d/clustr` on that node. Hook into the existing deploy / reimage path so the file lands on next deploy. For already-deployed nodes, expose `POST /api/v1/nodes/{id}/sudoers/sync` to push the current set without reimaging.
+- [ ] **NODE-SUDO-4** Web: in the node detail Sheet (read-mode, below the Hardware section), add a "Sudoers" subsection.
+  - List of current sudoers on this node: each row shows username, source badge (LDAP / Local), commands, remove button.
+  - "Add sudoer" inline form: dropdown picker that searches **both LDAP and local users** by typed query; selecting a result populates the entry. Optional commands field (default `ALL`).
+  - Inline destructive remove — typed username confirm.
+  - "Sync to node now" button below the list when there are unsynced changes.
+- [ ] **NODE-SUDO-5** The user-picker dropdown component is reusable — same pattern as the Cmd-K node picker but typed for users. Users come from a unified `GET /api/v1/users?q=&source=ldap|local|all` endpoint (combine LDAP search + local DB).
+- [ ] **NODE-SUDO-6** Cmd-K: "Add sudoer to node…" picker.
+- [ ] **NODE-SUDO-7** Activity event: `node.sudoer.added/removed/synced`.
+
+#### IA + sidebar
+
+- [ ] **IA-1** Add `/identity` route in TanStack Router. Required role: admin.
+- [ ] **IA-2** Sidebar: add "Identity" entry below "Settings" with a Lucide icon (shield-check or fingerprint).
+- [ ] **IA-3** Update memory `project_clustr_webapp_v2.md` IA section: 5 surfaces, not 4. Note Sudoers is per-node, not Identity-level.
+
+#### Cross-cutting
+
+- [ ] **X7-1** Activity event kinds added: `ldap.config.updated`, `ldap.test.run`, `ldap.sudoers.pushed`, `system-account.created/updated/deleted`.
+- [ ] **X7-2** Vitest: LDAP config form validation, sudoers SSE consumer, system-account CRUD flows.
+- [ ] **X7-3** Go tests: LDAP config GET/PUT (with bind-password masking), test endpoint with mock LDAP server, system-accounts CRUD, sudoers preview produces deterministic output.
+- [ ] **X7-4** README — short sentence under the operator workflows section: "Configure LDAP and manage system accounts from the Identity tab."
+
+### Out of scope (deferred — not legacy-wipe, just held)
+
+- **LDAP project plugin** (migration 069) — founder paused; revisit when needed.
+- **Per-node-group LDAP restrictions** (migration 070) — same.
+- PI / Director portals — still wiped per `feedback_no_legacy_restore.md`.
+- Multi-tenant identity / orgs.
+- LDAP-backed login *to clustr-serverd itself* — login still uses local password, LDAP-on-clustr-itself is a separate scope.
+
+### Definition of done
+
+1. All Sprint 7 checkboxes ticked in this doc.
+2. CI green on the merge SHA. Vitest + Go test counts visible.
+3. Autodeploy on cloner ships the latest. Hard-refresh; new Identity sidebar entry visible.
+4. Operator end-to-end on cloner, no CLI:
+   - Configure LDAP (URL, base DN, bind credentials).
+   - Test connection — success path returns user count.
+   - View sudoers preview.
+   - Push sudoers to a node group, watch per-node progress.
+   - Create a system account, target a node group, verify it gets provisioned on next deploy.
+5. Tag `v0.3.0` after Sprint 7 ships green — Identity is a major surface addition. Pipeline auto-fires.
+
+---
+
+## Sprint 8 — LDAP write-back
+
+**Founder authorization (2026-04-30):** clustr writes to the LDAP directory, not just reads. Operators can create/edit/delete LDAP users and groups, reset LDAP passwords, edit attributes — all from the web UI.
+
+**Sprint 8 starts after Sprint 7 ships v0.3.0.** Sprint 7 builds the read paths and the user-picker component; Sprint 8 promotes Identity → Users + Identity → Groups to read-write. **Don't start until Sprint 7 is merged.**
+
+### Goal
+
+Promote LDAP integration from read-only to read-write. Operators no longer need a separate directory client for routine identity management. clustr becomes authoritative for the LDAP directory (or at least co-authoritative with the existing directory tooling).
+
+### Architectural calls (decided up front)
+
+- **Backend support:** start with whatever backend `internal/ldap/Manager` already speaks. Read its source. If it's OpenLDAP-flavored, focus there for v0.4.0. If FreeIPA or AD, that. Generalize later.
+- **Bind privileges:** writes require a privileged bind. Existing config has `bind DN` + `bind password` for reads. Add an optional **second bind** for writes (`write_bind_dn`, `write_bind_password`) so operators can keep reads on a low-privilege bind and only elevate for writes. If unset, fall back to the read bind.
+- **Bind privilege check:** at config-save time, attempt a no-op write probe and warn the operator if the bind is read-only. Don't block — they may not need writes for now.
+- **Group membership model:** when an operator edits LDAP group members in the web UI, the directory write is authoritative for that group. The Sprint 7 supplementary-overlay model still exists for groups the operator chooses NOT to touch directly. Per-group toggle: "manage in directory" vs "use overlay." Default = overlay (Sprint 7 behavior).
+
+### In scope
+
+#### LDAP write — config
+
+- [ ] **WRITE-CFG-1** Server: extend `LDAPConfig` with optional `write_bind_dn` and `write_bind_password` (both write-only — never returned). PUT `/api/v1/ldap/config` accepts them.
+- [ ] **WRITE-CFG-2** Server: at config-save time, perform a probe operation (e.g. read+write a tombstone OU, then delete it) with the write bind. Return result as `write_capable: bool` + reason. UI surfaces a yellow banner when not write-capable.
+- [ ] **WRITE-CFG-3** Web LDAP config section: add the second bind credentials below the read bind. Tooltip: "Optional. Required only if you want to create/edit/delete users and groups in LDAP from clustr." Status indicator: write-capable / read-only / untested.
+
+#### LDAP user write
+
+- [ ] **WRITE-USER-1** Server: `POST /api/v1/ldap/users` accepts `{username, full_name?, email?, gid?, ssh_keys?, initial_password?}`. Builds the LDIF entry per backend dialect, binds with write creds, adds the entry. Returns the new DN.
+- [ ] **WRITE-USER-2** Server: `PATCH /api/v1/ldap/users/{dn}` accepts a partial set of attributes. Per-backend modify operations.
+- [ ] **WRITE-USER-3** Server: `DELETE /api/v1/ldap/users/{dn}` removes the entry. Refuse with 409 if removing this entry would orphan group memberships beyond a configurable threshold (safety net).
+- [ ] **WRITE-USER-4** Server: `POST /api/v1/ldap/users/{dn}/reset-password` — server generates a temp password, applies it to the directory entry, returns the temp value once. Per-backend password change op (OpenLDAP password modify extended op vs AD `unicodePwd` vs FreeIPA `pwd_policy`).
+- [ ] **WRITE-USER-5** Web Identity → Users → LDAP sub-card: add "Add LDAP user" button. On each search result row: Edit / Delete / Reset Password buttons. Edit opens an inline form with attribute fields. Reset shows the temp pwd once with a copy button (mirrors local-user reset UX).
+- [ ] **WRITE-USER-6** Inline destructive confirm on delete (typed LDAP username).
+- [ ] **WRITE-USER-7** Cmd-K: "Add LDAP user…", "Edit LDAP user…", "Reset LDAP password…", "Delete LDAP user…".
+
+#### LDAP group write
+
+- [ ] **WRITE-GRP-1** Server: `POST /api/v1/ldap/groups` accepts `{name, gid_number?, description?, initial_members?}`. Creates the group entry per backend dialect.
+- [ ] **WRITE-GRP-2** Server: `PATCH /api/v1/ldap/groups/{dn}` accepts attribute changes including member list edits. Per-backend group-membership representation (`member` DN list vs `memberUid` username list).
+- [ ] **WRITE-GRP-3** Server: `DELETE /api/v1/ldap/groups/{dn}` removes the group entry. 409 if any system reference still uses it (sudoers, restrictions if Sprint 8.1+).
+- [ ] **WRITE-GRP-4** Web Identity → Groups: per LDAP group row, gain "Manage in directory" toggle (default off = Sprint 7 overlay behavior). When on, the row's Edit panel writes to the directory directly instead of clustr's overlay. Member changes go through `PATCH`.
+- [ ] **WRITE-GRP-5** "Add LDAP group" button at the top of the Groups section (alongside the existing "Create specialty group"). Inline form: name, gid (auto-suggest from directory), description, optional initial members from the user picker.
+- [ ] **WRITE-GRP-6** Cmd-K: "Add LDAP group…", "Edit LDAP group…", "Delete LDAP group…".
+
+#### Audit + safety
+
+- [ ] **WRITE-AUDIT-1** Every write op is audit-logged in clustr's audit table with a `directory_write: true` tag, including the operator, the DN, the operation, and a hash of the changed attributes (NOT the values for sensitive ones like passwords).
+- [ ] **WRITE-SAFETY-1** Per-write inline-confirm with typed entity name on Delete and on Reset Password. Edit flows save inline without typed-confirm.
+- [ ] **WRITE-SAFETY-2** Read banner at the top of Identity → Users + Identity → Groups when write mode is active: "Writes go directly to your LDAP directory." Yellow when write bind is configured but unverified; green when probed-OK; absent when no write bind set.
+
+#### Backend dialect
+
+- [ ] **WRITE-DIALECT-1** Server: detect (or operator-configures) backend type. Use `internal/ldap/Manager` to centralize per-dialect ops. Start with the dialect cloner currently uses; document the assumption clearly.
+- [ ] **WRITE-DIALECT-2** Provide a stub for each major backend (OpenLDAP, FreeIPA, AD, generic) that surfaces a clear "not implemented for this backend" error rather than silent no-op or corrupting writes.
+
+#### Tests
+
+- [ ] **WRITE-TEST-1** Go: in-process LDAP server fixture (e.g. `github.com/go-ldap/ldap` with a fake backend, OR spin up `glauth` in CI). Tests for create/edit/delete user, create/edit/delete group, password reset against the fixture.
+- [ ] **WRITE-TEST-2** Vitest: write-form validation, optimistic update + rollback on directory error, dialect-specific error message rendering.
+
+### Out of scope (Sprint 9+)
+
+- LDAP project plugin (migration 069) — still deferred.
+- Per-node-group LDAP restrictions (migration 070) — still deferred.
+- Schema discovery / dynamic attribute editor (auto-detect what attributes the directory schema supports). Sprint 8 hardcodes the common attribute set; schema discovery is a separate sprint if needed.
+- LDAP replication awareness (writing to a primary then waiting for read replicas to catch up).
+- Bulk import (CSV → LDAP entries).
+- Self-service password change (LDAP user changing their own pwd via clustr web UI). Admin-driven only.
+
+### Definition of done
+
+1. All Sprint 8 checkboxes ticked.
+2. CI green on the merge SHA, including the new in-process LDAP fixture tests.
+3. Autodeploy on cloner ships the latest. Hard-refresh; write-mode banner appears in Identity → Users when a write bind is configured.
+4. Operator end-to-end on cloner against a test LDAP server (glauth or spun-up OpenLDAP container in the lab, NOT production directory):
+   - Configure LDAP with both read and write binds → see "write-capable" green status
+   - Add an LDAP user, set initial password
+   - Edit an attribute
+   - Reset that user's password, see the temp pwd once
+   - Add an LDAP group, add the new user as a member
+   - Delete the user → confirmation flow works → 409 if last admin
+   - Delete the group → confirmation works
+   - Switch a group from overlay-mode to direct-write-mode and back; verify state lands correctly each time
+5. Tag `v0.4.0` after Sprint 8 ships — LDAP write capability is a substantive product expansion. Pipeline auto-fires.

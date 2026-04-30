@@ -322,3 +322,115 @@ export interface ListLocalFilesResponse {
   files: LocalFileInfo[]
   import_dir: string
 }
+
+// ── Identity (Sprint 7) ───────────────────────────────────────────────────────
+
+export interface LocalUser {
+  id: string
+  username: string
+  role: string
+  must_change_password: boolean
+  disabled: boolean
+  created_at: string
+  last_login_at?: string
+}
+
+export interface ListLocalUsersResponse {
+  users: LocalUser[]
+}
+
+export interface LDAPUser {
+  uid: string
+  uid_number?: number
+  gid_number?: number
+  cn?: string
+  sn?: string
+  given_name?: string
+  mail?: string
+  home_directory?: string
+  login_shell?: string
+}
+
+export interface ListLDAPUsersResponse {
+  users: LDAPUser[]
+  total: number
+}
+
+export interface UserSearchResult {
+  identifier: string
+  display_name: string
+  email?: string
+  source: "ldap" | "local"
+}
+
+export interface UserSearchResponse {
+  users: UserSearchResult[]
+  total: number
+}
+
+export interface NodeSudoer {
+  node_id: string
+  user_identifier: string
+  source: "ldap" | "local"
+  commands: string
+  assigned_at: string
+  assigned_by: string
+}
+
+export interface ListNodeSudoersResponse {
+  sudoers: NodeSudoer[]
+  total: number
+}
+
+export interface LDAPConfigResponse {
+  enabled: boolean
+  status: string
+  status_detail: string
+  base_dn: string
+  base_dn_locked: boolean
+  service_bind_dn: string
+  ca_fingerprint: string
+  bind_password_set: boolean
+}
+
+export interface LDAPTestResponse {
+  ok: boolean
+  error?: string
+  user_count?: number
+  base_dn?: string
+}
+
+export interface SpecialtyGroup {
+  id: string
+  name: string
+  gid_number: number
+  description: string
+  members: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ListSpecialtyGroupsResponse {
+  groups: SpecialtyGroup[]
+  total: number
+}
+
+export interface GroupOverlay {
+  group_dn: string
+  user_identifier: string
+  source: string
+  added_at: string
+  added_by: string
+}
+
+export interface LDAPGroup {
+  cn: string
+  gid_number: number
+  member_uids: string[]
+  description?: string
+}
+
+export interface ListLDAPGroupsResponse {
+  groups: LDAPGroup[]
+  total: number
+}

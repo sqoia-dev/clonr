@@ -1566,6 +1566,24 @@ func (s *Server) buildRouter() chi.Router {
 			configHistoryH := &handlers.NodeConfigHistoryHandler{DB: s.db}
 			r.With(requireRole("admin")).Get("/nodes/{id}/config-history", configHistoryH.HandleList)
 
+			// Sprint 7 NODE-SUDO-1..3: per-node sudoer management.
+			nodeSudoersH := &handlers.NodeSudoersHandler{
+				DB:           s.db,
+				Audit:        s.audit,
+				GetActorInfo: getActorInfo,
+			}
+			r.Get("/nodes/{id}/sudoers", nodeSudoersH.HandleList)
+			r.With(requireRole("admin")).Post("/nodes/{id}/sudoers", nodeSudoersH.HandleAdd)
+			r.With(requireRole("admin")).Delete("/nodes/{id}/sudoers/{uid}", nodeSudoersH.HandleRemove)
+			r.With(requireRole("admin")).Post("/nodes/{id}/sudoers/sync", nodeSudoersH.HandleSync)
+
+			// Sprint 7 NODE-SUDO-5: unified user search across local + LDAP.
+			usersSearchH := &handlers.UsersSearchHandler{
+				DB:      s.db,
+				LDAPMgr: s.ldapMgr,
+			}
+			r.Get("/users/search", usersSearchH.HandleSearch)
+
 			// clientd heartbeat — admin read of latest heartbeat data.
 			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
 
@@ -1665,6 +1683,18 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Group(func(r chi.Router) {
 				sysaccounts.RegisterRoutes(r, s.sysAccountsMgr)
 			})
+
+			// Sprint 7: Identity surface — group overlays + specialty groups.
+			identityGroupsH := &handlers.IdentityGroupsHandler{DB: s.db}
+			r.With(requireRole("admin")).Get("/groups/{group_dn}/supplementary-members", identityGroupsH.HandleListOverlay)
+			r.With(requireRole("admin")).Post("/groups/{group_dn}/supplementary-members", identityGroupsH.HandleAddOverlay)
+			r.With(requireRole("admin")).Delete("/groups/{group_dn}/supplementary-members/{user_identifier}", identityGroupsH.HandleRemoveOverlay)
+			r.With(requireRole("admin")).Get("/groups/specialty", identityGroupsH.HandleListSpecialty)
+			r.With(requireRole("admin")).Post("/groups/specialty", identityGroupsH.HandleCreateSpecialty)
+			r.With(requireRole("admin")).Patch("/groups/specialty/{id}", identityGroupsH.HandleUpdateSpecialty)
+			r.With(requireRole("admin")).Delete("/groups/specialty/{id}", identityGroupsH.HandleDeleteSpecialty)
+			r.With(requireRole("admin")).Post("/groups/specialty/{id}/members", identityGroupsH.HandleAddSpecialtyMember)
+			r.With(requireRole("admin")).Delete("/groups/specialty/{id}/members/{uid}", identityGroupsH.HandleRemoveSpecialtyMember)
 
 			// Network module — admin-only management routes.
 			r.With(requireRole("admin")).Group(func(r chi.Router) {

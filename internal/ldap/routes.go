@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
@@ -20,6 +21,14 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Post("/ldap/disable", mgr.handleDisable)
 	r.Post("/ldap/backup", mgr.handleBackup)
 	r.Post("/ldap/admin/repair", mgr.handleAdminRepair)
+
+	// LDAP-1..2: config read/write and connection test (Sprint 7)
+	r.Get("/ldap/config", mgr.handleGetConfig)
+	r.Put("/ldap/config", mgr.handlePutConfig)
+	r.Post("/ldap/test", mgr.handleTestConnection)
+
+	// LDAP user search (Sprint 7 USERS-3)
+	r.Get("/ldap/users/search", mgr.handleSearchUsers)
 
 	// Users
 	r.Get("/ldap/users", mgr.handleListUsers)
@@ -78,7 +87,7 @@ func (m *Manager) handleEnable(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/v1/ldap/status")
 	jsonResponse(w, map[string]string{
-		"status":     "provisioning",
+		"status":      "provisioning",
 		"polling_url": "/api/v1/ldap/status",
 	}, http.StatusAccepted)
 }
@@ -96,8 +105,8 @@ func (m *Manager) handleDisable(w http.ResponseWriter, r *http.Request) {
 		var affectedErr *AffectedNodesError
 		if errors.As(err, &affectedErr) {
 			jsonResponse(w, map[string]interface{}{
-				"error":         "nodes are configured with LDAP; set nodes_acknowledged=true to proceed",
-				"code":          "affected_nodes",
+				"error":          "nodes are configured with LDAP; set nodes_acknowledged=true to proceed",
+				"code":           "affected_nodes",
 				"affected_nodes": affectedErr.NodeIDs,
 			}, http.StatusConflict)
 			return
@@ -496,6 +505,140 @@ func handleRevokeSudo(mgr *Manager) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// ─── LDAP Config (LDAP-1..2, Sprint 7) ───────────────────────────────────────
+
+// LDAPExternalConfig is the operator-facing LDAP config for an external directory.
+// Separate from the built-in slapd Enable flow — this is for connecting clustr to
+// an existing enterprise LDAP/AD server for user/group browse.
+type LDAPExternalConfig struct {
+	ServerURL         string `json:"server_url"`
+	BaseDN            string `json:"base_dn"`
+	BindDN            string `json:"bind_dn"`
+	BindPassword      string `json:"bind_password,omitempty"` // write-only; never returned
+	UserSearchFilter  string `json:"user_search_filter"`
+	GroupSearchFilter string `json:"group_search_filter"`
+	TLSMode           string `json:"tls_mode"` // none | starttls | tls
+	CACert            string `json:"ca_cert,omitempty"`
+}
+
+func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	row, err := m.db.LDAPGetConfig(r.Context())
+	if err != nil {
+		// If no row, return an empty config (module not yet enabled).
+		jsonResponse(w, map[string]interface{}{
+			"enabled":         false,
+			"status":          "disabled",
+			"base_dn":         "",
+			"service_bind_dn": "",
+		}, http.StatusOK)
+		return
+	}
+	// Return the config, masking the password.
+	jsonResponse(w, map[string]interface{}{
+		"enabled":         row.Enabled,
+		"status":          row.Status,
+		"status_detail":   row.StatusDetail,
+		"base_dn":         row.BaseDN,
+		"base_dn_locked":  row.BaseDNLocked,
+		"service_bind_dn": row.ServiceBindDN,
+		"ca_fingerprint":  row.CACertFingerprint,
+		// bind_password is write-only — never returned. Placeholder indicates if set.
+		"bind_password_set": row.AdminPasswd != "",
+	}, http.StatusOK)
+}
+
+func (m *Manager) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	// PUT /api/v1/ldap/config is the trigger for the enable flow.
+	// Delegate to handleEnable for now — the Enable() call accepts base_dn and admin_password.
+	m.handleEnable(w, r)
+}
+
+func (m *Manager) handleTestConnection(w http.ResponseWriter, r *http.Request) {
+	// Test the current LDAP module connection by checking status and doing a health bind.
+	status, err := m.Status(r.Context())
+	if err != nil {
+		jsonError(w, "failed to read LDAP status: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !status.Enabled {
+		jsonResponse(w, map[string]interface{}{
+			"ok":     false,
+			"error":  "LDAP module is not enabled",
+			"status": status.Status,
+		}, http.StatusOK)
+		return
+	}
+	if status.Status != "ready" {
+		jsonResponse(w, map[string]interface{}{
+			"ok":     false,
+			"error":  "LDAP module is not ready: " + status.StatusDetail,
+			"status": status.Status,
+		}, http.StatusOK)
+		return
+	}
+
+	// Try a reader bind.
+	dit, err := m.ReaderDIT(r.Context())
+	if err != nil {
+		jsonResponse(w, map[string]interface{}{
+			"ok":    false,
+			"error": err.Error(),
+		}, http.StatusOK)
+		return
+	}
+	users, err := dit.ListUsers()
+	if err != nil {
+		jsonResponse(w, map[string]interface{}{
+			"ok":    false,
+			"error": "bind succeeded but user search failed: " + err.Error(),
+		}, http.StatusOK)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{
+		"ok":         true,
+		"user_count": len(users),
+		"base_dn":    status.BaseDN,
+	}, http.StatusOK)
+}
+
+// handleSearchUsers handles GET /api/v1/ldap/users/search?q=<query>.
+// Returns LDAP user entries matching the query via the reader bind.
+func (m *Manager) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+
+	dit, err := m.ReaderDIT(r.Context())
+	if err != nil {
+		// LDAP not ready — return empty list gracefully.
+		jsonResponse(w, map[string]interface{}{"users": []interface{}{}, "total": 0}, http.StatusOK)
+		return
+	}
+
+	users, err := dit.ListUsers()
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Filter by query string if provided.
+	if q != "" {
+		qLower := strings.ToLower(q)
+		var filtered []LDAPUser
+		for _, u := range users {
+			if strings.Contains(strings.ToLower(u.UID), qLower) ||
+				strings.Contains(strings.ToLower(u.GivenName+" "+u.SN), qLower) ||
+				strings.Contains(strings.ToLower(u.Mail), qLower) {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+
+	if users == nil {
+		users = []LDAPUser{}
+	}
+	jsonResponse(w, map[string]interface{}{"users": users, "total": len(users)}, http.StatusOK)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

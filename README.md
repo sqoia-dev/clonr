@@ -84,6 +84,11 @@ open http://localhost:8080/
 # 8. Build the PXE initramfs
 #    Click Images → Bundles tab → "Build Initramfs" → watch live build log.
 #    The resulting image is registered and ready to reimage nodes.
+
+# 9. Configure LDAP and manage system accounts from the Identity tab
+#    Click Identity → LDAP Config to connect a directory server.
+#    Use the Users and Groups sections to browse local and LDAP identities,
+#    manage specialty groups, and add per-node sudo entries from the node detail Sheet.
 ```
 
 ## Build from source

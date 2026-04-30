@@ -10,30 +10,30 @@ import (
 
 // Audit action constants — used as the action column in audit_log.
 const (
-	AuditActionNodeCreate          = "node.create"
-	AuditActionNodeUpdate          = "node.update"
-	AuditActionNodeDelete          = "node.delete"
-	AuditActionNodeReimage         = "node.reimage"
-	AuditActionNodeProviderChanged = "node.provider.changed"
-	AuditActionImageCreate      = "image.create"
-	AuditActionImageDelete      = "image.delete"
-	AuditActionImageArchive     = "image.archive"
-	AuditActionImageStatusChange = "image.status_change"
-	AuditActionGroupCreate      = "node_group.create"
-	AuditActionGroupUpdate      = "node_group.update"
-	AuditActionGroupDelete      = "node_group.delete"
-	AuditActionGroupReimage     = "node_group.reimage"
-	AuditActionUserCreate       = "user.create"
-	AuditActionUserUpdate       = "user.update"
-	AuditActionUserDelete       = "user.delete"
-	AuditActionUserResetPassword = "user.reset_password"
-	AuditActionAPIKeyCreate     = "api_key.create"
-	AuditActionAPIKeyRevoke     = "api_key.revoke"     //#nosec G101 -- audit event name string, not a credential
-	AuditActionAPIKeyRotate     = "api_key.rotate"     //#nosec G101 -- audit event name string, not a credential
-	AuditActionGroupMemberAdd   = "node_group.member_add"
-	AuditActionGroupMemberRemove = "node_group.member_remove"
+	AuditActionNodeCreate           = "node.create"
+	AuditActionNodeUpdate           = "node.update"
+	AuditActionNodeDelete           = "node.delete"
+	AuditActionNodeReimage          = "node.reimage"
+	AuditActionNodeProviderChanged  = "node.provider.changed"
+	AuditActionImageCreate          = "image.create"
+	AuditActionImageDelete          = "image.delete"
+	AuditActionImageArchive         = "image.archive"
+	AuditActionImageStatusChange    = "image.status_change"
+	AuditActionGroupCreate          = "node_group.create"
+	AuditActionGroupUpdate          = "node_group.update"
+	AuditActionGroupDelete          = "node_group.delete"
+	AuditActionGroupReimage         = "node_group.reimage"
+	AuditActionUserCreate           = "user.create"
+	AuditActionUserUpdate           = "user.update"
+	AuditActionUserDelete           = "user.delete"
+	AuditActionUserResetPassword    = "user.reset_password"
+	AuditActionAPIKeyCreate         = "api_key.create"
+	AuditActionAPIKeyRevoke         = "api_key.revoke" //#nosec G101 -- audit event name string, not a credential
+	AuditActionAPIKeyRotate         = "api_key.rotate" //#nosec G101 -- audit event name string, not a credential
+	AuditActionGroupMemberAdd       = "node_group.member_add"
+	AuditActionGroupMemberRemove    = "node_group.member_remove"
 	AuditActionUserGroupMemberships = "user.group_memberships_update"
-	AuditActionLDAPConfigChange = "ldap_config.update"
+	AuditActionLDAPConfigChange     = "ldap_config.update"
 	AuditActionSlurmConfigChange    = "slurm_config.update"
 	// AuditActionSlurmInstallFailed is recorded when the in-chroot dnf Slurm
 	// install step fails during a node deploy. Query with:
@@ -64,17 +64,27 @@ const (
 	AuditActionReviewResponseSubmit = "review_response.submit"
 
 	// Sprint 6 — power, BMC, image lifecycle events (X6-1).
-	AuditActionNodePowerOn      = "node.power.on"
-	AuditActionNodePowerOff     = "node.power.off"
-	AuditActionNodePowerCycled  = "node.power.cycled"
-	AuditActionNodePowerReset   = "node.power.reset"
-	AuditActionNodeBootPXE      = "node.power.boot_pxe"
-	AuditActionNodeBootDisk     = "node.power.boot_disk"
-	AuditActionNodeBMCUpdated   = "node.bmc.updated"
+	AuditActionNodePowerOn          = "node.power.on"
+	AuditActionNodePowerOff         = "node.power.off"
+	AuditActionNodePowerCycled      = "node.power.cycled"
+	AuditActionNodePowerReset       = "node.power.reset"
+	AuditActionNodeBootPXE          = "node.power.boot_pxe"
+	AuditActionNodeBootDisk         = "node.power.boot_disk"
+	AuditActionNodeBMCUpdated       = "node.bmc.updated"
 	AuditActionImageCaptured        = "image.captured"
 	AuditActionImageShellStart      = "image.shell.started"
 	AuditActionImageShellEnd        = "image.shell.ended"
 	AuditActionImageShellDepMissing = "image.shell.dep_missing"
+
+	// Sprint 7 — Identity surface events (X7-1).
+	AuditActionNodeSudoerAdded   = "node.sudoer.added"
+	AuditActionNodeSudoerRemoved = "node.sudoer.removed"
+	AuditActionNodeSudoerSynced  = "node.sudoer.synced"
+	AuditActionLDAPConfigUpdated = "ldap.config.updated"
+	AuditActionLDAPTestRun       = "ldap.test.run"
+	AuditActionSysAccountCreated = "system-account.created"
+	AuditActionSysAccountUpdated = "system-account.updated"
+	AuditActionSysAccountDeleted = "system-account.deleted"
 )
 
 // AuditRecord is one row in audit_log.
