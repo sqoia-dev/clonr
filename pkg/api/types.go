@@ -1627,6 +1627,25 @@ type DHCPLeasesResponse struct {
 	Count  int         `json:"count"`
 }
 
+// Bundle describes a software bundle that ships with or is installed into
+// clustr-serverd. Currently only the built-in Slurm bundle is represented.
+// kind is always "builtin"; source is always "embedded" for bundles compiled
+// into the binary.
+type Bundle struct {
+	Name          string `json:"name"`           // e.g. "slurm-v24.11.4-clustr5"
+	SlurmVersion  string `json:"slurm_version"`  // e.g. "24.11.4"
+	BundleVersion string `json:"bundle_version"` // e.g. "v24.11.4-clustr5"
+	SHA256        string `json:"sha256"`         // bundle tarball SHA256 hex
+	Kind          string `json:"kind"`           // "builtin"
+	Source        string `json:"source"`         // "embedded"
+}
+
+// ListBundlesResponse is returned by GET /api/v1/bundles.
+type ListBundlesResponse struct {
+	Bundles []Bundle `json:"bundles"`
+	Total   int      `json:"total"`
+}
+
 // NetworkNodeConfig carries the resolved per-node network configuration
 // injected into NodeConfig during the deploy pipeline.
 type NetworkNodeConfig struct {

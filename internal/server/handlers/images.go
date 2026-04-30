@@ -85,9 +85,14 @@ func (h *ImagesHandler) blobSemaphore() chan struct{} {
 // ListImages handles GET /api/v1/images
 // Accepts optional ?page= and ?per_page= (default 50) for pagination.
 // When pagination params are absent the full list is returned (backward compatible).
+//
+// ?kind=initramfs — return only images with build_method="initramfs"
+// ?kind=base      — return only images that are NOT initramfs (build_method != "initramfs")
+// (no kind param) — return all images (backward compatible)
 func (h *ImagesHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	tag := r.URL.Query().Get("tag")
+	kind := r.URL.Query().Get("kind")
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
 	images, err := h.DB.ListBaseImages(r.Context(), status, tag)
@@ -98,6 +103,25 @@ func (h *ImagesHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	}
 	if images == nil {
 		images = []api.BaseImage{}
+	}
+
+	// Filter by kind if requested. "initramfs" images are identified by build_method.
+	if kind == "initramfs" {
+		filtered := images[:0]
+		for _, img := range images {
+			if img.BuildMethod == "initramfs" {
+				filtered = append(filtered, img)
+			}
+		}
+		images = filtered
+	} else if kind == "base" {
+		filtered := images[:0]
+		for _, img := range images {
+			if img.BuildMethod != "initramfs" {
+				filtered = append(filtered, img)
+			}
+		}
+		images = filtered
 	}
 
 	total := len(images)

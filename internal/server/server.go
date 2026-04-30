@@ -49,6 +49,11 @@ type BuildInfo struct {
 	Version   string
 	CommitSHA string
 	BuildTime string
+
+	// Slurm bundle metadata compiled into the binary.
+	SlurmVersion       string // e.g. "24.11.4"
+	SlurmBundleVersion string // e.g. "v24.11.4-clustr5"
+	SlurmBundleSHA256  string // bundle tarball SHA256 hex
 }
 
 // Server wraps the HTTP server and all its dependencies.
@@ -887,6 +892,12 @@ func (s *Server) buildRouter() chi.Router {
 		ImageEvents:       s.imageEvents,
 	}
 
+	bundlesH := &handlers.BundlesHandler{
+		SlurmVersion:  s.buildInfo.SlurmVersion,
+		BundleVersion: s.buildInfo.SlurmBundleVersion,
+		BundleSHA256:  s.buildInfo.SlurmBundleSHA256,
+	}
+
 	// Sprint 4: TUS resumable upload handler (IMG-ISO-1..2).
 	tusH := &handlers.TUSHandler{
 		ImageDir:     s.cfg.ImageDir,
@@ -1451,6 +1462,10 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
+
+			// Bundles — read-only; exposes built-in slurm bundle metadata compiled
+			// into the binary via -ldflags.
+			r.Get("/bundles", bundlesH.ListBundles)
 
 			// Images — mutating operations are admin-only.
 			// GET /images/{id} and GET /images/{id}/blob are registered above with

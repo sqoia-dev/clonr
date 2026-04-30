@@ -346,9 +346,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Wire up and start the HTTP server.
 	srv := server.New(cfg, database, server.BuildInfo{
-		Version:   version,
-		CommitSHA: commitSHA,
-		BuildTime: buildTime,
+		Version:            version,
+		CommitSHA:          commitSHA,
+		BuildTime:          buildTime,
+		SlurmVersion:       builtinSlurmVersion,
+		SlurmBundleVersion: builtinSlurmBundleVersion,
+		SlurmBundleSHA256:  builtinSlurmBundleSHA256,
 	})
 
 	// Wire PXE callbacks now that the network manager and database are available.

@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/sheet"
 import { StatusDot } from "@/components/StatusDot"
 import { apiFetch } from "@/lib/api"
-import type { BaseImage, ImageEvent, ListImagesResponse } from "@/lib/types"
+import type { BaseImage, Bundle, ImageEvent, ListImagesResponse, ListBundlesResponse } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useSSE } from "@/hooks/use-sse"
 import { toast } from "@/hooks/use-toast"
@@ -154,8 +154,18 @@ export function ImagesPage() {
   })
 
   const allImages = data?.images ?? []
-  const baseImages = allImages.filter((img) => !img.tags?.includes("bundle"))
-  const bundles = allImages.filter((img) => img.tags?.includes("bundle"))
+  // Base Images: anything that is not an initramfs artifact.
+  const baseImages = allImages.filter((img) => img.build_method !== "initramfs")
+  // Initramfs: images built by the initramfs build pipeline.
+  const initramfsImages = allImages.filter((img) => img.build_method === "initramfs")
+
+  // Bundles — separate endpoint: exposes built-in slurm bundle metadata.
+  const { data: bundlesData } = useQuery<ListBundlesResponse>({
+    queryKey: ["bundles"],
+    queryFn: () => apiFetch<ListBundlesResponse>("/api/v1/bundles"),
+    staleTime: Infinity,
+  })
+  const bundles = bundlesData?.bundles ?? []
 
   function handleSort(col: string) {
     if (sortCol === col) {
@@ -175,8 +185,6 @@ export function ImagesPage() {
     try { return formatDistanceToNow(new Date(iso), { addSuffix: true }) } catch { return "—" }
   }
 
-  const displayImages = tab === "bundles" ? bundles : baseImages
-
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
@@ -195,8 +203,8 @@ export function ImagesPage() {
             <Plus className="h-4 w-4 mr-1" />
             Add Image
           </Button>
-          {/* INITRD-3: Build Initramfs button (visible in Bundles tab) */}
-          {tab === "bundles" && (
+          {/* INITRD-3: Build Initramfs button — lives on the Initramfs tab */}
+          {tab === "initramfs" && (
             <Button size="sm" variant="outline" onClick={() => setBuildInitramfsOpen(true)}>
               <Layers className="h-4 w-4 mr-1" />
               Build Initramfs
@@ -224,10 +232,12 @@ export function ImagesPage() {
             <TabsList>
               <TabsTrigger value="base">Base Images ({baseImages.length})</TabsTrigger>
               <TabsTrigger value="bundles">Bundles ({bundles.length})</TabsTrigger>
+              <TabsTrigger value="initramfs">Initramfs ({initramfsImages.length})</TabsTrigger>
             </TabsList>
           </div>
 
-          <TabsContent value={tab} className="flex-1 overflow-auto mt-0">
+          {/* Base Images tab */}
+          <TabsContent value="base" className="flex-1 overflow-auto mt-0">
             {imagesLoading ? (
               <div className="p-4 space-y-2">
                 {Array.from({ length: 4 }).map((_, i) => (
@@ -238,64 +248,52 @@ export function ImagesPage() {
               <div className="flex items-center justify-center h-40">
                 <p className="text-sm text-destructive">Failed to load images. Reload to retry.</p>
               </div>
-            ) : displayImages.length === 0 ? (
-              <EmptyState onAddImage={() => setAddImageOpen(true)} />
+            ) : baseImages.length === 0 ? (
+              <BaseImagesEmptyState onAddImage={() => setAddImageOpen(true)} />
             ) : (
-              <Table>
-                <caption className="sr-only">Cluster base images and bundles</caption>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead scope="col">
-                      <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("name")}>
-                        Name <SortIcon col="name" />
-                      </button>
-                    </TableHead>
-                    <TableHead scope="col">Status</TableHead>
-                    <TableHead scope="col">
-                      <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("version")}>
-                        Version <SortIcon col="version" />
-                      </button>
-                    </TableHead>
-                    <TableHead scope="col">Size</TableHead>
-                    <TableHead scope="col">SHA256</TableHead>
-                    {advanced && <TableHead scope="col">OS / Arch</TableHead>}
-                    <TableHead scope="col">
-                      <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("created_at")}>
-                        Created <SortIcon col="created_at" />
-                      </button>
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {displayImages.map((img) => (
-                    <TableRow key={img.id} className="cursor-pointer" onClick={() => setSelectedImage(img)}>
-                      <TableCell>
-                        <span className="font-medium text-sm">{img.name}</span>
-                      </TableCell>
-                      <TableCell>
-                        <StatusDot state={imageState(img.status)} label={imageStateLabel(img.status)} />
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
-                        {img.version || "—"}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {formatBytes(img.size_bytes)}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
-                        {img.checksum ? img.checksum.slice(0, 12) + "…" : "—"}
-                      </TableCell>
-                      {advanced && (
-                        <TableCell className="text-xs text-muted-foreground">
-                          {[img.os, img.arch].filter(Boolean).join(" / ") || "—"}
-                        </TableCell>
-                      )}
-                      <TableCell className="text-xs text-muted-foreground">
-                        {relativeTime(img.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <ImageTable
+                images={baseImages}
+                advanced={advanced}
+                onSelect={setSelectedImage}
+                handleSort={handleSort}
+                SortIcon={SortIcon}
+                relativeTime={relativeTime}
+              />
+            )}
+          </TabsContent>
+
+          {/* Bundles tab — read-only, shows built-in slurm bundle from binary */}
+          <TabsContent value="bundles" className="flex-1 overflow-auto mt-0">
+            {bundles.length === 0 ? (
+              <BundlesEmptyState />
+            ) : (
+              <BundlesTable bundles={bundles} />
+            )}
+          </TabsContent>
+
+          {/* Initramfs tab — shows built initramfs artifacts */}
+          <TabsContent value="initramfs" className="flex-1 overflow-auto mt-0">
+            {imagesLoading ? (
+              <div className="p-4 space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="h-10 w-full rounded bg-secondary/40 animate-pulse" />
+                ))}
+              </div>
+            ) : imagesError ? (
+              <div className="flex items-center justify-center h-40">
+                <p className="text-sm text-destructive">Failed to load images. Reload to retry.</p>
+              </div>
+            ) : initramfsImages.length === 0 ? (
+              <InitramfsEmptyState onBuild={() => setBuildInitramfsOpen(true)} />
+            ) : (
+              <ImageTable
+                images={initramfsImages}
+                advanced={advanced}
+                onSelect={setSelectedImage}
+                handleSort={handleSort}
+                SortIcon={SortIcon}
+                relativeTime={relativeTime}
+              />
             )}
           </TabsContent>
         </Tabs>
@@ -707,7 +705,118 @@ function AddImageField({ label, hint, children }: { label: string; hint?: string
   )
 }
 
-function EmptyState({ onAddImage }: { onAddImage?: () => void }) {
+// ─── ImageTable ───────────────────────────────────────────────────────────────
+// Shared table component for both Base Images and Initramfs tabs.
+
+interface ImageTableProps {
+  images: BaseImage[]
+  advanced: boolean
+  onSelect: (img: BaseImage) => void
+  handleSort: (col: string) => void
+  SortIcon: (props: { col: string }) => React.ReactElement
+  relativeTime: (iso?: string) => string
+}
+
+function ImageTable({ images, advanced, onSelect, handleSort, SortIcon, relativeTime }: ImageTableProps) {
+  return (
+    <Table>
+      <caption className="sr-only">Cluster images</caption>
+      <TableHeader>
+        <TableRow>
+          <TableHead scope="col">
+            <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("name")}>
+              Name <SortIcon col="name" />
+            </button>
+          </TableHead>
+          <TableHead scope="col">Status</TableHead>
+          <TableHead scope="col">
+            <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("version")}>
+              Version <SortIcon col="version" />
+            </button>
+          </TableHead>
+          <TableHead scope="col">Size</TableHead>
+          <TableHead scope="col">SHA256</TableHead>
+          {advanced && <TableHead scope="col">OS / Arch</TableHead>}
+          <TableHead scope="col">
+            <button className="flex items-center gap-1 hover:text-foreground" onClick={() => handleSort("created_at")}>
+              Created <SortIcon col="created_at" />
+            </button>
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {images.map((img) => (
+          <TableRow key={img.id} className="cursor-pointer" onClick={() => onSelect(img)}>
+            <TableCell>
+              <span className="font-medium text-sm">{img.name}</span>
+            </TableCell>
+            <TableCell>
+              <StatusDot state={imageState(img.status)} label={imageStateLabel(img.status)} />
+            </TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">
+              {img.version || "—"}
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground">
+              {formatBytes(img.size_bytes)}
+            </TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">
+              {img.checksum ? img.checksum.slice(0, 12) + "…" : "—"}
+            </TableCell>
+            {advanced && (
+              <TableCell className="text-xs text-muted-foreground">
+                {[img.os, img.arch].filter(Boolean).join(" / ") || "—"}
+              </TableCell>
+            )}
+            <TableCell className="text-xs text-muted-foreground">
+              {relativeTime(img.created_at)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+
+// ─── BundlesTable ─────────────────────────────────────────────────────────────
+// Read-only table showing built-in bundle metadata from GET /api/v1/bundles.
+
+function BundlesTable({ bundles }: { bundles: Bundle[] }) {
+  return (
+    <Table>
+      <caption className="sr-only">Built-in software bundles</caption>
+      <TableHeader>
+        <TableRow>
+          <TableHead scope="col">Name</TableHead>
+          <TableHead scope="col">Slurm Version</TableHead>
+          <TableHead scope="col">Bundle Version</TableHead>
+          <TableHead scope="col">SHA256</TableHead>
+          <TableHead scope="col">Kind</TableHead>
+          <TableHead scope="col">Source</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {bundles.map((b) => (
+          <TableRow key={b.name}>
+            <TableCell>
+              <span className="font-medium text-sm">{b.name}</span>
+            </TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">{b.slurm_version}</TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">{b.bundle_version}</TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">
+              {b.sha256 ? b.sha256.slice(0, 12) + "…" : "—"}
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground">{b.kind}</TableCell>
+            <TableCell className="text-xs text-muted-foreground">{b.source}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+
+// ─── Empty states ─────────────────────────────────────────────────────────────
+
+function BaseImagesEmptyState({ onAddImage }: { onAddImage?: () => void }) {
   const [copied, setCopied] = React.useState(false)
   const snippet = "clustr-serverd image upload --name myimage --version 1.0 /path/to/image.tar"
 
@@ -736,6 +845,34 @@ function EmptyState({ onAddImage }: { onAddImage?: () => void }) {
           Add Image
         </Button>
       )}
+    </div>
+  )
+}
+
+function BundlesEmptyState() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-64 gap-2 p-8 text-center">
+      <h2 className="text-base font-semibold">No additional bundles installed</h2>
+      <p className="text-sm text-muted-foreground">
+        The built-in slurm bundle ships with clustr-serverd.
+      </p>
+    </div>
+  )
+}
+
+function InitramfsEmptyState({ onBuild }: { onBuild: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-64 gap-4 p-8 text-center">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">No initramfs built yet</h2>
+        <p className="text-sm text-muted-foreground">
+          Click &apos;Build Initramfs&apos; above to create one from a base image and bundle.
+        </p>
+      </div>
+      <Button size="sm" variant="outline" onClick={onBuild}>
+        <Layers className="h-4 w-4 mr-1" />
+        Build Initramfs
+      </Button>
     </div>
   )
 }

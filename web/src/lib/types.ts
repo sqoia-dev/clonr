@@ -100,6 +100,22 @@ export interface ImageEvent {
   id: string
 }
 
+// ── Bundles ───────────────────────────────────────────────────────────────────
+
+export interface Bundle {
+  name: string           // e.g. "slurm-v24.11.4-clustr5"
+  slurm_version: string  // e.g. "24.11.4"
+  bundle_version: string // e.g. "v24.11.4-clustr5"
+  sha256: string         // tarball SHA256 hex
+  kind: string           // "builtin"
+  source: string         // "embedded"
+}
+
+export interface ListBundlesResponse {
+  bundles: Bundle[]
+  total: number
+}
+
 // ── GPG Keys ─────────────────────────────────────────────────────────────────
 
 export interface GPGKey {

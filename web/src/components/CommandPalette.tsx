@@ -185,10 +185,10 @@ export function CommandPalette({ open, onClose }: Props) {
     navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: "1" } })
   }
 
-  // INITRD-7: navigate to /images?tab=bundles to surface the Build Initramfs button.
+  // INITRD-7: navigate to /images?tab=initramfs to surface the Build Initramfs button.
   function buildInitramfs() {
     onClose()
-    navigate({ to: "/images", search: { q: undefined, tab: "bundles", sort: undefined, dir: undefined, addImage: undefined } })
+    navigate({ to: "/images", search: { q: undefined, tab: "initramfs", sort: undefined, dir: undefined, addImage: undefined } })
   }
 
   return (
@@ -253,7 +253,7 @@ export function CommandPalette({ open, onClose }: Props) {
                   <CommandItem value="build initramfs" onSelect={buildInitramfs}>
                     <Layers className="mr-2 h-4 w-4" />
                     Build initramfs…
-                    <span className="ml-auto text-xs text-muted-foreground">Images → Bundles</span>
+                    <span className="ml-auto text-xs text-muted-foreground">Images → Initramfs</span>
                   </CommandItem>
                   <CommandItem value="create api key" onSelect={createAPIKey}>
                     <Key className="mr-2 h-4 w-4" />
