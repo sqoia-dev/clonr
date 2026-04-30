@@ -188,6 +188,7 @@ func isNotLoadedOrNotFound(output string, err error) bool {
 		if code == 5 || code == 1 {
 			lc := strings.ToLower(output)
 			if strings.Contains(lc, "not found") ||
+				strings.Contains(lc, "could not be found") ||
 				strings.Contains(lc, "no such file") ||
 				strings.Contains(lc, "loaded units listed") ||
 				code == 5 {
