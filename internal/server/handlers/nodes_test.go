@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,4 +188,58 @@ func TestUpdateNode_PreservesGroupID_WhenExplicitlyEmpty(t *testing.T) {
 	if got.GroupID != groupID {
 		t.Errorf("UpdateNode: GroupID = %q after empty group_id PUT; want %q (group must be preserved)", got.GroupID, groupID)
 	}
+}
+
+// ─── Sprint 15 #99: LDAP readiness helpers ───────────────────────────────────
+
+func TestIsSSSDConnected_Online(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"Online", true},
+		{"online", true},
+		{"Online status: Online", true},
+		{"online status: online", true},
+		{"Offline", false},
+		{"offline", false},
+		{"not_installed", false},
+		{"probe_failed", false},
+		{"empty_output", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := isSSSDConnected(tc.input)
+		if got != tc.want {
+			t.Errorf("isSSSDConnected(%q) = %v; want %v", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestBuildLDAPNotReadyDetail_MissingPAM(t *testing.T) {
+	detail := buildLDAPNotReadyDetail("Online", false)
+	if detail == "" {
+		t.Error("expected non-empty detail when pam_sss.so is missing")
+	}
+	if !containsSubstr(detail, "pam_sss.so missing") {
+		t.Errorf("expected 'pam_sss.so missing' in detail, got: %q", detail)
+	}
+}
+
+func TestBuildLDAPNotReadyDetail_NotInstalled(t *testing.T) {
+	detail := buildLDAPNotReadyDetail("not_installed", false)
+	if !containsSubstr(detail, "sssd not installed") {
+		t.Errorf("expected 'sssd not installed' in detail, got: %q", detail)
+	}
+}
+
+func TestBuildLDAPNotReadyDetail_Offline(t *testing.T) {
+	detail := buildLDAPNotReadyDetail("Offline", true)
+	if !containsSubstr(detail, "sssd not connected") {
+		t.Errorf("expected 'sssd not connected' in detail, got: %q", detail)
+	}
+}
+
+func containsSubstr(s, sub string) bool {
+	return strings.Contains(s, sub)
 }

@@ -518,6 +518,11 @@ type NodeConfig struct {
 	// agent on registration: "uefi" or "bios". Empty for manually-created nodes
 	// or legacy registrations that predate this field.
 	DetectedFirmware string               `json:"detected_firmware,omitempty"`
+	// LDAPReady is set by the server when a node phones home via verify-boot and
+	// includes sssd status. nil = not yet checked; true = sssd connected;
+	// false = sssd not ready (see LDAPReadyDetail). Sprint 15 #99.
+	LDAPReady       *bool  `json:"ldap_ready,omitempty"`
+	LDAPReadyDetail string `json:"ldap_ready_detail,omitempty"`
 	CreatedAt        time.Time            `json:"created_at"`
 	UpdatedAt        time.Time            `json:"updated_at"`
 }
@@ -1337,6 +1342,13 @@ type VerifyBootRequest struct {
 	SystemctlState string `json:"systemctl_state"`
 	// OSRelease is the OS identification string (from /etc/os-release PRETTY_NAME).
 	OSRelease string `json:"os_release"`
+	// SSSDStatus is the output of `sssctl domain-status <domain>` or "not_installed"
+	// if sssd is absent. Empty string means the probe was not run (older client).
+	// Sprint 15 #99 — LDAP node integration hardening.
+	SSSDStatus string `json:"sssd_status,omitempty"`
+	// PAMSSSOPresent is true when /etc/pam.d/system-auth contains "pam_sss.so".
+	// Sprint 15 #99.
+	PAMSSSPresent bool `json:"pam_sss_present,omitempty"`
 }
 
 // CreateReimageRequest is the body for POST /api/v1/nodes/:id/reimage.

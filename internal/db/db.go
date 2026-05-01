@@ -759,6 +759,7 @@ func nullableString(s string) interface{} {
 // Migration 049 (S6-8): last_deploy_succeeded_at column dropped; use deploy_completed_preboot_at.
 // Migration 054: verify_timeout_override added after power_provider_encrypted.
 // Migration 076: provider added after verify_timeout_override.
+// Migration 082: ldap_ready + ldap_ready_detail (Sprint 15 #99).
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_failed_at,
@@ -768,7 +769,8 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 	       deploy_completed_preboot_at, deploy_verified_booted_at,
 	       deploy_verify_timeout_at, last_seen_at, detected_firmware,
 	       bmc_config_encrypted, power_provider_encrypted,
-	       verify_timeout_override, provider`
+	       verify_timeout_override, provider,
+	       ldap_ready, ldap_ready_detail`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
 // the "nc" table alias. The caller must LEFT JOIN node_group_memberships m ON
@@ -776,6 +778,7 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 // Migration 048 (S6-6): group_id now comes exclusively from the is_primary join row.
 // Migration 049 (S6-8): last_deploy_succeeded_at removed; use deploy_completed_preboot_at.
 // Migration 076: provider added after verify_timeout_override.
+// Migration 082: ldap_ready + ldap_ready_detail appended.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
 	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
@@ -786,7 +789,8 @@ const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.
 	       nc.deploy_completed_preboot_at, nc.deploy_verified_booted_at,
 	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware,
 	       nc.bmc_config_encrypted, nc.power_provider_encrypted,
-	       nc.verify_timeout_override, nc.provider`
+	       nc.verify_timeout_override, nc.provider,
+	       nc.ldap_ready, nc.ldap_ready_detail`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -1101,6 +1105,29 @@ func (db *DB) RecordVerifyBooted(ctx context.Context, nodeID string) (firstTime 
 		return false, err
 	}
 	return true, nil
+}
+
+// RecordNodeLDAPReady records the LDAP readiness probe result from a node's
+// verify-boot phone-home. ready=true means sssd is connected and functional;
+// ready=false means the probe failed with the given detail string.
+// Called from the VerifyBoot handler (Sprint 15 #99).
+func (db *DB) RecordNodeLDAPReady(ctx context.Context, nodeID string, ready bool, detail string) error {
+	var readyInt int
+	if ready {
+		readyInt = 1
+	}
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE node_configs
+		SET ldap_ready        = ?,
+		    ldap_ready_detail = ?,
+		    updated_at        = ?
+		WHERE id = ?
+	`, readyInt, detail, now, nodeID)
+	if err != nil {
+		return fmt.Errorf("db: record node ldap ready: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
 }
 
 // RecordVerifyTimeout sets deploy_verify_timeout_at = now() for nodes that did
@@ -1613,12 +1640,16 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		verifyTimeoutOverrideVal sql.NullInt64
 		// Migration 076: hardware/power backend label ("ipmi", "proxmox", or "").
 		providerVal string
+		// Migration 082: LDAP readiness probe result (Sprint 15 #99).
+		ldapReadyVal    sql.NullInt64
+		ldapReadyDetail string
 	)
 
 	// Column order matches nodeConfigCols / nodeConfigColsJoined:
 	// S6-6: group_id is a subquery/join result, not a physical column.
 	// S6-8: last_deploy_succeeded_at removed; deploy_completed_preboot_at is canonical.
 	// Migration 054: verify_timeout_override appended.
+	// Migration 082: ldap_ready, ldap_ready_detail appended.
 	err := s.Scan(
 		&cfg.ID, &cfg.Hostname, &hostnameAuto, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
@@ -1633,6 +1664,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&cfg.DetectedFirmware,
 		&bmcConfigEncrypted, &powerProviderEncrypted,
 		&verifyTimeoutOverrideVal, &providerVal,
+		&ldapReadyVal, &ldapReadyDetail,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
@@ -1701,6 +1733,12 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	}
 	// Migration 076: hardware/power backend label.
 	cfg.Provider = providerVal
+	// Migration 082: LDAP readiness probe result (Sprint 15 #99).
+	if ldapReadyVal.Valid {
+		v := ldapReadyVal.Int64 != 0
+		cfg.LDAPReady = &v
+	}
+	cfg.LDAPReadyDetail = ldapReadyDetail
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
 	cfg.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()

@@ -1,14 +1,14 @@
-# slapd-seed.ldif.tmpl — cn=config seed LDIF for clonr LDAP module.
+# slapd-seed.ldif.tmpl — cn=config seed LDIF for clustr LDAP module.
 # Rendered once during Enable() and loaded via slapadd -n 0.
-# After seeding, clonr-serverd NEVER modifies the cn=config tree.
+# After seeding, clustr-serverd NEVER modifies the cn=config tree.
 #
 # Template fields:
 #   .BaseDN           — e.g. "dc=cluster,dc=local"
 #   .DC1              — first DC component, e.g. "cluster"
 #   .DC2              — second DC component, e.g. "local"
-#   .ConfigDir        — absolute path to slapd.d/, e.g. /etc/clonr/ldap/slapd.d
-#   .DataDir          — absolute path to mdb data dir, e.g. /var/lib/clonr/ldap/data
-#   .CACertPath       — absolute path to CA cert PEM, e.g. /etc/clonr/ldap/tls/ca.crt
+#   .ConfigDir        — absolute path to slapd.d/, e.g. /etc/clustr/ldap/slapd.d
+#   .DataDir          — absolute path to mdb data dir, e.g. /var/lib/clustr/ldap/data
+#   .CACertPath       — absolute path to CA cert PEM, e.g. /etc/clustr/ldap/tls/ca.crt
 #   .ServerCertPath   — absolute path to server cert PEM
 #   .ServerKeyPath    — absolute path to server key PEM
 #   .AdminPassword    — plaintext Directory Manager password (slapd hashes via olcPasswordHash)
@@ -68,7 +68,7 @@ dn: olcDatabase={0}config,cn=config
 objectClass: olcDatabaseConfig
 olcDatabase: {0}config
 # Only root (via SASL/EXTERNAL or local socket) may manage cn=config.
-# clonr-serverd seeds this once and never touches it again.
+# clustr-serverd seeds this once and never touches it again.
 olcRootDN: cn=config
 olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none
 

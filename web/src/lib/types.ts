@@ -448,6 +448,23 @@ export interface LDAPResetPasswordResponse {
   note: string
 }
 
+// Sprint 15 #100 — create user response (may include temp_password if auto-generated)
+export interface LDAPCreateUserResponse {
+  uid: string
+  uid_number?: number
+  gid_number?: number
+  cn?: string
+  sn?: string
+  given_name?: string
+  mail?: string
+  home_directory?: string
+  login_shell?: string
+  locked?: boolean
+  temp_password?: string  // present only when server auto-generated the password
+  force_change?: boolean
+  note?: string
+}
+
 export interface LDAPTestResponse {
   ok: boolean
   error?: string

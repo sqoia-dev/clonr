@@ -1068,8 +1068,37 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 		Str("systemctl_state", payload.SystemctlState).
 		Str("os_release", payload.OSRelease).
 		Float64("uptime_seconds", payload.UptimeSeconds).
+		Str("sssd_status", payload.SSSDStatus).
+		Bool("pam_sss_present", payload.PAMSSSPresent).
 		Msgf("verify-boot: node %s (%s) verified booted: kernel=%s, systemctl=%s",
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
+
+	// Sprint 15 #99: record LDAP readiness if the node has LDAP configured.
+	// sssd_status is empty for older clients that don't probe SSSD — skip silently.
+	if payload.SSSDStatus != "" {
+		if ldapConfigured, ldapErr := h.DB.LDAPNodeIsConfigured(r.Context(), id); ldapErr != nil {
+			log.Warn().Err(ldapErr).Str("node_id", id).Msg("verify-boot: could not check LDAP configured state (non-fatal)")
+		} else if ldapConfigured {
+			// Determine readiness from the sssd_status probe and PAM check.
+			ldapReady := payload.PAMSSSPresent && isSSSDConnected(payload.SSSDStatus)
+			var ldapDetail string
+			if ldapReady {
+				ldapDetail = "sssd connected, pam_sss.so present"
+			} else {
+				ldapDetail = buildLDAPNotReadyDetail(payload.SSSDStatus, payload.PAMSSSPresent)
+			}
+			if rdErr := h.DB.RecordNodeLDAPReady(r.Context(), id, ldapReady, ldapDetail); rdErr != nil {
+				log.Warn().Err(rdErr).Str("node_id", id).Msg("verify-boot: could not record LDAP readiness (non-fatal)")
+			} else {
+				if ldapReady {
+					log.Info().Str("node_id", id).Msg("verify-boot: LDAP readiness confirmed — sssd connected, pam_sss.so present")
+				} else {
+					log.Warn().Str("node_id", id).Str("detail", ldapDetail).
+						Msg("verify-boot: node has LDAP configured but is NOT LDAP-ready — operator must reimage to resolve")
+				}
+			}
+		}
+	}
 
 	// Flip the persistent boot order back to disk-first on the FIRST verify-boot
 	// only. This is a no-op on IPMI (override was already one-shot) but is
@@ -1275,4 +1304,41 @@ func (h *NodesHandler) BatchCreateNodes(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// ─── Sprint 15 #99: LDAP readiness helpers ───────────────────────────────────
+
+// isSSSDConnected returns true when the sssd_status string from the verify-boot
+// probe indicates that sssd has connected to the LDAP server. The probe runs
+// `sssctl domain-status <domain>` and sends the first line of output.
+// Accepted "connected" markers: "Online", "online" (case-insensitive prefix).
+func isSSSDConnected(sssdStatus string) bool {
+	lower := strings.ToLower(strings.TrimSpace(sssdStatus))
+	return strings.HasPrefix(lower, "online") ||
+		strings.Contains(lower, "online status: online")
+}
+
+// buildLDAPNotReadyDetail produces a human-readable reason string for the
+// ldap_ready_detail column when a node is not LDAP-ready.
+func buildLDAPNotReadyDetail(sssdStatus string, pamPresent bool) string {
+	var parts []string
+	if !pamPresent {
+		parts = append(parts, "pam_sss.so missing from /etc/pam.d/system-auth")
+	}
+	if sssdStatus == "not_installed" {
+		parts = append(parts, "sssd not installed in image")
+	} else if !isSSSDConnected(sssdStatus) {
+		parts = append(parts, "sssd not connected: "+strings.TrimSpace(sssdStatus))
+	}
+	if len(parts) == 0 {
+		return "sssd probe returned empty status"
+	}
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += "; "
+		}
+		result += p
+	}
+	return result
 }

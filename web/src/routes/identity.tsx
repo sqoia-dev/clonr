@@ -21,6 +21,7 @@ import type {
   UserSearchResult,
   LDAPGroupModeResponse,
   LDAPResetPasswordResponse,
+  LDAPCreateUserResponse,
   LDAPSourceModeResponse,
   LDAPInternalStatusResponse,
   LDAPInternalEnableError,
@@ -161,7 +162,7 @@ function LDAPUsersCard() {
   const createMutation = useMutation({
     mutationFn: () => {
       const sshKeys = fSSHKeys.split("\n").map(k => k.trim()).filter(Boolean)
-      return apiFetch("/api/v1/ldap/users", {
+      return apiFetch<LDAPCreateUserResponse>("/api/v1/ldap/users", {
         method: "POST",
         body: JSON.stringify({
           uid: fUID,
@@ -177,13 +178,20 @@ function LDAPUsersCard() {
         }),
       })
     },
-    onSuccess: () => {
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
       setAddOpen(false)
       setFUID(""); setFCN(""); setFSN(""); setFEmail(""); setFSSHKeys("")
       setFUID_num(""); setFGID_num(""); setFUIDOverride(false); setFGIDOverride(false)
       setFHome(""); setFShell("/bin/bash"); setFPassword(""); setAddError("")
-      toast({ title: "LDAP user created" })
+      // #100: if server auto-generated a temp password, show the one-shot panel.
+      if (res?.temp_password) {
+        setResetResult({ uid: res.uid, pwd: res.temp_password })
+        setShowTempPwd(false)
+        toast({ title: "LDAP user created — copy temp password before closing" })
+      } else {
+        toast({ title: "LDAP user created" })
+      }
       refetch()
     },
     onError: (err) => setAddError(String(err)),
@@ -297,7 +305,10 @@ function LDAPUsersCard() {
             <Input className="text-xs h-7 font-mono" placeholder={`Home dir (/home/${fUID || "…"})`} value={fHome} onChange={(e) => setFHome(e.target.value)} />
             <Input className="text-xs h-7 font-mono" placeholder="Shell (/bin/bash)" value={fShell} onChange={(e) => setFShell(e.target.value)} />
           </div>
-          <Input className="text-xs h-7 font-mono" type="password" placeholder="Initial password (optional)" value={fPassword} onChange={(e) => setFPassword(e.target.value)} />
+          <div className="space-y-1">
+            <Input className="text-xs h-7 font-mono" type="password" placeholder="Initial password (leave blank to auto-generate)" value={fPassword} onChange={(e) => setFPassword(e.target.value)} />
+            <p className="text-[11px] text-muted-foreground">Leave blank to auto-generate a temporary password (shown once after creation).</p>
+          </div>
           {/* #94: SSH keys textarea */}
           <div>
             <p className="text-[11px] text-muted-foreground mb-1">SSH public keys (one per line, optional)</p>

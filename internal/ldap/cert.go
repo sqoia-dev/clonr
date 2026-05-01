@@ -95,8 +95,12 @@ func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCer
 	notAfter := notBefore.Add(5 * 365 * 24 * time.Hour)
 
 	// Populate SANs: DNS names + IP addresses.
-	dnsNames := []string{"clustr.local"}
-	if hostname != "" {
+	// "clustr-server" is the canonical hostname alias used in sssd.conf and
+	// /etc/hosts entries pushed to nodes. It must be in the SAN list so nodes
+	// connecting with ldaps://clustr-server:636 pass TLS hostname verification.
+	// "clustr" is the short alias; "clustr.local" is the mDNS fallback.
+	dnsNames := []string{"clustr-server", "clustr", "clustr.local"}
+	if hostname != "" && hostname != "clustr-server" && hostname != "clustr" {
 		dnsNames = append(dnsNames, hostname)
 	}
 	// Always include loopback addresses so local probes (readiness check, health

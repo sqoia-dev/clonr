@@ -378,6 +378,20 @@ func (db *DB) LDAPListConfiguredNodeIDs(ctx context.Context) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// LDAPNodeIsConfigured returns true if the given node has an ldap_node_state row,
+// meaning LDAP client config was injected during its last deploy. Used by the
+// VerifyBoot handler to decide whether to record an LDAP readiness result.
+func (db *DB) LDAPNodeIsConfigured(ctx context.Context, nodeID string) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM ldap_node_state WHERE node_id = ?`, nodeID,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("db: LDAPNodeIsConfigured: %w", err)
+	}
+	return count > 0, nil
+}
+
 // LDAPRecordNodeConfigured upserts a ldap_node_state row for the given node.
 func (db *DB) LDAPRecordNodeConfigured(ctx context.Context, nodeID, configHash string) error {
 	now := time.Now().UTC().Format(time.RFC3339)

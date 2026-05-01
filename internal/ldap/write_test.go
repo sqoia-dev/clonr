@@ -337,3 +337,36 @@ func TestWriteCapableStatus_Clear(t *testing.T) {
 		t.Errorf("expected WriteCapable=nil after clearing, got %v", *row.WriteCapable)
 	}
 }
+
+// ─── Sprint 15 #100: generateRandomPassword ───────────────────────────────────
+
+// TestGenerateRandomPassword_NonEmpty asserts that generateRandomPassword always
+// returns a non-empty string for valid lengths.
+func TestGenerateRandomPassword_NonEmpty(t *testing.T) {
+	for _, length := range []int{8, 16, 20, 32} {
+		pwd, err := generateRandomPassword(length)
+		if err != nil {
+			t.Fatalf("generateRandomPassword(%d): unexpected error: %v", length, err)
+		}
+		if len(pwd) == 0 {
+			t.Errorf("generateRandomPassword(%d): returned empty string", length)
+		}
+		// Returned string may be base64-derived so length can differ — just check non-empty.
+	}
+}
+
+// TestGenerateRandomPassword_Unique asserts that two calls return different values.
+// A collision here would indicate a broken RNG.
+func TestGenerateRandomPassword_Unique(t *testing.T) {
+	a, err := generateRandomPassword(20)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	b, err := generateRandomPassword(20)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if a == b {
+		t.Errorf("two consecutive calls produced the same password %q — RNG may be broken", a)
+	}
+}

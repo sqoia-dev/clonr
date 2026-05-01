@@ -237,6 +237,22 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// #100: if no initial password supplied, auto-generate a strong temp password.
+	// The generated value is returned once in the response under "temp_password".
+	// forceChange is set so the user must change on first login.
+	var tempPwd string
+	var autoGenPwd bool
+	if req.Password == "" {
+		generated, err := generateRandomPassword(20)
+		if err != nil {
+			jsonError(w, "failed to generate temporary password", http.StatusInternalServerError)
+			return
+		}
+		req.Password = generated
+		tempPwd = generated
+		autoGenPwd = true
+	}
+
 	dit, err := m.WriteBind(r.Context())
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusServiceUnavailable)
@@ -248,6 +264,14 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When password was auto-generated, mark it as requiring a change on first login.
+	if autoGenPwd {
+		if err := dit.SetPassword(req.UID, req.Password, true); err != nil {
+			// Non-fatal: user was created, just force_change flag couldn't be set.
+			log.Warn().Err(err).Str("uid", req.UID).Msg("ldap: create user: could not set force_change on auto-generated password (non-fatal)")
+		}
+	}
+
 	// Audit — hash password value, include other attrs as-is.
 	attrMap := map[string]string{
 		"uid":       req.UID,
@@ -255,9 +279,7 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		"uidNumber": strings.TrimSpace(fmt.Sprintf("%d", req.UIDNumber)),
 		"gidNumber": strings.TrimSpace(fmt.Sprintf("%d", req.GIDNumber)),
 	}
-	if req.Password != "" {
-		attrMap["userPassword"] = req.Password
-	}
+	attrMap["userPassword"] = req.Password // always hashed by directoryWriteAudit
 	if req.Mail != "" {
 		attrMap["mail"] = req.Mail
 	}
@@ -265,6 +287,35 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		nil, directoryWriteAudit(dit.userDN(req.UID), "add", attrMap))
 
 	user, err := dit.GetUser(req.UID)
+	if autoGenPwd {
+		// Always return temp_password when auto-generated, regardless of GetUser success.
+		if err != nil {
+			jsonResponse(w, map[string]interface{}{
+				"uid":          req.UID,
+				"temp_password": tempPwd,
+				"force_change":  true,
+				"note":          "Show this to the operator once. It will not be returned again.",
+			}, http.StatusCreated)
+			return
+		}
+		// Merge temp_password into the user response.
+		jsonResponse(w, map[string]interface{}{
+			"uid":           user.UID,
+			"uid_number":    user.UIDNumber,
+			"gid_number":    user.GIDNumber,
+			"cn":            user.CN,
+			"sn":            user.SN,
+			"given_name":    user.GivenName,
+			"mail":          user.Mail,
+			"home_directory": user.HomeDirectory,
+			"login_shell":   user.LoginShell,
+			"locked":        user.Locked,
+			"temp_password": tempPwd,
+			"force_change":  true,
+			"note":          "Show this to the operator once. It will not be returned again.",
+		}, http.StatusCreated)
+		return
+	}
 	if err != nil {
 		jsonResponse(w, map[string]string{"uid": req.UID}, http.StatusCreated)
 		return
