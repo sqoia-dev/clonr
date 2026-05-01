@@ -124,7 +124,13 @@ jobs:
         run: go build -trimpath -o bin/clustr-serverd ./cmd/clustr-serverd
 
       - name: Build clustr-privhelper (static, linux/amd64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr-privhelper ./cmd/clustr-privhelper
+        # Guard: skip until Dinesh lands cmd/clustr-privhelper (Sprint 14 #98)
+        run: |
+          if [ -d ./cmd/clustr-privhelper ]; then
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr-privhelper ./cmd/clustr-privhelper
+          else
+            echo "cmd/clustr-privhelper not yet present — skipping build (packaging wired, pending Go code)"
+          fi
 
       - name: Verify static linking
         run: file bin/clustr | grep -q "statically linked"

@@ -261,6 +261,10 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
+          if [ ! -d ./cmd/clustr-privhelper ]; then
+            echo "ERROR: cmd/clustr-privhelper is required for release packaging but was not found"
+            exit 1
+          fi
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
             go build -trimpath \
               -ldflags="-s -w -X main.version=${TAG}" \
