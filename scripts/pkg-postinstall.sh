@@ -60,6 +60,17 @@ chown -R root:clustr /var/log/clustr
 chown -R root:clustr /etc/clustr
 
 # ---------------------------------------------------------------------------
+# Apply setuid bit to clustr-privhelper
+# ---------------------------------------------------------------------------
+# nfpm cannot write the setuid bit in RPM file metadata, so we apply it here.
+# This block is idempotent: chmod 4755 on an already-4755 file is a no-op.
+# The binary must exist at this point — it is laid down by the RPM payload
+# before %post runs.  If it is somehow absent (e.g. partial install), the
+# error from chmod will surface as a post-install failure, which is correct
+# behaviour — do not silently skip a missing suid binary.
+chmod 4755 /usr/sbin/clustr-privhelper
+
+# ---------------------------------------------------------------------------
 # Reload systemd unit database
 # ---------------------------------------------------------------------------
 if command -v systemctl > /dev/null 2>&1; then

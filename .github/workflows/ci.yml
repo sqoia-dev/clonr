@@ -123,6 +123,9 @@ jobs:
       - name: Build clustr-serverd (with embedded web)
         run: go build -trimpath -o bin/clustr-serverd ./cmd/clustr-serverd
 
+      - name: Build clustr-privhelper (static, linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr-privhelper ./cmd/clustr-privhelper
+
       - name: Verify static linking
         run: file bin/clustr | grep -q "statically linked"
 

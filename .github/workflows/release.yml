@@ -257,6 +257,16 @@ jobs:
               -o clustr-serverd-linux-${{ matrix.goarch }} \
               ./cmd/clustr-serverd
 
+      - name: Build clustr-privhelper binary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -trimpath \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o clustr-privhelper-linux-${{ matrix.goarch }} \
+              ./cmd/clustr-privhelper
+
       - name: SHA256 checksum (binary)
         run: sha256sum clustr-serverd-linux-${{ matrix.goarch }} > clustr-serverd-linux-${{ matrix.goarch }}.sha256
 

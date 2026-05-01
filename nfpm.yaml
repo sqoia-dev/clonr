@@ -64,6 +64,18 @@ contents:
       owner: root
       group: root
 
+  # Privilege-helper binary — single privilege boundary for all host-side
+  # privileged operations (nsenter, chroot, mknod, etc.).  Packaged with
+  # mode 0755 here; the post-install scriptlet applies the setuid bit (4755)
+  # so that clustr-serverd can exec it as root from a non-root context.
+  # nfpm does not support writing the setuid bit directly — hence %post.
+  - src: clustr-privhelper-linux-${ARCH}
+    dst: /usr/sbin/clustr-privhelper
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
   # Systemd unit (package variant: ExecStart uses /usr/sbin path)
   - src: deploy/systemd/clustr-serverd.package.service
     dst: /usr/lib/systemd/system/clustr-serverd.service
