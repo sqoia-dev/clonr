@@ -2217,6 +2217,27 @@ func writeLDAPConfig(ctx context.Context, mountRoot string, ldapCfg *api.LDAPNod
 			Msg("finalize: systemctl enable sssd.service in chroot failed (non-fatal) — sssd may not be installed in the image")
 	}
 
+	// ── GAP-S18-3: Install oddjob-mkhomedir in chroot ────────────────────────
+	// oddjob-mkhomedir provides pam_oddjob_mkhomedir.so, which authselect
+	// with-mkhomedir wires into the PAM stack. The package is in EL9 BaseOS and
+	// ships with the standard role images (roles.go), but a minimal base image
+	// (rocky9-slurm-free-clean) may not include it. Install idempotently here so
+	// the authselect call below can unconditionally reference the profile without
+	// needing a fallback for missing packages.
+	if out, err := exec.CommandContext(ctx, "chroot", mountRoot,
+		"dnf", "-y", "--setopt=install_weak_deps=False",
+		"--disablerepo=*", "--enablerepo=baseos", "--enablerepo=appstream",
+		"install", "oddjob-mkhomedir",
+	).CombinedOutput(); err != nil {
+		// Non-fatal: authselect with-mkhomedir will still run; if the package was
+		// already present the dnf invocation exits 0 anyway. Log the output so
+		// the operator can diagnose if homedir creation fails post-deploy.
+		log.Warn().Err(err).Str("output", string(out)).
+			Msg("finalize: chroot dnf install oddjob-mkhomedir failed (non-fatal) — pam_mkhomedir may be unavailable on deployed nodes")
+	} else {
+		log.Info().Msg("finalize: oddjob-mkhomedir installed in chroot")
+	}
+
 	// ── Enable oddjobd for pam_mkhomedir (if available) ───────────────────────
 	if out, err := exec.CommandContext(ctx, "chroot", mountRoot, "systemctl", "enable", "oddjobd.service").CombinedOutput(); err != nil {
 		log.Warn().Err(err).Str("output", string(out)).

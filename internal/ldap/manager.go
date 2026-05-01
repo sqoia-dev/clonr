@@ -543,6 +543,12 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 // account directly via go-ldap AddRequest calls. It is idempotent: entries that
 // already exist (ldap.ResultEntryAlreadyExists) are silently skipped, so
 // re-running Enable() does not fail.
+//
+// GAP-S18-1: This function also creates cn=clustr-admins,ou=groups during every
+// Enable() so the sudoers group is always present before any GrantSudo call.
+// GAP-S18-2: If the legacy cn=clonr-admins group is found in the DIT and
+// cn=clustr-admins is absent, a ModifyDN rename is performed so existing
+// installs upgrade without operator intervention.
 func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePassword string) error {
 	conn, err := dit.connect()
 	if err != nil {
@@ -554,6 +560,20 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 	dc1, _, err := parseDCComponents(baseDN)
 	if err != nil {
 		return fmt.Errorf("ldap: seed DIT: %w", err)
+	}
+
+	// Allocate a GID for the clustr-admins sudoers group.
+	// AllocateGID is safe to call during provisioning: the LDAP GID lister
+	// returns nil,nil when LDAP is not yet in statusReady, so the allocator
+	// falls back to DB-only collision checking against system_groups. At seed
+	// time the LDAP DIT is empty, so the allocated GID is always fresh.
+	sudoersGID, err := m.allocator.AllocateGID(ctx)
+	if err != nil {
+		// Non-fatal for the overall seed: fall back to a known-safe default so
+		// that the DIT seed can proceed. The SeedSudoersGroup call below will
+		// attempt LDAP and produce a cleaner error if this GID collides.
+		log.Warn().Err(err).Msg("ldap: seed DIT: AllocateGID failed, using fallback GID 10001 for clustr-admins")
+		sudoersGID = 10001
 	}
 
 	type seedEntry struct {
@@ -643,6 +663,23 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 				"pwdSafeModify":          {"FALSE"},
 			},
 		},
+		// ── GAP-S18-1: clustr-admins sudoers group ────────────────────────────
+		// Seeded here so the group always exists before any GrantSudo call.
+		// Without this, POST /api/v1/ldap/sudoers/members returns LDAP Error 32
+		// "No Such Object" because AddGroupMember targets a DN that was never created.
+		// The GID is allocated from the posixid allocator — allocator-consistent
+		// and safe to call during provisioning (LDAP GID lister returns nil on
+		// statusProvisioning, so no collision check against live LDAP is needed;
+		// the DB system_groups table is still consulted for correctness).
+		{
+			dn: fmt.Sprintf("cn=%s,ou=groups,%s", sudoersDefaultGroupCN, baseDN),
+			attrs: map[string][]string{
+				"objectClass": {"top", "posixGroup"},
+				"cn":          {sudoersDefaultGroupCN},
+				"gidNumber":   {strconv.Itoa(sudoersGID)},
+				"description": {"Members of this group have full sudo on cluster nodes"},
+			},
+		},
 	}
 
 	for _, e := range entries {
@@ -683,8 +720,88 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 		}
 	}
 
-	log.Info().Msg("ldap: data DIT seeded (base DN + OUs + node-reader account)")
+	// GAP-S18-2: Rename legacy cn=clonr-admins group to cn=clustr-admins if present.
+	// This handles installs that were provisioned before the clonr→clustr rename
+	// (2026-04-25). The three-state logic:
+	//   - only clonr-admins exists → rename it to clustr-admins via ModifyDN
+	//   - both exist → warn and leave alone (operator manually created clustr-admins)
+	//   - only clustr-admins exists → no-op (already seeded above)
+	if err := m.migrateClonrAdminsGroup(conn, baseDN); err != nil {
+		// Non-fatal: log the error but don't abort the seed. The sudoers group
+		// was already seeded above; the rename is a best-effort upgrade path.
+		log.Warn().Err(err).Msg("ldap: seed DIT: clonr-admins migration failed (non-fatal)")
+	}
+
+	log.Info().Msg("ldap: data DIT seeded (base DN + OUs + node-reader account + clustr-admins group)")
 	return nil
+}
+
+// migrateClonrAdminsGroup renames cn=clonr-admins,ou=groups,<baseDN> to
+// cn=clustr-admins if the old entry exists and the new one does not.
+// This is a no-op when only cn=clustr-admins exists (already correct)
+// or when both exist (operator managed — leave alone with a warning).
+func (m *Manager) migrateClonrAdminsGroup(conn *goldap.Conn, baseDN string) error {
+	const legacyCN = "clonr-admins"
+	legacyDN := fmt.Sprintf("cn=%s,ou=groups,%s", legacyCN, baseDN)
+	newDN := fmt.Sprintf("cn=%s,ou=groups,%s", sudoersDefaultGroupCN, baseDN)
+
+	// Check legacy entry existence.
+	legacyExists, err := ldapEntryExists(conn, legacyDN)
+	if err != nil {
+		return fmt.Errorf("ldap: migrate clonr-admins: search legacy: %w", err)
+	}
+	if !legacyExists {
+		return nil // no legacy entry — nothing to migrate
+	}
+
+	// Legacy entry exists. Check if new entry already exists too.
+	newExists, err := ldapEntryExists(conn, newDN)
+	if err != nil {
+		return fmt.Errorf("ldap: migrate clonr-admins: search new: %w", err)
+	}
+
+	if newExists {
+		// Both exist — operator may have created cn=clustr-admins manually.
+		// Leave both alone; log a warning so the operator can clean up.
+		log.Warn().
+			Str("legacy_dn", legacyDN).
+			Str("new_dn", newDN).
+			Msg("ldap: seed DIT: both cn=clonr-admins and cn=clustr-admins exist; leaving both in place — manually remove cn=clonr-admins after verifying membership is correct")
+		return nil
+	}
+
+	// Only legacy exists: rename it.
+	modDNReq := goldap.NewModifyDNRequest(legacyDN, fmt.Sprintf("cn=%s", sudoersDefaultGroupCN), true, "")
+	if err := conn.ModifyDN(modDNReq); err != nil {
+		return fmt.Errorf("ldap: migrate clonr-admins: ModifyDN %s → %s: %w", legacyDN, newDN, err)
+	}
+	log.Info().
+		Str("from", legacyDN).
+		Str("to", newDN).
+		Msg("ldap: seed DIT: renamed legacy cn=clonr-admins to cn=clustr-admins")
+	return nil
+}
+
+// ldapEntryExists returns true if an entry with the given DN exists in the DIT.
+// Returns (false, nil) for LDAP No Such Object, (false, err) for other errors.
+func ldapEntryExists(conn *goldap.Conn, dn string) (bool, error) {
+	req := goldap.NewSearchRequest(
+		dn,
+		goldap.ScopeBaseObject,
+		goldap.NeverDerefAliases,
+		1, 0, false,
+		"(objectClass=*)",
+		[]string{"dn"},
+		nil,
+	)
+	result, err := conn.Search(req)
+	if err != nil {
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchObject) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(result.Entries) > 0, nil
 }
 
 // ─── Disable ──────────────────────────────────────────────────────────────────
