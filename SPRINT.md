@@ -1258,27 +1258,27 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
 
 ### Tasks
 
-- [ ] **#120 — Real-hardware kernel module set in initramfs (HIGH, M)**
+- [x] **#120 — Real-hardware kernel module set in initramfs (HIGH, M)** — landed `688d16b`, CI green
   Owner: Dinesh; arch by Richard.
   In: expand the `scripts/build-initramfs.sh` allowlist to cover `mlx5_core/mlx5_ib/mlx4_*`, `i40e/ice/ixgbe/igb/e1000e`, `bnxt_en/bnx2x/tg3`, `nvme/nvme_core`, `megaraid_sas/mpt3sas/aacraid`, `dm_*`, `btrfs`, `crc32c_generic`. Build-time enumerate from `/lib/modules/$KVER/kernel/{net,drivers/net,drivers/scsi,drivers/block,drivers/md,drivers/nvme,fs}` and write a manifest of included modules into the build artifact for debug. Out: alternative driver runtime auto-load via lspci aliases (deferred follow-up).
   Depends on: nothing.
 
-- [ ] **#121 — xattr/ACL preservation in deploy (HIGH, S)**
+- [x] **#121 — xattr/ACL preservation in deploy (HIGH, S)** — landed `99e2439`, CI green
   Owner: Dinesh; arch by Richard.
   In: replace busybox `tar` with GNU `tar` in initramfs binary list. Add `--xattrs --xattrs-include='*' --acls` to the streamExtract invocation in `internal/deploy/rsync.go`. Add a deploy-round-trip test that captures an image with SELinux contexts + POSIX ACLs and asserts they survive capture → deploy → re-capture. Out: ACL editor UI.
   Depends on: nothing.
 
-- [ ] **#122 — HTTP `Range:` resume on blob retries (MEDIUM, S)**
+- [x] **#122 — HTTP `Range:` resume on blob retries (MEDIUM, S)** — landed `1848545`, CI green. Note: Range resume intentionally NOT applied to streaming tar (mid-stream seek would corrupt archive); applies to block-deploy path only
   Owner: Dinesh.
   In: track bytes-received per attempt in the rsync.go retry loop; on retry send `Range: bytes=N-` and resume the stream. Verify Go's `net/http.ServeContent` end-to-end. Cap total retry duration at `CLUSTR_DEPLOY_TIMEOUT`. Out: parallel-range streams.
   Depends on: nothing.
 
-- [ ] **#123 — Bandwidth and concurrency caps on `/blob` (MEDIUM, S)**
+- [x] **#123 — Bandwidth and concurrency caps on `/blob` (MEDIUM, S)** — landed `eee1964`, CI green. Legacy env name `CLUSTR_BLOB_MAX_CONCURRENT` still accepted alongside new `CLUSTR_BLOB_MAX_CONCURRENCY`
   Owner: Dinesh.
   In: `CLUSTR_BLOB_MAX_BPS` (per-stream), `CLUSTR_BLOB_MAX_CONCURRENCY` (global) env vars. Token-bucket middleware in `internal/server/handlers/images.go`. Out: per-image / per-group quota policies.
   Depends on: nothing.
 
-- [ ] **#124 — Lab-validate Sprint 20 on real Mellanox + megaraid hardware (HIGH, S)**
+- [ ] **#124 — Lab-validate Sprint 20 on real Mellanox + megaraid hardware (HIGH, S)** — BLOCKED on physical hardware (Mellanox CX-5 + LSI 9361-8i not in lab). Code-side blockers (#120 #121 #122) green. Carries forward as gating validation before Sprint 22 (operator parallel ops) ships against real customers.
   Owner: Gilfoyle (or Jared if Gilfoyle unavailable).
   In: confirm a node with a Mellanox CX-5 + an LSI 9361-8i actually PXE-boots, partitions, deploys an image, and rejoins the cluster end-to-end. Document exact module load order observed. Out: full lab-validate matrix (separate sprint task).
-  Depends on: #120 #121 #122.
+  Depends on: #120 #121 #122 (all landed).
