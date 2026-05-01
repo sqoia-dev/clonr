@@ -1510,18 +1510,6 @@ function LDAPInternalPanel({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
     onError: (err) => toast({ variant: "destructive", title: "Stop failed", description: String(err) }),
   })
 
-  const destroyMutation = useMutation({
-    mutationFn: () => apiFetch("/api/v1/ldap/internal/destroy", { method: "POST", body: JSON.stringify({ confirm: "destroy" }) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
-      qc.invalidateQueries({ queryKey: ["ldap-config"] })
-      setDisableOpen(false)
-      setDestroyConfirm("")
-      toast({ title: "LDAP stopped and data wiped" })
-    },
-    onError: (err) => toast({ variant: "destructive", title: "Destroy failed", description: String(err) }),
-  })
-
   // Admin password recovery (ENABLE-6 — show once)
   const [showPwd, setShowPwd] = React.useState(false)
   const [adminPwdValue, setAdminPwdValue] = React.useState<string | null>(null)
