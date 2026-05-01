@@ -1102,3 +1102,96 @@ For each row: mark PASS / FAIL / GAP-DOCUMENTED. File Sprint 17/18 task per FAIL
 | GAP-104a-3 | 18 | MEDIUM | Use IP in sssd ldap_uri if hostname DNS resolution is uncertain at deploy time |
 | GAP-104a-4 | 18 | LOW | Inject AuthorizedKeysCommand in sshd_config during node deploy for SSH pubkey auth |
 | INFRA-VM-1 | 17 | BLOCKER | Build reusable Rocky 9 VM template for lab verification runs |
+
+---
+
+## Sprint 19 backlog — surfaced 2026-04-29
+
+### #113 — Split posix_id_allocator into LDAP-user range and system-account range (HIGH)
+
+**Bug evidence (founder-surfaced 2026-04-29):**
+On cloner, `system_accounts` row for `munge` shows UID **10003** with GID **996**. UID 10003 is in the LDAP user range (10000–60000). GID 996 is correctly in the FHS system range (<1000) — that came from DNF's `groupadd -r munge`, not clustr.
+
+The asymmetry exposes a Sprint 13 (#96) design oversight: `internal/posixid/allocator.go` has a single `AllocateUID()` reading one range from `posixid_config`. Both `internal/ldap` user creation and `internal/db/sysaccounts.CreateAccount` call it, so daemon accounts end up in user-id space.
+
+**Why this matters:**
+- FHS/Linux convention reserves UID/GID <1000 for system accounts; SSSD's default `min_id=1000` excludes them from login enumeration.
+- UID drift risk: if a node's local `dnf install munge` picks 996 but clustr's record says 10003, manifest push creates same-name/different-UID divergence and file-ownership chaos.
+- Conceptually wrong: human users and daemon accounts share an identity allocator that has no notion of the distinction.
+
+**Fix:**
+1. Migration adds `kind` column to `posixid_config` with two seeded rows: `kind=ldap_user` (10000–60000), `kind=system_account` (200–999).
+2. `posixid.AllocateUID(kind)` and `AllocateGID(kind)` take the kind explicitly. No default.
+3. `internal/ldap` user-create calls with `kind=ldap_user`; `sysaccounts.CreateAccount` calls with `kind=system_account`.
+4. **Reconciliation migration for existing rows:** any `system_accounts` row with UID ≥1000 gets re-synced to its on-node UID (read via clientd `getent passwd <name>` push-back), not blindly re-allocated. Munge specifically lands at whatever DNF put it on the node (likely 996).
+5. Anti-regression test: assert `system_accounts.uid < 1000` invariant on every CreateAccount path.
+6. Documented in feedback memory: system accounts never share id-space with LDAP users.
+
+**Owner:** Richard scopes (15 min) → Dinesh implements. Queued behind Sprint 18 landing green.
+
+---
+
+## Sprint 18 verification matrix results (2026-05-01)
+
+**Branch:** `main` at `ff09c17` (v0.9.0 / Sprint 16+17 bundle)
+**Server:** clustr-serverd v0.2.0-501-ga4af5df on cloner (192.168.1.151)
+**Test nodes:** slurm-controller (10.99.0.100, VMID 201), slurm-compute (10.99.0.101, VMID 202)
+**Template build:** VMID 299 (`rocky9-minimal-template`), install in progress at time of matrix run
+
+### Matrix results
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Clean slapd bring-up | BLOCKED | Template VM (299) install still running; existing cloner has LDAP already enabled (no clean reset available without data loss). Re-test in Sprint 19 once template is usable. See GAP-S18-4. |
+| 2 | CA rotation mid-flight | BLOCKED | Depends on #109/#110 (Dinesh). Not retested. |
+| 3 | Service-bind credential drift | BLOCKED | Depends on #109/#110 (Dinesh). Not retested. |
+| 4 | Node enrollment cold | BLOCKED | Depends on #112 (Dinesh). Not retested. |
+| 5 | Node enrollment warm | PASS | `getent passwd sprint13test` → `sprint13test:*:10000:10000:sprint13test:/home/sprint13test:/bin/bash` on slurm-controller (reimaged 2026-04-30T22:44, sssd active). No manual fixup. |
+| 6 | SSH login via pubkey | BLOCKED | Depends on #109 (Dinesh). Not retested. |
+| 7 | SSH login via password | PASS | `sshpass -p 'TestPass123!' ssh sprint13test@10.99.0.100` → `uid=10000(sprint13test)` + `SSH_SUCCESS`. No sshd_config fixup needed. Minor: no homedir creation (see GAP-S18-5). |
+| 8 | Sudo via LDAP group | FAIL | `POST /api/v1/ldap/sudoers/members {uid: sprint13test}` → LDAP Error 32 "No Such Object". Group `clonr-admins` referenced by `sudoers_group_cn` does not exist in LDAP DIT (only user private groups present). See GAP-S18-1. |
+| 9 | sssd offline cache | PASS | iptables blocked port 636 on node; `getent passwd sprint13test` returned cached entry; `sshpass` SSH returned "Authenticated with cached credentials, expires Fri May 8 2026"; `iptables -D` unblocked cleanly. `offline_credentials_expiration = 7` (7 days) confirmed in sssd.conf. |
+
+### New gaps surfaced
+
+**GAP-S18-1 — sudoers group `clonr-admins` missing from LDAP DIT (HIGH)**
+- `POST /api/v1/ldap/sudoers` returns LDAP 32 "No Such Object" because the `clonr-admins` group was never seeded in `ou=groups,dc=cluster,dc=local`.
+- Root cause: the LDAP DIT seed (`Manager.Enable()` / `slapd-seed.ldif.tmpl`) does not create the sudoers group. The group name was `clonr-admins` pre-rename; the server config still references it.
+- The node has `/etc/sudoers.d/clonr-admins` file (deployed by the provisioning pipeline with `%clonr-admins ALL=(ALL) NOPASSWD:ALL`) but the LDAP group it references does not exist, so sudo silently does nothing.
+- Fix: `Manager.SeedDIT()` must create the `cn=<sudoers_group_cn>` entry in `ou=groups` during enable/re-enable. Also consider renaming `clonr-admins` → `clustr-admins` at the same time.
+- **Owner:** Dinesh. Sprint 19.
+
+**GAP-S18-2 — sudoers group name still `clonr-admins` (LOW)**
+- `GET /api/v1/ldap/sudoers/status` returns `group_cn: "clonr-admins"`. Project was renamed `clonr` → `clustr` in 2026-04-25.
+- The default sudoers group CN should be `clustr-admins`. This is a cosmetic rename but consistent with the product name.
+- Fix: default config value + DIT seed. Migration for existing installs: check if old group exists, rename if so.
+- **Owner:** Dinesh. Sprint 19 (bundle with GAP-S18-1).
+
+**GAP-S18-3 — pam_mkhomedir not configured; LDAP user homedirs not created on first login (LOW)**
+- SSH login succeeds but logs: `Could not chdir to home directory /home/sprint13test: No such file or directory`.
+- sssd is configured but the node deploy does not add `pam_mkhomedir.so` to the PAM session stack or set `homedir_substring` handling.
+- Fix: add `pam_mkhomedir.so` to `/etc/pam.d/sshd` (or a common file) in the node deploy finalize step.
+- **Owner:** Dinesh. Sprint 19.
+
+**GAP-S18-4 — Row 1 (clean slapd bring-up) not verifiable without fresh server state (MEDIUM)**
+- Testing "first Enable ever, no prior LDAP state" requires a clustr-serverd instance that has never run `Enable()`. The live cloner has had LDAP enabled for weeks; wiping it would destroy production LDAP data.
+- The Rocky 9 template (VMID 299) is being built for this. Once the template is ready, clone it, install clustr-serverd from pkg.sqoia.dev, run `bootstrap-admin`, open LDAP config, click Enable — that is the correct Row 1 test.
+- Action for Sprint 19: after VMID 299 template is confirmed (agent up, SSH accessible), run the Row 1 matrix item as the first clustr action on a clean install.
+- **Owner:** Gilfoyle. Sprint 19.
+
+**GAP-S18-5 — Template VM 299 build status (IN PROGRESS)**
+- Rocky 9.7 minimal + oemdrv kickstart install started at 06:43 local time on Proxmox host. Disk partitions not yet written as of matrix run (installer countdown to first package install).
+- oemdrv kickstart (`ks-rocky9-template.iso`, VMID 299 ide3) delivers kickstart without network access — avoids the virtio-net stall that blocked Sprint 16.
+- Once install completes + agent responds: run `qm stop 299; qm set 299 --boot order=scsi0 --ide2 none,media=cdrom --ide3 none,media=cdrom; qm template 299`.
+- Template documented in `reference_proxmox.md`. VMID 299, storage `local-lvm`, 2 vCPU / 2 GB RAM / 32 GB.
+- **Action for Sprint 19:** after template confirmed, run INFRA-VM-1 re-verification and Row 1 matrix item. Mark INFRA-VM-1 done.
+
+### Sprint 19 task IDs from this run
+
+| Gap ID | Priority | Title |
+|---|---|---|
+| GAP-S18-1 | HIGH | Seed `clonr-admins` (or `clustr-admins`) LDAP group during `Manager.Enable()` |
+| GAP-S18-2 | LOW | Rename default sudoers group CN `clonr-admins` → `clustr-admins` |
+| GAP-S18-3 | LOW | Add `pam_mkhomedir.so` to node PAM deploy step |
+| GAP-S18-4 | MEDIUM | Re-run Row 1 (clean slapd bring-up) on fresh clustr install from VMID 299 template |
+| GAP-S18-5 | MEDIUM | Complete VMID 299 Rocky 9 template build + convert to template + update reference_proxmox.md |
