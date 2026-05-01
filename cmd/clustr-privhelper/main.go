@@ -21,6 +21,18 @@
 //
 //	dnf-install <pkg>            Install a single package via dnf. Package must
 //	                             appear in the embedded deps_matrix allowlist.
+//	dnf-upgrade <pkg-spec>       Install/upgrade a fully-qualified slurm package
+//	                             spec (name-version.elX.arch) from
+//	                             clustr-internal-repo only. The --repo flag
+//	                             restricts dnf to that repo so only signed clustr
+//	                             RPMs are installed.
+//	repo-push <src-file> <dst-file>
+//	                             Copy a signed RPM from <src-file> to a path
+//	                             under /var/lib/clustr/repo/clustr-internal-repo/.
+//	                             dst-file must start with that prefix and end in
+//	                             .rpm. Source must be an absolute path.
+//	repo-refresh <repo-dir>      Run createrepo_c on <repo-dir>, which must be
+//	                             under /var/lib/clustr/repo/clustr-internal-repo/.
 //	cap-bit-test                 Print the process effective UID. Returns 0 when
 //	                             the setuid bit has landed correctly. Used by
 //	                             integration tests and operator diagnostics.
@@ -47,8 +59,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -189,7 +203,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, cap-bit-test, service-control\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control\n")
 		os.Exit(1)
 	}
 
@@ -205,6 +219,12 @@ func main() {
 	switch verb {
 	case "dnf-install":
 		exitCode = verbDnfInstall(callerUID, verbArgs)
+	case "dnf-upgrade":
+		exitCode = verbDnfUpgrade(callerUID, verbArgs)
+	case "repo-push":
+		exitCode = verbRepoPush(callerUID, verbArgs)
+	case "repo-refresh":
+		exitCode = verbRepoRefresh(callerUID, verbArgs)
 	case "cap-bit-test":
 		exitCode = verbCapBitTest()
 	case "service-control":
@@ -390,4 +410,218 @@ func writeAudit(callerUID int, verb string, args []string, exitCode int, errMsg 
 	if dbErr != nil {
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: audit: insert: %v\n", dbErr)
 	}
+}
+
+// ─── repo-push ────────────────────────────────────────────────────────────────
+
+// repoBasePath is the only directory prefix that repo-push and repo-refresh may
+// write to. No other path under /var/lib/clustr/ is accessible via these verbs.
+const repoBasePath = "/var/lib/clustr/repo/clustr-internal-repo/"
+
+// verbRepoPush copies a signed RPM from src to dst, where dst must be under
+// repoBasePath. Both arguments must be absolute paths. Dst must end in ".rpm".
+// No shell is invoked — the copy is a pure Go file copy.
+func verbRepoPush(callerUID int, args []string) int {
+	if len(args) != 2 {
+		msg := "repo-push requires exactly two arguments: <src-file> <dst-file>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 1, msg)
+		return 1
+	}
+
+	src, dst := args[0], args[1]
+
+	// Validate: both must be absolute paths, no traversal.
+	if !strings.HasPrefix(src, "/") {
+		msg := "repo-push: src must be an absolute path"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 1, msg)
+		return 1
+	}
+	if !strings.HasPrefix(dst, repoBasePath) {
+		msg := fmt.Sprintf("repo-push: dst must be under %s", repoBasePath)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 1, msg)
+		return 1
+	}
+	if !strings.HasSuffix(dst, ".rpm") {
+		msg := "repo-push: dst must end in .rpm"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 1, msg)
+		return 1
+	}
+	// Guard against path traversal after prefix check.
+	cleanDst := filepath.Clean(dst)
+	if !strings.HasPrefix(cleanDst, repoBasePath) {
+		msg := "repo-push: path traversal detected in dst"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 1, msg)
+		return 1
+	}
+
+	// Ensure destination directory exists.
+	if err := os.MkdirAll(filepath.Dir(cleanDst), 0755); err != nil {
+		msg := fmt.Sprintf("repo-push: mkdir: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 2, msg)
+		return 2
+	}
+
+	if err := copyFile(src, cleanDst); err != nil {
+		msg := fmt.Sprintf("repo-push: copy: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-push", args, 2, msg)
+		return 2
+	}
+
+	writeAudit(callerUID, "repo-push", args, 0, "")
+	return 0
+}
+
+// ─── repo-refresh ─────────────────────────────────────────────────────────────
+
+// verbRepoRefresh runs createrepo_c on the given directory, which must be under
+// repoBasePath. This regenerates the repomd.xml and other metadata so dnf can
+// discover the updated package list.
+func verbRepoRefresh(callerUID int, args []string) int {
+	if len(args) != 1 {
+		msg := "repo-refresh requires exactly one argument: <repo-dir>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-refresh", args, 1, msg)
+		return 1
+	}
+
+	dir := args[0]
+	cleanDir := filepath.Clean(dir)
+
+	if !strings.HasPrefix(cleanDir, repoBasePath) {
+		msg := fmt.Sprintf("repo-refresh: dir must be under %s", repoBasePath)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-refresh", args, 1, msg)
+		return 1
+	}
+
+	// Ensure the directory exists (createrepo_c doesn't create it).
+	if err := os.MkdirAll(cleanDir, 0755); err != nil {
+		msg := fmt.Sprintf("repo-refresh: mkdir: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "repo-refresh", args, 2, msg)
+		return 2
+	}
+
+	cmd := exec.Command("createrepo_c", "--update", cleanDir) //#nosec G204 -- cleanDir validated against repoBasePath prefix above
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "repo-refresh", args, exitCode, "")
+	return exitCode
+}
+
+// ─── dnf-upgrade ─────────────────────────────────────────────────────────────
+
+// verbDnfUpgrade installs/upgrades a slurm package spec from clustr-internal-repo
+// only. The --repo flag ensures dnf does not pull from any other configured repo,
+// so only GPG-signed clustr RPMs are installed. The package spec must match the
+// slurm package name pattern and may include version (e.g. "slurm-25.11.5-1.el9").
+func verbDnfUpgrade(callerUID int, args []string) int {
+	if len(args) < 1 {
+		msg := "dnf-upgrade requires at least one argument: <pkg-spec>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "dnf-upgrade", args, 1, msg)
+		return 1
+	}
+
+	// Validate each package spec.
+	for _, pkg := range args {
+		if !isSafePackageName(pkg) {
+			msg := fmt.Sprintf("dnf-upgrade: package spec %q contains disallowed characters", pkg)
+			fmt.Fprintln(os.Stderr, msg)
+			writeAudit(callerUID, "dnf-upgrade", args, 1, msg)
+			return 1
+		}
+		// Require the package to start with "slurm" so only slurm-family packages
+		// can be installed via this verb. Prevents abuse of the repo-restricted path.
+		if !strings.HasPrefix(pkg, "slurm") && !strings.HasPrefix(pkg, "munge") {
+			msg := fmt.Sprintf("dnf-upgrade: package %q is not a slurm or munge package; only slurm-family packages may be upgraded via dnf-upgrade", pkg)
+			fmt.Fprintln(os.Stderr, msg)
+			writeAudit(callerUID, "dnf-upgrade", args, 1, msg)
+			return 1
+		}
+	}
+
+	// Build dnf command: install -y --repo=clustr-internal-repo <pkg...>
+	// --repo restricts resolution to clustr-internal-repo only so GPG signature
+	// verification is scoped. --setopt=install_weak_deps=False keeps it lean.
+	dnfArgs := append([]string{
+		"install", "-y",
+		"--repo=clustr-internal-repo",
+		"--setopt=install_weak_deps=False",
+	}, args...)
+
+	cmd := exec.Command("dnf", dnfArgs...) //#nosec G204 -- all args validated above
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "dnf-upgrade", args, exitCode, "")
+	return exitCode
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// copyFile copies src to dst atomically via a temp file in the same directory.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src) //#nosec G304 -- src is from caller; privhelper operates as root
+	if err != nil {
+		return fmt.Errorf("open src: %w", err)
+	}
+	defer in.Close()
+
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	defer func() { _ = out.Close() }()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := in.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				_ = os.Remove(tmp)
+				return fmt.Errorf("write: %w", writeErr)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			_ = os.Remove(tmp)
+			return fmt.Errorf("read: %w", readErr)
+		}
+	}
+
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	return os.Rename(tmp, dst)
 }

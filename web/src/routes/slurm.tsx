@@ -18,9 +18,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Cpu, CheckCircle2, XCircle, AlertCircle, Play, StopCircle,
-  RefreshCw, ChevronRight, Loader2,
+  RefreshCw, ChevronRight, ChevronDown, Loader2,
   FileText, Code2, History, TerminalSquare, Package, ArrowUpCircle,
-  ScrollText, CircleDot, Check, X, Wrench, Eye, KeyRound, Table2,
+  ScrollText, CircleDot, Check, X, Wrench, Eye, KeyRound, Table2, ShieldAlert,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -45,6 +45,7 @@ import type {
   SlurmValidateResponse,
   ListSlurmRoleSummaryResponse,
   ListSlurmNodesResponse,
+  SlurmNodeEntry,
   ListSlurmScriptsResponse,
   SlurmScriptFile,
   ListSlurmBuildsResponse,
@@ -1070,6 +1071,18 @@ function BuildDetailSheet({ build, open, onClose }: BuildDetailSheetProps) {
   const qc = useQueryClient()
   const [cancelConfirm, setCancelConfirm] = React.useState("")
 
+  // Sprint 17 #107 — recovery install state.
+  const [advancedOpen, setAdvancedOpen] = React.useState(false)
+  const [recoveryNodeId, setRecoveryNodeId] = React.useState("")
+  const [recoveryConfirm, setRecoveryConfirm] = React.useState("")
+
+  const { data: nodesData } = useQuery<ListSlurmNodesResponse>({
+    queryKey: ["slurm-nodes"],
+    queryFn: () => apiFetch<ListSlurmNodesResponse>("/api/v1/slurm/nodes"),
+    enabled: advancedOpen,
+  })
+  const slurmNodes: SlurmNodeEntry[] = nodesData?.nodes ?? []
+
   const deleteMut = useMutation({
     mutationFn: () => apiFetch(`/api/v1/slurm/builds/${build!.id}`, { method: "DELETE" }),
     onSuccess: () => {
@@ -1089,7 +1102,23 @@ function BuildDetailSheet({ build, open, onClose }: BuildDetailSheetProps) {
     onError: (e: Error) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   })
 
+  const recoveryMut = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/nodes/${recoveryNodeId}/slurm/recovery-install`, {
+      method: "POST",
+      body: JSON.stringify({ build_id: build!.id }),
+    }),
+    onSuccess: () => {
+      toast({ title: "Recovery install complete", description: `Node ${recoveryNodeId.slice(0, 8)} updated via artifact fallback` })
+      setAdvancedOpen(false)
+      setRecoveryNodeId("")
+      setRecoveryConfirm("")
+    },
+    onError: (e: Error) => toast({ title: "Recovery install failed", description: e.message, variant: "destructive" }),
+  })
+
   if (!build) return null
+
+  const canRecover = build.status === "completed" && recoveryNodeId !== "" && recoveryConfirm === "recover"
 
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
@@ -1166,6 +1195,68 @@ function BuildDetailSheet({ build, open, onClose }: BuildDetailSheetProps) {
               </Button>
             </div>
           </div>
+
+          {/* Advanced — recovery install (Sprint 17 #107 part 5) */}
+          {build.status === "completed" && (
+            <div className="border border-amber-500/30 rounded-md">
+              <button
+                type="button"
+                className="w-full flex items-center gap-2 px-4 py-2.5 text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors"
+                onClick={() => setAdvancedOpen((v) => !v)}
+                aria-expanded={advancedOpen}
+              >
+                <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                Advanced
+                <ChevronDown className={cn("h-3.5 w-3.5 ml-auto transition-transform", advancedOpen && "rotate-180")} />
+              </button>
+              {advancedOpen && (
+                <div className="border-t border-amber-500/30 px-4 py-3 space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    <strong className="text-amber-400">Recovery: install from raw artifact.</strong>{" "}
+                    Bypasses dnf and installs directly from the build tarball.
+                    Use only when the yum repo or dnf itself is broken on the target node.
+                    This operation is audit-logged.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="text-xs text-muted-foreground block">Target node</label>
+                    <select
+                      className="w-full h-8 rounded-md border border-border bg-background px-2 text-xs"
+                      value={recoveryNodeId}
+                      onChange={(e) => setRecoveryNodeId(e.target.value)}
+                    >
+                      <option value="">Select a node…</option>
+                      {slurmNodes.map((n) => (
+                        <option key={n.node_id} value={n.node_id}>
+                          {n.node_id.slice(0, 8)} {n.connected ? "" : "(offline)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground block">Type <code className="font-mono bg-secondary px-1 rounded">recover</code> to confirm</label>
+                    <Input
+                      className="h-8 text-xs"
+                      placeholder='type "recover"'
+                      value={recoveryConfirm}
+                      onChange={(e) => setRecoveryConfirm(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="w-full"
+                    disabled={!canRecover || recoveryMut.isPending}
+                    onClick={() => recoveryMut.mutate()}
+                  >
+                    {recoveryMut.isPending
+                      ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />Installing (may take up to 30 min)…</>
+                      : <><ShieldAlert className="mr-1.5 h-3.5 w-3.5" />Recovery install on node</>
+                    }
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </SheetContent>
     </Sheet>

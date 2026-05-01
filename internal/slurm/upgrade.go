@@ -111,12 +111,27 @@ func (m *Manager) ValidateUpgrade(ctx context.Context, req UpgradeRequest) (*Upg
 	}
 	v.ToVersion = toBuild.Version
 
-	// 2. Resolve current active build.
-	activeBuildID, _ := m.db.SlurmGetActiveBuildID(ctx)
-	if activeBuildID != "" && activeBuildID == req.ToBuildID {
-		v.Errors = append(v.Errors, "target build is already the active build")
+	// 2. Check per-node deployed state: if ALL managed slurm nodes are already at
+	// the target version, this is a true no-op. If SOME are already at target,
+	// report that so the operator knows the upgrade is partial.
+	nodeVersions, _ := m.db.SlurmListNodeVersions(ctx)
+	nodesAtTarget := 0
+	for _, nv := range nodeVersions {
+		if nv.DeployedVersion == toBuild.Version {
+			nodesAtTarget++
+		}
+	}
+	totalManagedNodes := len(nodeVersions)
+	if totalManagedNodes > 0 && nodesAtTarget == totalManagedNodes {
+		v.Errors = append(v.Errors, fmt.Sprintf("all %d nodes are already at version %s — no upgrade needed", totalManagedNodes, toBuild.Version))
 		return v, nil
 	}
+	if nodesAtTarget > 0 && nodesAtTarget < totalManagedNodes {
+		v.Warnings = append(v.Warnings, fmt.Sprintf("%d of %d nodes already at version %s; will upgrade the remaining %d", nodesAtTarget, totalManagedNodes, toBuild.Version, totalManagedNodes-nodesAtTarget))
+	}
+
+	// Resolve from_version from per-node state (use majority version or active build).
+	activeBuildID, _ := m.db.SlurmGetActiveBuildID(ctx)
 	if activeBuildID != "" {
 		if fromBuild, err2 := m.db.SlurmGetBuild(ctx, activeBuildID); err2 == nil {
 			v.FromVersion = fromBuild.Version
@@ -417,6 +432,21 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 		nodeResultsMu.Unlock()
 		// Persist snapshot so the UI sees live progress.
 		m.persistNodeResults(ctx, opID, nr)
+
+		// Track per-node deployed version for accurate upgrade validation.
+		// If the upgrade succeeded and we have an installed version, record it.
+		if result.OK && result.InstalledVersion != "" {
+			if verErr := m.db.SlurmUpsertNodeVersion(ctx, db.SlurmNodeVersionRow{
+				NodeID:          nodeID,
+				DeployedVersion: result.InstalledVersion,
+				BuildID:         req.ToBuildID,
+				InstallMethod:   "dnf",
+				InstalledAt:     time.Now().Unix(),
+				InstalledBy:     "clustr-server",
+			}); verErr != nil {
+				log.Warn().Err(verErr).Str("node_id", nodeID).Msg("slurm: upgrade: failed to record node version (non-fatal)")
+			}
+		}
 	}
 
 	// ── Collect plan ──────────────────────────────────────────────────────
@@ -438,7 +468,7 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 			if err := m.checkPauseCancel(execCtx, state); err != nil {
 				return m.pauseOrCancelUpgrade(ctx, opID, nodeResults)
 			}
-			result := m.pushBinaryToNode(execCtx, opID, nodeID, toBuild)
+			result := m.dnfUpgradeNode(execCtx, opID, nodeID, toBuild)
 			result.Phase = "dbd"
 			recordResult(nodeID, result)
 			if !result.OK {
@@ -461,7 +491,7 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 			if err := m.checkPauseCancel(execCtx, state); err != nil {
 				return m.pauseOrCancelUpgrade(ctx, opID, nodeResults)
 			}
-			result := m.pushBinaryToNode(execCtx, opID, nodeID, toBuild)
+			result := m.dnfUpgradeNode(execCtx, opID, nodeID, toBuild)
 			result.Phase = "controller"
 			recordResult(nodeID, result)
 			if !result.OK {
@@ -541,7 +571,7 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 			bwg.Add(1)
 			go func(nid string) {
 				defer bwg.Done()
-				r := m.pushBinaryToNode(execCtx, opID, nid, toBuild)
+				r := m.dnfUpgradeNode(execCtx, opID, nid, toBuild)
 				r.Phase = "compute"
 				batchCh <- batchResult{nodeID: nid, result: r}
 			}(nodeID)
@@ -590,7 +620,7 @@ func (m *Manager) executeUpgrade(ctx context.Context, opID string, req UpgradeRe
 			if err := m.checkPauseCancel(execCtx, state); err != nil {
 				return m.pauseOrCancelUpgrade(ctx, opID, nodeResults)
 			}
-			result := m.pushBinaryToNode(execCtx, opID, nodeID, toBuild)
+			result := m.dnfUpgradeNode(execCtx, opID, nodeID, toBuild)
 			result.Phase = "login"
 			recordResult(nodeID, result)
 			// Login node failures are non-fatal (no daemon to restart).
@@ -702,6 +732,109 @@ func (m *Manager) pushBinaryToNode(ctx context.Context, opID, nodeID string, bui
 
 	case <-ctx.Done():
 		return UpgradeNodeResult{OK: false, Error: "context cancelled"}
+	}
+}
+
+// dnfUpgradeNode sends a slurm_dnf_upgrade to one node and waits for the ack.
+// This is the primary upgrade path (Sprint 17+). The node installs from
+// clustr-internal-repo via dnf, then reports the installed version back.
+func (m *Manager) dnfUpgradeNode(ctx context.Context, opID, nodeID string, build *db.SlurmBuildRow) UpgradeNodeResult {
+	if m.hub == nil {
+		return UpgradeNodeResult{OK: false, Error: "hub not available"}
+	}
+	if !m.hub.IsConnected(nodeID) {
+		return UpgradeNodeResult{OK: false, Error: "node offline (clustr-clientd not connected)"}
+	}
+
+	// Build the package spec list for this build.
+	// e.g. "slurm-25.11.5-clustr1.el9", "slurmd-25.11.5-clustr1.el9", ...
+	pkgSpecs := buildPkgSpecs(build.Version)
+
+	msgID := uuid.New().String()
+	payload, err := json.Marshal(clientd.SlurmDnfUpgradePayload{
+		BuildID:  build.ID,
+		Version:  build.Version,
+		PkgSpecs: pkgSpecs,
+	})
+	if err != nil {
+		return UpgradeNodeResult{OK: false, Error: "marshal payload: " + err.Error()}
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "slurm_dnf_upgrade",
+		MsgID:   msgID,
+		Payload: json.RawMessage(payload),
+	}
+
+	ackCh := m.hub.RegisterAck(msgID)
+	defer m.hub.UnregisterAck(msgID)
+
+	if err := m.hub.Send(nodeID, serverMsg); err != nil {
+		return UpgradeNodeResult{OK: false, Error: "send failed: " + err.Error()}
+	}
+
+	log.Info().
+		Str("node_id", nodeID).
+		Str("msg_id", msgID).
+		Str("version", build.Version).
+		Strs("pkg_specs", pkgSpecs).
+		Msg("slurm: upgrade: slurm_dnf_upgrade sent, waiting for ack")
+
+	// dnf installs can take a while (30 min is conservative but safe).
+	const dnfUpgradeAckTimeout = 35 * time.Minute
+
+	select {
+	case ack := <-ackCh:
+		// Try to parse SlurmDnfUpgradeAckPayload from AckPayload.Error.
+		var dnfAck clientd.SlurmDnfUpgradeAckPayload
+		if err := json.Unmarshal([]byte(ack.Error), &dnfAck); err == nil {
+			return UpgradeNodeResult{
+				OK:               dnfAck.OK,
+				Error:            dnfAck.Error,
+				InstalledVersion: dnfAck.InstalledVersion,
+			}
+		}
+		// Fallback: use generic ack fields.
+		return UpgradeNodeResult{OK: ack.OK, Error: ack.Error}
+
+	case <-time.After(dnfUpgradeAckTimeout):
+		return UpgradeNodeResult{
+			OK:    false,
+			Error: fmt.Sprintf("ack timeout after %s", dnfUpgradeAckTimeout),
+		}
+
+	case <-ctx.Done():
+		return UpgradeNodeResult{OK: false, Error: "context cancelled"}
+	}
+}
+
+// buildPkgSpecs returns the dnf package spec list for a given Slurm version.
+// The specs match the RPMs built by buildSlurmRPMs (repo.go).
+func buildPkgSpecs(slurmVersion string) []string {
+	subPkgs := []string{"slurm", "slurmd", "slurmctld", "slurmdbd", "slurm-libs", "slurm-pam_slurm"}
+	specs := make([]string, 0, len(subPkgs))
+	for _, pkg := range subPkgs {
+		specs = append(specs, fmt.Sprintf("%s-%s-clustr1", pkg, slurmVersion))
+	}
+	return specs
+}
+
+// recordNodeVersion persists the per-node deployed version after a successful upgrade.
+// Extracted here for use by one-off recovery installs outside the rolling upgrade flow.
+func (m *Manager) recordNodeVersion(ctx context.Context, nodeID string, build *db.SlurmBuildRow, result UpgradeNodeResult, method string) {
+	ver := result.InstalledVersion
+	if ver == "" {
+		ver = build.Version // best-effort if sinfo --version wasn't available
+	}
+	if err := m.db.SlurmUpsertNodeVersion(ctx, db.SlurmNodeVersionRow{
+		NodeID:          nodeID,
+		DeployedVersion: ver,
+		BuildID:         build.ID,
+		InstallMethod:   method,
+		InstalledAt:     time.Now().Unix(),
+		InstalledBy:     "clustr-server",
+	}); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("slurm: failed to record node version (non-fatal)")
 	}
 }
 

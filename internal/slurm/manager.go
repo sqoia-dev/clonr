@@ -298,6 +298,20 @@ func (m *Manager) Enable(ctx context.Context, req EnableRequest) error {
 		log.Debug().Msg("slurm: munge key already exists — skipping auto-generation")
 	}
 
+	// Auto-generate a per-cluster repo GPG key on first enable if one does not
+	// already exist.  This is idempotent — if a key already exists we leave it alone
+	// so re-enables do not rotate the signing key (nodes would need the new key imported).
+	if _, err := m.db.SlurmGetRepoGPGConfig(ctx); err != nil {
+		if genErr := m.InitRepoGPGKey(ctx); genErr != nil {
+			// Non-fatal: operator can call POST /api/v1/slurm/repo/init-gpg manually.
+			log.Warn().Err(genErr).Msg("slurm: auto-generate repo GPG key on enable failed (non-fatal) — run POST /slurm/repo/init-gpg manually")
+		} else {
+			log.Info().Msg("slurm: repo GPG key auto-generated on first enable")
+		}
+	} else {
+		log.Debug().Msg("slurm: repo GPG key already exists — skipping auto-generation")
+	}
+
 	// Update in-memory cache.
 	m.mu.Lock()
 	m.cfg = &row

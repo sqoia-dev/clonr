@@ -125,6 +125,22 @@ export interface ListBundlesResponse {
   total: number
 }
 
+// ── clustr-internal-repo packages ────────────────────────────────────────────
+
+export interface RepoPackage {
+  filename: string  // e.g. "slurm-25.11.5-clustr1.el9.x86_64.rpm"
+  name: string      // e.g. "slurm"
+  version: string   // e.g. "25.11.5"
+  arch: string      // e.g. "x86_64"
+  el_major: string  // e.g. "el9"
+  path: string      // absolute path on server
+}
+
+export interface ListRepoPackagesResponse {
+  packages: RepoPackage[]
+  total: number
+}
+
 // ── GPG Keys ─────────────────────────────────────────────────────────────────
 
 export interface GPGKey {

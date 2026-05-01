@@ -24,7 +24,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { StatusDot } from "@/components/StatusDot"
 import { apiFetch } from "@/lib/api"
-import type { BaseImage, Bundle, ImageEvent, ListImagesResponse, ListBundlesResponse, ListLocalFilesResponse, LocalFileInfo } from "@/lib/types"
+import type { BaseImage, Bundle, ImageEvent, ListBundlesResponse, ListImagesResponse, ListLocalFilesResponse, ListRepoPackagesResponse, LocalFileInfo, RepoPackage } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useSSE } from "@/hooks/use-sse"
 import { toast } from "@/hooks/use-toast"
@@ -169,6 +169,15 @@ export function ImagesPage() {
   })
   const bundles = bundlesData?.bundles ?? []
 
+  // Sprint 17: clustr-internal-repo RPMs — list packages published from slurm builds.
+  const { data: repoPackagesData } = useQuery<ListRepoPackagesResponse>({
+    queryKey: ["slurm-repo-packages"],
+    queryFn: () => apiFetch<ListRepoPackagesResponse>("/api/v1/slurm/repo/packages"),
+    staleTime: 30_000,
+    retry: false, // non-fatal — endpoint exists only when slurm module is enabled
+  })
+  const repoPackages = repoPackagesData?.packages ?? []
+
   function handleSort(col: string) {
     if (sortCol === col) {
       updateSearch({ dir: sortDir === "asc" ? "desc" : "asc" })
@@ -233,7 +242,7 @@ export function ImagesPage() {
           <div className="px-6 pt-3 border-b border-border shrink-0">
             <TabsList>
               <TabsTrigger value="base">Base Images ({baseImages.length})</TabsTrigger>
-              <TabsTrigger value="bundles">Bundles ({bundles.length})</TabsTrigger>
+              <TabsTrigger value="bundles">Bundles ({bundles.length + repoPackages.length})</TabsTrigger>
               <TabsTrigger value="initramfs">Initramfs ({initramfsImages.length})</TabsTrigger>
             </TabsList>
           </div>
@@ -264,22 +273,12 @@ export function ImagesPage() {
             )}
           </TabsContent>
 
-          {/* Bundles tab — read-only, shows built-in slurm bundle from binary */}
+          {/* Bundles tab — shows built-in bundles AND clustr-internal-repo RPMs (Sprint 17 #102) */}
           <TabsContent value="bundles" className="flex-1 overflow-auto mt-0">
-            {/* IMG-BUNDLE-1: link to Slurm builds */}
-            <div className="px-4 pt-3 pb-1">
-              <a
-                href="/slurm#builds"
-                onClick={(e) => { e.preventDefault(); window.location.href = "/slurm#builds" }}
-                className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-              >
-                Manage custom Slurm builds in the Slurm tab →
-              </a>
-            </div>
-            {bundles.length === 0 ? (
+            {bundles.length === 0 && repoPackages.length === 0 ? (
               <BundlesEmptyState />
             ) : (
-              <BundlesTable bundles={bundles} />
+              <BundlesTable bundles={bundles} repoPackages={repoPackages} />
             )}
           </TabsContent>
 
@@ -920,17 +919,18 @@ function ImageTable({ images, advanced, onSelect, handleSort, SortIcon, relative
 }
 
 // ─── BundlesTable ─────────────────────────────────────────────────────────────
-// Read-only table showing built-in bundle metadata from GET /api/v1/bundles.
+// Unified table: built-in bundles from GET /api/v1/bundles AND signed RPMs from
+// GET /api/v1/slurm/repo/packages (clustr-internal-repo). Sprint 17 #102.
 
-function BundlesTable({ bundles }: { bundles: Bundle[] }) {
+function BundlesTable({ bundles, repoPackages }: { bundles: Bundle[]; repoPackages: RepoPackage[] }) {
   return (
     <Table>
-      <caption className="sr-only">Built-in software bundles</caption>
+      <caption className="sr-only">Software bundles and repo packages</caption>
       <TableHeader>
         <TableRow>
           <TableHead scope="col">Name</TableHead>
-          <TableHead scope="col">Slurm Version</TableHead>
-          <TableHead scope="col">Bundle Version</TableHead>
+          <TableHead scope="col">Version</TableHead>
+          <TableHead scope="col">Arch / Platform</TableHead>
           <TableHead scope="col">SHA256</TableHead>
           <TableHead scope="col">Kind</TableHead>
           <TableHead scope="col">Source</TableHead>
@@ -943,12 +943,26 @@ function BundlesTable({ bundles }: { bundles: Bundle[] }) {
               <span className="font-medium text-sm">{b.name}</span>
             </TableCell>
             <TableCell className="font-mono text-xs text-muted-foreground">{b.slurm_version}</TableCell>
-            <TableCell className="font-mono text-xs text-muted-foreground">{b.bundle_version}</TableCell>
+            <TableCell className="text-xs text-muted-foreground">—</TableCell>
             <TableCell className="font-mono text-xs text-muted-foreground">
               {b.sha256 ? b.sha256.slice(0, 12) + "…" : "—"}
             </TableCell>
             <TableCell className="text-xs text-muted-foreground">{b.kind}</TableCell>
             <TableCell className="text-xs text-muted-foreground">{b.source}</TableCell>
+          </TableRow>
+        ))}
+        {repoPackages.map((p) => (
+          <TableRow key={p.filename}>
+            <TableCell>
+              <span className="font-medium text-sm">{p.name}</span>
+            </TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">{p.version}</TableCell>
+            <TableCell className="font-mono text-xs text-muted-foreground">
+              {p.el_major}/{p.arch}
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground">—</TableCell>
+            <TableCell className="text-xs text-muted-foreground">rpm</TableCell>
+            <TableCell className="text-xs text-muted-foreground">clustr-internal-repo</TableCell>
           </TableRow>
         ))}
       </TableBody>

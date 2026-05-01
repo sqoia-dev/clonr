@@ -154,6 +154,63 @@ type SlurmBinaryAckPayload struct {
 	InstalledVersion string `json:"installed_version,omitempty"`
 }
 
+// SlurmDnfUpgradePayload is the payload for the "slurm_dnf_upgrade" server→node message.
+// The server sends this to instruct the node to install Slurm packages from
+// clustr-internal-repo via dnf. This is the primary upgrade path.
+type SlurmDnfUpgradePayload struct {
+	// BuildID is the server-side build UUID for tracking and ack correlation.
+	BuildID string `json:"build_id"`
+	// Version is the target Slurm version string, e.g. "25.11.5".
+	Version string `json:"version"`
+	// PkgSpecs are the fully-qualified package specs to install, e.g.
+	// ["slurm-25.11.5-clustr1.el9", "slurmd-25.11.5-clustr1.el9"].
+	// The privhelper dnf-upgrade verb installs all of these from clustr-internal-repo.
+	PkgSpecs []string `json:"pkg_specs"`
+}
+
+// SlurmDnfUpgradeAckPayload is the payload for the "ack" message sent after slurm_dnf_upgrade.
+type SlurmDnfUpgradeAckPayload struct {
+	// BuildID is the build UUID from the push message.
+	BuildID string `json:"build_id"`
+	// OK is true when dnf completed successfully.
+	OK bool `json:"ok"`
+	// Error is a human-readable failure description, if any.
+	Error string `json:"error,omitempty"`
+	// InstalledVersion is the Slurm version now running on the node (from sinfo --version).
+	InstalledVersion string `json:"installed_version,omitempty"`
+	// FallbackUsed is always false for this path (distinguishes from artifact path in logs).
+	FallbackUsed bool `json:"fallback_used"`
+}
+
+// SlurmArtifactInstallPayload is the payload for the "slurm_artifact_install" server→node message.
+// This is the FALLBACK path — operator-triggered only, never automatic.
+// It instructs the node to download the raw tarball artifact and extract it directly.
+type SlurmArtifactInstallPayload struct {
+	// BuildID is the server-side build UUID for tracking and ack correlation.
+	BuildID string `json:"build_id"`
+	// Version is the Slurm version string, e.g. "25.11.5".
+	Version string `json:"version"`
+	// ArtifactURL is the signed download URL for the build artifact tarball.
+	ArtifactURL string `json:"artifact_url"`
+	// Checksum is the SHA-256 hex digest of the artifact to verify after download.
+	Checksum string `json:"checksum"`
+}
+
+// SlurmArtifactInstallAckPayload is the payload for the "ack" message sent after slurm_artifact_install.
+type SlurmArtifactInstallAckPayload struct {
+	// BuildID is the build UUID from the push message.
+	BuildID string `json:"build_id"`
+	// OK is true when the artifact was installed successfully.
+	OK bool `json:"ok"`
+	// Error is a human-readable failure description, if any.
+	Error string `json:"error,omitempty"`
+	// InstalledVersion is the Slurm version now running on the node (from sinfo --version).
+	InstalledVersion string `json:"installed_version,omitempty"`
+	// FallbackUsed is always true for this path — so the server can distinguish
+	// artifact installs from dnf-managed upgrades in the audit trail.
+	FallbackUsed bool `json:"fallback_used"`
+}
+
 // SlurmAdminCmdPayload is the payload for the "slurm_admin_cmd" server→node message.
 // Only accepted on nodes with slurmctld running (controller role).
 // Used by the upgrade orchestrator to drain/resume nodes and check job queues.

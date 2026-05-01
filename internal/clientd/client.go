@@ -261,6 +261,12 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "slurm_binary_push":
 		c.handleSlurmBinaryPush(msg)
 
+	case "slurm_dnf_upgrade":
+		c.handleSlurmDnfUpgrade(msg)
+
+	case "slurm_artifact_install":
+		c.handleSlurmArtifactInstall(msg)
+
 	case "slurm_admin_cmd":
 		c.handleSlurmAdminCmd(msg)
 
@@ -492,6 +498,143 @@ func (c *Client) sendSlurmBinaryAck(refMsgID string, result SlurmBinaryAckPayloa
 	default:
 		log.Warn().Str("ref_msg_id", refMsgID).
 			Msg("clientd: slurm binary ack dropped — send buffer full")
+	}
+}
+
+// handleSlurmDnfUpgrade parses a slurm_dnf_upgrade payload, runs the dnf upgrade
+// via clustr-privhelper, and sends a structured ack back to the server.
+func (c *Client) handleSlurmDnfUpgrade(msg ServerMessage) {
+	var payload SlurmDnfUpgradePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed slurm_dnf_upgrade payload")
+		c.sendAck(msg.MsgID, false, "malformed slurm_dnf_upgrade payload: "+err.Error())
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("build_id", payload.BuildID).
+		Str("version", payload.Version).
+		Strs("pkg_specs", payload.PkgSpecs).
+		Msg("clientd: handling slurm_dnf_upgrade")
+
+	result := applyDnfUpgrade(context.Background(), payload)
+	c.sendSlurmDnfUpgradeAck(msg.MsgID, result)
+
+	if result.OK {
+		log.Info().
+			Str("build_id", payload.BuildID).
+			Str("installed_version", result.InstalledVersion).
+			Msg("clientd: slurm_dnf_upgrade completed successfully")
+	} else {
+		log.Error().
+			Str("build_id", payload.BuildID).
+			Str("error", result.Error).
+			Msg("clientd: slurm_dnf_upgrade failed")
+	}
+}
+
+// handleSlurmArtifactInstall parses a slurm_artifact_install payload (fallback path)
+// and sends a structured ack back to the server.
+func (c *Client) handleSlurmArtifactInstall(msg ServerMessage) {
+	var payload SlurmArtifactInstallPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).Msg("clientd: malformed slurm_artifact_install payload")
+		c.sendAck(msg.MsgID, false, "malformed slurm_artifact_install payload: "+err.Error())
+		return
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("build_id", payload.BuildID).
+		Str("version", payload.Version).
+		Msg("clientd: handling slurm_artifact_install (fallback/recovery path)")
+
+	// Derive the base HTTP URL from the WebSocket server URL.
+	baseURL := strings.Replace(c.serverURL, "ws://", "http://", 1)
+	baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
+	if idx := strings.Index(baseURL, "/api/"); idx != -1 {
+		baseURL = baseURL[:idx]
+	}
+
+	result := applyArtifactInstall(context.Background(), baseURL, payload)
+	c.sendSlurmArtifactInstallAck(msg.MsgID, result)
+
+	if result.OK {
+		log.Info().
+			Str("build_id", payload.BuildID).
+			Str("installed_version", result.InstalledVersion).
+			Msg("clientd: slurm_artifact_install (fallback) completed successfully")
+	} else {
+		log.Error().
+			Str("build_id", payload.BuildID).
+			Str("error", result.Error).
+			Msg("clientd: slurm_artifact_install (fallback) failed")
+	}
+}
+
+// sendSlurmDnfUpgradeAck sends a structured ack for a slurm_dnf_upgrade message.
+func (c *Client) sendSlurmDnfUpgradeAck(refMsgID string, result SlurmDnfUpgradeAckPayload) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal dnf upgrade ack result")
+		c.sendAck(refMsgID, false, "failed to marshal dnf upgrade ack result")
+		return
+	}
+
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       result.OK,
+		Error:    string(resultJSON),
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal dnf upgrade ack payload")
+		return
+	}
+
+	c.enqueueMsgAck(refMsgID, ackPayload)
+}
+
+// sendSlurmArtifactInstallAck sends a structured ack for a slurm_artifact_install message.
+func (c *Client) sendSlurmArtifactInstallAck(refMsgID string, result SlurmArtifactInstallAckPayload) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal artifact install ack result")
+		c.sendAck(refMsgID, false, "failed to marshal artifact install ack result")
+		return
+	}
+
+	ackPayload, err := json.Marshal(AckPayload{
+		RefMsgID: refMsgID,
+		OK:       result.OK,
+		Error:    string(resultJSON),
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal artifact install ack payload")
+		return
+	}
+
+	c.enqueueMsgAck(refMsgID, ackPayload)
+}
+
+// enqueueMsgAck is a shared helper for enqueuing ack messages from the above senders.
+func (c *Client) enqueueMsgAck(refMsgID string, ackPayload []byte) {
+	msg := ClientMessage{
+		Type:    "ack",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(ackPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal ack message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", refMsgID).
+			Msg("clientd: ack dropped — send buffer full")
 	}
 }
 

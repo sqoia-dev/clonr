@@ -162,12 +162,22 @@ func (m *Manager) executeBuild(ctx context.Context, buildID string, cfg BuildCon
 		return m.failBuild(ctx, buildID, fmt.Errorf("make install: %w", err))
 	}
 
-	// Step 8: Package staging directory.
+	// Step 8: Package staging directory into a tarball artifact.
 	artifactName := fmt.Sprintf("slurm-%s-%s.tar.gz", cfg.SlurmVersion, cfg.Arch)
 	artifactTmp := filepath.Join(workspace, artifactName)
 	m.logBuildLine(buildID, fmt.Sprintf("[build] packaging artifact %s", artifactName))
 	if err := createTarGz(stagingDir, artifactTmp); err != nil {
 		return m.failBuild(ctx, buildID, fmt.Errorf("package artifact: %w", err))
+	}
+
+	// Step 8b: Build signed RPMs and push to clustr-internal-repo.
+	// Non-fatal: RPM packaging failure does NOT abort the build — the tarball
+	// artifact is always produced first (fallback path depends on it).
+	// If the GPG key has not been generated yet, this step is silently skipped.
+	m.logBuildLine(buildID, "[build] building and publishing signed RPMs to clustr-internal-repo")
+	if rpmErr := m.buildSlurmRPMs(ctx, buildID, cfg.SlurmVersion, cfg.Arch, stagingDir); rpmErr != nil {
+		m.logBuildLine(buildID, fmt.Sprintf("[build] WARN: RPM packaging failed (non-fatal, tarball artifact still available): %s", rpmErr.Error()))
+		log.Warn().Err(rpmErr).Str("build_id", buildID).Msg("slurm: build: RPM packaging failed (non-fatal)")
 	}
 
 	// Step 9: Compute checksum.

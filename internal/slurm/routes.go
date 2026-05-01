@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 
+	"github.com/sqoia-dev/clustr/internal/clientd"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
@@ -112,6 +113,18 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Post("/slurm/upgrades/{op_id}/pause", m.handlePauseUpgrade)
 	r.Post("/slurm/upgrades/{op_id}/resume", m.handleResumeUpgrade)
 	r.Post("/slurm/upgrades/{op_id}/rollback", m.handleRollbackUpgrade)
+
+	// Sprint 17 — clustr-internal-repo.
+	// Repo GPG key init (generates per-cluster key on first call; idempotent).
+	r.Post("/slurm/repo/init-gpg", m.handleInitRepoGPG)
+	// Push clustr-internal-repo yum repo file to all connected nodes (or single node).
+	r.Post("/slurm/repo/push-repo-file", m.handlePushRepoFile)
+	// Per-node deployed Slurm version list.
+	r.Get("/slurm/node-versions", m.handleListNodeVersions)
+	// Recovery: artifact-direct install on a specific node (fallback path, operator only).
+	r.Post("/nodes/{node_id}/slurm/recovery-install", m.handleRecoveryInstall)
+	// Available RPMs in clustr-internal-repo (for Bundles tab unification).
+	r.Get("/slurm/repo/packages", m.handleListRepoPackages)
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -1408,4 +1421,274 @@ func jsonError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// ─── Sprint 17: clustr-internal-repo handlers ─────────────────────────────────
+
+// handleInitRepoGPG generates (or no-ops if already exists) the per-cluster GPG key.
+// POST /api/v1/slurm/repo/init-gpg
+func (m *Manager) handleInitRepoGPG(w http.ResponseWriter, r *http.Request) {
+	if err := m.InitRepoGPGKey(r.Context()); err != nil {
+		log.Error().Err(err).Msg("slurm: repo: GPG key init failed")
+		jsonError(w, "GPG key init failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg, _ := m.db.SlurmGetRepoGPGConfig(r.Context())
+	keyID := ""
+	if cfg != nil {
+		keyID = cfg.KeyID
+	}
+	jsonResponse(w, map[string]string{"status": "ok", "key_id": keyID}, http.StatusOK)
+}
+
+// handleListNodeVersions returns all per-node deployed Slurm versions.
+// GET /api/v1/slurm/node-versions
+func (m *Manager) handleListNodeVersions(w http.ResponseWriter, r *http.Request) {
+	rows, err := m.db.SlurmListNodeVersions(r.Context())
+	if err != nil {
+		jsonError(w, "failed to list node versions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type nodeVersionResp struct {
+		NodeID          string `json:"node_id"`
+		DeployedVersion string `json:"deployed_version"`
+		BuildID         string `json:"build_id,omitempty"`
+		InstallMethod   string `json:"install_method"`
+		InstalledAt     int64  `json:"installed_at"`
+		InstalledBy     string `json:"installed_by"`
+	}
+	resp := make([]nodeVersionResp, 0, len(rows))
+	for _, r := range rows {
+		resp = append(resp, nodeVersionResp{
+			NodeID:          r.NodeID,
+			DeployedVersion: r.DeployedVersion,
+			BuildID:         r.BuildID,
+			InstallMethod:   r.InstallMethod,
+			InstalledAt:     r.InstalledAt,
+			InstalledBy:     r.InstalledBy,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"node_versions": resp, "total": len(resp)}, http.StatusOK)
+}
+
+// handleRecoveryInstall triggers a slurm_artifact_install (fallback path) on one node.
+// POST /api/v1/nodes/{node_id}/slurm/recovery-install
+// Body: {"build_id": "<id>"}
+// Requires the operator to have explicitly confirmed — UI enforces a typed-confirm gate.
+func (m *Manager) handleRecoveryInstall(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "node_id")
+	if nodeID == "" {
+		jsonError(w, "missing node_id", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		BuildID string `json:"build_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BuildID == "" {
+		jsonError(w, "build_id is required", http.StatusBadRequest)
+		return
+	}
+
+	build, err := m.db.SlurmGetBuild(r.Context(), req.BuildID)
+	if err != nil {
+		jsonError(w, "build not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	if build.Status != "completed" {
+		jsonError(w, "build is not in completed status", http.StatusBadRequest)
+		return
+	}
+
+	if m.hub == nil || !m.hub.IsConnected(nodeID) {
+		jsonError(w, "node is offline (clustr-clientd not connected)", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Generate a signed artifact URL for the node.
+	artifactURL, err := m.GenerateArtifactURL(build.ID)
+	if err != nil {
+		jsonError(w, "failed to generate artifact URL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	msgID := newUUID()
+	payload, err := json.Marshal(clientd.SlurmArtifactInstallPayload{
+		BuildID:     build.ID,
+		Version:     build.Version,
+		ArtifactURL: artifactURL,
+		Checksum:    build.ArtifactChecksum,
+	})
+	if err != nil {
+		jsonError(w, "marshal payload: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "slurm_artifact_install",
+		MsgID:   msgID,
+		Payload: json.RawMessage(payload),
+	}
+
+	ackCh := m.hub.RegisterAck(msgID)
+	defer m.hub.UnregisterAck(msgID)
+
+	if err := m.hub.Send(nodeID, serverMsg); err != nil {
+		jsonError(w, "send to node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Audit log the recovery install immediately (before ack) so the trail is
+	// written even if the request context times out waiting for the node.
+	actor, actorLabel := m.actorInfo(r)
+	if m.Audit != nil {
+		m.Audit.Record(r.Context(), actor, actorLabel,
+			"slurm.recovery_install", "node", nodeID, r.RemoteAddr,
+			nil,
+			map[string]interface{}{"build_id": req.BuildID, "slurm.recovery_install": true},
+		)
+	}
+
+	// Wait for the ack (up to 35 minutes — same as the artifact download timeout).
+	const recoveryTimeout = 35 * time.Minute
+	select {
+	case ack := <-ackCh:
+		var artAck clientd.SlurmArtifactInstallAckPayload
+		if err := json.Unmarshal([]byte(ack.Error), &artAck); err != nil {
+			// Fallback to generic ack.
+			artAck.OK = ack.OK
+			artAck.Error = ack.Error
+			artAck.FallbackUsed = true
+		}
+		if artAck.OK {
+			// Record per-node version for tracking purposes.
+			m.recordNodeVersion(r.Context(), nodeID, build, UpgradeNodeResult{
+				OK:               true,
+				InstalledVersion: artAck.InstalledVersion,
+			}, "artifact")
+		}
+		jsonResponse(w, map[string]interface{}{
+			"ok":                artAck.OK,
+			"error":             artAck.Error,
+			"installed_version": artAck.InstalledVersion,
+			"fallback_used":     true,
+		}, http.StatusOK)
+
+	case <-time.After(recoveryTimeout):
+		jsonError(w, "timeout waiting for node ack", http.StatusGatewayTimeout)
+
+	case <-r.Context().Done():
+		jsonError(w, "request cancelled", http.StatusServiceUnavailable)
+	}
+}
+
+// handlePushRepoFile pushes /etc/yum.repos.d/clustr-internal-repo.repo to all
+// connected nodes, or to a single node when node_id is provided in the body.
+// POST /api/v1/slurm/repo/push-repo-file
+// Optional body: {"node_id": "<id>"}  — omit for all-nodes broadcast.
+func (m *Manager) handlePushRepoFile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	// Body is optional; ignore decode errors.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if req.NodeID != "" {
+		// Single-node push.
+		if err := m.PushRepoFileTo(r.Context(), req.NodeID); err != nil {
+			jsonError(w, "repo file push failed: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{"ok": true, "pushed": 1, "failures": []string{}}, http.StatusOK)
+		return
+	}
+
+	// Broadcast to all connected nodes.
+	count, failures := m.PushRepoFileToAllNodes(r.Context())
+	jsonResponse(w, map[string]interface{}{
+		"ok":       len(failures) == 0,
+		"pushed":   count,
+		"failures": failures,
+	}, http.StatusOK)
+}
+
+// handleListRepoPackages lists RPMs available in clustr-internal-repo on disk.
+// GET /api/v1/slurm/repo/packages
+// Returns the discovered RPM files so the Bundles tab can list them alongside built-in bundles.
+func (m *Manager) handleListRepoPackages(w http.ResponseWriter, r *http.Request) {
+	type repoPackage struct {
+		Filename string `json:"filename"`
+		Name     string `json:"name"`
+		Version  string `json:"version"`
+		Arch     string `json:"arch"`
+		ELMajor  string `json:"el_major"`
+		Path     string `json:"path"`
+	}
+
+	var packages []repoPackage
+
+	// Walk the repo directory tree.
+	walkErr := filepath.Walk(repoBaseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".rpm") {
+			return nil
+		}
+		filename := filepath.Base(path)
+		// Parse filename: name-version-release.arch.rpm
+		// e.g. slurm-25.11.5-clustr1.el9.x86_64.rpm
+		name, ver, elMajor, arch := parseRPMFilename(filename)
+		packages = append(packages, repoPackage{
+			Filename: filename,
+			Name:     name,
+			Version:  ver,
+			Arch:     arch,
+			ELMajor:  elMajor,
+			Path:     path,
+		})
+		return nil
+	})
+	if walkErr != nil && !os.IsNotExist(walkErr) {
+		log.Warn().Err(walkErr).Msg("slurm: repo: walk failed")
+	}
+	if packages == nil {
+		packages = []repoPackage{}
+	}
+	jsonResponse(w, map[string]interface{}{"packages": packages, "total": len(packages)}, http.StatusOK)
+}
+
+// parseRPMFilename extracts name, version, el_major, arch from an RPM filename.
+// e.g. "slurm-25.11.5-clustr1.el9.x86_64.rpm" → ("slurm", "25.11.5", "el9", "x86_64")
+func parseRPMFilename(filename string) (name, ver, elMajor, arch string) {
+	filename = strings.TrimSuffix(filename, ".rpm")
+	// Last field is arch.
+	parts := strings.Split(filename, ".")
+	if len(parts) >= 2 {
+		arch = parts[len(parts)-1]
+		elMajor = parts[len(parts)-2]
+		filename = strings.Join(parts[:len(parts)-2], ".")
+	}
+	// Now parse name-version-release.
+	// version is between the first and second dash (after the package name).
+	// Package names can contain dashes (e.g. slurm-libs, slurm-pam_slurm).
+	// release follows the last dash before the arch fields.
+	// Find the last "-" followed by a digit (start of version).
+	for i := len(filename) - 1; i >= 0; i-- {
+		if filename[i] == '-' && i+1 < len(filename) && filename[i+1] >= '0' && filename[i+1] <= '9' {
+			// Everything before i is the name, everything after is version-release.
+			name = filename[:i]
+			verRel := filename[i+1:]
+			// release is the part after the last "-".
+			relIdx := strings.LastIndex(verRel, "-")
+			if relIdx >= 0 {
+				ver = verRel[:relIdx]
+			} else {
+				ver = verRel
+			}
+			return
+		}
+	}
+	name = filename
+	return
 }

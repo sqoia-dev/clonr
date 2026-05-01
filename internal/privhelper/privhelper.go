@@ -64,6 +64,45 @@ func ServiceControl(ctx context.Context, unit, action string) error {
 	return nil
 }
 
+// RepoPush copies a signed RPM from src to dst via the clustr-privhelper
+// repo-push verb (requires root to write under /var/lib/clustr/repo/).
+// dst must be under /var/lib/clustr/repo/clustr-internal-repo/ and end in .rpm.
+func RepoPush(ctx context.Context, src, dst string) error {
+	cmd := exec.CommandContext(ctx, helperPath, "repo-push", src, dst) //#nosec G204 -- paths are plain identifiers; helper validates prefix
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: repo-push: %w\noutput: %s", err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// RepoRefresh runs createrepo_c on the given directory via the clustr-privhelper
+// repo-refresh verb. dir must be under /var/lib/clustr/repo/clustr-internal-repo/.
+func RepoRefresh(ctx context.Context, dir string) error {
+	cmd := exec.CommandContext(ctx, helperPath, "repo-refresh", dir) //#nosec G204 -- dir is a plain path; helper validates prefix
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: repo-refresh: %w\noutput: %s", err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// DnfUpgrade installs/upgrades one or more slurm package specs from
+// clustr-internal-repo only via the clustr-privhelper dnf-upgrade verb.
+// All specs must start with "slurm" or "munge" — the helper enforces this.
+func DnfUpgrade(ctx context.Context, pkgSpecs []string) error {
+	if len(pkgSpecs) == 0 {
+		return nil
+	}
+	args := append([]string{"dnf-upgrade"}, pkgSpecs...)
+	cmd := exec.CommandContext(ctx, helperPath, args...) //#nosec G204 -- pkg specs are plain identifiers; helper validates each
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: dnf-upgrade: %w\noutput: %s", err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
 // CapBitTest invokes the cap-bit-test verb and returns the reported effective
 // UID. Returns (0, nil) when the setuid bit is set correctly; returns (n, nil)
 // where n is the server process UID if the bit is missing.

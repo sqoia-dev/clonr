@@ -28,6 +28,9 @@ var configTargets = map[string]configTarget{
 	"resolv":  {path: "/etc/resolv.conf", mode: 0644, applyAction: nil},
 	// sudoers: sudo re-reads drop-ins on every invocation — no restart needed.
 	"sudoers": {path: "/etc/sudoers.d/clustr-admins", mode: 0440, applyAction: nil},
+	// clustr-internal-repo: pushed by server after InitRepoGPGKey or on node join.
+	// The apply action runs "dnf clean metadata" so the node picks up the new/updated repo.
+	"clustr-internal-repo": {path: "/etc/yum.repos.d/clustr-internal-repo.repo", mode: 0644, applyAction: dnfCleanMetadata()},
 }
 
 const maxConfigSizeBytes = 1 << 20 // 1 MB
@@ -115,6 +118,24 @@ func restartService(name string) func() error {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("systemctl restart %s: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+}
+
+// dnfCleanMetadata returns an apply action that runs "dnf clean metadata" so the
+// node re-indexes yum repos after the repo file is written.  Non-fatal: if dnf
+// is not available (not an RPM node) the clean is skipped silently.
+func dnfCleanMetadata() func() error {
+	return func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "dnf", "clean", "metadata")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			// Non-fatal — clean is advisory; the repo file is already written.
+			// Print to stderr so it shows up in clustr-clientd's journald output.
+			fmt.Fprintf(os.Stderr, "config push: dnf clean metadata: %v (output: %s)\n", err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
