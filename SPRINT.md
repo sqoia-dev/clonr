@@ -1028,3 +1028,77 @@ All four TAIL endpoints verified 401 (not 404) on cloner before scoping.
 - LDAP: `slapdUptimeSec()` in `internal_routes.go` still queries `systemctl show` directly — migrate to `sysd.QueryStatus` or a dedicated uptime helper in Sprint 13.
 - Any tangential items found during audit (LDAP project plugin per-group restrictions, etc.) remain deferred.
 5. Tag `v0.6.0` after Sprint 10 ships green — Slurm surface is a substantive new top-level capability. Pipeline auto-fires.
+
+---
+
+## Sprint 17 — Fresh-VM Verification + LDAP/SSSD Matrix
+
+**Carried from Sprint 16 #104 / #104a.** Requires a reproducible fresh Rocky 9 VM baseline in the lab.
+
+### Prerequisite (infra)
+
+- [ ] **INFRA-VM-1** Build a reusable Rocky 9 VM template (VMID 9001) from the minimal ISO with:
+  - Single NIC (vmbr0, DHCP)
+  - Root password `clustrtest123`
+  - SSH root login enabled
+  - `dnf-plugins-core`, `curl`, `wget` pre-installed
+  - Procedure: use Proxmox console during Anaconda install (5 min interactive), then `qm template 9001`
+  - **Rationale**: The kickstart-from-ISO automation fails on Rocky 9.7 minimal in this lab — Anaconda gets stuck in text mode with no disk writes even after cdrom-embedded ks.cfg. Root cause is Anaconda cdrom stage2 + inst.ks=cdrom:/ not advancing when virtio-net has no DHCP response available at kernel-cmdline phase. Needs interactive console to unblock. Once template exists, all future VM tests clone it in <30s.
+
+### Task #104 — Fresh RPM install verification (Sprint 17)
+
+**Depends on INFRA-VM-1.**
+
+- [ ] **VM-104-1** Clone template → VMID 204 (`clustr-104-fresh`), boot, verify Rocky 9 reachable via SSH.
+- [ ] **VM-104-2** Walk install sequence verbatim:
+  ```
+  sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+  sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo
+  sudo dnf install -y clustr-serverd
+  sudo systemctl enable --now clustr-serverd
+  sudo /usr/sbin/clustr-serverd bootstrap-admin
+  ```
+- [ ] **VM-104-3** Verify 6 surfaces render: Nodes, Images, Activity, Settings + Slurm + Identity (LDAP) tabs.
+- [ ] **VM-104-4** Create LDAP user with empty `initial_password` → verify temp password panel appears in web UI.
+- [ ] **VM-104-5** Build slurm bundle via web UI → verify `deps_matrix` auto-install runs via privhelper, no `unit_not_allowed` errors in server log.
+- [ ] **VM-104-6** Node CRUD: register node via API, verify it appears in Nodes surface, delete it.
+- [ ] **VM-104-7** File one Sprint 17/18 task per gap found. Use gap IDs: `GAP-104-N`.
+
+**Known ahead of time (from pre-verification on cloner):**
+- `pkg.sqoia.dev` GPG key and clustr.repo both reachable. Repo infrastructure is OK.
+- `clustr-privhelper` setuid bit (4755) applied by post-install scriptlet — no manual fixup needed.
+
+### Task #104a — LDAP/SSSD/cert chain verification matrix (Sprint 17)
+
+**Depends on VM-104-2 completing successfully (LDAP enabled on fresh VM).**
+
+For each row: mark PASS / FAIL / GAP-DOCUMENTED. File Sprint 17/18 task per FAIL or GAP.
+
+| # | Check | How to verify | Status |
+|---|---|---|---|
+| 1 | Clean slapd bring-up | Fresh VM, click Enable → slapd starts first try, no manual fixup | pending |
+| 2 | CA rotation mid-flight | Disable+wipe → Enable → CA regenerates → nodes' `ldap_tls_cacert` auto-updates AND sssd reconnects (or document gap) | pending |
+| 3 | Service-bind credential rotation | Same flow with `service_bind_password` regen → nodes' sssd.conf auto-updates or surfaces drift | pending |
+| 4 | Node enrollment cold | Fresh node, never seen LDAP → join cluster → sssd config baked correctly → `getent passwd <ldap-user>` works first try | pending |
+| 5 | Node enrollment warm | Existing node, slapd state changed since last deploy → re-deploy → sssd updated atomically | pending |
+| 6 | SSH login via pubkey | Set `sshPublicKey` on LDAP user → SSH with private key → login works | pending |
+| 7 | SSH login via password | SSH with temp password from create flow → login works | pending |
+| 8 | Sudo via LDAP group | Add user to LDAP "wheel" or sudoers group → `sudo -i` on node succeeds | pending |
+| 9 | sssd offline cache | Cut node→slapd network → cached creds work for N minutes per pwd_policy | pending |
+
+**Known gaps from Sprint 15 code review (pre-verification):**
+
+- **GAP-104a-1 (CA rotation, row 2):** No automatic CA cert push to enrolled nodes on re-Enable. The `NodeConfig()` projection returns the new CA cert PEM, but it is only pushed to nodes on the next deploy/reimage cycle, not proactively. Nodes sssd.conf holds a stale `ldap_tls_cacert` until re-deployed. Severity: HIGH — breaks LDAP auth on all nodes silently after any CA rotation.
+- **GAP-104a-2 (service-bind drift, row 3):** Same path as CA rotation. `service_bind_password` is pushed to nodes only on deploy. No push-on-change mechanism. Severity: MEDIUM — auth works until slapd's ppolicy locks the stale entry (if lockout configured); detectable via health check failure.
+- **GAP-104a-3 (node enrollment cold, row 4):** sssd.conf template uses `ldap_uri = ldaps://<hostname>:636`. On a fresh node before DNS resolves the clustr-serverd hostname, sssd fails to start. Severity: MEDIUM — depends on DNS setup; may work if IP used instead of hostname.
+- **GAP-104a-4 (SSH pubkey, row 6):** `sshPublicKey` attribute support requires `openssh-lpk` schema and `AuthorizedKeysCommand` configured in sshd_config on each node. The schema embed lands in Sprint 15 (#97), but sshd_config injection is not implemented in the deploy finalize step. Severity: LOW for MVP; documented in KL.
+
+**Sprint 17/18 task IDs (to be formalized when sprint opens):**
+
+| Gap ID | Sprint | Priority | Title |
+|---|---|---|---|
+| GAP-104a-1 | 17 | HIGH | Push updated CA cert to enrolled nodes on LDAP re-Enable/CA-rotate |
+| GAP-104a-2 | 17 | MEDIUM | Detect and push service-bind password drift to enrolled nodes |
+| GAP-104a-3 | 18 | MEDIUM | Use IP in sssd ldap_uri if hostname DNS resolution is uncertain at deploy time |
+| GAP-104a-4 | 18 | LOW | Inject AuthorizedKeysCommand in sshd_config during node deploy for SSH pubkey auth |
+| INFRA-VM-1 | 17 | BLOCKER | Build reusable Rocky 9 VM template for lab verification runs |
