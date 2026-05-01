@@ -675,14 +675,28 @@ done
 echo "  [+] Installed busybox and symlinks"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kernel modules for virtio NIC support.
+# Kernel modules — real-hardware + VM support.
 #
-# The Rocky 9 kernel served by clustr-server has virtio_pci built-in but
-# virtio_net (+ its deps net_failover, failover) as loadable modules.
-# Without these, the NIC won't appear in the initramfs and DHCP won't work.
+# Module allowlist covers:
+#   NICs: mlx5 (Mellanox CX-4/5/6), mlx4 (CX-3), i40e/ice (Intel XL710/E810),
+#         ixgbe/igb/e1000e (Intel 10G/1G), bnxt_en (Broadcom BCM5741x),
+#         bnx2x (Broadcom 10G legacy), tg3 (Broadcom NetXtreme),
+#         virtio_net + failover (VMs)
+#   Storage: nvme/nvme_core (NVMe SSDs), megaraid_sas (LSI MegaRAID),
+#            mpt3sas (LSI SAS3/SAS2), aacraid (Adaptec RAID),
+#            virtio_scsi/virtio_blk/sd_mod (VMs)
+#   Block/DM: dm_mod, dm_mirror, dm_snapshot, dm_thin_pool (Device Mapper)
+#   FS: xfs, ext4, fat/vfat, btrfs, jbd2, mbcache
+#   Crypto/Lib: crc32c_generic, crc32c-intel (x86 hw), libcrc32c
+#   MD RAID: raid0/1/10/456
 #
-# We pull the modules from the clustr-server (same kernel version as the PXE
-# kernel) and embed them. The init script calls modprobe before udhcpc.
+# Strategy: build-time enumeration. We walk the server's module directories for
+# each allowlisted name, pulling every .ko/.ko.xz that matches. This captures
+# sibling modules (e.g. mlx5_vdpa alongside mlx5_core) and survives kernel
+# version bumps that move files between subdirectories.
+#
+# Out of scope: lspci-alias auto-detection. If the explicit list proves fragile
+# after real-hardware lab validation, Sprint 21 can add lspci resolution.
 # ──────────────────────────────────────────────────────────────────────────────
 echo "  [+] Fetching kernel modules from clustr-server ${CLUSTR_SERVER_HOST}..."
 
@@ -691,101 +705,209 @@ KVER=$(remote_exec "uname -r" 2>/dev/null)
 
 if [[ -z "$KVER" ]]; then
     echo "WARNING: cannot reach clustr-server — skipping kernel modules." >&2
-    echo "         virtio_net will not be loaded; DHCP may fail on virtio NICs." >&2
+    echo "         NIC drivers will not be loaded; DHCP may fail." >&2
     KVER="unknown"
 else
     echo "      kernel version: $KVER"
 
-    # Modules needed for virtio NIC: failover → net_failover → virtio_net
-    # failover lives in net/core/, the rest in drivers/net/.
-    # We fetch the .ko.xz files and decompress to plain .ko because busybox
-    # insmod uses the init_module syscall which needs an uncompressed ELF.
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/net/core"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/net"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/scsi"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/block"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/drivers/md"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/xfs"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/ext4"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/jbd2"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/fs/fat"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/lib"
-    mkdir -p "$WORKDIR/lib/modules/$KVER/kernel/arch/x86/crypto"
+    # ── Module allowlist ──────────────────────────────────────────────────────
+    # Canonical module names (underscores, no .ko suffix).
+    # The enumerator below searches for each name under the kernel module tree,
+    # handling both foo.ko and foo.ko.xz, and any subdirectory layout.
+    # Adding a name here is sufficient — no file paths to maintain.
+    MODULE_ALLOWLIST=(
+        # VMs (keep existing virtio support)
+        failover net_failover virtio_net
+        virtio_scsi virtio_blk
 
-    # List of module paths relative to /lib/modules/$KVER/kernel/
-    # Network: failover → net_failover → virtio_net
-    # Storage (virtio-scsi-pci controller, e.g. Proxmox scsi0 with scsihw=virtio-scsi-pci):
-    #   virtio_scsi  — the HBA driver; makes the SCSI bus visible to the kernel
-    #   sd_mod       — the SCSI disk driver; turns a SCSI target into /dev/sdX
-    #                  Without sd_mod, virtio_scsi sees the device but never creates
-    #                  the block node, so /sys/class/block/ stays empty.
-    # Storage (virtio block device, e.g. Proxmox virtio0):
-    #   virtio_blk   — direct virtio block driver, creates /dev/vdX
-    # Filesystems and their deps:
-    #   crc32c-intel — hardware CRC32C acceleration (required by xfs, libcrc32c)
-    #   libcrc32c    — software CRC32C library (required by xfs)
-    #   xfs          — XFS filesystem (required for mount after mkfs.xfs)
-    #   mbcache      — meta-data block cache (required by ext4)
-    #   jbd2         — journaling block device (required by ext4)
-    #   ext4         — ext4 filesystem
-    #   fat          — FAT/vFAT base layer (required by vfat; no deps)
-    #   vfat         — vFAT filesystem (required for ESP/EFI System Partition mount)
-    # Software RAID (md):
-    #   raid1        — RAID1 (mirror) personality; required for nodes with RAID1 disk layouts
-    #   raid0        — RAID0 (stripe) personality; included for completeness
-    #   raid10       — RAID10 personality
-    #   raid456      — RAID4/5/6 personalities
-    # NOTE: md_mod is typically built-in to Rocky 9 kernel. If RUN_ARRAY fails with
-    # ENODEV, it means raid1.ko (the personality) is not loaded — insmod it here.
-    MODULES=(
-        "net/core/failover.ko.xz"
-        "drivers/net/net_failover.ko.xz"
-        "drivers/net/virtio_net.ko.xz"
-        "drivers/scsi/virtio_scsi.ko.xz"
-        "drivers/scsi/sd_mod.ko.xz"
-        "drivers/block/virtio_blk.ko.xz"
-        "arch/x86/crypto/crc32c-intel.ko.xz"
-        "lib/libcrc32c.ko.xz"
-        "fs/xfs/xfs.ko.xz"
-        "fs/mbcache.ko.xz"
-        "fs/jbd2/jbd2.ko.xz"
-        "fs/ext4/ext4.ko.xz"
-        "fs/fat/fat.ko.xz"
-        "fs/fat/vfat.ko.xz"
-        "drivers/md/raid1.ko.xz"
-        "drivers/md/raid0.ko.xz"
-        "drivers/md/raid10.ko.xz"
-        "drivers/md/raid456.ko.xz"
+        # Mellanox/NVIDIA ConnectX NICs (CX-3 through CX-6+)
+        mlx5_core mlx5_ib
+        mlx4_core mlx4_en mlx4_ib
+
+        # Intel NICs (XL710 i40e, E810 ice, 82599 ixgbe, 1G igb, e1000e)
+        i40e ice ixgbe igb e1000e
+
+        # Broadcom NICs
+        bnxt_en bnx2x tg3
+
+        # NVMe storage
+        nvme nvme_core
+
+        # Hardware RAID controllers
+        megaraid_sas mpt3sas aacraid
+
+        # SCSI mid-layer (required by hardware HBAs above)
+        sd_mod scsi_mod
+
+        # Device Mapper (LVM + thin provisioning)
+        dm_mod dm_mirror dm_snapshot dm_thin_pool
+
+        # Filesystems
+        xfs btrfs ext4 jbd2 mbcache fat vfat
+
+        # Crypto / CRC (required by xfs, btrfs, dm layers)
+        crc32c_generic libcrc32c
+        crc32c-intel    # x86 hardware acceleration (hyphen form in tree)
+
+        # MD software RAID personalities
+        raid0 raid1 raid10 raid456
     )
 
-    for mod_rel in "${MODULES[@]}"; do
-        REMOTE_PATH="/lib/modules/$KVER/kernel/${mod_rel}"
-        # Destination: strip .xz suffix for the local .ko file
-        LOCAL_KO_XZ="$WORKDIR/lib/modules/$KVER/kernel/${mod_rel}"
-        LOCAL_KO="${LOCAL_KO_XZ%.xz}"
-        mkdir -p "$(dirname "$LOCAL_KO_XZ")"
+    # ── Directories to search on the server ──────────────────────────────────
+    # We walk these recursively; the find command below handles subdirectory
+    # depth automatically so we don't need to enumerate leaf directories.
+    SEARCH_DIRS=(
+        "net"
+        "drivers/net"
+        "drivers/scsi"
+        "drivers/block"
+        "drivers/nvme"
+        "drivers/md"
+        "drivers/infiniband"
+        "fs"
+        "arch/x86/crypto"
+        "lib"
+        "crypto"
+    )
 
-        if remote_copy "${REMOTE_PATH}" "$LOCAL_KO_XZ"; then
-            # Decompress in place: failover.ko.xz → failover.ko
-            if xz -d "$LOCAL_KO_XZ" 2>/dev/null; then
-                echo "      fetched+decompressed: $(basename "$LOCAL_KO")"
-            else
-                echo "WARNING: failed to decompress ${LOCAL_KO_XZ}" >&2
-                rm -f "$LOCAL_KO_XZ"
+    KMOD_BASE="/lib/modules/$KVER/kernel"
+    KMOD_LOCAL="$WORKDIR/lib/modules/$KVER/kernel"
+    MANIFEST_FILE="${OUTPUT%.img}.modules.manifest"
+    # Initialize manifest (overwrite any prior run)
+    : > "$MANIFEST_FILE"
+
+    # ── enumerate_and_fetch <module_name> ────────────────────────────────────
+    # Walks each SEARCH_DIR on the server looking for <module_name>.ko or
+    # <module_name>.ko.xz (recursively). Copies every match into the initramfs,
+    # decompresses .xz files, and appends a manifest line.
+    #
+    # We normalize hyphens↔underscores when comparing names because the kernel
+    # tree uses hyphens in some file names (crc32c-intel.ko) while modprobe
+    # canonicalizes to underscores. We match both forms.
+    enumerate_and_fetch() {
+        local mod_name="$1"
+        # Build a grep-friendly alternation: foo_bar matches foo_bar and foo-bar.
+        local mod_hyp="${mod_name//_/-}"
+        local mod_und="${mod_name//-/_}"
+        local found=0
+
+        for search_dir in "${SEARCH_DIRS[@]}"; do
+            local remote_dir="${KMOD_BASE}/${search_dir}"
+            # List .ko and .ko.xz files in this subtree matching either form.
+            local hits
+            hits=$(remote_exec "
+                find '${remote_dir}' -type f \( -name '${mod_hyp}.ko' -o -name '${mod_hyp}.ko.xz' \
+                    -o -name '${mod_und}.ko' -o -name '${mod_und}.ko.xz' \) 2>/dev/null
+            " 2>/dev/null || true)
+
+            if [[ -z "$hits" ]]; then
+                continue
             fi
-        else
-            echo "WARNING: failed to fetch ${REMOTE_PATH}" >&2
+
+            while IFS= read -r remote_path; do
+                [[ -z "$remote_path" ]] && continue
+                # Compute relative path from kernel base
+                local rel_path="${remote_path#${KMOD_BASE}/}"
+                local local_dest="${KMOD_LOCAL}/${rel_path}"
+                mkdir -p "$(dirname "$local_dest")"
+
+                if remote_copy "${remote_path}" "${local_dest}"; then
+                    local ko_path="$local_dest"
+                    # Decompress .xz in place (busybox insmod needs uncompressed ELF)
+                    if [[ "$local_dest" == *.xz ]]; then
+                        if xz -d "$local_dest" 2>/dev/null; then
+                            ko_path="${local_dest%.xz}"
+                        else
+                            echo "      WARNING: failed to decompress ${local_dest}" >&2
+                            rm -f "$local_dest"
+                            continue
+                        fi
+                    fi
+                    # Append manifest line: <module_name> <relative_path> <sha256>
+                    local ko_rel="${ko_path#${WORKDIR}/}"
+                    local ko_sha256
+                    ko_sha256=$(sha256sum "$ko_path" 2>/dev/null | awk '{print $1}' || echo "unavailable")
+                    echo "${mod_und} ${ko_rel} ${ko_sha256}" >> "$MANIFEST_FILE"
+                    echo "        + $(basename "$ko_path")"
+                    found=1
+                else
+                    echo "      WARNING: could not fetch ${remote_path}" >&2
+                fi
+            done <<< "$hits"
+        done
+
+        if [[ "$found" -eq 0 ]]; then
+            echo "      (not found on server — may be built-in or not installed): ${mod_name}"
         fi
+    }
+
+    echo "      enumerating modules from allowlist..."
+    for mod in "${MODULE_ALLOWLIST[@]}"; do
+        printf "    [*] %-25s " "${mod}:"
+        enumerate_and_fetch "$mod"
     done
 
-    # Generate a minimal modules.dep for plain .ko files.
+    # ── Generate modules.dep (modprobe dependency file) ───────────────────────
+    # Run depmod on the server to generate a dep file for our exact module set,
+    # then copy it. If depmod is unavailable, fall back to a hand-written dep
+    # file that covers the known dependency chains.
     MODDEP_DIR="$WORKDIR/lib/modules/$KVER"
-    cat > "$MODDEP_DIR/modules.dep" << MODDEP
+
+    # Try server-side depmod for an accurate dep file.
+    if remote_exec "command -v depmod >/dev/null 2>&1"; then
+        TMP_KMOD_DIR=$(remote_exec "mktemp -d /tmp/clustr-depmod.XXXXXXXX" 2>/dev/null || echo "")
+        if [[ -n "$TMP_KMOD_DIR" ]]; then
+            # Copy our fetched .ko files to the server temp dir so depmod can scan them.
+            # This is best-effort: if it fails we fall back to the static dep map.
+            # We list the .ko files we actually embedded.
+            EMBEDDED_KOS=$(find "$KMOD_LOCAL" -name "*.ko" 2>/dev/null | \
+                sed "s|${WORKDIR}/||" || true)
+            server_depmod_ok=0
+            if [[ -n "$EMBEDDED_KOS" ]]; then
+                # Build a temporary module layout on the server mirroring ours.
+                while IFS= read -r rel_ko; do
+                    [[ -z "$rel_ko" ]] && continue
+                    remote_dir_path="${TMP_KMOD_DIR}/$(dirname "$rel_ko")"
+                    remote_exec "mkdir -p '${remote_dir_path}'" 2>/dev/null || true
+                    # Push the .ko to the server for depmod scanning.
+                    # (sshpass scp in reverse: push local→remote)
+                    if [[ "$LOCAL_MODE" -eq 1 ]]; then
+                        cp -f "$WORKDIR/$rel_ko" "${TMP_KMOD_DIR}/${rel_ko}" 2>/dev/null || true
+                    else
+                        sshpass -p "$CLUSTR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
+                            "$WORKDIR/$rel_ko" \
+                            "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}:${TMP_KMOD_DIR}/${rel_ko}" \
+                            2>/dev/null || true
+                    fi
+                done <<< "$EMBEDDED_KOS"
+                FAKE_KVER="depmod-fake"
+                DEP_OUTPUT=$(remote_exec "
+                    depmod -b '${TMP_KMOD_DIR}' '${FAKE_KVER}' 2>/dev/null &&
+                    cat '${TMP_KMOD_DIR}/lib/modules/${FAKE_KVER}/modules.dep' 2>/dev/null || true
+                " 2>/dev/null || true)
+                if [[ -n "$DEP_OUTPUT" ]]; then
+                    echo "$DEP_OUTPUT" > "$MODDEP_DIR/modules.dep"
+                    server_depmod_ok=1
+                    echo "      generated modules.dep via server depmod"
+                fi
+                remote_exec "rm -rf '${TMP_KMOD_DIR}'" 2>/dev/null || true
+            fi
+            if [[ "$server_depmod_ok" -eq 0 ]]; then
+                echo "      depmod push failed — using static dep map" >&2
+            fi
+        fi
+    fi
+
+    # Fall back to a static modules.dep covering known dependency chains.
+    # This covers the common case; depmod-generated is preferred when available.
+    if [[ ! -s "$MODDEP_DIR/modules.dep" ]]; then
+        cat > "$MODDEP_DIR/modules.dep" << 'MODDEP'
 kernel/net/core/failover.ko:
 kernel/drivers/net/net_failover.ko: kernel/net/core/failover.ko
 kernel/drivers/net/virtio_net.ko: kernel/drivers/net/net_failover.ko kernel/net/core/failover.ko
 kernel/drivers/scsi/virtio_scsi.ko:
-kernel/drivers/scsi/sd_mod.ko:
+kernel/drivers/scsi/sd_mod.ko: kernel/drivers/scsi/scsi_mod.ko
+kernel/drivers/scsi/scsi_mod.ko:
 kernel/drivers/block/virtio_blk.ko:
 kernel/arch/x86/crypto/crc32c-intel.ko:
 kernel/lib/libcrc32c.ko: kernel/arch/x86/crypto/crc32c-intel.ko
@@ -795,20 +917,49 @@ kernel/fs/jbd2/jbd2.ko:
 kernel/fs/ext4/ext4.ko: kernel/fs/mbcache.ko kernel/fs/jbd2/jbd2.ko
 kernel/fs/fat/fat.ko:
 kernel/fs/fat/vfat.ko: kernel/fs/fat/fat.ko
-kernel/drivers/md/raid1.ko:
+kernel/drivers/md/dm_mod.ko:
+kernel/drivers/md/dm_mirror.ko: kernel/drivers/md/dm_mod.ko
+kernel/drivers/md/dm_snapshot.ko: kernel/drivers/md/dm_mod.ko
+kernel/drivers/md/dm_thin_pool.ko: kernel/drivers/md/dm_mod.ko
 kernel/drivers/md/raid0.ko:
+kernel/drivers/md/raid1.ko:
 kernel/drivers/md/raid10.ko:
 kernel/drivers/md/raid456.ko:
+kernel/drivers/nvme/host/nvme_core.ko:
+kernel/drivers/nvme/host/nvme.ko: kernel/drivers/nvme/host/nvme_core.ko
+kernel/drivers/scsi/megaraid/megaraid_sas.ko: kernel/drivers/scsi/scsi_mod.ko
+kernel/drivers/scsi/mpt3sas/mpt3sas.ko: kernel/drivers/scsi/scsi_mod.ko
+kernel/drivers/scsi/aacraid/aacraid.ko: kernel/drivers/scsi/scsi_mod.ko
 MODDEP
+        echo "      generated static fallback modules.dep"
+    fi
 
-    cat > "$MODDEP_DIR/modules.alias" << MODALIAS
+    # modules.alias: PCI device ID to module name mappings for common devices.
+    # The init script uses modprobe which reads this file.
+    cat > "$MODDEP_DIR/modules.alias" << 'MODALIAS'
 alias virtio:d00000001v* virtio_net
 alias virtio:d00000008v* virtio_scsi
 alias virtio:d00000002v* virtio_blk
 alias scsi:t-0x00* sd_mod
+alias pci:v000015B3d* mlx5_core
+alias pci:v000015B3d00001002* mlx4_core
+alias pci:v00008086d00001572* i40e
+alias pci:v00008086d00008800* ice
+alias pci:v00008086d000010FB* ixgbe
+alias pci:v00008086d0000150E* igb
+alias pci:v00008086d000010D3* e1000e
+alias pci:v000014E4d* bnxt_en
+alias pci:v000014E4d00001639* bnx2x
+alias pci:v000014E4d00001684* tg3
+alias pci:v00001000d* megaraid_sas
+alias pci:v00001000d00000097* mpt3sas
+alias pci:v00009005d* aacraid
 MODALIAS
 
-    echo "      generated modules.dep for $KVER"
+    # ── Log manifest location ─────────────────────────────────────────────────
+    MOD_COUNT=$(wc -l < "$MANIFEST_FILE" 2>/dev/null || echo 0)
+    echo "      manifest: $MANIFEST_FILE ($MOD_COUNT modules)"
+    echo "      generated modules.alias"
 fi
 
 echo "  [+] Kernel modules ready"
