@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/privhelper"
 )
 
 // BuildConfig is the input for a Slurm build.
@@ -119,8 +120,19 @@ func (m *Manager) executeBuild(ctx context.Context, buildID string, cfg BuildCon
 		return m.failBuild(ctx, buildID, fmt.Errorf("find top src dir: %w", err))
 	}
 
-	// Step 4: Build dependencies.
-	m.logBuildLine(buildID, "[build] building dependencies")
+	// Step 4: Install host build-time dependencies via clustr-privhelper.
+	// This step surfaces the package list to the operator before proceeding so
+	// there are no silent dnf installs. Failure is a hard stop — the build
+	// cannot proceed without the required devel packages.
+	buildDeps := slurmBuildDeps()
+	m.logBuildLine(buildID, fmt.Sprintf("[build] Installing packages: %s", strings.Join(buildDeps, ", ")))
+	if err := privhelper.DnfInstall(ctx, buildDeps); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("install build deps: %w", err))
+	}
+	m.logBuildLine(buildID, "[build] build deps installed")
+
+	// Step 4b: Build source dependencies (munge, hwloc, UCX, PMIx, libjwt).
+	m.logBuildLine(buildID, "[build] building source dependencies")
 	depPaths, err := m.buildDependencies(ctx, buildID, cfg.SlurmVersion, cfg.Arch, workspace)
 	if err != nil {
 		return m.failBuild(ctx, buildID, fmt.Errorf("build dependencies: %w", err))
@@ -220,38 +232,98 @@ func (m *Manager) failBuild(ctx context.Context, buildID string, cause error) er
 //   - --with-ucx=<path>    — MPI high-speed network transport
 //   - --with-pmix=<path>   — PMI-2/PMIx for MPI process management (needs hwloc)
 //
-// Extra caller-supplied flags from BuildConfig.ConfigureFlags are appended last
-// so operators can override defaults (e.g. --with-json=<path> for libjwt).
+// ConfigureFlags override: if the operator passes a flag that starts with the
+// same --with-<dep>= prefix as an auto-wired dependency path (e.g.
+// --with-ucx=/usr/local), the auto-wired flag is skipped and the operator's
+// flag wins. This prevents duplicate --with-<dep>= entries in the configure
+// command and ensures the operator can see exactly which flags are active in
+// the build log.
 func buildSlurmConfigureArgs(cfg BuildConfig, depPaths map[string]string) []string {
+	// Build an operator-override set so auto-wired dep paths can be skipped when
+	// the operator has supplied their own --with-<dep>= value.
+	operatorOverrides := make(map[string]bool)
+	for _, f := range cfg.ConfigureFlags {
+		// Extract the --with-<key>= prefix (up to and including the "=").
+		// Flags like "--with-ucx=/usr/local" → key "with-ucx".
+		// Flags like "--with-pmix" (no "=") → key "with-pmix".
+		if !strings.HasPrefix(f, "--") {
+			continue
+		}
+		bare := strings.TrimPrefix(f, "--")
+		key := bare
+		if idx := strings.IndexByte(bare, '='); idx >= 0 {
+			key = bare[:idx]
+		}
+		operatorOverrides[key] = true
+	}
+
 	args := []string{
 		"--prefix=/usr/local",
 		"--sysconfdir=/etc/slurm",
 		"--enable-pam",
 	}
 
-	// Wire each dependency with an explicit path when available.
-	// Fall back to --with-<dep> (no path) only when dep was skipped (not built).
-	if p, ok := depPaths["munge"]; ok && p != "" {
-		args = append(args, "--with-munge="+p)
-	} else {
-		args = append(args, "--with-munge")
+	// Wire each dependency with an explicit path when available, unless the
+	// operator has supplied their own --with-<dep> flag in ConfigureFlags.
+	if !operatorOverrides["with-munge"] {
+		if p, ok := depPaths["munge"]; ok && p != "" {
+			args = append(args, "--with-munge="+p)
+		} else {
+			args = append(args, "--with-munge")
+		}
 	}
-	if p, ok := depPaths["hwloc"]; ok && p != "" {
-		args = append(args, "--with-hwloc="+p)
+	if !operatorOverrides["with-hwloc"] {
+		if p, ok := depPaths["hwloc"]; ok && p != "" {
+			args = append(args, "--with-hwloc="+p)
+		}
 	}
-	if p, ok := depPaths["ucx"]; ok && p != "" {
-		args = append(args, "--with-ucx="+p)
+	if !operatorOverrides["with-ucx"] {
+		if p, ok := depPaths["ucx"]; ok && p != "" {
+			args = append(args, "--with-ucx="+p)
+		}
 	}
-	if p, ok := depPaths["pmix"]; ok && p != "" {
-		args = append(args, "--with-pmix="+p)
+	if !operatorOverrides["with-pmix"] {
+		if p, ok := depPaths["pmix"]; ok && p != "" {
+			args = append(args, "--with-pmix="+p)
+		}
 	}
-	if p, ok := depPaths["libjwt"]; ok && p != "" {
-		args = append(args, "--with-jwt="+p)
-	} else {
-		args = append(args, "--with-jwt")
+	if !operatorOverrides["with-jwt"] {
+		if p, ok := depPaths["libjwt"]; ok && p != "" {
+			args = append(args, "--with-jwt="+p)
+		} else {
+			args = append(args, "--with-jwt")
+		}
 	}
 
+	// Append operator-supplied flags last. Because auto-wired flags for any
+	// dep that the operator overrode were skipped above, the configure command
+	// line is clean: each --with-<dep>= appears exactly once.
 	return append(args, cfg.ConfigureFlags...)
+}
+
+// slurmBuildDeps returns the list of system packages that must be present
+// on the build host before the Slurm source build can proceed. These are
+// installed via clustr-privhelper dnf-install (not built from source).
+//
+// All package names here must be present in build/slurm/deps_matrix.json.
+func slurmBuildDeps() []string {
+	return []string{
+		"gcc",
+		"gcc-c++",
+		"make",
+		"autoconf",
+		"automake",
+		"libtool",
+		"openssl-devel",
+		"zlib-devel",
+		"libcurl-devel",
+		"pam-devel",
+		"perl",
+		"python3",
+		"rpm-build",
+		"readline-devel",
+		"bzip2-devel",
+	}
 }
 
 // runTar runs the tar command with explicit flag args (no shell).

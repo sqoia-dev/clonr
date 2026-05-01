@@ -1485,15 +1485,29 @@ function LDAPInternalPanel({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
   const [disableOpen, setDisableOpen] = React.useState(false)
   const [destroyConfirm, setDestroyConfirm] = React.useState("")
 
+  // Default disable: wipe data (no body needed — server default).
   const disableMutation = useMutation({
     mutationFn: () => apiFetch("/api/v1/ldap/internal/disable", { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
       qc.invalidateQueries({ queryKey: ["ldap-config"] })
       setDisableOpen(false)
-      toast({ title: "LDAP stopped (data preserved)" })
+      toast({ title: "LDAP stopped and data wiped" })
     },
     onError: (err) => toast({ variant: "destructive", title: "Disable failed", description: String(err) }),
+  })
+
+  // Preserve-data path: opt-in, requires typed confirm.
+  const preserveMutation = useMutation({
+    mutationFn: () => apiFetch("/api/v1/ldap/internal/disable", { method: "POST", body: JSON.stringify({ preserve_data: true }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-internal-status"] })
+      qc.invalidateQueries({ queryKey: ["ldap-config"] })
+      setDisableOpen(false)
+      setDestroyConfirm("")
+      toast({ title: "LDAP stopped (data preserved)" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Stop failed", description: String(err) }),
   })
 
   const destroyMutation = useMutation({
@@ -1617,44 +1631,45 @@ function LDAPInternalPanel({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
             </div>
           )}
 
-          {/* Disable panel (DISABLE-2) */}
+          {/* Disable panel (DISABLE-2) — wipe is the default, preserve is opt-in */}
           {disableOpen && (
             <div className="rounded border border-border bg-secondary/5 px-3 py-2 space-y-2 mt-1">
               <p className="text-xs font-medium">Disable internal LDAP</p>
+              {/* Primary: Stop + wipe (default behavior) */}
               <div className="flex gap-2">
                 <Button
                   size="sm"
-                  variant="outline"
+                  variant="destructive"
                   className="text-xs h-7"
                   disabled={disableMutation.isPending}
                   onClick={() => disableMutation.mutate()}
                 >
-                  {disableMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop (preserve data)"}
+                  {disableMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop + wipe data"}
                 </Button>
                 <Button size="sm" variant="ghost" className="text-xs h-7" onClick={() => { setDisableOpen(false); setDestroyConfirm("") }}>
                   Cancel
                 </Button>
               </div>
-              {/* Stop+Wipe option */}
+              {/* Advanced: Stop + preserve data — requires typed confirm */}
               <div className="pt-1 border-t border-border/50">
                 <p className="text-[11px] text-muted-foreground mb-1.5">
-                  Stop + wipe data — type <code className="font-mono">destroy</code> to confirm:
+                  Stop + preserve data (advanced) — type <code className="font-mono">preserve</code> to confirm:
                 </p>
                 <div className="flex gap-2">
                   <Input
                     className="text-xs h-7 font-mono w-28"
-                    placeholder="destroy"
+                    placeholder="preserve"
                     value={destroyConfirm}
                     onChange={(e) => setDestroyConfirm(e.target.value)}
                   />
                   <Button
                     size="sm"
-                    variant="destructive"
+                    variant="outline"
                     className="text-xs h-7"
-                    disabled={destroyConfirm !== "destroy" || destroyMutation.isPending}
-                    onClick={() => destroyMutation.mutate()}
+                    disabled={destroyConfirm !== "preserve" || preserveMutation.isPending}
+                    onClick={() => preserveMutation.mutate()}
                   >
-                    {destroyMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop + wipe"}
+                    {preserveMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Stop (keep data)"}
                   </Button>
                 </div>
               </div>

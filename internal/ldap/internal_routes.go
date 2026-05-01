@@ -5,7 +5,8 @@
 //   PUT  /ldap/source-mode           — switches mode; requires typed confirm
 //   POST /ldap/internal/enable       — provisions slapd; wraps Manager.Enable()
 //   GET  /ldap/internal/status       — runtime slapd state for polling
-//   POST /ldap/internal/disable      — stops slapd, preserves data dir
+//   POST /ldap/internal/disable      — stops slapd + wipes data dir by default;
+//                                      set {preserve_data:true} to keep data
 //   POST /ldap/internal/destroy      — stops + wipes data; requires confirm:"destroy"
 package ldap
 
@@ -14,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -368,11 +370,48 @@ func slapdUptimeSec() int64 {
 
 // ─── Internal disable / destroy ───────────────────────────────────────────────
 
-// handleInternalDisable stops clustr-slapd.service without wiping data (DISABLE-1).
-// Resets status to "disabled" in the DB.
+// internalDisableRequest is the optional body for POST /api/v1/ldap/internal/disable.
+// All fields are optional — an empty body triggers the default (wipe data).
+type internalDisableRequest struct {
+	// PreserveData keeps the slapd data directory intact when true.
+	// Default (omitted or false): data dir is wiped on disable to prevent
+	// state divergence on re-enable (see feedback_no_preserve_default.md).
+	PreserveData bool `json:"preserve_data"`
+}
+
+// handleInternalDisable stops clustr-slapd.service.
+//
+// Default behavior (no body or {preserve_data: false}): wipes the slapd data
+// directory at /var/lib/clustr/ldap/data/ and the cn=config directory so that
+// a subsequent Enable() always provisions from a clean slate.
+//
+// Set {preserve_data: true} to keep the data dir (advanced — risk of drift).
 func (m *Manager) handleInternalDisable(w http.ResponseWriter, r *http.Request) {
+	// Parse optional body. Empty body is valid — defaults to preserve_data=false (wipe).
+	var req internalDisableRequest
+	if r.ContentLength > 0 {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
 	if err := StopSlapd(r.Context()); err != nil {
 		log.Warn().Err(err).Msg("ldap: internal disable: stop slapd (non-fatal)")
+	}
+
+	// Wipe persistent state unless the operator explicitly opted in to preserve.
+	ldapDataDir := m.cfg.LDAPDataDir
+	dataDir := ldapDataDir + "/data"
+	configDir := m.cfg.LDAPConfigDir + "/slapd.d"
+
+	if !req.PreserveData {
+		log.Info().Str("data_dir", dataDir).Msg("ldap: disable: wiping data dir (default behavior)")
+		if err := os.RemoveAll(dataDir); err != nil {
+			log.Error().Err(err).Str("dir", dataDir).Msg("ldap: disable: wipe data dir (non-fatal)")
+		}
+		if err := os.RemoveAll(configDir); err != nil {
+			log.Error().Err(err).Str("dir", configDir).Msg("ldap: disable: wipe config dir (non-fatal)")
+		}
+	} else {
+		log.Info().Msg("ldap: disable: preserve_data=true — data dir retained")
 	}
 
 	if err := m.db.LDAPDisable(r.Context()); err != nil {
@@ -389,7 +428,7 @@ func (m *Manager) handleInternalDisable(w http.ResponseWriter, r *http.Request) 
 
 	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPInternalDisabled,
 		"ldap_module", "1", r.RemoteAddr,
-		nil, map[string]interface{}{"data_preserved": true},
+		nil, map[string]interface{}{"data_preserved": req.PreserveData},
 	)
 
 	jsonResponse(w, map[string]string{"status": "disabled"}, http.StatusOK)

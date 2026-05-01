@@ -23,9 +23,9 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-.PHONY: all client server clientd static clean test web
+.PHONY: all client server clientd privhelper static clean test web
 
-all: web client server clientd
+all: web client server clientd privhelper
 
 web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
@@ -40,6 +40,11 @@ server: web
 
 clientd:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o bin/clustr-clientd ./cmd/clustr-clientd
+
+# privhelper is the setuid root privilege helper (chmod 4755 applied by RPM post-install).
+# Built without CGO for portability; no version ldflags needed (it has no --version flag).
+privhelper:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/clustr-privhelper ./cmd/clustr-privhelper
 
 # static builds a fully static binary suitable for embedding in PXE initramfs.
 # Uses -a to force rebuild of all packages with CGO disabled.
