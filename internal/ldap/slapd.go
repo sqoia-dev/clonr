@@ -122,8 +122,27 @@ func chownTree(dir, slapdUser string) error {
 // the presence of cn=config/cn.ldif), this function WIPES the directory and
 // re-seeds from scratch. This ensures Enable() after a failed Enable() is safe.
 // The slapd data directory (mdb) is NOT touched here — only cn=config.
+//
+// Before seeding, the openssh-lpk schema file is written to the parent of
+// configDir (e.g. /etc/clustr/ldap/openssh-lpk.ldif) so the include: directive
+// in the seed template can reference it.
 func SeedConfig(ctx context.Context, data slapdSeedData) error {
 	configDir := data.ConfigDir
+
+	// Write the openssh-lpk schema to the parent config directory so the
+	// include: file:///etc/clustr/ldap/openssh-lpk.ldif directive resolves.
+	lpkLDIF, err := assetFS.ReadFile("assets/openssh-lpk.ldif")
+	if err != nil {
+		return fmt.Errorf("ldap slapd: read embedded openssh-lpk.ldif: %w", err)
+	}
+	lpkDst := filepath.Join(filepath.Dir(configDir), "openssh-lpk.ldif")
+	if err := os.MkdirAll(filepath.Dir(lpkDst), 0o755); err != nil {
+		return fmt.Errorf("ldap slapd: mkdir for openssh-lpk.ldif: %w", err)
+	}
+	if err := os.WriteFile(lpkDst, lpkLDIF, 0o644); err != nil {
+		return fmt.Errorf("ldap slapd: write openssh-lpk.ldif: %w", err)
+	}
+	log.Info().Str("path", lpkDst).Msg("ldap slapd: wrote openssh-lpk schema")
 
 	// Check whether cn=config has already been seeded.
 	cnLDIF := filepath.Join(configDir, "cn=config.ldif")
