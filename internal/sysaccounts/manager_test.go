@@ -130,14 +130,15 @@ func TestDeleteGroup_BlockedByAccountReference(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 
-	grp, err := m.CreateGroup(ctx, api.SystemGroup{Name: "munge", GID: 1001})
+	// Use a system-range GID (< 1000) to satisfy the hard guard added by #113.
+	grp, err := m.CreateGroup(ctx, api.SystemGroup{Name: "munge", GID: 800})
 	if err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	if _, err := m.CreateAccount(ctx, api.SystemAccount{
 		Username:   "munge",
-		UID:        1001,
-		PrimaryGID: 1001,
+		UID:        800,
+		PrimaryGID: 800,
 		Shell:      "/sbin/nologin",
 		HomeDir:    "/var/run/munge",
 	}); err != nil {
@@ -289,7 +290,7 @@ func TestNodeConfig_NonNilWhenPopulated(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 
-	if _, err := m.CreateGroup(ctx, api.SystemGroup{Name: "munge", GID: 1001}); err != nil {
+	if _, err := m.CreateGroup(ctx, api.SystemGroup{Name: "munge", GID: 900}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
@@ -302,5 +303,68 @@ func TestNodeConfig_NonNilWhenPopulated(t *testing.T) {
 	}
 	if len(cfg.Groups) != 1 {
 		t.Errorf("Groups count = %d, want 1", len(cfg.Groups))
+	}
+}
+
+// ─── #113 — Hard guard tests ──────────────────────────────────────────────────
+
+// TestCreateAccount_RejectsExplicitUIDGe1000 verifies that the hard guard added
+// by #113 rejects any system account with an explicit UID >= 1000.
+// This catches the mis-allocated munge row (UID 10003) from Sprint 13 #96.
+func TestCreateAccount_RejectsExplicitUIDGe1000(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+
+	_, err := m.CreateAccount(ctx, api.SystemAccount{
+		Username:   "munge",
+		UID:        10003, // was mis-allocated by single-range allocator
+		PrimaryGID: 996,
+		Shell:      "/sbin/nologin",
+		HomeDir:    "/var/run/munge",
+	})
+	if err == nil {
+		t.Fatal("expected error for UID >= 1000 on a system account, got nil")
+	}
+	if !errors.Is(err, sysaccounts.ErrInvalidSystemUID) {
+		t.Errorf("expected ErrInvalidSystemUID, got: %v", err)
+	}
+}
+
+// TestCreateAccount_RejectsExplicitPrimaryGIDGe1000 verifies that a PrimaryGID
+// >= 1000 is also rejected so system accounts stay in the FHS system range.
+func TestCreateAccount_RejectsExplicitPrimaryGIDGe1000(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+
+	_, err := m.CreateAccount(ctx, api.SystemAccount{
+		Username:   "slurm",
+		UID:        995,
+		PrimaryGID: 10000, // wrong: leaked into LDAP range
+		Shell:      "/sbin/nologin",
+		HomeDir:    "/var/lib/slurm",
+	})
+	if err == nil {
+		t.Fatal("expected error for PrimaryGID >= 1000 on a system account, got nil")
+	}
+	if !errors.Is(err, sysaccounts.ErrInvalidSystemGID) {
+		t.Errorf("expected ErrInvalidSystemGID, got: %v", err)
+	}
+}
+
+// TestCreateAccount_AcceptsSystemRangeUID verifies that explicit UIDs in the
+// system account range (200-999) are accepted.
+func TestCreateAccount_AcceptsSystemRangeUID(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+
+	_, err := m.CreateAccount(ctx, api.SystemAccount{
+		Username:   "munge",
+		UID:        996,
+		PrimaryGID: 996,
+		Shell:      "/sbin/nologin",
+		HomeDir:    "/var/run/munge",
+	})
+	if err != nil {
+		t.Fatalf("expected no error for system-range UID 996, got: %v", err)
 	}
 }

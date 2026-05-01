@@ -11,7 +11,7 @@ import (
 // ─── stub IDSource ────────────────────────────────────────────────────────────
 
 type stubSource struct {
-	cfg      posixid.Config
+	cfgs     map[posixid.Role]posixid.Config
 	ldapUIDs []int
 	ldapGIDs []int
 	sysUIDs  []int
@@ -22,27 +22,177 @@ func (s *stubSource) ListLDAPUIDs(_ context.Context) ([]int, error) { return s.l
 func (s *stubSource) ListLDAPGIDs(_ context.Context) ([]int, error) { return s.ldapGIDs, nil }
 func (s *stubSource) ListSysUIDs(_ context.Context) ([]int, error)  { return s.sysUIDs, nil }
 func (s *stubSource) ListSysGIDs(_ context.Context) ([]int, error)  { return s.sysGIDs, nil }
-func (s *stubSource) GetConfig(_ context.Context) (posixid.Config, error) {
-	return s.cfg, nil
+func (s *stubSource) GetConfig(_ context.Context, role posixid.Role) (posixid.Config, error) {
+	if cfg, ok := s.cfgs[role]; ok {
+		return cfg, nil
+	}
+	return posixid.Config{}, errors.New("no config for role " + string(role))
 }
 
-func defaultCfg() posixid.Config {
+func ldapUserCfg() posixid.Config {
 	return posixid.Config{
-		UIDMin: 10000,
-		UIDMax: 60000,
-		GIDMin: 10000,
-		GIDMax: 60000,
-		ReservedUIDRanges: []posixid.IDRange{{0, 999}, {1000, 9999}},
-		ReservedGIDRanges: []posixid.IDRange{{0, 999}, {1000, 9999}},
+		UIDMin:            10000,
+		UIDMax:            60000,
+		GIDMin:            10000,
+		GIDMax:            60000,
+		ReservedUIDRanges: []posixid.IDRange{{0, 9999}},
+		ReservedGIDRanges: []posixid.IDRange{{0, 9999}},
 	}
 }
 
-// ─── AllocateUID tests ────────────────────────────────────────────────────────
+func systemAccountCfg() posixid.Config {
+	return posixid.Config{
+		UIDMin:            200,
+		UIDMax:            999,
+		GIDMin:            200,
+		GIDMax:            999,
+		ReservedUIDRanges: []posixid.IDRange{{0, 199}},
+		ReservedGIDRanges: []posixid.IDRange{{0, 199}},
+	}
+}
+
+func bothRoleSource() *stubSource {
+	return &stubSource{
+		cfgs: map[posixid.Role]posixid.Config{
+			posixid.RoleLDAPUser:      ldapUserCfg(),
+			posixid.RoleSystemAccount: systemAccountCfg(),
+		},
+	}
+}
+
+// ─── Role-split allocation tests ─────────────────────────────────────────────
+
+// TestAllocateUID_RoleSystemAccount verifies that auto-allocated system-account
+// UIDs are < 1000 (in the 200-999 range).
+func TestAllocateUID_RoleSystemAccount(t *testing.T) {
+	src := bothRoleSource()
+	a := posixid.New(src)
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleSystemAccount)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uid < 200 || uid >= 1000 {
+		t.Fatalf("expected system account UID in [200,999], got %d", uid)
+	}
+}
+
+// TestAllocateUID_RoleLDAPUser verifies that auto-allocated LDAP-user UIDs
+// are >= 10000.
+func TestAllocateUID_RoleLDAPUser(t *testing.T) {
+	src := bothRoleSource()
+	a := posixid.New(src)
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uid < 10000 {
+		t.Fatalf("expected LDAP user UID >= 10000, got %d", uid)
+	}
+}
+
+// TestAllocateUID_RoleMismatch verifies that allocating with a role whose range
+// doesn't overlap the other role's range produces distinct, non-colliding results.
+func TestAllocateUID_RoleRangesDontOverlap(t *testing.T) {
+	src := bothRoleSource()
+	a := posixid.New(src)
+
+	sysUID, err := a.AllocateUID(context.Background(), posixid.RoleSystemAccount)
+	if err != nil {
+		t.Fatalf("system account alloc: %v", err)
+	}
+	ldapUID, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
+	if err != nil {
+		t.Fatalf("ldap user alloc: %v", err)
+	}
+
+	if sysUID >= 1000 {
+		t.Errorf("system account UID %d >= 1000 (leaked into LDAP range)", sysUID)
+	}
+	if ldapUID < 10000 {
+		t.Errorf("ldap user UID %d < 10000 (fell into system range)", ldapUID)
+	}
+}
+
+// TestAllocateUID_RoleSystemAccount_ReservedSkipped verifies that IDs in the
+// system account reserved range (0-199) are never allocated.
+func TestAllocateUID_RoleSystemAccount_ReservedSkipped(t *testing.T) {
+	// Fill 200-299 as used; next should be 300.
+	used := make([]int, 100)
+	for i := range used {
+		used[i] = 200 + i
+	}
+	src := &stubSource{
+		cfgs:    map[posixid.Role]posixid.Config{posixid.RoleSystemAccount: systemAccountCfg()},
+		sysUIDs: used,
+	}
+	a := posixid.New(src)
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleSystemAccount)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uid != 300 {
+		t.Fatalf("expected 300, got %d", uid)
+	}
+}
+
+// TestAllocateUID_RoleSystemAccount_Exhausted verifies ErrRangeExhausted when
+// the system account range is fully used.
+func TestAllocateUID_RoleSystemAccount_Exhausted(t *testing.T) {
+	used := make([]int, 800) // 200-999 = 800 IDs
+	for i := range used {
+		used[i] = 200 + i
+	}
+	src := &stubSource{
+		cfgs:    map[posixid.Role]posixid.Config{posixid.RoleSystemAccount: systemAccountCfg()},
+		sysUIDs: used,
+	}
+	a := posixid.New(src)
+	_, err := a.AllocateUID(context.Background(), posixid.RoleSystemAccount)
+	if !errors.Is(err, posixid.ErrRangeExhausted) {
+		t.Fatalf("expected ErrRangeExhausted, got %v", err)
+	}
+}
+
+// TestValidate_RoleLDAPUser_OutOfRange verifies that a system-range UID is
+// rejected when validated as an LDAP user UID.
+func TestValidate_RoleLDAPUser_OutOfRange(t *testing.T) {
+	src := bothRoleSource()
+	a := posixid.New(src)
+	err := a.Validate(context.Background(), 500, posixid.KindUID, posixid.RoleLDAPUser)
+	if !errors.Is(err, posixid.ErrOutOfRange) && !errors.Is(err, posixid.ErrReserved) {
+		t.Fatalf("expected ErrOutOfRange or ErrReserved for UID 500 in ldap_user role, got %v", err)
+	}
+}
+
+// TestValidate_RoleSystemAccount_OutOfRange verifies that an LDAP-range UID is
+// rejected when validated as a system account UID.
+func TestValidate_RoleSystemAccount_OutOfRange(t *testing.T) {
+	src := bothRoleSource()
+	a := posixid.New(src)
+	err := a.Validate(context.Background(), 10000, posixid.KindUID, posixid.RoleSystemAccount)
+	if !errors.Is(err, posixid.ErrOutOfRange) {
+		t.Fatalf("expected ErrOutOfRange for UID 10000 in system_account role, got %v", err)
+	}
+}
+
+// ─── Existing tests — preserved and updated to pass role ─────────────────────
+
+func defaultCfg() posixid.Config {
+	return ldapUserCfg() // existing tests used ldap-user-like range
+}
+
+func singleRoleSource(cfg posixid.Config) *stubSource {
+	return &stubSource{
+		cfgs: map[posixid.Role]posixid.Config{
+			posixid.RoleLDAPUser: cfg,
+		},
+	}
+}
 
 func TestAllocateUID_ReturnsLowestFreeInRange(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	uid, err := a.AllocateUID(context.Background())
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,11 +203,11 @@ func TestAllocateUID_ReturnsLowestFreeInRange(t *testing.T) {
 
 func TestAllocateUID_SkipsUsedLDAPEntries(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapUIDs: []int{10000, 10001, 10002},
 	}
 	a := posixid.New(src)
-	uid, err := a.AllocateUID(context.Background())
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,11 +218,11 @@ func TestAllocateUID_SkipsUsedLDAPEntries(t *testing.T) {
 
 func TestAllocateUID_SkipsUsedSysAccountEntries(t *testing.T) {
 	src := &stubSource{
-		cfg:     defaultCfg(),
+		cfgs:    map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		sysUIDs: []int{10000},
 	}
 	a := posixid.New(src)
-	uid, err := a.AllocateUID(context.Background())
+	uid, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +232,6 @@ func TestAllocateUID_SkipsUsedSysAccountEntries(t *testing.T) {
 }
 
 func TestAllocateUID_ReturnsErrRangeExhausted(t *testing.T) {
-	// Narrow range with all IDs taken.
 	cfg := posixid.Config{
 		UIDMin:            10000,
 		UIDMax:            10002,
@@ -91,22 +240,20 @@ func TestAllocateUID_ReturnsErrRangeExhausted(t *testing.T) {
 		ReservedUIDRanges: nil,
 	}
 	src := &stubSource{
-		cfg:      cfg,
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: cfg},
 		ldapUIDs: []int{10000, 10001, 10002},
 	}
 	a := posixid.New(src)
-	_, err := a.AllocateUID(context.Background())
+	_, err := a.AllocateUID(context.Background(), posixid.RoleLDAPUser)
 	if !errors.Is(err, posixid.ErrRangeExhausted) {
 		t.Fatalf("expected ErrRangeExhausted, got %v", err)
 	}
 }
 
-// ─── AllocateGID tests ────────────────────────────────────────────────────────
-
 func TestAllocateGID_ReturnsLowestFreeInRange(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	gid, err := a.AllocateGID(context.Background())
+	gid, err := a.AllocateGID(context.Background(), posixid.RoleLDAPUser)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,12 +264,12 @@ func TestAllocateGID_ReturnsLowestFreeInRange(t *testing.T) {
 
 func TestAllocateGID_SkipsBothLDAPAndSysGIDs(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapGIDs: []int{10000},
 		sysGIDs:  []int{10001},
 	}
 	a := posixid.New(src)
-	gid, err := a.AllocateGID(context.Background())
+	gid, err := a.AllocateGID(context.Background(), posixid.RoleLDAPUser)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,11 +278,9 @@ func TestAllocateGID_SkipsBothLDAPAndSysGIDs(t *testing.T) {
 	}
 }
 
-// ─── CheckCollision tests ─────────────────────────────────────────────────────
-
 func TestCheckCollision_CollisionWithLDAPUID(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapUIDs: []int{12345},
 	}
 	a := posixid.New(src)
@@ -150,7 +295,7 @@ func TestCheckCollision_CollisionWithLDAPUID(t *testing.T) {
 
 func TestCheckCollision_CollisionWithSysAccount(t *testing.T) {
 	src := &stubSource{
-		cfg:     defaultCfg(),
+		cfgs:    map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		sysUIDs: []int{55000},
 	}
 	a := posixid.New(src)
@@ -165,7 +310,7 @@ func TestCheckCollision_CollisionWithSysAccount(t *testing.T) {
 
 func TestCheckCollision_NoCollision(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapUIDs: []int{10000},
 		sysUIDs:  []int{10001},
 	}
@@ -181,7 +326,7 @@ func TestCheckCollision_NoCollision(t *testing.T) {
 
 func TestCheckCollision_GIDCollisionWithLDAP(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapGIDs: []int{20000},
 	}
 	a := posixid.New(src)
@@ -194,39 +339,37 @@ func TestCheckCollision_GIDCollisionWithLDAP(t *testing.T) {
 	}
 }
 
-// ─── Validate tests ───────────────────────────────────────────────────────────
-
 func TestValidate_InRangeNotReservedNotColliding(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	if err := a.Validate(context.Background(), 15000, posixid.KindUID); err != nil {
+	if err := a.Validate(context.Background(), 15000, posixid.KindUID, posixid.RoleLDAPUser); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 }
 
 func TestValidate_OutOfRange(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	err := a.Validate(context.Background(), 9999, posixid.KindUID)
-	if !errors.Is(err, posixid.ErrOutOfRange) {
-		t.Fatalf("expected ErrOutOfRange, got %v", err)
+	err := a.Validate(context.Background(), 9999, posixid.KindUID, posixid.RoleLDAPUser)
+	if !errors.Is(err, posixid.ErrOutOfRange) && !errors.Is(err, posixid.ErrReserved) {
+		t.Fatalf("expected ErrOutOfRange or ErrReserved, got %v", err)
 	}
 }
 
 func TestValidate_OutOfRangeAboveMax(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	err := a.Validate(context.Background(), 60001, posixid.KindUID)
+	err := a.Validate(context.Background(), 60001, posixid.KindUID, posixid.RoleLDAPUser)
 	if !errors.Is(err, posixid.ErrOutOfRange) {
 		t.Fatalf("expected ErrOutOfRange, got %v", err)
 	}
 }
 
 func TestValidate_Reserved(t *testing.T) {
-	src := &stubSource{cfg: defaultCfg()}
+	src := singleRoleSource(defaultCfg())
 	a := posixid.New(src)
-	// 500 is in the [0,999] reserved range
-	err := a.Validate(context.Background(), 500, posixid.KindUID)
+	// 500 is in the [0,9999] reserved range of the ldap_user config
+	err := a.Validate(context.Background(), 500, posixid.KindUID, posixid.RoleLDAPUser)
 	if !errors.Is(err, posixid.ErrOutOfRange) && !errors.Is(err, posixid.ErrReserved) {
 		t.Fatalf("expected ErrOutOfRange or ErrReserved, got %v", err)
 	}
@@ -234,11 +377,11 @@ func TestValidate_Reserved(t *testing.T) {
 
 func TestValidate_CollidingWithLDAP(t *testing.T) {
 	src := &stubSource{
-		cfg:      defaultCfg(),
+		cfgs:     map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		ldapUIDs: []int{10500},
 	}
 	a := posixid.New(src)
-	err := a.Validate(context.Background(), 10500, posixid.KindUID)
+	err := a.Validate(context.Background(), 10500, posixid.KindUID, posixid.RoleLDAPUser)
 	if !errors.Is(err, posixid.ErrCollision) {
 		t.Fatalf("expected ErrCollision, got %v", err)
 	}
@@ -246,11 +389,11 @@ func TestValidate_CollidingWithLDAP(t *testing.T) {
 
 func TestValidate_CollidingWithSysAccount(t *testing.T) {
 	src := &stubSource{
-		cfg:     defaultCfg(),
+		cfgs:    map[posixid.Role]posixid.Config{posixid.RoleLDAPUser: defaultCfg()},
 		sysUIDs: []int{11000},
 	}
 	a := posixid.New(src)
-	err := a.Validate(context.Background(), 11000, posixid.KindUID)
+	err := a.Validate(context.Background(), 11000, posixid.KindUID, posixid.RoleLDAPUser)
 	if !errors.Is(err, posixid.ErrCollision) {
 		t.Fatalf("expected ErrCollision, got %v", err)
 	}

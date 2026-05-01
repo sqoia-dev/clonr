@@ -1,5 +1,5 @@
 // Package posixid provides a POSIX UID/GID allocator that:
-//   - Maintains configurable allocation ranges via the posixid_config DB table.
+//   - Maintains configurable allocation ranges per role via the posixid_role_ranges DB table.
 //   - Enforces reserved ranges (system and distro-typical accounts).
 //   - Checks collision against live LDAP entries AND the system_accounts/
 //     system_groups tables before allocating or validating an ID.
@@ -15,6 +15,16 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+)
+
+// Role identifies which ID range to use for allocation.
+type Role string
+
+const (
+	// RoleLDAPUser is for human LDAP accounts — range 10000-60000, reserved 0-9999.
+	RoleLDAPUser Role = "ldap_user"
+	// RoleSystemAccount is for daemon/service accounts — range 200-999, reserved 0-199.
+	RoleSystemAccount Role = "system_account"
 )
 
 // IDKind distinguishes UID from GID for Validate and CheckCollision.
@@ -37,6 +47,12 @@ var ErrOutOfRange = errors.New("posixid: ID is outside the configured allocation
 // ErrCollision is returned when an ID is already in use.
 var ErrCollision = errors.New("posixid: ID is already in use")
 
+// ErrInvalidSystemUID is returned when a UID >= 1000 is supplied for a system account.
+var ErrInvalidSystemUID = errors.New("posixid: system account UID must be < 1000")
+
+// ErrInvalidSystemGID is returned when a GID >= 1000 is supplied for a system account.
+var ErrInvalidSystemGID = errors.New("posixid: system account GID must be < 1000")
+
 // IDRange is a [min, max] pair (inclusive on both ends).
 type IDRange [2]int
 
@@ -52,11 +68,11 @@ type IDSource interface {
 	ListSysUIDs(ctx context.Context) ([]int, error)
 	// ListSysGIDs returns the set of GIDs in the system_groups table.
 	ListSysGIDs(ctx context.Context) ([]int, error)
-	// GetConfig returns the active allocation config.
-	GetConfig(ctx context.Context) (Config, error)
+	// GetConfig returns the active allocation config for the given role.
+	GetConfig(ctx context.Context, role Role) (Config, error)
 }
 
-// Config holds the allocator policy, read from posixid_config.
+// Config holds the allocator policy, read from posixid_role_ranges.
 type Config struct {
 	UIDMin            int
 	UIDMax            int
@@ -76,12 +92,12 @@ func New(src IDSource) *Allocator {
 	return &Allocator{src: src}
 }
 
-// AllocateUID returns the lowest available UID in the configured range that is
-// not reserved and not already in use (LDAP or system_accounts).
-func (a *Allocator) AllocateUID(ctx context.Context) (int, error) {
-	cfg, err := a.src.GetConfig(ctx)
+// AllocateUID returns the lowest available UID in the range for the given role
+// that is not reserved and not already in use (LDAP or system_accounts).
+func (a *Allocator) AllocateUID(ctx context.Context, role Role) (int, error) {
+	cfg, err := a.src.GetConfig(ctx, role)
 	if err != nil {
-		return 0, fmt.Errorf("posixid: read config: %w", err)
+		return 0, fmt.Errorf("posixid: read config for role %q: %w", role, err)
 	}
 
 	ldapUIDs, err := a.src.ListLDAPUIDs(ctx)
@@ -97,12 +113,12 @@ func (a *Allocator) AllocateUID(ctx context.Context) (int, error) {
 	return allocate(cfg.UIDMin, cfg.UIDMax, cfg.ReservedUIDRanges, used)
 }
 
-// AllocateGID returns the lowest available GID in the configured range that is
-// not reserved and not already in use (LDAP or system_groups).
-func (a *Allocator) AllocateGID(ctx context.Context) (int, error) {
-	cfg, err := a.src.GetConfig(ctx)
+// AllocateGID returns the lowest available GID in the range for the given role
+// that is not reserved and not already in use (LDAP or system_groups).
+func (a *Allocator) AllocateGID(ctx context.Context, role Role) (int, error) {
+	cfg, err := a.src.GetConfig(ctx, role)
 	if err != nil {
-		return 0, fmt.Errorf("posixid: read config: %w", err)
+		return 0, fmt.Errorf("posixid: read config for role %q: %w", role, err)
 	}
 
 	ldapGIDs, err := a.src.ListLDAPGIDs(ctx)
@@ -123,7 +139,6 @@ func (a *Allocator) AllocateGID(ctx context.Context) (int, error) {
 // when free, or (false, err) if the directory or DB could not be queried.
 func (a *Allocator) CheckCollision(ctx context.Context, id int, kind IDKind) (bool, error) {
 	var allIDs []int
-	var err error
 
 	switch kind {
 	case KindUID:
@@ -150,7 +165,6 @@ func (a *Allocator) CheckCollision(ctx context.Context, id int, kind IDKind) (bo
 		return false, fmt.Errorf("posixid: unknown kind %q", kind)
 	}
 
-	_ = err
 	for _, v := range allIDs {
 		if v == id {
 			return true, nil
@@ -159,14 +173,14 @@ func (a *Allocator) CheckCollision(ctx context.Context, id int, kind IDKind) (bo
 	return false, nil
 }
 
-// Validate returns an error if id should be rejected:
+// Validate returns an error if id should be rejected for the given role:
 //   - ErrOutOfRange if id is outside [min, max] for the given kind.
 //   - ErrReserved if id falls within a reserved range.
 //   - ErrCollision if id is already in use.
-func (a *Allocator) Validate(ctx context.Context, id int, kind IDKind) error {
-	cfg, err := a.src.GetConfig(ctx)
+func (a *Allocator) Validate(ctx context.Context, id int, kind IDKind, role Role) error {
+	cfg, err := a.src.GetConfig(ctx, role)
 	if err != nil {
-		return fmt.Errorf("posixid: read config: %w", err)
+		return fmt.Errorf("posixid: read config for role %q: %w", role, err)
 	}
 
 	var rangeMin, rangeMax int

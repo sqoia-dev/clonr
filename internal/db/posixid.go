@@ -63,6 +63,47 @@ func (db *DB) PosixIDSaveConfig(ctx context.Context, cfg PosixIDConfig) error {
 	return err
 }
 
+// PosixIDRoleRange holds allocation config for a single role from posixid_role_ranges.
+type PosixIDRoleRange struct {
+	Role               string
+	UIDMin             int
+	UIDMax             int
+	GIDMin             int
+	GIDMax             int
+	ReservedUIDRanges  string // raw JSON
+	ReservedGIDRanges  string // raw JSON
+}
+
+// PosixIDGetRoleRange reads a single row from posixid_role_ranges by role.
+func (db *DB) PosixIDGetRoleRange(ctx context.Context, role string) (PosixIDRoleRange, error) {
+	var r PosixIDRoleRange
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT role, uid_min, uid_max, gid_min, gid_max,
+		       reserved_uid_ranges, reserved_gid_ranges
+		FROM posixid_role_ranges WHERE role = ?
+	`, role)
+	err := row.Scan(
+		&r.Role,
+		&r.UIDMin, &r.UIDMax,
+		&r.GIDMin, &r.GIDMax,
+		&r.ReservedUIDRanges, &r.ReservedGIDRanges,
+	)
+	if err != nil {
+		return r, err
+	}
+	return r, nil
+}
+
+// SysAccountsUpdateUID updates the uid field of a single system_accounts row.
+// Used by the posixid reconciliation pass to correct mis-allocated UIDs.
+func (db *DB) SysAccountsUpdateUID(ctx context.Context, accountID string, newUID int) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE system_accounts SET uid = ?, updated_at = ? WHERE id = ?`,
+		newUID, time.Now().Unix(), accountID,
+	)
+	return err
+}
+
 // SysAccountsListUIDs returns all UIDs from the system_accounts table.
 func (db *DB) SysAccountsListUIDs(ctx context.Context) ([]int, error) {
 	rows, err := db.sql.QueryContext(ctx, `SELECT uid FROM system_accounts ORDER BY uid ASC`)

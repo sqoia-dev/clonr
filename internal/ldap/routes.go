@@ -207,31 +207,31 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// UID auto-allocation / validation (#93).
+	// UID auto-allocation / validation (#93, #113: use RoleLDAPUser range 10000-60000).
 	if req.UIDNumber == 0 {
-		uid, err := m.allocator.AllocateUID(r.Context())
+		uid, err := m.allocator.AllocateUID(r.Context(), posixid.RoleLDAPUser)
 		if err != nil {
 			jsonErrorPosixID(w, "uid_number", err)
 			return
 		}
 		req.UIDNumber = uid
 	} else {
-		if err := m.allocator.Validate(r.Context(), req.UIDNumber, posixid.KindUID); err != nil {
+		if err := m.allocator.Validate(r.Context(), req.UIDNumber, posixid.KindUID, posixid.RoleLDAPUser); err != nil {
 			jsonErrorPosixID(w, "uid_number", err)
 			return
 		}
 	}
 
-	// GID auto-allocation / validation (#93).
+	// GID auto-allocation / validation (#93, #113: use RoleLDAPUser range 10000-60000).
 	if req.GIDNumber == 0 {
-		gid, err := m.allocator.AllocateGID(r.Context())
+		gid, err := m.allocator.AllocateGID(r.Context(), posixid.RoleLDAPUser)
 		if err != nil {
 			jsonErrorPosixID(w, "gid_number", err)
 			return
 		}
 		req.GIDNumber = gid
 	} else {
-		if err := m.allocator.Validate(r.Context(), req.GIDNumber, posixid.KindGID); err != nil {
+		if err := m.allocator.Validate(r.Context(), req.GIDNumber, posixid.KindGID, posixid.RoleLDAPUser); err != nil {
 			jsonErrorPosixID(w, "gid_number", err)
 			return
 		}
@@ -375,9 +375,9 @@ func (m *Manager) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate GID if explicitly provided.
+	// Validate GID if explicitly provided (#113: use RoleLDAPUser range 10000-60000).
 	if body.GIDNumber != nil {
-		if err := m.allocator.Validate(r.Context(), *body.GIDNumber, posixid.KindGID); err != nil {
+		if err := m.allocator.Validate(r.Context(), *body.GIDNumber, posixid.KindGID, posixid.RoleLDAPUser); err != nil {
 			jsonErrorPosixID(w, "gid_number", err)
 			return
 		}
@@ -573,16 +573,16 @@ func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// GID auto-allocation / validation (#93).
+	// GID auto-allocation / validation (#93, #113: use RoleLDAPUser range 10000-60000).
 	if body.GIDNumber == 0 {
-		gid, err := m.allocator.AllocateGID(r.Context())
+		gid, err := m.allocator.AllocateGID(r.Context(), posixid.RoleLDAPUser)
 		if err != nil {
 			jsonErrorPosixID(w, "gid_number", err)
 			return
 		}
 		body.GIDNumber = gid
 	} else {
-		if err := m.allocator.Validate(r.Context(), body.GIDNumber, posixid.KindGID); err != nil {
+		if err := m.allocator.Validate(r.Context(), body.GIDNumber, posixid.KindGID, posixid.RoleLDAPUser); err != nil {
 			jsonErrorPosixID(w, "gid_number", err)
 			return
 		}

@@ -567,7 +567,8 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 	// returns nil,nil when LDAP is not yet in statusReady, so the allocator
 	// falls back to DB-only collision checking against system_groups. At seed
 	// time the LDAP DIT is empty, so the allocated GID is always fresh.
-	sudoersGID, err := m.allocator.AllocateGID(ctx)
+	// #113: LDAP groups use RoleLDAPUser range (10000-60000).
+	sudoersGID, err := m.allocator.AllocateGID(ctx, posixid.RoleLDAPUser)
 	if err != nil {
 		// Non-fatal for the overall seed: fall back to a known-safe default so
 		// that the DIT seed can proceed. The SeedSudoersGroup call below will

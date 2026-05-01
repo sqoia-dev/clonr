@@ -445,6 +445,24 @@ func runServer(cmd *cobra.Command, args []string) error {
 		log.Error().Err(err).Msg("reconcile stuck initramfs builds failed (non-fatal)")
 	}
 
+	// #113 — posixid reconciliation pass.
+	// Corrects system_accounts rows whose UID was mis-allocated into LDAP user
+	// space (>= 1000) by the Sprint 13 single-range allocator.  Gated behind
+	// CLUSTR_RECONCILE_SYSACCOUNTS=1 so it only fires when the operator
+	// explicitly requests it.  Read the controller node ID from the environment
+	// (CLUSTR_RECONCILE_CONTROLLER_NODE_ID).
+	if os.Getenv("CLUSTR_RECONCILE_SYSACCOUNTS") == "1" {
+		controllerNodeID := os.Getenv("CLUSTR_RECONCILE_CONTROLLER_NODE_ID")
+		if controllerNodeID == "" {
+			log.Warn().Msg("CLUSTR_RECONCILE_SYSACCOUNTS=1 set but CLUSTR_RECONCILE_CONTROLLER_NODE_ID is empty — skipping posixid reconciliation")
+		} else {
+			log.Info().Str("controller_node_id", controllerNodeID).Msg("posixid reconciliation: starting (CLUSTR_RECONCILE_SYSACCOUNTS=1)")
+			if err := srv.SysAccountsManager().ReconcileFromNode(ctx, srv.ClientdHub(), controllerNodeID); err != nil {
+				log.Error().Err(err).Msg("posixid reconciliation failed (non-fatal)")
+			}
+		}
+	}
+
 	// Start background workers (reimage scheduler, etc.) before accepting traffic.
 	srv.StartBackgroundWorkers(ctx)
 

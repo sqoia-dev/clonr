@@ -215,17 +215,38 @@ func (m *Manager) DeleteGroup(ctx context.Context, id string) error {
 
 // ─── Account CRUD ─────────────────────────────────────────────────────────────
 
+// ErrInvalidSystemUID is returned when an explicit UID >= 1000 is supplied for
+// a system account. System accounts must use the distro system range (< 1000)
+// so they align with what DNF/rpm places on the node and avoid conflicting with
+// SSSD's min_id=1000 cutoff for LDAP users.
+var ErrInvalidSystemUID = errors.New("sysaccounts: system account UID must be < 1000")
+
+// ErrInvalidSystemGID is returned when an explicit primary GID >= 1000 is
+// supplied for a system account.
+var ErrInvalidSystemGID = errors.New("sysaccounts: system account GID must be < 1000")
+
 // CreateAccount validates and inserts a new system account.
 // Returns ErrConflict if the username or UID is already in use.
-// If a.UID == 0 and an allocator is configured, a UID is auto-allocated.
+// If a.UID == 0 and an allocator is configured, a UID is auto-allocated from
+// the RoleSystemAccount range (200-999).
 func (m *Manager) CreateAccount(ctx context.Context, a api.SystemAccount) (api.SystemAccount, error) {
 	// Auto-allocate UID if requested and allocator is available.
 	if a.UID == 0 && m.allocator != nil {
-		uid, err := m.allocator.AllocateUID(ctx)
+		uid, err := m.allocator.AllocateUID(ctx, posixid.RoleSystemAccount)
 		if err != nil {
 			return api.SystemAccount{}, fmt.Errorf("sysaccounts: auto-allocate uid: %w", err)
 		}
 		a.UID = uid
+	}
+
+	// Hard guard: system accounts must not use LDAP user ID space (>= 1000).
+	// This catches callers that supply an explicit UID that was previously
+	// mis-allocated by the single-range allocator (Sprint 13 #96 bug).
+	if a.UID != 0 && a.UID >= 1000 {
+		return api.SystemAccount{}, fmt.Errorf("%w: explicit UID %d rejected", ErrInvalidSystemUID, a.UID)
+	}
+	if a.PrimaryGID != 0 && a.PrimaryGID >= 1000 {
+		return api.SystemAccount{}, fmt.Errorf("%w: explicit PrimaryGID %d rejected", ErrInvalidSystemGID, a.PrimaryGID)
 	}
 
 	if err := validateAccount(a); err != nil {

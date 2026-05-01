@@ -43,19 +43,43 @@ func (s *DBLDAPSource) ListSysGIDs(ctx context.Context) ([]int, error) {
 	return s.DB.SysAccountsListGIDs(ctx)
 }
 
-func (s *DBLDAPSource) GetConfig(ctx context.Context) (Config, error) {
-	row, err := s.DB.PosixIDGetConfig(ctx)
+// GetConfig reads allocation config for the given role from posixid_role_ranges.
+// Falls back to posixid_config (migration 081 legacy row) for unknown roles so
+// existing callers that haven't migrated yet still get a sensible config.
+func (s *DBLDAPSource) GetConfig(ctx context.Context, role Role) (Config, error) {
+	row, err := s.DB.PosixIDGetRoleRange(ctx, string(role))
 	if err != nil {
-		return Config{}, fmt.Errorf("posixid source: get config: %w", err)
+		// If the role row is missing (e.g. fresh DB before 084 migration runs, or
+		// an unknown role), fall back to the legacy posixid_config row.
+		legacy, legErr := s.DB.PosixIDGetConfig(ctx)
+		if legErr != nil {
+			return Config{}, fmt.Errorf("posixid source: get config for role %q (role row missing, legacy fallback also failed): %w", role, legErr)
+		}
+		reservedUID, err := ParseRanges(legacy.ReservedUIDRanges)
+		if err != nil {
+			return Config{}, fmt.Errorf("posixid source: parse legacy reserved_uid_ranges: %w", err)
+		}
+		reservedGID, err := ParseRanges(legacy.ReservedGIDRanges)
+		if err != nil {
+			return Config{}, fmt.Errorf("posixid source: parse legacy reserved_gid_ranges: %w", err)
+		}
+		return Config{
+			UIDMin:            legacy.UIDMin,
+			UIDMax:            legacy.UIDMax,
+			GIDMin:            legacy.GIDMin,
+			GIDMax:            legacy.GIDMax,
+			ReservedUIDRanges: reservedUID,
+			ReservedGIDRanges: reservedGID,
+		}, nil
 	}
 
 	reservedUID, err := ParseRanges(row.ReservedUIDRanges)
 	if err != nil {
-		return Config{}, fmt.Errorf("posixid source: parse reserved_uid_ranges: %w", err)
+		return Config{}, fmt.Errorf("posixid source: parse reserved_uid_ranges for role %q: %w", role, err)
 	}
 	reservedGID, err := ParseRanges(row.ReservedGIDRanges)
 	if err != nil {
-		return Config{}, fmt.Errorf("posixid source: parse reserved_gid_ranges: %w", err)
+		return Config{}, fmt.Errorf("posixid source: parse reserved_gid_ranges for role %q: %w", role, err)
 	}
 
 	return Config{

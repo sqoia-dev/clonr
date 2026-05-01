@@ -1127,7 +1127,58 @@ The asymmetry exposes a Sprint 13 (#96) design oversight: `internal/posixid/allo
 5. Anti-regression test: assert `system_accounts.uid < 1000` invariant on every CreateAccount path.
 6. Documented in feedback memory: system accounts never share id-space with LDAP users.
 
-**Owner:** Richard scopes (15 min) → Dinesh implements. Queued behind Sprint 18 landing green.
+**Owner:** Richard scopes (15 min) → Dinesh implements. Queued behind GAP-S18-1/2/3 landing (overlap on `internal/ldap/manager.go` and `ldap/routes.go`).
+
+**Richard's scope (locked 2026-05-01):**
+
+- **Range:** `system_account` 200-999 (reserved `[[0,199]]` for distro packages); `ldap_user` 10000-60000 (reserved `[[0,9999]]`).
+- **API:** Replace `AllocateUID(ctx)` / `AllocateGID(ctx)` with `AllocateUID(ctx, role)` / `AllocateGID(ctx, role)`. New `posixid.Role` enum: `RoleLDAPUser`, `RoleSystemAccount`. One enum, one signature, scales to future role classes (ML, container-runtime, etc.) without method explosion.
+- **Reconciliation:** Sync DB row down to on-node truth (founder option a). For any `system_accounts` row with UID/GID ≥1000, deploy/clientd manifest reconciler reads `getent passwd <name>` from controller node and updates the DB row in place. No file chowns. Behind feature flag `CLUSTR_RECONCILE_SYSACCOUNTS=1` so it doesn't fire on every server restart.
+
+**Implementation steps for Dinesh:**
+
+1. **Migration 084_posixid_roles.sql** — new table `posixid_role_ranges(role TEXT PK, uid_min, uid_max, gid_min, gid_max, reserved_uid_ranges, reserved_gid_ranges)`. Seed `ldap_user` (10000-60000, reserved `[[0,9999]]`) and `system_account` (200-999, reserved `[[0,199]]`). Leave migration 081's `posixid_config` row for legacy read; stop writing to it.
+2. **`internal/posixid/allocator.go`** — add `Role` type + consts. Change `AllocateUID(ctx, role)` / `AllocateGID(ctx, role)` signatures. Update `IDSource.GetConfig(ctx, role)` and `Validate` to take role. Read by role in `source.go`.
+3. **`internal/sysaccounts/manager.go:224`** — pass `RoleSystemAccount`. Add hard guard: `if a.UID != 0 && a.UID >= 1000 { return ErrInvalidSystemUID }` before insert. Same for `PrimaryGID`.
+4. **`internal/ldap/routes.go:212,227,578`** — pass `RoleLDAPUser`.
+5. **Reconciliation pass** — `internal/sysaccounts/reconcile.go` with `ReconcileFromNode(ctx, controllerNodeID)`. For each row where UID ≥1000: clientd `getent passwd <name>` → `UPDATE system_accounts SET uid=? WHERE id=?`. Run on serverd startup behind `CLUSTR_RECONCILE_SYSACCOUNTS=1`.
+6. **Tests** — `allocator_test.go`: `RoleSystemAccount` <1000, `RoleLDAPUser` ≥10000, role-mismatch fails. `sysaccounts_test.go`: `CreateAccount` rejects explicit UID ≥1000. `reconcile_test.go`: fake getent → row updated.
+7. **Run reconcile on cloner manually** post-deploy: trip flag once, verify munge UID flips 10003 → 996, unset flag. Document one-shot in SPRINT.md.
+8. **CI watch** to green before reporting DONE.
+
+**Out of scope:** LDAP schema changes, SSSD min_id config, file chown sweeps, multi-cluster reconciliation, new role classes beyond the two, D18 reseed (KL-2 separate lane).
+
+### One-shot cloner reconciliation (run manually after deploy)
+
+The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After this PR lands on `main` and `clustr-autodeploy` rebuilds on cloner (192.168.1.151):
+
+1. Confirm the controller node is connected (it must have an active `clustr-clientd` session to the server):
+   ```
+   curl -s -H "X-Api-Key: <admin-key>" http://localhost:8080/api/v1/nodes | jq '.[] | {id,hostname,status}'
+   ```
+   Note the UUID for `slurm-controller` — call it `<CONTROLLER_NODE_ID>`.
+
+2. Trip the reconcile flag on the **next** server startup:
+   ```bash
+   systemctl stop clustr-serverd
+   CLUSTR_RECONCILE_SYSACCOUNTS=1 \
+   CLUSTR_RECONCILE_CONTROLLER_NODE_ID=<CONTROLLER_NODE_ID> \
+   /usr/sbin/clustr-serverd
+   ```
+   Watch logs for `sysaccounts reconcile: updating UID to match on-node truth` for the `munge` account. Expected: `old_uid=10003 new_uid=996`.
+
+3. Restart normally (without the flag):
+   ```bash
+   systemctl start clustr-serverd
+   ```
+
+4. Verify:
+   ```bash
+   curl -s -H "X-Api-Key: <admin-key>" http://localhost:8080/api/v1/system-accounts | jq '.[] | select(.username=="munge") | .uid'
+   # should print: 996
+   ```
+
+**Do not set `CLUSTR_RECONCILE_SYSACCOUNTS=1` in the systemd unit.** The flag is a one-shot; after the munge row is fixed it must be removed so the reconcile does not run on every restart.
 
 ---
 

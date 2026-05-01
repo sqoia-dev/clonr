@@ -210,6 +210,18 @@ func (s *Server) NetworkManager() *networkmodule.Manager {
 	return s.networkMgr
 }
 
+// SysAccountsManager returns the server's system accounts manager.
+// Used by main to run the optional posixid reconciliation pass.
+func (s *Server) SysAccountsManager() *sysaccounts.Manager {
+	return s.sysAccountsMgr
+}
+
+// ClientdHub returns the server's clientd hub.
+// Used by main to wire the posixid reconciliation pass.
+func (s *Server) ClientdHub() *ClientdHub {
+	return s.clientdHub
+}
+
 // SetDHCPLeaseLookup wires a DHCP lease lookup function so the registration
 // handler can auto-populate node interfaces from DHCP-assigned IPs. Call this
 // after server.New() when the PXE server is available. Safe to call with nil
