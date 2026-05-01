@@ -66,18 +66,13 @@ type ImagesHandler struct {
 }
 
 // blobSemaphore returns the blob concurrency semaphore, reading
-// CLUSTR_BLOB_MAX_CONCURRENT from the environment on first call.
+// CLUSTR_BLOB_MAX_CONCURRENCY (preferred) or CLUSTR_BLOB_MAX_CONCURRENT (legacy)
+// from the environment on first call.
 // Initialization is protected by sync.Once to prevent data races when
 // multiple concurrent requests hit DownloadBlob simultaneously.
 func (h *ImagesHandler) blobSemaphore() chan struct{} {
 	h.blobSemOnce.Do(func() {
-		cap := defaultBlobMaxConcurrent
-		if v := os.Getenv("CLUSTR_BLOB_MAX_CONCURRENT"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cap = n
-			}
-		}
-		h.blobSem = make(chan struct{}, cap)
+		h.blobSem = make(chan struct{}, blobConcurrencyLimit())
 	})
 	return h.blobSem
 }
@@ -626,6 +621,14 @@ func (h *ImagesHandler) UploadBlob(w http.ResponseWriter, r *http.Request) {
 //
 // For "block" format images: streams the pre-packed blob file from disk.
 // For "filesystem" format images: streams an uncompressed tar of rootfs/ on the fly.
+//
+// Two env-var knobs control throughput:
+//
+//	CLUSTR_BLOB_MAX_CONCURRENCY — maximum simultaneous blob streams (global semaphore).
+//	                              Also accepts legacy name CLUSTR_BLOB_MAX_CONCURRENT.
+//	                              Zero or unset = use default (8).
+//	CLUSTR_BLOB_MAX_BPS         — per-stream byte rate cap in bytes/sec (token bucket).
+//	                              Zero or unset = unlimited.
 func (h *ImagesHandler) DownloadBlob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -650,6 +653,15 @@ func (h *ImagesHandler) DownloadBlob(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintf(w, `{"error":"too many concurrent blob streams (max %d) — retry in 10s"}`, cap(sem))
 		return
+	}
+
+	// Apply per-stream bandwidth cap if CLUSTR_BLOB_MAX_BPS is set.
+	// The token bucket is created fresh for each stream so each client gets its own
+	// quota independent of other concurrent streams.
+	if bps := blobMaxBPS(); bps > 0 {
+		tb := newTokenBucket(bps)
+		w = newRateLimitedResponseWriter(w, r.Context(), tb)
+		log.Debug().Int64("bps", bps).Msg("blob stream: bandwidth cap active")
 	}
 
 	img, err := h.DB.GetBaseImage(r.Context(), id)

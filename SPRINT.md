@@ -1246,3 +1246,39 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
 | GAP-S18-3 | LOW | Add `pam_mkhomedir.so` to node PAM deploy step |
 | GAP-S18-4 | MEDIUM | Re-run Row 1 (clean slapd bring-up) on fresh clustr install from VMID 299 template |
 | GAP-S18-5 | MEDIUM | Complete VMID 299 Rocky 9 template build + convert to template + update reference_proxmox.md |
+
+---
+
+## Sprint 20 — Real-hardware initramfs (HIGH) — "stop failing PXE"
+
+**Started:** 2026-05-01
+**Theme:** clustr currently cannot PXE-boot real Mellanox / Intel / Broadcom / megaraid hardware. The current `scripts/initramfs-init.sh` insmods a virtio-only module list — first time a real customer plugs a Mellanox CX-5 NIC into a clustr-managed cluster, deploy fails at "no usable NIC found." Sprint 20 fixes that and a small cluster of related deploy-correctness bugs. Gating dependency for Sprint 22 (operator parallel ops) and Sprint 25 (imaging follow-ups).
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` (commit 12e9f04). Approved by founder 2026-05-01.
+
+### Tasks
+
+- [ ] **#120 — Real-hardware kernel module set in initramfs (HIGH, M)**
+  Owner: Dinesh; arch by Richard.
+  In: expand the `scripts/build-initramfs.sh` allowlist to cover `mlx5_core/mlx5_ib/mlx4_*`, `i40e/ice/ixgbe/igb/e1000e`, `bnxt_en/bnx2x/tg3`, `nvme/nvme_core`, `megaraid_sas/mpt3sas/aacraid`, `dm_*`, `btrfs`, `crc32c_generic`. Build-time enumerate from `/lib/modules/$KVER/kernel/{net,drivers/net,drivers/scsi,drivers/block,drivers/md,drivers/nvme,fs}` and write a manifest of included modules into the build artifact for debug. Out: alternative driver runtime auto-load via lspci aliases (deferred follow-up).
+  Depends on: nothing.
+
+- [ ] **#121 — xattr/ACL preservation in deploy (HIGH, S)**
+  Owner: Dinesh; arch by Richard.
+  In: replace busybox `tar` with GNU `tar` in initramfs binary list. Add `--xattrs --xattrs-include='*' --acls` to the streamExtract invocation in `internal/deploy/rsync.go`. Add a deploy-round-trip test that captures an image with SELinux contexts + POSIX ACLs and asserts they survive capture → deploy → re-capture. Out: ACL editor UI.
+  Depends on: nothing.
+
+- [ ] **#122 — HTTP `Range:` resume on blob retries (MEDIUM, S)**
+  Owner: Dinesh.
+  In: track bytes-received per attempt in the rsync.go retry loop; on retry send `Range: bytes=N-` and resume the stream. Verify Go's `net/http.ServeContent` end-to-end. Cap total retry duration at `CLUSTR_DEPLOY_TIMEOUT`. Out: parallel-range streams.
+  Depends on: nothing.
+
+- [ ] **#123 — Bandwidth and concurrency caps on `/blob` (MEDIUM, S)**
+  Owner: Dinesh.
+  In: `CLUSTR_BLOB_MAX_BPS` (per-stream), `CLUSTR_BLOB_MAX_CONCURRENCY` (global) env vars. Token-bucket middleware in `internal/server/handlers/images.go`. Out: per-image / per-group quota policies.
+  Depends on: nothing.
+
+- [ ] **#124 — Lab-validate Sprint 20 on real Mellanox + megaraid hardware (HIGH, S)**
+  Owner: Gilfoyle (or Jared if Gilfoyle unavailable).
+  In: confirm a node with a Mellanox CX-5 + an LSI 9361-8i actually PXE-boots, partitions, deploys an image, and rejoins the cluster end-to-end. Document exact module load order observed. Out: full lab-validate matrix (separate sprint task).
+  Depends on: #120 #121 #122.
