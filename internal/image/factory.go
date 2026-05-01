@@ -1151,16 +1151,23 @@ func rsyncDir(ctx context.Context, src, dst string) error {
 // sha256 hex string, and its size in bytes.
 //
 // Determinism flags passed to GNU tar:
-//   --sort=name          — lexical entry order (same across kernel readdir orderings)
-//   --mtime=@0           — normalise all timestamps to UNIX epoch 0
-//   --owner=0 --group=0  — zero ownership numerically
-//   --numeric-owner      — suppress name lookups (host-independent)
-//   --pax-option=...     — strip pax extended atime/ctime headers (timestamp leakage)
+//
+//	--sort=name          — lexical entry order (same across kernel readdir orderings)
+//	--mtime=@0           — normalise all timestamps to UNIX epoch 0
+//	--owner=0 --group=0  — zero ownership numerically
+//	--numeric-owner      — suppress name lookups (host-independent)
+//	--pax-option=...     — strip pax extended atime/ctime headers (timestamp leakage)
+//
+// Preservation flags (symmetric with streamExtract in rsync.go):
+//
+//	--xattrs --xattrs-include='*'  — capture all extended attributes
+//	--selinux                      — capture SELinux security contexts
+//	--acls                         — capture POSIX ACL entries
 //
 // The tar excludes the same runtime/security paths that streamFilesystemBlob
 // excludes so the sha256 matches what the deploy agent would verify.
 //
-// Requires GNU tar on the host (gtar or tar with --sort support).
+// Requires GNU tar on the host (gtar or tar with --sort and --xattrs support).
 func (f *Factory) bakeDeterministicTar(ctx context.Context, imageID, imageRoot, rootfsDir string) (tarPath string, sha256hex string, sizeBytes int64, err error) {
 	tarPath = filepath.Join(imageRoot, "rootfs.tar")
 
@@ -1172,6 +1179,14 @@ func (f *Factory) bakeDeterministicTar(ctx context.Context, imageID, imageRoot, 
 		"--mtime=@0",
 		"--owner=0", "--group=0", "--numeric-owner",
 		"--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime",
+		// Preserve extended attributes, SELinux contexts, and POSIX ACLs so
+		// that capture → deploy → re-capture round-trips are lossless.
+		// These flags mirror the extract flags in internal/deploy/rsync.go
+		// streamExtract, ensuring symmetric preservation.
+		"--xattrs",
+		"--xattrs-include=*",
+		"--selinux",
+		"--acls",
 		// Exclude the same runtime/security paths as streamFilesystemBlob so
 		// the tar sha256 is stable and matches what deploy agents verify.
 		"--exclude=./proc/*",
