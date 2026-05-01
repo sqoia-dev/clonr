@@ -908,4 +908,468 @@ PXE/iPXE        ipxe_server.py builds menu from      Go pxe/boot.go renders iPXE
 
 | Aspect | clustervisor `cv-cloner new-image` | clustr `clustr image capture` / `POST /api/v1/factory/capture` |
 |---|---|---|
-| Capture transport | `rsync -a -h --numeric-ids --human-readable -A -H -X --filter '-x system.*' --filter '-x security.selinux' --info=progress2` from node → server `rsync_url`. | `rsync` to `internal/deploy/rsync.go`. Excludes a fixed list (`/
+| Capture transport | `rsync -a -h --numeric-ids --human-readable -A -H -X --filter '-x system.*' --filter '-x security.selinux' --info=progress2` from node → server `rsync_url`. | `rsync` to `internal/deploy/rsync.go`. Excludes a fixed list (`/proc/*`, `/sys/*`, `/dev/*`, `/run/*`, `/tmp/*`, `/var/tmp/*`, `/var/cache/*`, `/var/log/*`, `/boot/efi/*`, `/lost+found`, `/mnt/*`, `/media/*`, `/root/.bash_history`, `/home/*/.bash_history`, `/home/*/.ssh/authorized_keys`). |
+| xattr / ACL preservation | **Yes** — `-A -H -X` (ACLs, hardlinks, xattrs), with explicit filters for `system.*` and `security.selinux`. Also separately rsyncs `.cloner` xattr/acl staging when `store-xattr-acls` is set. | Not explicitly preserved in capture path; the streamExtract in deploy uses `tar` whose flag set is determined elsewhere — needs verification (see "Gaps", below). |
+| Disk layout capture | Separate operation: `cv-cloner new-disklayout` / `update-disklayout`. Stored as a versioned `cloner_disk_layout` object referencing disks, RAID, LVM, filesystems, bootloader (incl. EFI mountpoints). | The Layout package (`internal/image/layout/`) generates a *recommended* layout from hardware; not "captured" from the running node. |
+| BIOS settings capture | `cv-cloner biossettings` / `biossettings-upload`. Reads via `intel-syscfg`. | None. |
+| Filesystem-vs-block | Filesystem only (rsync). | Both: `ImageFormatFilesystem` (tar) and `ImageFormatBlock` (raw). |
+| Validation summary before send | `show_summary_info($layout, "new-image")` interactive confirm. | None — capture starts immediately. |
+| Versioning | Image options + disk layout each carry their own versions; `update-options` modifies metadata only. | Image revisions implicit via image_id; metadata mutable through `PUT /api/v1/images/{id}/tags` + `metadata`. |
+
+#### Image storage on the server
+
+| Aspect | clustervisor | clustr |
+|---|---|---|
+| On-disk format | rsync'd live tree under `<image_dir>/<image>/...` plus `.cloner/` staging dir for xattr/acl. Image options stored as YAML/JSON in DB. | Filesystem image: extracted rootfs tree at `/var/lib/clustr/images/<id>/rootfs/` with sha256 over the directory. Block image: single raw file. Image record in SQLite. |
+| Compression at rest | None — rsync tree. | None — the streamed blob is recomposed from the rootfs tree on every download (`tar -cf - <rootfs>/`); compression is requested per-stream by the client (nothing is gzipped on disk). |
+| Deduplication | Implicit via rsync delta on update. | None. |
+| Resumable build | Server-side state machine for resumable downloads (`018_image_build_resumable.sql`). Phases tracked. `Factory.ResumeFromPhase()`. | Same on clustr side; this is parity. |
+| Image kinds | `cloner_image` (filesystem to deploy on disk), `diskless_image` (NFS-rooted), stateless image (initramfs+squashfs in RAM). | Single `BaseImage` (with `Format=filesystem|block`); no diskless / stateless model. |
+| Build manifest signing | None of the cloner trees are signed end-to-end (the SLURM bundles are, separately). | clustr signs the build manifest of every image and exposes it at `/api/v1/images/{id}/build-manifest`. |
+
+#### Image transport to the deploying node
+
+| Aspect | clustervisor | clustr |
+|---|---|---|
+| Default transport | `rsync -a -h --numeric-ids` from server to node, with `--bwlimit` configurable per image. | HTTP GET `/api/v1/images/{id}/blob` streamed → tar. Throughput watchdog (cancel if <1 KB/s for 120 s). pigz / zstd auto-detect for compression. |
+| Multicast | **Yes** — UDPCast. Server tracks readiness in `_cloner_multicast` collection per IP, expires after 90 s, base port 9000 (configurable). Each batch picks next port. Receiver runs `udp-receiver --pipe 'tar --extract --xattrs-include='security.*' --xattrs-include='user.*' --acls'`. Sender side runs `udp-sender` for the tarball. | **No.** Every node pulls its own copy over HTTP. |
+| Offline / USB | **Yes** — `cv-cloner make-installer` builds a USB image carrying the cloner initrd + a chosen image. Installer mounts USB and does `rsync` from `/cloner/usb/<image>` instead of network. | **No.** Initramfs is network-only. |
+| Bandwidth limit | rsync `--bwlimit` per image option. | None. |
+| Resumable (per-stream) | rsync handles partial transfers natively. | clustr re-issues the HTTP GET on stream failure (the rsync.go retry loop) but always re-runs from byte 0 — no Range: support on client side. |
+| Integrity | Per-rsync checksum + post-install verify. | sha256 over the streamed tar (header `X-Clustr-Blob-SHA256`); verified post-extract. |
+| Authentication | Munge sign+verify on every API call. SSH-equivalent trust on rsync (uses `rsync://` daemon mode on the server with auth). | Bearer token (node-scoped, single-use within a deploy run). |
+| Maximum practical concurrency | High via multicast (single tar stream addressed to N receivers). | Limited by server NIC bandwidth ÷ image size; no practical reimage-fleet flow. |
+
+#### Initramfs build pipeline
+
+| Aspect | clustervisor (Buildroot) | clustr (`scripts/build-initramfs.sh`) |
+|---|---|---|
+| Builder | Buildroot 2019.02-00050. `external.{desc,mk}` overlay tree at `/usr/libexec/clustervisor/cloner_initrd/initrd/buildroot-act-tree/`. Make-driven, reproducible. | 1,300-line bash. Pulls busybox-musl from `https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox` (sha256-pinned). Pulls kernel modules over `sshpass` from `192.168.1.151` (a hardcoded dev box) unless `CLUSTR_CI_MODE=1`. |
+| Architectures | x86_64 nocona only (per `BR2_GCC_TARGET_ARCH="nocona"`). | linux/amd64 only; no aarch64 path despite RPM split. |
+| Per-distro variants | Three initrd source tarballs: `initrd-src-cloner.tar.bz2`, `initrd-src-el7-cloner.tar.bz2`, `initrd-src-el8-cloner.tar.bz2` (no el9 in this build — points to a separate generation path). | Single initramfs; the kernel modules pulled at build time tie it to a specific kernel version. |
+| Reproducibility | Reproducible across rebuilds (Buildroot pins package SHA + version per `external.desc`). | Mostly: busybox sha256-pinned; kernel modules vary per server source; bash logic is procedural and order-dependent. |
+| Networking modules | Detected at runtime (`load_all_kmod` skipping class "network", then auto-detect via PCI). | Hardcoded list: `failover`, `net_failover`, `virtio_net`, `virtio_scsi`, `sd_mod`, `virtio_blk`, `crc32c-intel`, `libcrc32c`, `xfs`, `ext4`, `fat`, `vfat`, `raid0/1/10/456`. **No Mellanox (mlx4/5), no Intel ixgbe/i40e, no broadcom, no megaraid_sas, no mpt3sas.** |
+| Storage modules | Auto + manual lists (kmod, kmod-blacklist, kmod-post per image config). | Same hardcoded list as above; raid0/1/10/456 included; **no btrfs, no zfs, no dm_crypt, no nvme** (despite the deploy code being NVMe-aware). |
+| Bundled tools | busybox + dropbear + mdadm + nvme + lvm2 + e2fsprogs + xfsprogs + btrfs-progs + dosfstools + smartmontools + hdparm + dmidecode + ipmitool (lanplus + USB) + udpcast (sender + receiver) + rsync + tar + xz + openssl + util-linux blkid/uuid + perl + munge. **116 packages total.** | busybox + dropbear + mdadm + mkfs.{xfs,ext4,vfat} + partprobe (parted) + rsync + cpio (build host only) + clustr static binary. **About 8 binaries plus busybox applets.** |
+| Authentication artefact | `/etc/munge/munge.key` baked into initrd; `/etc/dropbear/` SSH host keys baked in. | None baked in. SSH host key generated at boot. Auth via per-boot `clustr.token=` from kernel cmdline. |
+| Init system | SysV with `S10mdev` → `S50dropbear` → `S55munged` → `cloner_start.sh` → `installer` (Perl) → exec `/bin/ash`. | Single bash `init.sh` template with placeholders substituted at build time. Mounts proc/sys/dev/devpts, mdev, parses cmdline, insmod hardcoded list, polls block devices for 45 s, udhcpc on each iface, starts httpd serving init.log on port 9999, exec `clustr deploy --auto`. |
+| Diagnostics | Dropbear SSH always available; `/etc/munge/munge.key` allows trusted ops. | Per-boot dropbear password (8-char hex) embedded in cmdline; init log served on port 9999 over HTTP for the server to fetch. |
+
+#### Disk preparation + bootloader
+
+| Aspect | clustervisor (`ClonerInstall.pm`) | clustr (`internal/deploy/`) |
+|---|---|---|
+| Partitioning tool | parted + mdadm + lvm. Distinct paths for IMSM (Intel Matrix Storage Manager onboard RAID). | sgdisk (`backup_partition_table`/`restore_partition_table`/`probe`). mdadm for software RAID. |
+| Filesystems supported in installer | xfs, ext{2,3,4}, fat, swap, btrfs (Buildroot includes btrfs-progs). | xfs, ext4, vfat (matching the mkfs.* binaries shipped in initramfs). ZFS supported in deploy code (`zfs.go`) but no `zpool` binary in initramfs. |
+| Hardware RAID | IMSM (Intel RST/IMSM) supported via `disk_raid_imsm()`. Falls back to `disk_raid_standard()`. | None (pure mdadm software RAID). No IMSM passthrough; no megaraid CLI; no PERC. |
+| Disk layout source | Per-image versioned `cloner_disk_layout` object that has been previously captured + uploaded. | `Layout.Recommend` derives layout from hardware on each deploy; `Layout.Validate` + `Layout.Autocorrect` catch obvious mistakes. |
+| /etc/fstab generation | `create_fstab()` from blkid UUIDs. | `internal/deploy/finalize.go` `writeFstab` (similar). |
+| /etc/mdadm.conf generation | `create_mdadm_conf()` from mdadm --detail --scan. | `internal/deploy/raid.go` writes mdadm conf. |
+| Distro-specific system files | Separate generators for el7 (`_create_system_files_el7`), el8 (`_create_system_files_el8`), el9 (`_create_system_files_el`), ubuntu (`_create_system_files_ubuntu`), with ifcfg-style for el7/8, NetworkManager for el9, netplan for ubuntu. | `finalize.go` + `network.go` generate NetworkManager keyfiles for el9. el7/el8 ifcfg-style not present. Ubuntu / Debian not supported in deploy at all. |
+| Bootloader install | `install_bootloader_grub()` (BIOS) and `install_bootloader_efi()` (UEFI). Per-distro grub.cfg generators (`_generate_grub2_config_el`, `_generate_grub2_config_el9`, `_generate_grub2_config_ubuntu`). | `internal/deploy/efiboot.go` for UEFI (`grub2-install --removable` writes `\EFI\BOOT\BOOTX64.EFI`; no NVRAM entry created). BIOS path uses grub2-install with `--target=i386-pc`. UEFI BootOrder rotation with `efibootmgr -o` post-install. `BootloaderError` if `grub2-install` fails on all targets. |
+| EFI repair | `cv-cloner fix-efiboot` — uses `EFIBootmgr.pm` to inspect/recreate boot entries. | `clustr fix-efi-boot` CLI subcommand (`newFixEFIBootCmd`). Parity. |
+| BIOS settings push | `check_set_biossettings` → `_check_set_intel_syscfg` → `_set_intel_bios_setting` / `_check_intel_bios_setting`. Compares current vs desired Intel server BIOS settings via `intel-syscfg`. | None. |
+| IPMI configuration | `configure_ipmi` — writes channel LAN settings, VLAN, DHCP/static, gateway, user/password per channel. | clustr CLI has `clustr ipmi configure` for operator-side setup; the in-installer path doesn't auto-configure BMC LAN. |
+
+#### Post-install instruction processing
+
+| Aspect | clustervisor | clustr |
+|---|---|---|
+| Per-image install instructions | Each image carries an `install_instructions` array. Three opcodes: **modify** (patch a file in-place), **overwrite** (replace a file with a templated one), **script** (run a shell snippet inside the chroot). Ordered, sequential. Failure aborts. | None. The deploy `finalize` phase has fixed steps (hostname, network, fstab, mdadm conf, ssh host keys, grub2-install, install clustr-clientd, sysaccounts inject, network/keyfile gen). |
+| `cv-reconfigure` inside chroot | Yes — runs every config plugin (chronyd, fstab, hosts, ldapauth, rsyslog, selinux, slurmclient, ssh, sudoers, timezone, tuned, yumrepo, etc.) against the freshly installed root. | clientd applies the per-node config *after* boot, on the live system. No in-chroot reconfigure pass. Means the very first boot may have an old `/etc/hosts` until clientd connects. |
+| clientd injection | `install_cvclient_reconfigure` writes the cv-clientd RPM into the chroot and enables it via systemd. | `internal/deploy/clientd_inject.go` writes the clustr-clientd binary into the chroot, drops `/etc/clustr/clustrd-url` and `/etc/clustr/node-token`, and enables `clustr-clientd.service` via systemd-systemctl preset. |
+
+#### Diskless / stateless boot path
+
+| Aspect | clustervisor | clustr |
+|---|---|---|
+| Diskless image | `cv-diskless new/edit/kernel/prep/state/exec/cp` workflow. Image is NFS-exported root fs. Node mounts root via NFS at boot. | None. |
+| Stateless image | `iPXEserver._ipxe_stateless_entry` — per-image stateless entries in iPXE menu. Server lists `get_stateless_servers()`. Node boots a kernel + initramfs that fetches a squashfs into RAM. | None (P2 in original section). |
+| Combination with DHCP/TFTP | clustervisor expects external dhcpd / DNS; uses its own iPXE TFTP. | clustr's embedded DHCP+TFTP+iPXE chain handles all of this. |
+
+#### iPXE menu generation
+
+| Aspect | clustervisor (`ipxe_server.py`) | clustr (`internal/pxe/boot.go`) |
+|---|---|---|
+| Menu source | Python class builds menu from server config: `ipxe_menu(default, default_timeout)`, `_ipxe_global_entries`, `_ipxe_netboot_entry`, `_ipxe_stateless_entry`. Each node can have a per-MAC menu. | Go template baked into the binary. Per-node menu uses node state machine routing (`generateDiskBootScript` + `GenerateBootScript` + `GenerateWaitRetryScript`). |
+| Boot menu items | Custom per-node + per-image entries. Stateless entries tied to specific image-node pairs. Netboot entries (custom OS installers, memtest, etc.). | Three: `disk` (sanboot 0x80), `reimage` (chain back with `force_reimage=1`), `rescue` ("not yet configured"). |
+| Branding | Generic Cockpit/clustervisor branding. | Branded `c l o n r   B o o t   M a n a g e r` ASCII header with version + node + MAC info. |
+| Per-firmware behavior | Common iPXE syntax across BIOS + UEFI. | Two separate templates (`diskBootBIOSTemplate` and a UEFI variant). BIOS uses `sanboot --no-describe --drive 0x80` (avoids SeaBIOS PXE-loop bug); UEFI chains `grub.efi` from the server. |
+| Token / auth | Munge-based — token comes via munge-signed JSON. | Per-boot node-scoped API key minted at PXE-serve time, embedded as `clustr.token=` and `clustr.ssh.pass=` in the kernel cmdline. SSH password is logged at INFO so the operator can find it via journalctl. |
+
+### Gap analysis (cloning + initramfs)
+
+The 14 most consequential gaps, prioritised by operational impact.
+
+#### CG1 — UDPCast multicast for fleet reimaging — 🔴 Major
+
+**Problem**: clustr's blob is HTTP from server → node, one stream per node.
+A 50-node reimage of a 10 GB image saturates a 1 Gbps NIC at the server for
+the entire transfer (~14 minutes per node × 50 nodes ÷ NIC bandwidth, in
+practice the server is the bottleneck). clustervisor solves this with
+UDPCast: one `udp-sender` on the server fans out to N `udp-receiver`
+processes on the nodes; total time ≈ single-node transfer time + a small
+constant overhead.
+
+**Recommendation**:
+
+- Add `udpcast` (sender + receiver) to the initramfs (Buildroot equivalent —
+  see CG6).
+- Add a server-side multicast scheduler (`internal/multicast/`):
+  - DB table `multicast_sessions(image_id, port, started_at, expires_at, leader_node_id)`.
+  - When a deploy starts and N other nodes are already in `multicast_pending`
+    state for the same image, pause the new arrivals up to a configurable
+    window (default 60 s) so they batch. Then start one `udp-sender` for
+    the whole batch.
+  - Each receiver pipes through tar with `--xattrs-include='security.*' --acls`
+    (clustervisor's pattern).
+- Add a clustr CLI flag `clustr deploy --multicast=auto|off|require` to
+  let operators force one mode or the other.
+- New iPXE menu item: "Reimage (wait for fleet)" vs "Reimage (now)".
+
+**Time estimate**: 4–5 weeks (initramfs work + scheduler + receiver wiring +
+tests on the lab).
+
+#### CG2 — Hardware-realistic kernel modules in initramfs — 🔴 Major
+
+**Problem**: `scripts/initramfs-init.sh` insmod's a hardcoded virtio-only
+list. A real HPC node will have any of: `mlx4_core` / `mlx5_core` / `mlx5_ib`
+(Mellanox CX-3/4/5/6/7 IB+ETH), `i40e` / `ice` / `ixgbe` (Intel 10/25/40/100
+GbE), `bnxt_en` (Broadcom), `megaraid_sas` (LSI/Avago SAS HBAs), `mpt3sas`
+(Avago), `nvme` (already missing despite NVMe deploy support), `bnx2x`,
+`tg3` — none of which clustr currently loads. On real hardware the deploy
+agent will fail at "no usable NIC found".
+
+**Recommendation**:
+
+- Switch to **auto-load** style: instead of an explicit `insmod` list,
+  use `find /lib/modules/$KVER/kernel -name "*.ko*"` + a curated allowlist,
+  or `modprobe -a` with module aliases pulled from `lspci -k`.
+- Or, if staying with explicit lists, expand to cover at minimum:
+  `failover`, `net_failover`, `virtio_*`,
+  `mlx5_core`, `mlx5_ib`, `mlx4_core`, `mlx4_en`,
+  `i40e`, `ice`, `ixgbe`, `igb`, `e1000e`,
+  `bnxt_en`, `bnx2x`, `tg3`,
+  `nvme`, `nvme_core`,
+  `megaraid_sas`, `mpt3sas`, `aacraid`,
+  `dm_mod`, `dm_log`, `dm_region_hash`,
+  `xfs`, `ext4`, `fat`, `vfat`, `btrfs`,
+  `raid0`, `raid1`, `raid10`, `raid456`,
+  `crc32c-intel`, `libcrc32c`, `crc32c_generic`.
+- Build the kernel-module manifest at initramfs-build time by enumerating
+  `/lib/modules/$KVER/kernel/{net,drivers/net,drivers/scsi,drivers/block,drivers/md,drivers/nvme,fs}/`
+  and copying every `.ko*` whose name matches the allowlist. Print a
+  manifest of what was included into a build artifact for debugging.
+
+**Time estimate**: 1–2 weeks.
+
+#### CG3 — xattr / ACL preservation in deploy — 🟠 Medium-major
+
+**Problem**: clustervisor's installer pipes the multicast/rsync stream
+through `tar --xattrs-include='security.*' --xattrs-include='user.*' --acls`
+so SELinux contexts and POSIX ACLs survive the install. clustr's
+`streamExtract` runs `tar` (the in-initramfs busybox `tar`) without
+explicitly specifying `--xattrs-include` / `--acls`. Busybox `tar`
+historically does not preserve xattrs or ACLs. On SELinux-enforcing
+deployments the relabel post-install can mask this, but ACLs are silently
+dropped.
+
+**Recommendation**:
+
+- Audit the actual `tar` invocation in `internal/deploy/rsync.go`'s
+  `streamExtract`. If it uses busybox `tar`, swap for GNU `tar` (already
+  in the Buildroot equivalent for clustervisor; ship via the bundled
+  binaries list in `scripts/build-initramfs.sh`).
+- Add `--xattrs --xattrs-include='*' --acls` flags.
+- Add an integration test under `internal/deploy/` that captures an image
+  with selinux contexts + POSIX ACLs and asserts they survive deploy →
+  capture round-trips.
+
+**Time estimate**: 1 week.
+
+#### CG4 — USB / offline cloner installer — 🟠 Medium-major
+
+**Problem**: `cv-cloner make-installer` builds a USB image that contains
+the cloner initrd plus a chosen image. The node boots from USB, identifies
+itself, and rsyncs from `/cloner/usb/<image>` instead of network. This is
+how clustervisor handles air-gapped, slow-WAN, or PXE-blocked sites. clustr
+is fully network-dependent.
+
+**Recommendation**:
+
+- New CLI: `clustr-serverd installer build --image <id> --output <iso|img>`
+  that produces a hybrid ISO/USB image:
+  - The clustr initramfs + a kernel
+  - The image blob (tarball) embedded
+  - A small init shim that detects "USB/ISO" boot vs "PXE" and points the
+    deploy agent at a local `file://` URL.
+- Document the operator workflow: `dd if=clustr-installer.iso of=/dev/sdX`
+  → boot the target → it auto-deploys.
+- Optionally support hybrid ISOs that boot both BIOS (isolinux) and UEFI
+  (grub.efi) so the same media works on any hardware.
+
+**Time estimate**: 3 weeks.
+
+#### CG5 — BIOS settings push (intel-syscfg + Dell racadm + Supermicro SUM) — 🟠 Medium-major
+
+**Problem**: clustervisor's `check_set_biossettings` reads/writes Intel
+server BIOS settings via `intel-syscfg` (Buildroot package
+`intel-syscfg/syscfg-V14_1_Build24.tar.gz`). HPC operators frequently
+need to enforce things like SMT off, HT on, P-states, NUMA snoop mode,
+power profiles, IPMI watchdog timer settings — at scale, on every
+reimage. clustr has none of this.
+
+**Recommendation**:
+
+- New `internal/bios/` package with vendor providers:
+  - `internal/bios/intel/` — wrap `intel-syscfg`.
+  - `internal/bios/dell/` — wrap `racadm` (DRAC).
+  - `internal/bios/supermicro/` — wrap `sum` (SUM).
+- New table `bios_profiles(id, name, vendor, settings_json)` and
+  `node_bios_profile(node_id, profile_id, last_applied_at)`.
+- Add a deploy phase that runs after partition/format and before image
+  extract: read desired profile, diff against current (via the same vendor
+  CLI), apply if drift, log to audit.
+- Bundle the vendor binaries in the initramfs (small footprint each).
+
+**Time estimate**: 4–5 weeks (vendor binaries vary; Intel is the easiest
+starting point, Dell next).
+
+#### CG6 — Switch initramfs build to a reproducible builder — 🟠 Medium
+
+**Problem**: `scripts/build-initramfs.sh` is 1,300 lines of bash with
+external assumptions: a specific dev-box at 192.168.1.151 over SSH, a pinned
+busybox URL on busybox.net, and PATH-dependent system tools. It works on
+the cloner host and in CI; it's brittle outside those environments. Build
+output isn't reproducible byte-for-byte.
+
+**Recommendations** (pick one):
+
+- **Option A** (lighter): keep bash, but replace the SSH-pull with a
+  Make-driven local kernel-module extraction step and ship a Dockerfile
+  that contains the build environment so anyone can `docker run
+  ghcr.io/sqoia-dev/clustr-initramfs-builder:latest` to get bit-identical
+  output.
+- **Option B** (heavier, longer-term): adopt **dracut** modules for the
+  per-distro variant or move to **Buildroot** like clustervisor. Buildroot
+  is reproducible, supports cross-compile to aarch64 (closes the arm64 gap),
+  and has out-of-the-box packages for everything in CG2 + CG4 (busybox,
+  dropbear, mdadm, lvm2, e2fsprogs, xfsprogs, btrfs-progs, dosfstools,
+  smartmontools, hdparm, dmidecode, ipmitool, udpcast, rsync, gnu tar, xz,
+  openssl, util-linux, intel-syscfg).
+
+**Time estimate**: 1 week (Option A) or 4 weeks (Option B).
+
+#### CG7 — Decouple disk layout from image — 🟠 Medium
+
+**Problem**: clustervisor's `cloner_disk_layout` is a separate first-class
+object — captured from a representative node, versioned, edited
+independently, and referenced by name from any image. clustr's layout is
+either auto-recommended at deploy time or attached to the image record;
+operators who have a specific known-good partition scheme for a node class
+can't say "use layout 'compute-h100-v3' on every node in this group."
+
+**Recommendation**:
+
+- New table `disk_layouts(id, name, source_node_id, captured_at, layout_json)`.
+- New endpoints `POST /api/v1/disk-layouts/capture/{node_id}`,
+  `GET /api/v1/disk-layouts`, `PUT /api/v1/disk-layouts/{id}`.
+- New foreign key `node_groups.disk_layout_id` (and per-node override).
+- Deploy agent prefers explicit layout > group default > recommendation.
+- UI: "Disk Layouts" tab on the **Images** route (or its own tab).
+
+**Time estimate**: 2 weeks.
+
+#### CG8 — Image install instructions DSL — 🟡 Medium
+
+**Problem**: clustervisor's per-image `install_instructions` array
+(opcodes: modify, overwrite, script) gives operators a small declarative
+hook to customise an image without re-baking it. Need to set a different
+`/etc/motd` on the storage role? Add an instruction. Need to drop a
+custom kickstart-time script into `/usr/local/bin/`? Add an instruction.
+clustr today requires a full image rebuild (or relying on clientd's
+post-boot config apply).
+
+**Recommendation**:
+
+- Extend `BaseImage` with `install_instructions []InstallInstruction`.
+- `InstallInstruction = { opcode: "modify"|"overwrite"|"script",
+  target: string, payload: string }`.
+- Deploy agent runs them in order inside the chroot after extract,
+  before bootloader install.
+- UI: "Install Instructions" tab on the image edit drawer.
+
+**Time estimate**: 1.5 weeks.
+
+#### CG9 — IMSM / hardware RAID passthrough in installer — 🟡 Medium
+
+**Problem**: Intel Matrix Storage Manager (IMSM) onboard RAID is common
+on Xeon servers; clustervisor handles it via `disk_raid_imsm()` in
+`ClonerInstall.pm`. clustr installer cannot deploy to IMSM-managed disks
+today.
+
+**Recommendation**:
+
+- Add `mdadm --imsm-platform-test` detection in `internal/deploy/raid.go`.
+- Branch on detection: assemble IMSM container, then create the volume,
+  then format inside.
+- Add tests using qemu IMSM-emulated topology.
+
+**Time estimate**: 1.5 weeks.
+
+#### CG10 — Per-stream Range: support for blob retries — 🟡 Medium
+
+**Problem**: `internal/deploy/rsync.go`'s blob retry loop re-issues the
+HTTP GET from byte 0 on stream failure. For a 20 GB image over a flaky
+WAN link this is fatal — every glitch sends you back to the start.
+
+**Recommendation**:
+
+- Track bytes-received per attempt. On retry, send `Range: bytes=N-` and
+  resume the tar stream. Server already serves blobs as a regular file,
+  which Go's `net/http.ServeContent` honors Range requests for; verify
+  end-to-end.
+- Cap total retry duration at `CLUSTR_DEPLOY_TIMEOUT`.
+
+**Time estimate**: 0.5 week.
+
+#### CG11 — Distro coverage in installer (Ubuntu / Debian / SLES) — 🟡 Medium
+
+**Problem**: clustr's distro support in `internal/deploy/finalize.go` +
+`network.go` is el9-only. clustervisor handles el7, el8, el9, ubuntu with
+distinct system-files generators.
+
+**Recommendation**:
+
+- Refactor `finalize.go` around a `DistroDriver` interface:
+  `WriteSystemFiles(chroot, hostname, network) error`,
+  `InstallBootloader(chroot, layout) error`.
+- Implement drivers: `el8`, `el9`, `el10`, `ubuntu24` (matches what HPC
+  sites with Ubuntu compute pools want). SLES is niche; defer.
+- Plumb through image factory so it knows which DistroDriver applies.
+
+**Time estimate**: 3 weeks.
+
+#### CG12 — In-chroot reconfigure pass before first boot — 🟡 Medium
+
+**Problem**: clustervisor runs `cv-reconfigure` inside the chroot
+post-extract, so every config plugin (chronyd, hosts, ldapauth, rsyslog,
+slurmclient, sudoers, timezone, tuned, yumrepo, etc.) lands before the
+node ever boots its installed OS. clustr defers everything to clientd
+post-boot. The result is that the very first boot of a freshly imaged
+node has stale `/etc/hosts`, no chronyd peer config, no LDAP joined, no
+slurmd running — a 30-second-to-3-minute window where the node looks
+"online but useless."
+
+**Recommendation**:
+
+- Add a `clustr deploy --in-chroot` mode that runs the same logic as
+  clientd's `configapply` against `/mnt/target` before unmount.
+- The clientd code already lives at `internal/clientd/configapply.go`;
+  factor out the file-writing logic so it can target an arbitrary root.
+
+**Time estimate**: 1.5 weeks.
+
+#### CG13 — Per-image stateless / netboot menu entries — 🟡 Medium
+
+**Problem**: `iPXEserver` exposes per-image stateless entries
+(`_ipxe_stateless_entry`) and named netboot entries (`_ipxe_netboot_entry`)
+in the boot menu, so operators can boot Memtest, a custom rescue OS, an
+Ubuntu installer ISO, etc., from the same iPXE menu. clustr's menu is
+fixed at 3 items (disk / reimage / rescue-not-configured).
+
+**Recommendation**:
+
+- Add a `boot_entries` table: `id, name, kind: stateless|netboot|memtest|
+  custom, kernel_url, initrd_url, cmdline, enabled`.
+- Render extra menu items into the iPXE menu at PXE-serve time.
+- UI: "Boot Menu" tab on the **Settings** route. Stock entries: Memtest,
+  Ubuntu Live, Rescue (busybox+dropbear with credentials from the
+  operator).
+
+**Time estimate**: 2 weeks (the rescue boot needs CG2 first to actually
+work on real HW).
+
+#### CG14 — Bandwidth-limit + concurrency caps on transport — 🟢 Minor
+
+**Problem**: rsync's `--bwlimit` lets ops cap server outbound bandwidth
+during business hours. clustr has neither bandwidth caps nor a global
+concurrency cap on `/api/v1/images/{id}/blob`.
+
+**Recommendation**:
+
+- Add `CLUSTR_BLOB_MAX_BPS` env var (per-stream cap) and
+  `CLUSTR_BLOB_MAX_CONCURRENCY` (global cap). Implement via a token-bucket
+  middleware in `internal/server/handlers/images.go`.
+
+**Time estimate**: 0.5 week.
+
+### Putting the new gaps onto the roadmap
+
+These slot into the existing 13-iteration roadmap as follows:
+
+| Iteration | Original focus | New imaging/UI deliverables to fold in |
+|---|---|---|
+| 7–8 | P1 stats agent + alerts | UP1 (per-node sensor/SEL/console panels) lands alongside stats agent. |
+| 9 | P1 alerting | UP5 (Alerts UI) lands with the alerting engine. |
+| 10 | P3 SNMP OOB | (no overlap) |
+| 11 | P2 stateless images | CG13 (stateless menu entries) lands here. UP2 (stateless image management) UI lands here. |
+| 12 | P4 two-stage commit | UP9 (changes drawer) lands here. |
+| 13 | P6 + P7 | (no overlap) |
+
+Then add a new mini-track **"CG: cloning hardening"** as iterations 14–18
+once the alerting / portal work is settled:
+
+| Iteration | Focus |
+|---|---|
+| 14 | CG2 (kernel modules) + CG3 (xattr/ACL) + CG10 (Range:) + CG14 (bwlimit). Small, high-leverage fixes. Closes the "real-hardware" gap. |
+| 15 | CG1 (UDPCast multicast). Single biggest feature for fleet reimaging. |
+| 16 | CG7 (decoupled disk layouts) + CG8 (install instructions) + CG12 (in-chroot reconfigure). Image-system maturity. |
+| 17 | CG4 (USB installer) + CG6 (reproducible initramfs builder, Option A). |
+| 18 | CG11 (Ubuntu distro driver) + CG9 (IMSM RAID). Hardware/distro coverage. |
+| 19 | CG5 (BIOS settings push). Largest piece of work. |
+| 20 | UP3/UP4/UP6/UP7/UP8/UP10/UP11. UI catch-up sprint. |
+
+After iteration 20 the operator-facing parity gap is essentially closed:
+operators can reimage 100 nodes simultaneously over multicast, push BIOS
+settings as part of the deploy, edit per-image install instructions,
+manage rack diagrams, see live sensors and alerts in the browser, and
+build offline installer media.
+
+### Things clustr's imaging already does *better* than clustervisor
+
+So the team doesn't regress these:
+
+1. **Single Go binary in the initramfs** instead of a Perl runtime + 8,200
+   lines of Perl modules. Easier to debug, easier to test (`go test
+   ./internal/deploy/...` actually runs). One static binary handles
+   discovery, deploy, finalize, and IPMI ops.
+2. **HTTP transport with sha256 verification + zstd support**. clustervisor's
+   rsync is solid but doesn't sit cleanly behind a CDN or auth proxy;
+   clustr's HTTP-with-bearer flow does. zstd is materially faster than
+   gzip for the multi-GB tarballs HPC images tend to be.
+3. **Throughput watchdog** (`newThroughputWatchdog` cancels the deploy if
+   the stream stalls below 1 KB/s for 120 s) — a feature clustervisor
+   doesn't have. Failure modes are bounded.
+4. **Per-boot node-scoped tokens** with audit. clustervisor's munge is
+   fine but not auditable per-deploy.
+5. **Per-firmware iPXE branching** with the `sanboot 0x80` workaround for
+   SeaBIOS / Proxmox. clustervisor's "common iPXE" is more elegant on
+   real HW but breaks on virtualised lab setups.
+6. **Auto-register on unknown MAC** in `BootHandler.ServeIPXEScript`:
+   PXE-boot any new machine and it shows up in the inventory immediately
+   with a deterministic hostname. clustervisor requires explicit pre-registration
+   (or the operator runs `cv-cloner identify` from the booted system).
+7. **Modern build tooling**: nfpm + dnf-repo-on-Caddy + gosec + gold
+   linker; nothing in the cloner side of clustervisor uses anything later
+   than 2019 (Buildroot 2019.02, Python 3.6 venv).
+8. **Storage recommender** (`internal/image/layout/recommend.go`): given
+   raw hardware, suggest a sensible layout including ZFS with SLOG/L2ARC
+   role assignment for NVMe drives. clustervisor leaves all of this to
+   the operator and a captured `cloner_disk_layout`.
+9. **Deploy progress streaming** to the server with structured phases
+   (`StartPhase("formatting", n)` etc.) that the UI can show live. The
+   clustervisor flow logs to journald only.
+10. **Backup/restore of partition table on rollback** (`backupPartitionTable`
+    via `sgdisk --backup`) — non-destructive deploy with rollback. clustervisor's
+    installer commits as it goes.
