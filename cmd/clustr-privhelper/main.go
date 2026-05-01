@@ -40,9 +40,13 @@
 //	                             Run systemctl <action> <unit>. Both unit and
 //	                             action are validated against static allowlists
 //	                             before any exec occurs. Allowed units:
-//	                               clustr-slapd.service
+//	                               clustr-slapd.service, sssd.service, sshd.service
 //	                             Allowed actions:
 //	                               start, stop, restart, enable, disable, reset-failed
+//	ca-trust-extract             Run `update-ca-trust extract` as root. Called by
+//	                             clustr-clientd after an LDAP CA rotation push
+//	                             places a new cert at
+//	                             /etc/pki/ca-trust/source/anchors/clustr-ca.crt.
 //
 // # Usage
 //
@@ -203,7 +207,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract\n")
 		os.Exit(1)
 	}
 
@@ -229,6 +233,8 @@ func main() {
 		exitCode = verbCapBitTest()
 	case "service-control":
 		exitCode = verbServiceControl(callerUID, verbArgs)
+	case "ca-trust-extract":
+		exitCode = verbCATrustExtract(callerUID)
 	default:
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: unknown verb %q\n", verb)
 		exitCode = 1
@@ -300,6 +306,8 @@ func verbCapBitTest() int {
 // caller without checking this map first.
 var allowedServiceUnits = map[string]bool{
 	"clustr-slapd.service": true,
+	"sssd.service":         true,
+	"sshd.service":         true,
 }
 
 // allowedServiceActions is the set of systemctl verbs permitted via
@@ -363,6 +371,28 @@ func verbServiceControl(callerUID int, args []string) int {
 	}
 
 	writeAudit(callerUID, "service-control", args, exitCode, "")
+	return exitCode
+}
+
+// verbCATrustExtract runs `update-ca-trust extract` as root.
+// Called by clustr-clientd after the server pushes a new CA certificate to
+// /etc/pki/ca-trust/source/anchors/clustr-ca.crt. No arguments accepted.
+func verbCATrustExtract(callerUID int) int {
+	cmd := exec.Command("update-ca-trust", "extract") //#nosec G204 -- no user-supplied arguments; fixed command
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "ca-trust-extract", nil, exitCode, "")
 	return exitCode
 }
 

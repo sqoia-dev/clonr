@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -21,10 +22,12 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	goldap "github.com/go-ldap/ldap/v3"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/sqoia-dev/clustr/internal/clientd"
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/posixid"
@@ -38,6 +41,16 @@ const (
 	statusReady        = "ready"
 	statusError        = "error"
 )
+
+// LDAPHubIface is the subset of ClientdHub needed by the LDAP manager for
+// config fanout. Defined here as an interface to avoid an import cycle between
+// the ldap and server packages. The concrete *server.ClientdHub satisfies it.
+type LDAPHubIface interface {
+	Send(nodeID string, msg clientd.ServerMessage) error
+	IsConnected(nodeID string) bool
+	RegisterAck(msgID string) <-chan clientd.AckPayload
+	UnregisterAck(msgID string)
+}
 
 // certExpiryWarnDays — warn when the server cert expires within this many days.
 const certExpiryWarnDays = 30
@@ -68,6 +81,19 @@ type Manager struct {
 	// projectPluginCfg is the OpenLDAP project plugin configuration (G1 / CF-24).
 	// Zero value uses defaultProjectPluginConfig() defaults (set in New()).
 	projectPluginCfg ProjectPluginConfig
+
+	// hub is the optional clientd hub for fanout pushes. Set after construction
+	// via SetHub(). When nil, fanout operations are skipped (dev/test mode).
+	hub LDAPHubIface
+}
+
+// SetHub wires the clientd hub into the LDAP manager so Enable() can fanout
+// CA cert and sssd.conf pushes to enrolled nodes after a CA rotation.
+// Call this after server.New() from buildRouter (mirrors the slurm pattern).
+func (m *Manager) SetHub(hub LDAPHubIface) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hub = hub
 }
 
 // New creates a new LDAP Manager. Call StartBackgroundWorkers to start health checks.
@@ -484,6 +510,33 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 	m.mu.Unlock()
 
 	log.Info().Str("base_dn", req.BaseDN).Msg("ldap: module enabled and ready")
+
+	// ── Step 7: Fanout new CA + sssd.conf to enrolled nodes ──────────────────
+	// When the operator does Disable+wipe+Enable (CA rotation), any previously
+	// deployed nodes have a stale CA and stale sssd.conf (new service bind
+	// password). Push the updated files to every connected enrolled node so
+	// they recover without waiting for the next reimage cycle.
+	// Non-blocking: runs in the same goroutine after DB save so the result is
+	// available for logging, but any per-node failure is non-fatal.
+	m.mu.RLock()
+	hub := m.hub
+	m.mu.RUnlock()
+
+	if hub != nil {
+		results := m.FanoutLDAPConfig(ctx)
+		okCount := 0
+		for _, r := range results {
+			if r.OK {
+				okCount++
+			}
+		}
+		log.Info().
+			Int("nodes_pushed", okCount).
+			Int("nodes_total", len(results)).
+			Msg("ldap: post-enable fanout complete")
+	} else {
+		log.Debug().Msg("ldap: no hub wired — skipping post-enable fanout (dev/test mode)")
+	}
 }
 
 // seedDIT creates the base DN entry, standard OUs, and the node-reader service
@@ -782,8 +835,15 @@ func (m *Manager) NodeConfig(ctx context.Context) (*api.LDAPNodeConfig, error) {
 		svcPasswd = row.ServiceBindPassword
 	}
 
-	// Build the ldaps URI with the server's hostname.
-	serverURI := fmt.Sprintf("ldaps://%s:636", detectHostname())
+	// #111: use the server's primary IP (not hostname) in ldap_uri so fresh nodes
+	// without DNS for "clustr-server" can authenticate on first boot.
+	// The server cert SAN already includes the IP (Sprint 15 #101), so TLS validation
+	// passes against an IP URI. Falls back to hostname if IP detection fails.
+	serverAddr := detectPrimaryIP()
+	if serverAddr == "" {
+		serverAddr = detectHostname()
+	}
+	serverURI := fmt.Sprintf("ldaps://%s:636", serverAddr)
 
 	return &api.LDAPNodeConfig{
 		ServerURI:         serverURI,
@@ -995,6 +1055,87 @@ func ConfigHashForNode(hostname string, cfg *api.LDAPNodeConfig) (string, error)
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// marshalConfigPushPayload encodes a clientd.ConfigPushPayload as raw JSON bytes
+// for inclusion as a ServerMessage.Payload field. Kept here to avoid importing
+// encoding/json twice in callers that already have it.
+func marshalConfigPushPayload(target, content, checksum string) (json.RawMessage, error) {
+	p := clientd.ConfigPushPayload{
+		Target:   target,
+		Content:  content,
+		Checksum: checksum,
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}
+
+// renderFanoutSSSDConf renders sssd.conf content for a push to an already-deployed node.
+// Identical to deploy/finalize.go:renderSSSDConf but lives here to avoid cross-package
+// dependency. Both must stay in sync — if the template changes, update both.
+func renderFanoutSSSDConf(hostname, domain, serverURI, baseDN, serviceBindDN, serviceBindPasswd string) string {
+	return fmt.Sprintf(`# sssd.conf — generated by clustr-serverd for node %s
+# DO NOT EDIT — managed by clustr. Regenerated on each reimage.
+
+[sssd]
+services = nss, pam
+domains = %s
+
+[nss]
+homedir_substring = /home
+
+[pam]
+offline_credentials_expiration = 7
+
+[domain/%s]
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = ldap
+access_provider = ldap
+
+ldap_uri = %s
+ldap_search_base = %s
+
+ldap_default_bind_dn = %s
+ldap_default_authtok_type = password
+ldap_default_authtok = %s
+
+ldap_user_object_class = posixAccount
+ldap_user_search_base = ou=people,%s
+ldap_user_name = uid
+ldap_user_uid_number = uidNumber
+ldap_user_gid_number = gidNumber
+ldap_user_home_directory = homeDirectory
+ldap_user_shell = loginShell
+ldap_user_gecos = gecos
+ldap_user_shadow_expire = shadowExpire
+
+ldap_group_object_class = posixGroup
+ldap_group_search_base = ou=groups,%s
+ldap_group_name = cn
+ldap_group_gid_number = gidNumber
+ldap_group_member = memberUid
+
+ldap_tls_reqcert = demand
+ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clustr-ca.crt
+
+ldap_account_expire_policy = shadow
+ldap_access_order = ppolicy, expire
+ldap_use_ppolicy = true
+ldap_pwd_policy = none
+
+ldap_id_use_start_tls = false
+ldap_referrals = false
+enumerate = false
+cache_credentials = true
+entry_cache_timeout = 300
+`, hostname, domain, domain,
+		serverURI, baseDN,
+		serviceBindDN, serviceBindPasswd,
+		baseDN, baseDN)
+}
+
 // domainFromBaseDN extracts the first DC component from a base DN.
 // "dc=cluster,dc=local" → "cluster"
 func domainFromBaseDN(baseDN string) string {
@@ -1007,6 +1148,177 @@ func domainFromBaseDN(baseDN string) string {
 		}
 	}
 	return baseDN
+}
+
+// NodePushResult records the outcome of a single node's config push attempt.
+type NodePushResult struct {
+	NodeID  string `json:"node_id"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Offline bool   `json:"offline,omitempty"` // true when node is not connected
+}
+
+// FanoutLDAPConfig pushes the current CA cert and a per-node sssd.conf to every
+// enrolled node that is currently connected. It fires after doProvision() completes
+// so nodes recover immediately after a CA rotation without waiting for the next
+// reimage cycle.
+//
+// Push order for each node:
+//  1. "ldap-ca-cert"  — /etc/pki/ca-trust/source/anchors/clustr-ca.crt
+//     Follow-up: update-ca-trust extract + systemctl restart sssd.
+//  2. "sssd"          — /etc/sssd/sssd.conf
+//     Follow-up: systemctl restart sssd.
+//
+// Both pushes fire sequentially per node; nodes are processed concurrently.
+// Per-node results are returned for status reporting.
+func (m *Manager) FanoutLDAPConfig(ctx context.Context) []NodePushResult {
+	m.mu.RLock()
+	hub := m.hub
+	m.mu.RUnlock()
+
+	row, err := m.db.LDAPGetConfig(ctx)
+	if err != nil || !row.Enabled || row.Status != statusReady {
+		log.Warn().Msg("ldap fanout: module not ready — skipping push")
+		return nil
+	}
+
+	nodeIDs, err := m.db.LDAPListConfiguredNodeIDs(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("ldap fanout: failed to list configured node IDs")
+		return nil
+	}
+	if len(nodeIDs) == 0 {
+		log.Info().Msg("ldap fanout: no enrolled nodes — nothing to push")
+		return nil
+	}
+
+	m.mu.RLock()
+	svcPasswd := m.servicePassword
+	m.mu.RUnlock()
+	if svcPasswd == "" {
+		svcPasswd = row.ServiceBindPassword
+	}
+
+	serverIP := detectPrimaryIP()
+	if serverIP == "" {
+		// Fall back to hostname if IP detection fails — this should be rare.
+		serverIP = detectHostname()
+	}
+	serverURI := fmt.Sprintf("ldaps://%s:636", serverIP)
+
+	caCertPEM := row.CACertPEM
+	results := make([]NodePushResult, 0, len(nodeIDs))
+	var resultsMu sync.Mutex
+
+	var wg sync.WaitGroup
+	for _, nodeID := range nodeIDs {
+		if hub == nil || !hub.IsConnected(nodeID) {
+			resultsMu.Lock()
+			results = append(results, NodePushResult{NodeID: nodeID, OK: false, Offline: true})
+			resultsMu.Unlock()
+			log.Info().Str("node_id", nodeID).Msg("ldap fanout: node offline — will receive config on reconnect")
+			continue
+		}
+
+		wg.Add(1)
+		go func(nid string) {
+			defer wg.Done()
+			res := m.pushLDAPToNode(ctx, hub, nid, row, caCertPEM, svcPasswd, serverURI)
+			resultsMu.Lock()
+			results = append(results, res)
+			resultsMu.Unlock()
+		}(nodeID)
+	}
+	wg.Wait()
+
+	ok := 0
+	for _, r := range results {
+		if r.OK {
+			ok++
+		}
+	}
+	log.Info().
+		Int("total", len(results)).
+		Int("ok", ok).
+		Int("offline", len(results)-ok).
+		Msg("ldap fanout: complete")
+
+	return results
+}
+
+// pushLDAPToNode sends the CA cert and sssd.conf to a single node sequentially.
+// Returns a NodePushResult summarising the outcome.
+func (m *Manager) pushLDAPToNode(
+	ctx context.Context,
+	hub LDAPHubIface,
+	nodeID string,
+	row db.LDAPModuleConfig,
+	caCertPEM, svcPasswd, serverURI string,
+) NodePushResult {
+	// 1. Push CA cert.
+	if err := m.sendConfigPush(ctx, hub, nodeID, "ldap-ca-cert", caCertPEM); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("ldap fanout: ca-cert push failed")
+		return NodePushResult{NodeID: nodeID, OK: false, Error: "ca-cert push: " + err.Error()}
+	}
+	log.Info().Str("node_id", nodeID).Msg("ldap fanout: ca-cert push acked")
+
+	// 2. Push sssd.conf (per-node — uses node's own hostname from DB).
+	nodeHostname := nodeID // fallback when DB lookup fails
+	if nodeCfg, err := m.db.GetNodeConfig(ctx, nodeID); err == nil && nodeCfg.Hostname != "" {
+		nodeHostname = nodeCfg.Hostname
+	}
+
+	domain := domainFromBaseDN(row.BaseDN)
+	sssdContent := renderFanoutSSSDConf(
+		nodeHostname, domain, serverURI,
+		row.BaseDN, row.ServiceBindDN, svcPasswd,
+	)
+	if err := m.sendConfigPush(ctx, hub, nodeID, "sssd", sssdContent); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("ldap fanout: sssd.conf push failed")
+		return NodePushResult{NodeID: nodeID, OK: false, Error: "sssd push: " + err.Error()}
+	}
+	log.Info().Str("node_id", nodeID).Msg("ldap fanout: sssd.conf push acked")
+
+	return NodePushResult{NodeID: nodeID, OK: true}
+}
+
+// sendConfigPush sends a single config_push message to a node and waits for ack.
+// Times out after 30 seconds per node.
+func (m *Manager) sendConfigPush(ctx context.Context, hub LDAPHubIface, nodeID, target, content string) error {
+	sum := sha256.Sum256([]byte(content))
+	checksum := fmt.Sprintf("sha256:%x", sum)
+
+	msgID := uuid.New().String()
+
+	payloadJSON, err := marshalConfigPushPayload(target, content, checksum)
+	if err != nil {
+		return fmt.Errorf("marshal config_push payload: %w", err)
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "config_push",
+		MsgID:   msgID,
+		Payload: payloadJSON,
+	}
+
+	ackCh := hub.RegisterAck(msgID)
+	defer hub.UnregisterAck(msgID)
+
+	if err := hub.Send(nodeID, serverMsg); err != nil {
+		return fmt.Errorf("send to node: %w", err)
+	}
+
+	select {
+	case ack := <-ackCh:
+		if !ack.OK {
+			return fmt.Errorf("node ack error: %s", ack.Error)
+		}
+		return nil
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("ack timeout (30s)")
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled: %w", ctx.Err())
+	}
 }
 
 // RecordNodeConfigured records that a node has been configured with LDAP and,

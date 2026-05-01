@@ -103,6 +103,19 @@ func DnfUpgrade(ctx context.Context, pkgSpecs []string) error {
 	return nil
 }
 
+// CATrustExtract runs `update-ca-trust extract` via the clustr-privhelper
+// ca-trust-extract verb. Used after writing a new CA certificate to the system
+// trust anchor directory (/etc/pki/ca-trust/source/anchors/) so the change
+// is reflected in the consolidated bundle immediately.
+func CATrustExtract(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, helperPath, "ca-trust-extract") //#nosec G204 -- no user-supplied arguments; verb is a fixed literal
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: ca-trust-extract: %w\noutput: %s", err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
 // CapBitTest invokes the cap-bit-test verb and returns the reported effective
 // UID. Returns (0, nil) when the setuid bit is set correctly; returns (n, nil)
 // where n is the server process UID if the bit is missing.

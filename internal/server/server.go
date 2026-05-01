@@ -163,6 +163,10 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	// GAP-20: wire audit service into slurm manager for config change recording.
 	slurmMgr.Audit = db.NewAuditService(database)
 
+	// Wire the hub into the LDAP manager so Enable() can fanout CA cert +
+	// sssd.conf pushes to enrolled nodes after a CA rotation (#109/#110).
+	ldapMgr.SetHub(hub)
+
 	groupReimageEvents := NewGroupReimageEventStore()
 	reimageOrch.Events = groupReimageEvents
 

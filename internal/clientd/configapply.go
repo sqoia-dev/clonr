@@ -31,6 +31,15 @@ var configTargets = map[string]configTarget{
 	// clustr-internal-repo: pushed by server after InitRepoGPGKey or on node join.
 	// The apply action runs "dnf clean metadata" so the node picks up the new/updated repo.
 	"clustr-internal-repo": {path: "/etc/yum.repos.d/clustr-internal-repo.repo", mode: 0644, applyAction: dnfCleanMetadata()},
+	// ldap-ca-cert: pushed by the server whenever the LDAP CA is rotated (e.g. after
+	// Disable+wipe+Enable). Writing to the system anchor dir is root-only, so the
+	// apply action calls clustr-privhelper ca-trust-extract then restarts sssd so
+	// the new CA is picked up immediately.
+	"ldap-ca-cert": {
+		path:        "/etc/pki/ca-trust/source/anchors/clustr-ca.crt",
+		mode:        0644,
+		applyAction: caTrustExtractThenRestartSSSD(),
+	},
 }
 
 const maxConfigSizeBytes = 1 << 20 // 1 MB
@@ -136,6 +145,32 @@ func dnfCleanMetadata() func() error {
 			// Non-fatal — clean is advisory; the repo file is already written.
 			// Print to stderr so it shows up in clustr-clientd's journald output.
 			fmt.Fprintf(os.Stderr, "config push: dnf clean metadata: %v (output: %s)\n", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+}
+
+// caTrustExtractThenRestartSSSD returns an apply action that:
+// 1. Runs `update-ca-trust extract` to rebuild the system trust bundle.
+// 2. Runs `systemctl restart sssd` to pick up the new CA.
+// clustr-clientd runs as root on nodes, so no privhelper indirection is needed here.
+func caTrustExtractThenRestartSSSD() func() error {
+	return func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Step 1: rebuild system trust bundle.
+		extractCmd := exec.CommandContext(ctx, "update-ca-trust", "extract")
+		if out, err := extractCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("config push: update-ca-trust extract: %w (output: %s)", err, strings.TrimSpace(string(out)))
+		}
+
+		// Step 2: restart sssd so it loads the refreshed trust bundle.
+		restartCtx, restartCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer restartCancel()
+		restartCmd := exec.CommandContext(restartCtx, "systemctl", "restart", "sssd")
+		if out, err := restartCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("config push: sssd restart after ca-trust-extract: %w (output: %s)", err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
