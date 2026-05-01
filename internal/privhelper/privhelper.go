@@ -46,6 +46,24 @@ func dnfInstallOne(ctx context.Context, pkg string) error {
 	return nil
 }
 
+// ServiceControl runs `systemctl <action> <unit>` via the clustr-privhelper
+// service-control verb. Both unit and action are validated by the helper
+// against static allowlists before any exec occurs — callers must not
+// construct these values from user input without their own prior validation.
+//
+// Returns a wrapped error that includes the helper's stderr output on failure.
+// If the helper rejects the unit with a structured "unit_not_allowed" message,
+// that text is preserved in the error string for caller inspection.
+func ServiceControl(ctx context.Context, unit, action string) error {
+	cmd := exec.CommandContext(ctx, helperPath, "service-control", unit, action) //#nosec G204 -- unit and action are plain identifiers; helper validates against allowlists
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: service-control %s %s: %w\noutput: %s",
+			action, unit, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
 // CapBitTest invokes the cap-bit-test verb and returns the reported effective
 // UID. Returns (0, nil) when the setuid bit is set correctly; returns (n, nil)
 // where n is the server process UID if the bit is missing.

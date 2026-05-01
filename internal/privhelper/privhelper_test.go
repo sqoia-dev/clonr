@@ -168,3 +168,83 @@ func TestPrivhelperDnfInstallKnownPackageAccepted(t *testing.T) {
 	}
 	// We do NOT assert exit code 0 here because dnf may not be installed in CI.
 }
+
+// ─── service-control tests ────────────────────────────────────────────────────
+
+// TestServiceControlRejectsUnknownUnit verifies that a unit not in the
+// allowlist is rejected with a structured "unit_not_allowed" error message
+// and a non-zero exit code. No systemctl invocation occurs.
+func TestServiceControlRejectsUnknownUnit(t *testing.T) {
+	bin := buildHelper(t)
+
+	cmd := exec.CommandContext(context.Background(), bin, "service-control", "clustr-foobar.service", "start")
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatal("expected non-zero exit for unit not in allowlist, got exit 0")
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "unit_not_allowed") {
+		t.Errorf("expected 'unit_not_allowed' in output for rejected unit, got: %q", output)
+	}
+}
+
+// TestServiceControlRejectsUnknownAction verifies that a valid unit combined
+// with a disallowed action (e.g. mask) is rejected with "action_not_allowed".
+func TestServiceControlRejectsUnknownAction(t *testing.T) {
+	bin := buildHelper(t)
+
+	cmd := exec.CommandContext(context.Background(), bin, "service-control", "clustr-slapd.service", "mask")
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatal("expected non-zero exit for disallowed action, got exit 0")
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "action_not_allowed") {
+		t.Errorf("expected 'action_not_allowed' in output for rejected action, got: %q", output)
+	}
+}
+
+// TestServiceControlAllowedUnitPassesValidation verifies that
+// "clustr-slapd.service" with action "restart" passes both allowlist checks
+// and reaches systemctl. The test only validates that no rejection message
+// appears — systemctl may exit non-zero in CI where the unit does not exist,
+// and that is acceptable.
+func TestServiceControlAllowedUnitPassesValidation(t *testing.T) {
+	bin := buildHelper(t)
+
+	cmd := exec.CommandContext(context.Background(), bin, "service-control", "clustr-slapd.service", "restart")
+	out, _ := cmd.CombinedOutput()
+
+	output := string(out)
+	// If either rejection string appears, the allowlist check misfired on a known-good pair.
+	if strings.Contains(output, "unit_not_allowed") {
+		t.Errorf("clustr-slapd.service was rejected by unit allowlist: %s", output)
+	}
+	if strings.Contains(output, "action_not_allowed") {
+		t.Errorf("'restart' action was rejected by action allowlist: %s", output)
+	}
+	// We do NOT assert exit code 0 — systemctl may fail in CI where systemd is not running.
+}
+
+// TestServiceControlRequiresTwoArgs verifies that wrong argument count exits non-zero.
+func TestServiceControlRequiresTwoArgs(t *testing.T) {
+	bin := buildHelper(t)
+
+	// Too few args.
+	cmd := exec.CommandContext(context.Background(), bin, "service-control", "clustr-slapd.service")
+	_, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Error("expected non-zero exit for service-control with only one arg")
+	}
+
+	// No args.
+	cmd = exec.CommandContext(context.Background(), bin, "service-control")
+	_, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Error("expected non-zero exit for service-control with no args")
+	}
+}

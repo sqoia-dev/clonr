@@ -12,10 +12,10 @@
 // when Enable() is called. Normal operation (health checks, DIT CRUD) does NOT
 // require root — those operations use the LDAP protocol over the network.
 //
-// Polkit rule at internal/ldap/assets/50-clustr-slapd.rules grants the clustr
-// user start|stop|restart|reload on clustr-slapd.service only.
-// Both files are embedded into the binary and installed by EnsureSystemdUnit()
-// during Enable().
+// Runtime slapd lifecycle (start/stop/restart/enable/disable/reset-failed) is
+// routed through clustr-privhelper's service-control verb, which is the single
+// privilege boundary for all host-side privileged operations. The polkit rule
+// (50-clustr-slapd.rules) has been removed — polkit is no longer used.
 
 package ldap
 
@@ -282,29 +282,24 @@ func MaskDistroSlapd(ctx context.Context) error {
 	return nil
 }
 
-// EnsureSystemdUnit writes the embedded clustr-slapd.service and polkit rule to
-// their system paths, then runs daemon-reload if either file changed.
+// EnsureSystemdUnit writes the embedded clustr-slapd.service to its system
+// path, then runs daemon-reload if the file changed.
 //
-// Idempotent: if both files already exist with identical content, no writes
-// occur and daemon-reload is skipped.
+// Idempotent: if the file already exists with identical content, no write
+// occurs and daemon-reload is skipped.
 //
 // Must be called AFTER EnsureOpenLDAP (so the ldap user and slapd binary exist)
 // and AFTER MaskDistroSlapd (so the single daemon-reload picks up both our unit
 // and the masked distro unit at once).
+//
+// The polkit rule (50-clustr-slapd.rules) is NOT installed here. Runtime
+// service lifecycle is managed via clustr-privhelper's service-control verb.
 func EnsureSystemdUnit(ctx context.Context) error {
-	const (
-		unitDst   = "/etc/systemd/system/clustr-slapd.service"
-		polkitDst = "/etc/polkit-1/rules.d/50-clustr-slapd.rules"
-	)
+	const unitDst = "/etc/systemd/system/clustr-slapd.service"
 
 	unitSrc, err := assetFS.ReadFile("assets/clustr-slapd.service")
 	if err != nil {
 		return fmt.Errorf("ldap slapd: read embedded clustr-slapd.service: %w", err)
-	}
-
-	polkitSrc, err := assetFS.ReadFile("assets/50-clustr-slapd.rules")
-	if err != nil {
-		return fmt.Errorf("ldap slapd: read embedded 50-clustr-slapd.rules: %w", err)
 	}
 
 	changed := false
@@ -322,21 +317,6 @@ func EnsureSystemdUnit(ctx context.Context) error {
 		changed = true
 	} else {
 		log.Info().Str("path", unitDst).Msg("ldap slapd: clustr-slapd.service unchanged, skipping write")
-	}
-
-	// Write polkit rule if missing or content differs.
-	polkitExisting, readErr := os.ReadFile(polkitDst)
-	if readErr != nil || !bytes.Equal(polkitExisting, polkitSrc) {
-		if err := os.MkdirAll(filepath.Dir(polkitDst), 0o755); err != nil {
-			return fmt.Errorf("ldap slapd: mkdir /etc/polkit-1/rules.d: %w", err)
-		}
-		if err := os.WriteFile(polkitDst, polkitSrc, 0o644); err != nil {
-			return fmt.Errorf("ldap slapd: write 50-clustr-slapd.rules: %w", err)
-		}
-		log.Info().Str("path", polkitDst).Msg("ldap slapd: wrote 50-clustr-slapd.rules")
-		changed = true
-	} else {
-		log.Info().Str("path", polkitDst).Msg("ldap slapd: 50-clustr-slapd.rules unchanged, skipping write")
 	}
 
 	// Only daemon-reload if something changed.

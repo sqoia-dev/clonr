@@ -255,10 +255,10 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		log.Warn().Err(err).Msg("ldap: mask distro slapd (non-fatal)")
 	}
 
-	// Install the clustr-slapd systemd unit and polkit rule, then daemon-reload.
+	// Install the clustr-slapd systemd unit, then daemon-reload.
 	// Runs after MaskDistroSlapd so the single reload picks up both changes.
-	log.Info().Msg("ldap: step 0b/6: installing systemd unit and polkit rule")
-	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "Installing systemd unit and polkit rule...")
+	log.Info().Msg("ldap: step 0b/6: installing systemd unit")
+	_ = m.db.LDAPSetStatus(ctx, statusProvisioning, "Installing systemd unit...")
 
 	if err := EnsureSystemdUnit(ctx); err != nil {
 		setError(fmt.Sprintf("install systemd unit failed: %v", err))

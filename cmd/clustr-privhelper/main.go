@@ -19,11 +19,18 @@
 //
 // # Verbs
 //
-//	dnf-install <pkg>  Install a single package via dnf. Package must appear in
-//	                   the embedded deps_matrix allowlist.
-//	cap-bit-test       Print the process effective UID. Returns 0 when the
-//	                   setuid bit has landed correctly. Used by integration tests
-//	                   and operator diagnostics.
+//	dnf-install <pkg>            Install a single package via dnf. Package must
+//	                             appear in the embedded deps_matrix allowlist.
+//	cap-bit-test                 Print the process effective UID. Returns 0 when
+//	                             the setuid bit has landed correctly. Used by
+//	                             integration tests and operator diagnostics.
+//	service-control <unit> <action>
+//	                             Run systemctl <action> <unit>. Both unit and
+//	                             action are validated against static allowlists
+//	                             before any exec occurs. Allowed units:
+//	                               clustr-slapd.service
+//	                             Allowed actions:
+//	                               start, stop, restart, enable, disable, reset-failed
 //
 // # Usage
 //
@@ -182,7 +189,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, cap-bit-test\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, cap-bit-test, service-control\n")
 		os.Exit(1)
 	}
 
@@ -200,6 +207,8 @@ func main() {
 		exitCode = verbDnfInstall(callerUID, verbArgs)
 	case "cap-bit-test":
 		exitCode = verbCapBitTest()
+	case "service-control":
+		exitCode = verbServiceControl(callerUID, verbArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: unknown verb %q\n", verb)
 		exitCode = 1
@@ -263,6 +272,78 @@ func verbCapBitTest() int {
 	eUID := os.Geteuid()
 	fmt.Printf("clustr-privhelper cap-bit-test: euid=%d\n", eUID)
 	return 0
+}
+
+// allowedServiceUnits is the explicit allowlist of systemd units that
+// service-control may manage. Units are added here one at a time, per-feature,
+// to keep the privilege surface minimal. Never accept a unit name from the
+// caller without checking this map first.
+var allowedServiceUnits = map[string]bool{
+	"clustr-slapd.service": true,
+}
+
+// allowedServiceActions is the set of systemctl verbs permitted via
+// service-control. This is a subset of all systemctl actions — destructive
+// verbs (mask, unmask, daemon-reload, etc.) are intentionally excluded.
+var allowedServiceActions = map[string]bool{
+	"start":        true,
+	"stop":         true,
+	"restart":      true,
+	"enable":       true,
+	"disable":      true,
+	"reset-failed": true,
+}
+
+// verbServiceControl validates unit and action against static allowlists, then
+// runs `systemctl <action> <unit>` as root. Both arguments come from the Go
+// caller via argv — they are identifiers, not shell strings, and no shell
+// expansion occurs. The structured error code "unit_not_allowed" or
+// "action_not_allowed" is printed to stderr so callers can detect the exact
+// rejection reason without parsing free-form text.
+func verbServiceControl(callerUID int, args []string) int {
+	if len(args) != 2 {
+		msg := "service-control requires exactly two arguments: <unit> <action>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "service-control", args, 1, msg)
+		return 1
+	}
+
+	unit := args[0]
+	action := args[1]
+
+	// Validate unit against allowlist.
+	if !allowedServiceUnits[unit] {
+		msg := fmt.Sprintf("service-control: unit_not_allowed: %q is not in the service unit allowlist", unit)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "service-control", args, 1, msg)
+		return 1
+	}
+
+	// Validate action against allowlist.
+	if !allowedServiceActions[action] {
+		msg := fmt.Sprintf("service-control: action_not_allowed: %q is not a permitted action", action)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "service-control", args, 1, msg)
+		return 1
+	}
+
+	// Both validated — build argv internally; caller cannot influence any flag.
+	cmd := exec.Command("systemctl", action, unit) //#nosec G204 -- unit and action validated against static allowlists above
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "service-control", args, exitCode, "")
+	return exitCode
 }
 
 // writeAudit opens clustr's SQLite DB as root and inserts one row into
