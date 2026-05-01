@@ -153,7 +153,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	}
 
 	ldapMgr := ldapmodule.New(cfg, database)
-	sysAccountsMgr := sysaccounts.New(database)
+	sysAccountsMgr := sysaccounts.New(database, ldapMgr.Allocator())
 	networkMgr := networkmodule.New(database)
 
 	// clientdHub must be created before SlurmManager so the hub reference is valid.

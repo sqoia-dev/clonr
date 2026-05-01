@@ -25,7 +25,7 @@ import (
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	d := openTestDB(t)
-	mgr := sysaccounts.New(d)
+	mgr := sysaccounts.New(d, nil) // nil allocator: test specifies UIDs explicitly
 	r := chi.NewRouter()
 	sysaccounts.RegisterRoutes(r, mgr)
 	return r
@@ -96,7 +96,7 @@ func TestListGroups_ResponseShape(t *testing.T) {
 // decide whether to render the "sys" badge.
 func TestListAccounts_SystemAccountField(t *testing.T) {
 	d := openTestDB(t)
-	mgr := sysaccounts.New(d)
+	mgr := sysaccounts.New(d, nil) // nil allocator: test specifies UIDs explicitly
 	r := chi.NewRouter()
 	sysaccounts.RegisterRoutes(r, mgr)
 

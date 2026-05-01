@@ -4,6 +4,7 @@ import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, ShieldCheck, Users, Setti
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import { UserPicker } from "@/components/UserPicker"
@@ -24,6 +25,7 @@ import type {
   LDAPInternalStatusResponse,
   LDAPInternalEnableError,
   LDAPAdminPasswordResponse,
+  LDAPPatchUserRequest,
 } from "@/lib/types"
 // ─── Identity page ────────────────────────────────────────────────────────────
 
@@ -105,35 +107,33 @@ function WriteModeBanner({ config }: { config?: LDAPConfigResponse }) {
   )
 }
 
-// ─── LDAP Users Card (WRITE-USER-5) ──────────────────────────────────────────
+// ─── LDAP Users Card (WRITE-USER-5, Sprint 13 #93+#94+#95) ──────────────────
 
 function LDAPUsersCard() {
   const qc = useQueryClient()
   const [q, setQ] = React.useState("")
   const [addOpen, setAddOpen] = React.useState(false)
-  const [editUser, setEditUser] = React.useState<LDAPUser | null>(null)
+  const [editSheetUser, setEditSheetUser] = React.useState<LDAPUser | null>(null) // #95 Sheet
   const [deleteConfirm, setDeleteConfirm] = React.useState<LDAPUser | null>(null)
   const [deleteInput, setDeleteInput] = React.useState("")
   const [resetResult, setResetResult] = React.useState<{ uid: string; pwd: string } | null>(null)
   const [showTempPwd, setShowTempPwd] = React.useState(false)
   const [copyDone, setCopyDone] = React.useState(false)
 
-  // Add form state
+  // Add form state (#94: email + ssh_keys added)
   const [fUID, setFUID] = React.useState("")
   const [fCN, setFCN] = React.useState("")
   const [fSN, setFSN] = React.useState("")
+  const [fEmail, setFEmail] = React.useState("")           // #94
+  const [fSSHKeys, setFSSHKeys] = React.useState("")       // #94 multi-line textarea
+  const [fUIDOverride, setFUIDOverride] = React.useState(false)  // #93 toggle
+  const [fGIDOverride, setFGIDOverride] = React.useState(false)  // #93 toggle
   const [fUID_num, setFUID_num] = React.useState("")
   const [fGID_num, setFGID_num] = React.useState("")
   const [fHome, setFHome] = React.useState("")
   const [fShell, setFShell] = React.useState("/bin/bash")
   const [fPassword, setFPassword] = React.useState("")
   const [addError, setAddError] = React.useState("")
-
-  // Edit form state
-  const [eCN, setECN] = React.useState("")
-  const [eSN, setESN] = React.useState("")
-  const [eHome, setEHome] = React.useState("")
-  const [eShell, setEShell] = React.useState("")
 
   // Get write-capable status for banner
   const { data: configData } = useQuery<LDAPConfigResponse>({
@@ -150,39 +150,43 @@ function LDAPUsersCard() {
     retry: false,
   })
 
+  const { data: groupsData } = useQuery<{ groups: LDAPGroup[]; total: number }>({
+    queryKey: ["ldap-groups"],
+    queryFn: () => apiFetch<{ groups: LDAPGroup[]; total: number }>("/api/v1/ldap/groups"),
+    staleTime: 30000,
+    retry: false,
+  })
+  const allGroups = groupsData?.groups ?? []
+
   const createMutation = useMutation({
-    mutationFn: () => apiFetch("/api/v1/ldap/users", {
-      method: "POST",
-      body: JSON.stringify({
-        uid: fUID, cn: fCN || fUID, sn: fSN || fUID,
-        uid_number: Number(fUID_num) || 0, gid_number: Number(fGID_num) || 0,
-        home_directory: fHome || `/home/${fUID}`, login_shell: fShell,
-        password: fPassword,
-      }),
-    }),
+    mutationFn: () => {
+      const sshKeys = fSSHKeys.split("\n").map(k => k.trim()).filter(Boolean)
+      return apiFetch("/api/v1/ldap/users", {
+        method: "POST",
+        body: JSON.stringify({
+          uid: fUID,
+          cn: fCN || fUID,
+          sn: fSN || fUID,
+          mail: fEmail || undefined,
+          uid_number: fUIDOverride ? (Number(fUID_num) || 0) : 0,
+          gid_number: fGIDOverride ? (Number(fGID_num) || 0) : 0,
+          home_directory: fHome || `/home/${fUID}`,
+          login_shell: fShell,
+          password: fPassword || undefined,
+          ssh_public_keys: sshKeys.length > 0 ? sshKeys : undefined,
+        }),
+      })
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
       setAddOpen(false)
-      setFUID(""); setFCN(""); setFSN(""); setFUID_num(""); setFGID_num("")
+      setFUID(""); setFCN(""); setFSN(""); setFEmail(""); setFSSHKeys("")
+      setFUID_num(""); setFGID_num(""); setFUIDOverride(false); setFGIDOverride(false)
       setFHome(""); setFShell("/bin/bash"); setFPassword(""); setAddError("")
       toast({ title: "LDAP user created" })
       refetch()
     },
     onError: (err) => setAddError(String(err)),
-  })
-
-  const updateMutation = useMutation({
-    mutationFn: (uid: string) => apiFetch(`/api/v1/ldap/users/${encodeURIComponent(uid)}`, {
-      method: "PUT",
-      body: JSON.stringify({ cn: eCN, sn: eSN, home_directory: eHome, login_shell: eShell }),
-    }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
-      setEditUser(null)
-      toast({ title: "User updated" })
-      refetch()
-    },
-    onError: (err) => toast({ variant: "destructive", title: "Update failed", description: String(err) }),
   })
 
   const deleteMutation = useMutation({
@@ -208,17 +212,7 @@ function LDAPUsersCard() {
     onError: (err) => toast({ variant: "destructive", title: "Reset failed", description: String(err) }),
   })
 
-  function handleSearch() {
-    refetch()
-  }
-
-  function startEdit(u: LDAPUser) {
-    setEditUser(u)
-    setECN(u.cn ?? "")
-    setESN(u.sn ?? "")
-    setEHome(u.home_directory ?? "")
-    setEShell(u.login_shell ?? "/bin/bash")
-  }
+  function handleSearch() { refetch() }
 
   const users = data?.users ?? []
   const writeCapable = configData?.write_capable ?? false
@@ -260,24 +254,61 @@ function LDAPUsersCard() {
         </div>
       )}
 
-      {/* Add form */}
+      {/* Add form (#94: email + ssh_keys; #93: auto-allocate toggle) */}
       {addOpen && (
         <div className="px-4 py-3 border-b border-border bg-secondary/10 space-y-2">
           <p className="text-xs font-medium">New LDAP user</p>
           <div className="grid grid-cols-3 gap-2">
-            <Input className="text-xs h-7 font-mono" placeholder="UID (username)" value={fUID} onChange={(e) => setFUID(e.target.value)} autoFocus />
+            <Input className="text-xs h-7 font-mono" placeholder="UID (username) *" value={fUID} onChange={(e) => setFUID(e.target.value)} autoFocus />
             <Input className="text-xs h-7" placeholder="Display name (CN)" value={fCN} onChange={(e) => setFCN(e.target.value)} />
             <Input className="text-xs h-7" placeholder="Surname (SN)" value={fSN} onChange={(e) => setFSN(e.target.value)} />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Input className="text-xs h-7 font-mono" placeholder="UID number (0=auto)" type="number" value={fUID_num} onChange={(e) => setFUID_num(e.target.value)} />
-            <Input className="text-xs h-7 font-mono" placeholder="GID number (0=auto)" type="number" value={fGID_num} onChange={(e) => setFGID_num(e.target.value)} />
+          {/* #94: email field */}
+          <Input className="text-xs h-7" placeholder="Email (mail attribute)" type="email" value={fEmail} onChange={(e) => setFEmail(e.target.value)} />
+          {/* #93: UID override toggle */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={cn("text-[11px] px-2 py-0.5 rounded border transition-colors",
+                  fUIDOverride ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:text-foreground")}
+                onClick={() => setFUIDOverride(v => !v)}
+              >
+                {fUIDOverride ? "UID: override" : "UID: auto-allocate"}
+              </button>
+              {fUIDOverride && (
+                <Input className="text-xs h-7 font-mono w-36" placeholder="UID number" type="number" value={fUID_num} onChange={(e) => setFUID_num(e.target.value)} />
+              )}
+              <button
+                type="button"
+                className={cn("text-[11px] px-2 py-0.5 rounded border transition-colors",
+                  fGIDOverride ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:text-foreground")}
+                onClick={() => setFGIDOverride(v => !v)}
+              >
+                {fGIDOverride ? "GID: override" : "GID: auto-allocate"}
+              </button>
+              {fGIDOverride && (
+                <Input className="text-xs h-7 font-mono w-36" placeholder="GID number" type="number" value={fGID_num} onChange={(e) => setFGID_num(e.target.value)} />
+              )}
+            </div>
+            {!fUIDOverride && <p className="text-[11px] text-muted-foreground">Server assigns the next free UID ≥ 10000.</p>}
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Input className="text-xs h-7 font-mono" placeholder={`Home dir (/home/${fUID})`} value={fHome} onChange={(e) => setFHome(e.target.value)} />
+            <Input className="text-xs h-7 font-mono" placeholder={`Home dir (/home/${fUID || "…"})`} value={fHome} onChange={(e) => setFHome(e.target.value)} />
             <Input className="text-xs h-7 font-mono" placeholder="Shell (/bin/bash)" value={fShell} onChange={(e) => setFShell(e.target.value)} />
           </div>
           <Input className="text-xs h-7 font-mono" type="password" placeholder="Initial password (optional)" value={fPassword} onChange={(e) => setFPassword(e.target.value)} />
+          {/* #94: SSH keys textarea */}
+          <div>
+            <p className="text-[11px] text-muted-foreground mb-1">SSH public keys (one per line, optional)</p>
+            <textarea
+              className="w-full text-xs font-mono bg-background border border-border rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+              rows={2}
+              placeholder="ssh-ed25519 AAAA…"
+              value={fSSHKeys}
+              onChange={(e) => setFSSHKeys(e.target.value)}
+            />
+          </div>
           {addError && <p className="text-xs text-destructive">{addError}</p>}
           <div className="flex gap-2">
             <Button size="sm" className="flex-1 text-xs" disabled={!fUID || createMutation.isPending} onClick={() => createMutation.mutate()}>
@@ -332,36 +363,21 @@ function LDAPUsersCard() {
                 <React.Fragment key={u.uid}>
                   <tr className="border-b border-border/50 hover:bg-secondary/20">
                     <td className="py-1.5 font-mono pr-4">{u.uid}</td>
-                    <td className="py-1.5 pr-4">
-                      {editUser?.uid === u.uid ? (
-                        <Input className="h-6 text-[11px] w-full" value={eCN} onChange={(e) => setECN(e.target.value)} placeholder="Display name" />
-                      ) : (
-                        [u.given_name, u.sn].filter(Boolean).join(" ") || "—"
-                      )}
-                    </td>
+                    <td className="py-1.5 pr-4">{[u.given_name, u.sn].filter(Boolean).join(" ") || "—"}</td>
                     <td className="py-1.5 pr-4 text-muted-foreground">{u.mail || "—"}</td>
                     <td className="py-1.5 font-mono text-muted-foreground">{u.gid_number ?? "—"}</td>
                     {writeCapable && (
                       <td className="py-1.5 text-right">
                         <div className="flex items-center justify-end gap-1">
-                          {editUser?.uid === u.uid ? (
-                            <>
-                              <Button size="sm" className="h-6 px-2 text-[11px]" onClick={() => updateMutation.mutate(u.uid)} disabled={updateMutation.isPending}>Save</Button>
-                              <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => setEditUser(null)}><X className="h-3 w-3" /></Button>
-                            </>
-                          ) : (
-                            <>
-                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => startEdit(u)} title="Edit user">
-                                <Pencil className="h-3 w-3" />
-                              </Button>
-                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => resetPwdMutation.mutate(u.uid)} disabled={resetPwdMutation.isPending} title="Reset password">
-                                <KeyRound className="h-3 w-3" />
-                              </Button>
-                              <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-destructive hover:text-destructive" onClick={() => setDeleteConfirm(u)} title="Delete user">
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </>
-                          )}
+                          <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => setEditSheetUser(u)} title="Edit user">
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                          <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => resetPwdMutation.mutate(u.uid)} disabled={resetPwdMutation.isPending} title="Reset password">
+                            <KeyRound className="h-3 w-3" />
+                          </Button>
+                          <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-destructive hover:text-destructive" onClick={() => setDeleteConfirm(u)} title="Delete user">
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
                         </div>
                       </td>
                     )}
@@ -391,7 +407,196 @@ function LDAPUsersCard() {
           </table>
         )}
       </div>
+
+      {/* #95: Edit user Sheet */}
+      {editSheetUser && (
+        <LDAPUserEditSheet
+          user={editSheetUser}
+          allGroups={allGroups}
+          onClose={() => { setEditSheetUser(null); refetch() }}
+        />
+      )}
     </div>
+  )
+}
+
+// ─── #95: LDAP User Edit Sheet ────────────────────────────────────────────────
+
+function LDAPUserEditSheet({
+  user,
+  allGroups,
+  onClose,
+}: {
+  user: LDAPUser
+  allGroups: LDAPGroup[]
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+
+  // Derive current group membership for this user
+  const currentGroups = allGroups.filter(g => g.member_uids?.includes(user.uid)).map(g => g.cn)
+
+  const [eName, setEName] = React.useState([user.given_name ?? "", user.sn ?? ""].filter(Boolean).join(" "))
+  const [eMail, setEMail] = React.useState(user.mail ?? "")
+  const [eGID, setEGID] = React.useState(user.gid_number != null ? String(user.gid_number) : "")
+  const [eSSHKeys, setESSHKeys] = React.useState((user.ssh_public_keys ?? []).join("\n"))
+  const [eGroups, setEGroups] = React.useState<string[]>(currentGroups)
+  const [saveError, setSaveError] = React.useState("")
+
+  // Parse "First Last" → {given_name, sn}
+  function parseName(full: string): { given_name: string; sn: string; cn: string } {
+    const parts = full.trim().split(/\s+/)
+    if (parts.length === 1) return { given_name: parts[0], sn: parts[0], cn: parts[0] }
+    const sn = parts[parts.length - 1]
+    const given_name = parts.slice(0, -1).join(" ")
+    return { given_name, sn, cn: full.trim() }
+  }
+
+  const patchMutation = useMutation({
+    mutationFn: () => {
+      const { given_name, sn, cn } = parseName(eName)
+      const sshKeys = eSSHKeys.split("\n").map(k => k.trim()).filter(Boolean)
+
+      // Compute group diffs
+      const addGroups = eGroups.filter(g => !currentGroups.includes(g))
+      const removeGroups = currentGroups.filter(g => !eGroups.includes(g))
+
+      const body: LDAPPatchUserRequest = {
+        cn: cn || undefined,
+        sn: sn || undefined,
+        given_name: given_name || undefined,
+        mail: eMail || undefined,
+        gid_number: eGID !== "" ? Number(eGID) : undefined,
+        ssh_public_keys: sshKeys,
+        add_groups: addGroups.length > 0 ? addGroups : undefined,
+        remove_groups: removeGroups.length > 0 ? removeGroups : undefined,
+      }
+
+      return apiFetch(`/api/v1/ldap/users/${encodeURIComponent(user.uid)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      })
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ldap-users-search"] })
+      qc.invalidateQueries({ queryKey: ["ldap-groups"] })
+      toast({ title: "User updated" })
+      onClose()
+    },
+    onError: (err) => setSaveError(String(err)),
+  })
+
+  function toggleGroup(cn: string) {
+    setEGroups(prev => prev.includes(cn) ? prev.filter(g => g !== cn) : [...prev, cn])
+  }
+
+  return (
+    <Sheet open onOpenChange={(open) => { if (!open) onClose() }}>
+      <SheetContent className="w-[420px] sm:w-[480px] overflow-y-auto">
+        <SheetHeader>
+          <SheetTitle className="text-sm">Edit LDAP user — <span className="font-mono">{user.uid}</span></SheetTitle>
+        </SheetHeader>
+
+        <div className="space-y-4 py-4">
+          {/* UID — immutable */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">UID (username)</label>
+            <div className="h-8 px-2 flex items-center rounded border border-border bg-secondary/30 font-mono text-xs text-muted-foreground">
+              {user.uid}
+              <span className="ml-2 text-[10px] text-muted-foreground/60">(immutable)</span>
+            </div>
+          </div>
+
+          {/* Full name */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Full name</label>
+            <Input
+              className="text-xs h-8"
+              placeholder="First Last"
+              value={eName}
+              onChange={(e) => setEName(e.target.value)}
+            />
+            <p className="text-[10px] text-muted-foreground">Split on last space: first part → givenName, last → sn</p>
+          </div>
+
+          {/* Email (#94) */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Email (mail)</label>
+            <Input
+              className="text-xs h-8"
+              type="email"
+              placeholder="user@example.com"
+              value={eMail}
+              onChange={(e) => setEMail(e.target.value)}
+            />
+          </div>
+
+          {/* GID (#95 with allocator validation) */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Primary GID (gidNumber)</label>
+            <Input
+              className="text-xs h-8 font-mono"
+              type="number"
+              placeholder="Leave empty to keep current"
+              value={eGID}
+              onChange={(e) => setEGID(e.target.value)}
+            />
+            {eGID !== "" && (Number(eGID) < 10000 || Number(eGID) > 60000) && (
+              <p className="text-[11px] text-amber-500">GID must be in range 10000–60000 (server validates before saving)</p>
+            )}
+          </div>
+
+          {/* Supplementary groups */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Supplementary groups</label>
+            {allGroups.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No LDAP groups available.</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5 border border-border rounded p-2 min-h-[40px]">
+                {allGroups.map((g) => (
+                  <button
+                    key={g.cn}
+                    type="button"
+                    onClick={() => toggleGroup(g.cn)}
+                    className={cn(
+                      "text-[11px] px-2 py-0.5 rounded border transition-colors",
+                      eGroups.includes(g.cn)
+                        ? "border-primary bg-primary/15 text-primary"
+                        : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/40"
+                    )}
+                  >
+                    {g.cn}
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">Changes add/remove memberUid on the group entries.</p>
+          </div>
+
+          {/* SSH public keys (#94/#95) */}
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-muted-foreground">SSH public keys (sshPublicKey)</label>
+            <textarea
+              className="w-full text-xs font-mono bg-background border border-border rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+              rows={3}
+              placeholder={"ssh-ed25519 AAAA…\nssh-rsa AAAA…"}
+              value={eSSHKeys}
+              onChange={(e) => setESSHKeys(e.target.value)}
+            />
+            <p className="text-[10px] text-muted-foreground">One key per line. Replaces all existing keys.</p>
+          </div>
+
+          {saveError && <p className="text-xs text-destructive">{saveError}</p>}
+        </div>
+
+        <SheetFooter>
+          <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
+          <Button size="sm" className="text-xs" disabled={patchMutation.isPending} onClick={() => patchMutation.mutate()}>
+            {patchMutation.isPending ? "Saving…" : "Save changes"}
+          </Button>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   )
 }
 

@@ -349,6 +349,29 @@ export interface LDAPUser {
   mail?: string
   home_directory?: string
   login_shell?: string
+  ssh_public_keys?: string[]  // #94: sshPublicKey attributes
+  locked?: boolean
+}
+
+// #93: structured error response for posixid validation failures
+export interface PosixIDErrorResponse {
+  error: string
+  code: "range_exhausted" | "reserved_id" | "out_of_range" | "id_collision" | "posixid_error"
+  field: "uid_number" | "gid_number"
+}
+
+// #95: PATCH /api/v1/ldap/users/{uid} request body
+export interface LDAPPatchUserRequest {
+  cn?: string
+  sn?: string
+  given_name?: string
+  mail?: string
+  gid_number?: number
+  home_directory?: string
+  login_shell?: string
+  ssh_public_keys?: string[]
+  add_groups?: string[]
+  remove_groups?: string[]
 }
 
 export interface ListLDAPUsersResponse {

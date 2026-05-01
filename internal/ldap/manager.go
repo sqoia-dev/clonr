@@ -27,6 +27,7 @@ import (
 
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/posixid"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
@@ -44,10 +45,11 @@ const certExpiryWarnDays = 30
 // Manager owns the LDAP module lifecycle and provides the API surface for
 // users/groups/status. It is safe for concurrent use.
 type Manager struct {
-	cfg   config.ServerConfig
-	db    *db.DB
-	audit *db.AuditService
-	mu    sync.RWMutex
+	cfg       config.ServerConfig
+	db        *db.DB
+	audit     *db.AuditService
+	allocator *posixid.Allocator
+	mu        sync.RWMutex
 
 	// In-memory DM password — set on Enable(), cleared on Disable().
 	// Never persisted; the DB only stores its bcrypt hash.
@@ -76,6 +78,49 @@ func New(cfg config.ServerConfig, database *db.DB) *Manager {
 		audit:            db.NewAuditService(database),
 		projectPluginCfg: defaultProjectPluginConfig(),
 	}
+
+	// Wire up the posixid allocator. The LDAP UID/GID listers are closures that
+	// read live LDAP entries via the reader DIT on every allocation call.
+	// If LDAP is not yet enabled, ListLDAPUIDs/GIDs return nil gracefully.
+	src := &posixid.DBLDAPSource{
+		DB: database,
+		UIDs: func(ctx context.Context) ([]int, error) {
+			dit, err := m.ReaderDIT(ctx)
+			if err != nil {
+				return nil, nil // LDAP not ready — skip; collision check still uses sys_accounts
+			}
+			users, err := dit.ListUsers()
+			if err != nil {
+				return nil, nil
+			}
+			uids := make([]int, 0, len(users))
+			for _, u := range users {
+				if u.UIDNumber > 0 {
+					uids = append(uids, u.UIDNumber)
+				}
+			}
+			return uids, nil
+		},
+		GIDs: func(ctx context.Context) ([]int, error) {
+			dit, err := m.ReaderDIT(ctx)
+			if err != nil {
+				return nil, nil
+			}
+			groups, err := dit.ListGroups()
+			if err != nil {
+				return nil, nil
+			}
+			gids := make([]int, 0, len(groups))
+			for _, g := range groups {
+				if g.GIDNumber > 0 {
+					gids = append(gids, g.GIDNumber)
+				}
+			}
+			return gids, nil
+		},
+	}
+	m.allocator = posixid.New(src)
+
 	// Restore in-memory passwords from DB on startup if module is ready.
 	m.restoreInMemoryPasswords(context.Background())
 	return m
@@ -983,6 +1028,12 @@ func (m *Manager) RecordNodeConfigured(ctx context.Context, nodeID, configHash s
 // if needed (e.g., from an admin override endpoint in the future).
 func (m *Manager) LockBaseDN(ctx context.Context) error {
 	return m.db.LDAPLockBaseDN(ctx)
+}
+
+// Allocator returns the shared posixid.Allocator so other modules (e.g. sysaccounts)
+// can route their UID/GID operations through the same policy and collision checks.
+func (m *Manager) Allocator() *posixid.Allocator {
+	return m.allocator
 }
 
 // ─── Admin repair ─────────────────────────────────────────────────────────────

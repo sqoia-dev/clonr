@@ -29,7 +29,7 @@ func openTestDB(t *testing.T) *db.DB {
 
 func newManager(t *testing.T) *sysaccounts.Manager {
 	t.Helper()
-	return sysaccounts.New(openTestDB(t))
+	return sysaccounts.New(openTestDB(t), nil) // nil allocator: tests specify UIDs explicitly
 }
 
 // ─── Group CRUD ───────────────────────────────────────────────────────────────

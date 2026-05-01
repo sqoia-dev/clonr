@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/posixid"
 )
 
 // RegisterRoutes wires all LDAP API endpoints into the given chi router group.
@@ -37,6 +38,7 @@ func RegisterRoutes(r chi.Router, mgr *Manager) {
 	r.Get("/ldap/users", mgr.handleListUsers)
 	r.Post("/ldap/users", mgr.handleCreateUser)
 	r.Put("/ldap/users/{uid}", mgr.handleUpdateUser)
+	r.Patch("/ldap/users/{uid}", mgr.handlePatchUser) // #95: full edit Sheet
 	r.Delete("/ldap/users/{uid}", mgr.handleDeleteUser)
 	r.Post("/ldap/users/{uid}/password", mgr.handleSetPassword)
 	r.Post("/ldap/users/{uid}/lock", mgr.handleLockUser)
@@ -200,6 +202,40 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	if req.UID == "" {
+		jsonError(w, "uid is required", http.StatusBadRequest)
+		return
+	}
+
+	// UID auto-allocation / validation (#93).
+	if req.UIDNumber == 0 {
+		uid, err := m.allocator.AllocateUID(r.Context())
+		if err != nil {
+			jsonErrorPosixID(w, "uid_number", err)
+			return
+		}
+		req.UIDNumber = uid
+	} else {
+		if err := m.allocator.Validate(r.Context(), req.UIDNumber, posixid.KindUID); err != nil {
+			jsonErrorPosixID(w, "uid_number", err)
+			return
+		}
+	}
+
+	// GID auto-allocation / validation (#93).
+	if req.GIDNumber == 0 {
+		gid, err := m.allocator.AllocateGID(r.Context())
+		if err != nil {
+			jsonErrorPosixID(w, "gid_number", err)
+			return
+		}
+		req.GIDNumber = gid
+	} else {
+		if err := m.allocator.Validate(r.Context(), req.GIDNumber, posixid.KindGID); err != nil {
+			jsonErrorPosixID(w, "gid_number", err)
+			return
+		}
+	}
 
 	dit, err := m.WriteBind(r.Context())
 	if err != nil {
@@ -217,9 +253,13 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		"uid":       req.UID,
 		"cn":        req.CN,
 		"uidNumber": strings.TrimSpace(fmt.Sprintf("%d", req.UIDNumber)),
+		"gidNumber": strings.TrimSpace(fmt.Sprintf("%d", req.GIDNumber)),
 	}
 	if req.Password != "" {
 		attrMap["userPassword"] = req.Password
+	}
+	if req.Mail != "" {
+		attrMap["mail"] = req.Mail
 	}
 	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserCreated, "ldap_user", req.UID, r.RemoteAddr,
 		nil, directoryWriteAudit(dit.userDN(req.UID), "add", attrMap))
@@ -259,6 +299,72 @@ func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.LoginShell != "" { attrMap["loginShell"] = req.LoginShell }
 	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserUpdated, "ldap_user", uid, r.RemoteAddr,
 		nil, directoryWriteAudit(dit.userDN(uid), "modify", attrMap))
+
+	user, err := dit.GetUser(uid)
+	if err != nil {
+		jsonResponse(w, map[string]string{"uid": uid}, http.StatusOK)
+		return
+	}
+	jsonResponse(w, user, http.StatusOK)
+}
+
+// handlePatchUser handles PATCH /api/v1/ldap/users/{uid} — Sprint 8 WRITE-USER-2 / Sprint 13 #95.
+// Supports full attribute editing: cn/sn/givenName/mail/gidNumber/sshPublicKeys/homeDirectory/loginShell.
+// Supplementary group changes are expressed via add_groups/remove_groups on the group entries.
+func (m *Manager) handlePatchUser(w http.ResponseWriter, r *http.Request) {
+	uid := chi.URLParam(r, "uid")
+
+	var body struct {
+		UpdateUserRequest
+		AddGroups    []string `json:"add_groups"`    // groups to add this user to (memberUid)
+		RemoveGroups []string `json:"remove_groups"` // groups to remove this user from
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate GID if explicitly provided.
+	if body.GIDNumber != nil {
+		if err := m.allocator.Validate(r.Context(), *body.GIDNumber, posixid.KindGID); err != nil {
+			jsonErrorPosixID(w, "gid_number", err)
+			return
+		}
+	}
+
+	dit, err := m.WriteBind(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	if err := dit.UpdateUser(uid, body.UpdateUserRequest); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Apply supplementary group changes — modify the group entries (not the user entry).
+	for _, grp := range body.AddGroups {
+		if addErr := dit.AddGroupMember(grp, uid); addErr != nil {
+			log.Warn().Err(addErr).Str("uid", uid).Str("group", grp).Msg("ldap: patch user: add to group failed")
+		}
+	}
+	for _, grp := range body.RemoveGroups {
+		if rmErr := dit.RemoveGroupMember(grp, uid); rmErr != nil {
+			log.Warn().Err(rmErr).Str("uid", uid).Str("group", grp).Msg("ldap: patch user: remove from group failed")
+		}
+	}
+
+	// Build attr map for audit.
+	attrMap := map[string]string{"uid": uid}
+	if body.CN != "" { attrMap["cn"] = body.CN }
+	if body.SN != "" { attrMap["sn"] = body.SN }
+	if body.GivenName != "" { attrMap["givenName"] = body.GivenName }
+	if body.Mail != "" { attrMap["mail"] = body.Mail }
+	if body.GIDNumber != nil { attrMap["gidNumber"] = fmt.Sprintf("%d", *body.GIDNumber) }
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPUserUpdated, "ldap_user", uid, r.RemoteAddr,
+		nil, directoryWriteAudit(dit.userDN(uid), "patch", attrMap))
 
 	user, err := dit.GetUser(uid)
 	if err != nil {
@@ -414,6 +520,21 @@ func (m *Manager) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	if len(body.Description) > 256 {
 		jsonError(w, "description must be 256 characters or fewer", http.StatusBadRequest)
 		return
+	}
+
+	// GID auto-allocation / validation (#93).
+	if body.GIDNumber == 0 {
+		gid, err := m.allocator.AllocateGID(r.Context())
+		if err != nil {
+			jsonErrorPosixID(w, "gid_number", err)
+			return
+		}
+		body.GIDNumber = gid
+	} else {
+		if err := m.allocator.Validate(r.Context(), body.GIDNumber, posixid.KindGID); err != nil {
+			jsonErrorPosixID(w, "gid_number", err)
+			return
+		}
 	}
 
 	dit, err := m.WriteBind(r.Context())
@@ -1009,4 +1130,27 @@ func jsonError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// jsonErrorPosixID returns a 400 with a structured body identifying which field
+// failed posixid validation and why.
+func jsonErrorPosixID(w http.ResponseWriter, field string, err error) {
+	code := "posixid_error"
+	switch {
+	case errors.Is(err, posixid.ErrRangeExhausted):
+		code = "range_exhausted"
+	case errors.Is(err, posixid.ErrReserved):
+		code = "reserved_id"
+	case errors.Is(err, posixid.ErrOutOfRange):
+		code = "out_of_range"
+	case errors.Is(err, posixid.ErrCollision):
+		code = "id_collision"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": err.Error(),
+		"code":  code,
+		"field": field,
+	})
 }

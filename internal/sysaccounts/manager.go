@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/posixid"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
@@ -30,12 +31,14 @@ var ErrConflict = errors.New("conflict")
 // Manager owns DB access for the system accounts module. It is safe for
 // concurrent use.
 type Manager struct {
-	db *db.DB
+	db        *db.DB
+	allocator *posixid.Allocator
 }
 
-// New creates a new Manager.
-func New(database *db.DB) *Manager {
-	return &Manager{db: database}
+// New creates a new Manager. allocator is the shared POSIX ID allocator;
+// it may be nil for callers that don't need auto-allocation (e.g. tests).
+func New(database *db.DB, allocator *posixid.Allocator) *Manager {
+	return &Manager{db: database, allocator: allocator}
 }
 
 // ─── Read methods ─────────────────────────────────────────────────────────────
@@ -214,7 +217,17 @@ func (m *Manager) DeleteGroup(ctx context.Context, id string) error {
 
 // CreateAccount validates and inserts a new system account.
 // Returns ErrConflict if the username or UID is already in use.
+// If a.UID == 0 and an allocator is configured, a UID is auto-allocated.
 func (m *Manager) CreateAccount(ctx context.Context, a api.SystemAccount) (api.SystemAccount, error) {
+	// Auto-allocate UID if requested and allocator is available.
+	if a.UID == 0 && m.allocator != nil {
+		uid, err := m.allocator.AllocateUID(ctx)
+		if err != nil {
+			return api.SystemAccount{}, fmt.Errorf("sysaccounts: auto-allocate uid: %w", err)
+		}
+		a.UID = uid
+	}
+
 	if err := validateAccount(a); err != nil {
 		return api.SystemAccount{}, err
 	}

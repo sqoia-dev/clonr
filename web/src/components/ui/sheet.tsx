@@ -88,6 +88,11 @@ const SheetDescription = React.forwardRef<
 ))
 SheetDescription.displayName = "SheetDescription"
 
+const SheetFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn("flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 pt-4 border-t border-border mt-2", className)} {...props} />
+)
+SheetFooter.displayName = "SheetFooter"
+
 export {
   Sheet,
   SheetTrigger,
@@ -96,4 +101,5 @@ export {
   SheetHeader,
   SheetTitle,
   SheetDescription,
+  SheetFooter,
 }

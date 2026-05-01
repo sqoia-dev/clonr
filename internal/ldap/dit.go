@@ -32,6 +32,7 @@ type LDAPUser struct {
 	Mail          string     `json:"mail,omitempty"`
 	HomeDirectory string     `json:"home_directory"`
 	LoginShell    string     `json:"login_shell"`
+	SSHPublicKeys []string   `json:"ssh_public_keys,omitempty"` // sshPublicKey attribute values
 	Locked        bool       `json:"locked"`               // true if shadowExpire=1
 	LastLogin     *time.Time `json:"last_login,omitempty"` // pwdLastSuccess, nil if never
 }
@@ -45,24 +46,32 @@ type LDAPGroup struct {
 }
 
 // CreateUserRequest holds the fields for creating a new POSIX user.
+// UIDNumber == 0 means "auto-allocate"; GIDNumber == 0 means "auto-allocate".
 type CreateUserRequest struct {
-	UID           string `json:"uid"`
-	UIDNumber     int    `json:"uid_number"`
-	GIDNumber     int    `json:"gid_number"`
-	CN            string `json:"cn"`
-	SN            string `json:"sn"`
-	HomeDirectory string `json:"home_directory"`
-	LoginShell    string `json:"login_shell"`
-	Password      string `json:"password"`      // plaintext; hashed by slapd
-	SSHPublicKey  string `json:"ssh_public_key,omitempty"` // v2: requires ldapPublicKey schema
+	UID           string   `json:"uid"`
+	UIDNumber     int      `json:"uid_number"`    // 0 = auto-allocate via posixid.Allocator
+	GIDNumber     int      `json:"gid_number"`    // 0 = auto-allocate via posixid.Allocator
+	CN            string   `json:"cn"`
+	SN            string   `json:"sn"`
+	GivenName     string   `json:"given_name,omitempty"`
+	Mail          string   `json:"mail,omitempty"`         // #94: email field → mail attribute
+	HomeDirectory string   `json:"home_directory"`
+	LoginShell    string   `json:"login_shell"`
+	Password      string   `json:"password"`               // plaintext; hashed by slapd
+	SSHPublicKeys []string `json:"ssh_public_keys,omitempty"` // #94: one per line; each written as sshPublicKey
 }
 
-// UpdateUserRequest holds the fields that can be updated on an existing user.
+// UpdateUserRequest holds the fields that can be updated on an existing user via PATCH.
+// Only non-zero / non-nil fields are applied.
 type UpdateUserRequest struct {
-	CN            string `json:"cn,omitempty"`
-	SN            string `json:"sn,omitempty"`
-	HomeDirectory string `json:"home_directory,omitempty"`
-	LoginShell    string `json:"login_shell,omitempty"`
+	CN            string   `json:"cn,omitempty"`
+	SN            string   `json:"sn,omitempty"`
+	GivenName     string   `json:"given_name,omitempty"`
+	Mail          string   `json:"mail,omitempty"`          // mail attribute
+	HomeDirectory string   `json:"home_directory,omitempty"`
+	LoginShell    string   `json:"login_shell,omitempty"`
+	GIDNumber     *int     `json:"gid_number,omitempty"`    // pointer so 0 is distinguishable from "not set"
+	SSHPublicKeys []string `json:"ssh_public_keys,omitempty"` // replaces all sshPublicKey values
 }
 
 // ditClient wraps a go-ldap connection, binding as Directory Manager.
@@ -137,7 +146,8 @@ func (c *ditClient) ListUsers() ([]LDAPUser, error) {
 		"(objectClass=posixAccount)",
 		// pwdLastSuccess is an operational attribute — must be named explicitly;
 		// it is NOT returned by a bare "*" wildcard search.
-		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire", "pwdLastSuccess"},
+		// sshPublicKey is from the ldapPublicKey auxiliary schema.
+		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire", "pwdLastSuccess", "sshPublicKey"},
 		nil,
 	)
 
@@ -171,7 +181,7 @@ func (c *ditClient) GetUser(uid string) (*LDAPUser, error) {
 		goldap.NeverDerefAliases,
 		1, 0, false,
 		fmt.Sprintf("(uid=%s)", goldap.EscapeFilter(uid)),
-		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire"},
+		[]string{"uid", "uidNumber", "gidNumber", "cn", "sn", "givenName", "mail", "homeDirectory", "loginShell", "shadowExpire", "sshPublicKey"},
 		nil,
 	)
 
@@ -221,7 +231,9 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	gecos := req.CN
 
 	addReq := goldap.NewAddRequest(dn, nil)
-	addReq.Attribute("objectClass", []string{"top", "posixAccount", "inetOrgPerson", "shadowAccount"})
+	// objectClasses: ldapPublicKey enables the sshPublicKey attribute.
+	objectClasses := []string{"top", "posixAccount", "inetOrgPerson", "shadowAccount", "ldapPublicKey"}
+	addReq.Attribute("objectClass", objectClasses)
 	addReq.Attribute("uid", []string{req.UID})
 	addReq.Attribute("cn", []string{cn})
 	addReq.Attribute("sn", []string{sn})
@@ -240,10 +252,20 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 	addReq.Attribute("shadowMin", []string{"0"})
 	addReq.Attribute("shadowMax", []string{"99999"})
 	addReq.Attribute("shadowWarning", []string{"7"})
-
-	// NOTE: ssh_public_key requires the ldapPublicKey schema (draft-ietf-secsh-ldap).
-	// Loading this schema requires adding it to the seed LDIF. Deferred to v2.
-	// req.SSHPublicKey is accepted on the API struct but not written in v1.
+	// Optional attributes from #94.
+	if req.GivenName != "" {
+		addReq.Attribute("givenName", []string{req.GivenName})
+	}
+	if req.Mail != "" {
+		addReq.Attribute("mail", []string{req.Mail})
+	}
+	// SSH public keys — each line written as a separate sshPublicKey value.
+	if len(req.SSHPublicKeys) > 0 {
+		keys := filterNonEmpty(req.SSHPublicKeys)
+		if len(keys) > 0 {
+			addReq.Attribute("sshPublicKey", keys)
+		}
+	}
 
 	if err := conn.Add(addReq); err != nil {
 		return fmt.Errorf("ldap dit: create user %s: %w", req.UID, err)
@@ -270,7 +292,7 @@ func (c *ditClient) CreateUser(req CreateUserRequest) error {
 }
 
 // UpdateUser modifies an existing user entry with the provided fields.
-// Only non-empty fields are updated.
+// Only non-empty / non-nil fields are updated.
 func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 	conn, err := c.connect()
 	if err != nil {
@@ -287,11 +309,31 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 	if req.SN != "" {
 		modReq.Replace("sn", []string{req.SN})
 	}
+	if req.GivenName != "" {
+		modReq.Replace("givenName", []string{req.GivenName})
+	}
+	if req.Mail != "" {
+		// Replace; empty string to clear is handled in PatchUser below.
+		modReq.Replace("mail", []string{req.Mail})
+	}
 	if req.HomeDirectory != "" {
 		modReq.Replace("homeDirectory", []string{req.HomeDirectory})
 	}
 	if req.LoginShell != "" {
 		modReq.Replace("loginShell", []string{req.LoginShell})
+	}
+	if req.GIDNumber != nil {
+		modReq.Replace("gidNumber", []string{strconv.Itoa(*req.GIDNumber)})
+	}
+	// SSH keys: replace entire sshPublicKey attribute with the new set.
+	if req.SSHPublicKeys != nil {
+		keys := filterNonEmpty(req.SSHPublicKeys)
+		if len(keys) > 0 {
+			modReq.Replace("sshPublicKey", keys)
+		} else {
+			// Empty slice means "remove all SSH keys".
+			modReq.Delete("sshPublicKey", []string{})
+		}
 	}
 
 	if len(modReq.Changes) == 0 {
@@ -299,6 +341,10 @@ func (c *ditClient) UpdateUser(uid string, req UpdateUserRequest) error {
 	}
 
 	if err := conn.Modify(modReq); err != nil {
+		// Tolerate NoSuchAttribute when deleting sshPublicKey that was never set.
+		if goldap.IsErrorWithCode(err, goldap.LDAPResultNoSuchAttribute) {
+			return nil
+		}
 		return fmt.Errorf("ldap dit: update user %s: %w", uid, err)
 	}
 	return nil
@@ -774,6 +820,11 @@ func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 		return LDAPUser{}, fmt.Errorf("entry missing uid: %s", entry.DN)
 	}
 
+	sshKeys := entry.GetAttributeValues("sshPublicKey")
+	if sshKeys == nil {
+		sshKeys = []string{}
+	}
+
 	u := LDAPUser{
 		UID:           uid,
 		CN:            entry.GetAttributeValue("cn"),
@@ -782,6 +833,7 @@ func entryToUser(entry *goldap.Entry) (LDAPUser, error) {
 		Mail:          entry.GetAttributeValue("mail"),
 		HomeDirectory: entry.GetAttributeValue("homeDirectory"),
 		LoginShell:    entry.GetAttributeValue("loginShell"),
+		SSHPublicKeys: sshKeys,
 	}
 
 	if n, err := strconv.Atoi(entry.GetAttributeValue("uidNumber")); err == nil {
@@ -887,4 +939,15 @@ func (c *ditClient) GetGroupMembers(cn string) ([]string, error) {
 		return nil, fmt.Errorf("ldap dit: group %q not found", cn)
 	}
 	return sr.Entries[0].GetAttributeValues("memberUid"), nil
+}
+
+// filterNonEmpty returns only non-empty, non-whitespace-only strings from ss.
+func filterNonEmpty(ss []string) []string {
+	var out []string
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
