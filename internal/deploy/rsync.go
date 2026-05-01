@@ -166,9 +166,17 @@ func humanReadableBytes(b int64) string {
 //  3. Once mounts are ready, begin extracting from the already-open download pipe.
 //
 // This hides nearly all of the network round-trip latency behind local disk ops.
+// Total duration is capped by CLUSTR_DEPLOY_TIMEOUT (default 30m).
 func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progress ProgressFunc) error {
 	if d.targetDisk == "" {
 		return fmt.Errorf("deploy: Preflight must be called before Deploy")
+	}
+
+	// Enforce CLUSTR_DEPLOY_TIMEOUT as an absolute deadline on the entire deploy.
+	if to := deployTimeout(); to > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, to)
+		defer cancel()
 	}
 
 	disk := opts.TargetDisk
@@ -454,8 +462,17 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// Attempt extraction with retries. On a watchdog-triggered stall or a
 	// truncated stream, close the current response, wait briefly, then re-issue
 	// a fresh HTTP request rather than retrying from the same dead TCP connection.
+	//
+	// bytesReceived tracks the cumulative bytes consumed from the HTTP body in
+	// the most recent attempt. It is logged on retry so operators can diagnose
+	// how far the stream got before failing. For the streaming-tar case we
+	// always restart from byte 0 — Range resume is not applicable here because
+	// tar requires a continuous stream from the archive header; resuming mid-stream
+	// would produce a malformed input. Range resume is implemented for block images
+	// in deploy/block.go where seeking the disk destination is possible.
 	reportStep("Extracting image to disk")
 	var extractErr error
+	var bytesReceived int64 // bytes consumed from the last HTTP body before failure
 	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
 		var body io.Reader
 		var bodyClose func()
@@ -472,7 +489,8 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 			logger().Warn().
 				Int("attempt", attempt).Int("max", maxDownloadAttempts).
 				Dur("backoff", backoff).
-				Msg("blob stream failed — re-issuing HTTP request for retry")
+				Int64("bytes_received_before_failure", bytesReceived).
+				Msg("blob stream failed — re-issuing HTTP request for retry (streaming-tar restart from byte 0)")
 			select {
 			case <-ctx.Done():
 				break
@@ -486,6 +504,9 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 			if opts.AuthToken != "" {
 				retryReq.Header.Set("Authorization", "Bearer "+opts.AuthToken)
 			}
+			// Do not send a Range header here: tar must receive the full stream
+			// starting at byte 0. The Range-resume pattern is implemented for
+			// block images in deploy/block.go.
 			retryResp, httpErr := http.DefaultClient.Do(retryReq)
 			if httpErr != nil {
 				extractErr = fmt.Errorf("retry HTTP request failed: %w", httpErr)
@@ -500,12 +521,17 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 			bodyClose = func() { retryResp.Body.Close() }
 		}
 
-		extractErr = d.streamExtract(ctx, body, blob.totalBytes, verifyOpts, needsVerify, progress)
+		// Wrap the body in a counting reader so we can report bytes received.
+		cr := &countingReader{r: body}
+		extractErr = d.streamExtract(ctx, cr, blob.totalBytes, verifyOpts, needsVerify, progress)
+		bytesReceived = cr.n
 		bodyClose()
 		if extractErr == nil {
 			break
 		}
-		logger().Error().Err(extractErr).Int("attempt", attempt).Int("max", maxDownloadAttempts).
+		logger().Error().Err(extractErr).
+			Int("attempt", attempt).Int("max", maxDownloadAttempts).
+			Int64("bytes_received", bytesReceived).
 			Msg("stream-extract attempt failed")
 	}
 
@@ -2321,6 +2347,19 @@ func (d *FilesystemDeployer) streamExtract(ctx context.Context, body io.Reader, 
 		progress(pr.written, totalBytes, "extract complete")
 	}
 	return nil
+}
+
+// countingReader wraps an io.Reader and counts the number of bytes read.
+// Used to track bytesReceived across streaming attempts for retry diagnostics.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	c.n += int64(n)
+	return n, err
 }
 
 // progressReader wraps an io.Reader and calls a ProgressFunc on each read.
