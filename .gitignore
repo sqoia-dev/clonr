@@ -46,3 +46,7 @@ Thumbs.db
 web/dist/
 web/node_modules/
 internal/server/web/dist/
+
+# Vendored binary build outputs — compiled in CI, never committed to git
+# Source tarballs and version pins live in build/*/versions.yml (committed).
+build/udpcast/dist/

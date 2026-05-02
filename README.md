@@ -40,34 +40,15 @@ sudo dnf install clustr-serverd
 `clustr-serverd` pulls in `memtest86+` automatically (ships in EL8 BaseOS and
 EL9/EL10 AppStream — no EPEL required).
 
+udpcast (used internally for fleet-reimage multicast) is bundled in
+`clustr-serverd`. No additional install steps required.
+
 ### CLI only
 
 ```sh
 # Add the repo for your EL version first (see above), then:
 sudo dnf install clustr
 ```
-
-### Optional: udpcast (fleet-reimage multicast)
-
-udpcast is required for the fleet-reimage multicast feature (imaging many nodes
-simultaneously over a single multicast stream). It is not packaged for EL8/9/10
-in any base or EPEL repository, so you must install it from source or a third-party
-build.
-
-**Build from source (recommended):**
-
-```sh
-sudo dnf install -y gcc make autoconf automake
-wget https://sourceforge.net/projects/udpcast/files/latest/download -O udpcast.tar.gz
-tar xf udpcast.tar.gz && cd udpcast-*
-./configure && make && sudo make install
-```
-
-`udpcast` and `udp-sender` / `udp-receiver` will be installed to `/usr/local/bin/`.
-clustr expects `udp-sender` and `udp-receiver` on `PATH`.
-
-Without udpcast, single-node reimage works normally. Fleet-reimage (multicast)
-will fail at dispatch with an "udpcast not available" error.
 
 ### Optional: Intel BIOS settings push
 

@@ -271,6 +271,50 @@ jobs:
               -o clustr-privhelper-linux-${{ matrix.goarch }} \
               ./cmd/clustr-privhelper
 
+      - name: Build vendored udpcast (amd64 only)
+        # udpcast (GPL-2.0-or-later) is not in EL8/9/10 repos; we vendor
+        # udp-sender + udp-receiver from source. arm64 is deferred — multicast
+        # fleet reimage targets amd64 bare-metal HPC. See build/udpcast/versions.yml.
+        if: matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          UDPCAST_VER=$(awk '/^udpcast:/{in_u=1} in_u && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+          UDPCAST_URL=$(awk '/^udpcast:/{in_u=1} in_u && /source_url:/{sub(/^[[:space:]]*source_url:[[:space:]]*/, ""); print; exit}' build/udpcast/versions.yml)
+          UDPCAST_SHA=$(awk '/^udpcast:/{in_u=1} in_u && /source_sha256:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+
+          echo "Building udpcast ${UDPCAST_VER} from ${UDPCAST_URL}"
+
+          # Install build dependencies
+          sudo apt-get install -y --no-install-recommends gcc make autoconf automake
+
+          # Download + verify
+          curl -fL "${UDPCAST_URL}" -o /tmp/udpcast.tar.gz
+          echo "${UDPCAST_SHA}  /tmp/udpcast.tar.gz" | sha256sum -c -
+          echo "udpcast tarball SHA256 verified"
+
+          # Copy source tarball for GPL-2.0 compliance (attached to release)
+          mkdir -p build/udpcast/dist
+          cp /tmp/udpcast.tar.gz build/udpcast/dist/udpcast-source.tar.gz
+
+          # Extract + build (static if possible, dynamic fallback)
+          tar -xzf /tmp/udpcast.tar.gz -C /tmp
+          cd /tmp/udpcast-${UDPCAST_VER}
+          ./configure
+          if make LDFLAGS=-static udp-sender udp-receiver; then
+            echo "Static link succeeded"
+          else
+            echo "Static link failed — falling back to dynamic"
+            make udp-sender udp-receiver
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64"
+          cp udp-sender udp-receiver "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/"
+          chmod 755 "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender" \
+                    "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver"
+
+          echo "udp-sender: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender)"
+          echo "udp-receiver: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver)"
+
       - name: SHA256 checksum (binary)
         run: sha256sum clustr-serverd-linux-${{ matrix.goarch }} > clustr-serverd-linux-${{ matrix.goarch }}.sha256
 
@@ -306,8 +350,16 @@ jobs:
 
           # Pre-expand only ${ARCH} in the nfpm config src: paths, leaving
           # ${VERSION} and ${EL_RELEASE} intact for nfpm's own env expansion.
+          # For arm64, strip udpcast content blocks — vendored udp-sender is
+          # amd64-only (arm64 deferred, see build/udpcast/versions.yml).
           NFPM_SERVER_RESOLVED=$(mktemp /tmp/nfpm-server-XXXXXX.yaml)
           envsubst '${ARCH}' < nfpm.yaml > "${NFPM_SERVER_RESOLVED}"
+          if [ "${ARCH}" = "arm64" ]; then
+            # Remove the udpcast contents block (udp-sender + LICENSE-udpcast entries).
+            # The block starts at "# udpcast vendored binaries" and ends just before
+            # "scripts:" — use a two-address range to delete all lines in between.
+            sed -i '/# udpcast vendored binaries/,/^scripts:/{ /^scripts:/!d }' "${NFPM_SERVER_RESOLVED}"
+          fi
 
           for EL in el8 el9 el10; do
             VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
@@ -344,6 +396,15 @@ jobs:
             clustr-serverd-linux-${{ matrix.goarch }}.sha256
             dist/
             checksums-server-${{ matrix.goarch }}.txt
+
+      # Upload udpcast source tarball for GPL-2.0 §3a compliance.
+      # amd64 only — arm64 udpcast build is deferred.
+      - name: Upload udpcast source tarball (amd64 only)
+        if: matrix.goarch == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: udpcast-source
+          path: build/udpcast/dist/udpcast-source.tar.gz
 
   # ---------------------------------------------------------------------------
   # Publish signed RPM repo to pkg.sqoia.dev.
@@ -522,3 +583,4 @@ jobs:
             clustr-serverd-linux-arm64
             clustr-serverd-linux-arm64.sha256
             dist/*.rpm
+            udpcast-source.tar.gz

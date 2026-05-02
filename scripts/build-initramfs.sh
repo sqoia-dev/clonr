@@ -682,25 +682,41 @@ ${transitive}"
     # has assigned the node to a multicast session (signalled by
     # clustr.multicast=1 + clustr.session_poll_url=... in the kernel cmdline).
     #
-    # Installed from the EPEL udpcast package on the server host; ~200KB binary.
-    # If not available, the feature is silently disabled — the build still
-    # succeeds and the node falls back to unicast HTTP fetch.
+    # In CI (MODULES_PATH set), udp-receiver is taken from the vendored build
+    # at build/udpcast/dist/amd64/udp-receiver — same binary that CI compiled
+    # for udp-sender. This eliminates the "hope it's installed on the build host"
+    # assumption. In local/dev mode, fall back to host PATH lookup as before.
     #
-    # Install on the server with: dnf install -y udpcast   (EPEL required)
+    # If not available from either source, the feature is silently disabled —
+    # the build still succeeds and the node falls back to unicast HTTP fetch.
     echo "[+] Installing udp-receiver (UDPCast multicast)..."
-    UDPRECV_PATH=$(remote_exec "command -v udp-receiver 2>/dev/null || command -v /usr/bin/udp-receiver 2>/dev/null" || echo "")
-    if [[ -n "$UDPRECV_PATH" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    VENDORED_UDPRECV="${SCRIPT_DIR}/../build/udpcast/dist/amd64/udp-receiver"
+    if [[ -n "${MODULES_PATH:-}" && -f "$VENDORED_UDPRECV" && -x "$VENDORED_UDPRECV" ]]; then
+        # CI mode: use vendored binary built from the same source as udp-sender
         mkdir -p "$WORKDIR/usr/bin"
-        if install_server_binary "$UDPRECV_PATH" "$WORKDIR/usr/bin"; then
-            UDPRECV_SIZE=$(remote_exec "du -sh ${UDPRECV_PATH} 2>/dev/null | cut -f1" || echo "?")
-            echo "  [+] udp-receiver installed at /usr/bin/udp-receiver (${UDPRECV_SIZE})"
+        if cp -f "$VENDORED_UDPRECV" "$WORKDIR/usr/bin/udp-receiver" && chmod 755 "$WORKDIR/usr/bin/udp-receiver"; then
+            UDPRECV_SIZE=$(du -sh "$VENDORED_UDPRECV" 2>/dev/null | cut -f1 || echo "?")
+            echo "  [+] udp-receiver installed from vendored build (${UDPRECV_SIZE})"
         else
-            echo "  [!] udp-receiver found but could not be installed — multicast disabled" >&2
+            echo "  [!] vendored udp-receiver copy failed — multicast disabled" >&2
         fi
     else
-        echo "  [!] udp-receiver not found on ${CLUSTR_SERVER_HOST} — multicast image delivery disabled" >&2
-        echo "       Install with: dnf install -y udpcast   # Rocky/RHEL (requires EPEL)" >&2
-        echo "       Install with: apt-get install -y udpcast  # Debian/Ubuntu" >&2
+        # Dev/remote mode: look up on the server host (legacy path)
+        UDPRECV_PATH=$(remote_exec "command -v udp-receiver 2>/dev/null || command -v /usr/bin/udp-receiver 2>/dev/null" || echo "")
+        if [[ -n "$UDPRECV_PATH" ]]; then
+            mkdir -p "$WORKDIR/usr/bin"
+            if install_server_binary "$UDPRECV_PATH" "$WORKDIR/usr/bin"; then
+                UDPRECV_SIZE=$(remote_exec "du -sh ${UDPRECV_PATH} 2>/dev/null | cut -f1" || echo "?")
+                echo "  [+] udp-receiver installed at /usr/bin/udp-receiver (${UDPRECV_SIZE})"
+            else
+                echo "  [!] udp-receiver found but could not be installed — multicast disabled" >&2
+            fi
+        else
+            echo "  [!] udp-receiver not found — multicast image delivery disabled" >&2
+            echo "       In CI: vendored build/udpcast/dist/amd64/udp-receiver was not found" >&2
+            echo "       In dev: udp-receiver not found on ${CLUSTR_SERVER_HOST}" >&2
+        fi
     fi
 fi
 

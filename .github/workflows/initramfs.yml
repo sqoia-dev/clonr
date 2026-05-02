@@ -67,9 +67,44 @@ jobs:
             pigz \
             make \
             git \
-            golang
+            golang \
+            gcc \
+            autoconf \
+            automake \
+            curl
 
       - uses: actions/checkout@v4
+
+      - name: Build vendored udpcast (udp-receiver for initramfs)
+        # Build udp-receiver from the vendored source so the initramfs includes
+        # a known-good binary without requiring udpcast on the build host.
+        # Static link attempted first; dynamic fallback if libc static libs absent.
+        # See build/udpcast/versions.yml for version + SHA256 pin.
+        run: |
+          set -euo pipefail
+          UDPCAST_VER=$(awk '/^udpcast:/{in_u=1} in_u && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+          UDPCAST_URL=$(awk '/^udpcast:/{in_u=1} in_u && /source_url:/{sub(/^[[:space:]]*source_url:[[:space:]]*/, ""); print; exit}' build/udpcast/versions.yml)
+          UDPCAST_SHA=$(awk '/^udpcast:/{in_u=1} in_u && /source_sha256:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+
+          echo "Building udpcast ${UDPCAST_VER}"
+          curl -fL "${UDPCAST_URL}" -o /tmp/udpcast.tar.gz
+          echo "${UDPCAST_SHA}  /tmp/udpcast.tar.gz" | sha256sum -c -
+
+          tar -xzf /tmp/udpcast.tar.gz -C /tmp
+          cd /tmp/udpcast-${UDPCAST_VER}
+          ./configure
+          if make LDFLAGS=-static udp-sender udp-receiver; then
+            echo "Static link succeeded"
+          else
+            echo "Static link failed — falling back to dynamic"
+            make udp-sender udp-receiver
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64"
+          cp udp-sender udp-receiver "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/"
+          chmod 755 "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender" \
+                    "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver"
+          echo "udp-receiver ready: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver)"
 
       - name: Build static clustr client
         env:

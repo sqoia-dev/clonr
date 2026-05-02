@@ -1,0 +1,31 @@
+# build/udpcast/versions.yml
+#
+# Single source-of-truth for the vendored udpcast build.
+# udpcast provides udp-sender (sender-side) and udp-receiver (receiver-side)
+# binaries for fleet-reimage multicast image delivery (Sprint 25 #157).
+#
+# udpcast is not packaged for EL8/9/10 in any base or EPEL repository.
+# Rather than requiring manual build-from-source, clustr-serverd bundles
+# udp-sender at /usr/bin/udp-sender and the initramfs bundles udp-receiver
+# at /usr/bin/udp-receiver from this vendored build.
+#
+# LICENSE: GPL-2.0-or-later. Source tarball is attached to every GitHub
+# Release as udpcast-source.tar.gz to satisfy GPL-2.0 §3a.
+#
+# HOW TO BUMP: edit version + source_sha256, verify by:
+#   curl -fL <source_url> | sha256sum
+#
+# UPSTREAM NOTE: udpcast.linux.lu is unreachable as of 2026-05. The
+# authoritative source tarball is mirrored in the Fedora lookaside cache.
+# SHA512 (Fedora sources file): 89010c781d99a60e335213e88867c9114b51f3d75bd4ebfa38bcd1382e5925be4f316faf8c24ea55b087edb2115e18b5fd3cceac70a65371f91227528d218e89
+# Cross-referenced against the Fedora udpcast.spec Version field.
+#
+# ARCH SUPPORT: amd64 only. arm64 cross-compilation deferred — multicast
+# fleet reimage is overwhelmingly amd64 bare-metal HPC. Track as follow-up.
+
+udpcast:
+  version: "20211207"
+  source_url: "https://src.fedoraproject.org/repo/pkgs/udpcast/udpcast-20211207.tar.gz/sha512/89010c781d99a60e335213e88867c9114b51f3d75bd4ebfa38bcd1382e5925be4f316faf8c24ea55b087edb2115e18b5fd3cceac70a65371f91227528d218e89/udpcast-20211207.tar.gz"
+  # SHA256 verified against Fedora lookaside cache tarball on 2026-05-01
+  source_sha256: "a3cebee7a87ecf1bca0645f125be78fbd7b37846a4da82fecef96b92cc64d050"
+  license: "GPL-2.0-or-later"

@@ -48,8 +48,9 @@ license: MIT
 
 # systemd-container provides systemd-nspawn, required by the image-shell feature.
 # memtest86+ ships in EL8 BaseOS and EL9/EL10 AppStream — no EPEL required.
-# udpcast (fleet-reimage multicast, Sprint 25 #157) is not packaged for EL8/9/10
-# in EPEL or base repos; operator must install manually — see README.
+# udpcast (fleet-reimage multicast, Sprint 25 #157) is vendored: udp-sender and
+# udp-receiver are built from source in CI and bundled in the RPM. No manual
+# install required. See build/udpcast/versions.yml and LICENSE-udpcast.
 # Package names are identical across EL8, EL9, and EL10.
 depends:
   - systemd-container
@@ -181,6 +182,24 @@ contents:
   # also available on-disk at /usr/share/clustr/schema/v1/ for third-party tooling.
   - src: pkg/api/schema/v1/*.json
     dst: /usr/share/clustr/schema/v1/
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # udpcast vendored binaries — GPL-2.0-or-later, built from source in CI.
+  # amd64 only; arm64 entries are stripped by the release.yml packaging step.
+  # Source tarball attached to every GitHub Release (GPL-2.0 §3a compliance).
+  # See build/udpcast/versions.yml and LICENSE-udpcast.
+  - src: build/udpcast/dist/${ARCH}/udp-sender
+    dst: /usr/bin/udp-sender
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: LICENSE-udpcast
+    dst: /usr/share/doc/clustr-serverd/udpcast/LICENSE
     file_info:
       mode: 0644
       owner: root
