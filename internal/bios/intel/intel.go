@@ -130,11 +130,14 @@ func (p *intelProvider) Diff(desired, current []bios.Setting) ([]bios.Change, er
 // applied when syscfg exits 0; partial failure is signalled by syscfg exit
 // codes, propagated as an error).
 func (p *intelProvider) Apply(ctx context.Context, changes []bios.Change) ([]bios.Change, error) {
-	if !p.binaryAvailable() {
-		return nil, fmt.Errorf("%w: expected at %s (see docs/BIOS-INTEL-SETUP.md)", bios.ErrBinaryMissing, p.binPath)
-	}
+	// Short-circuit: nil/empty changes require no binary invocation.
+	// Check this before binaryAvailable so callers probing with no-op payloads
+	// don't get ErrBinaryMissing on systems that haven't installed the binary yet.
 	if len(changes) == 0 {
 		return nil, nil
+	}
+	if !p.binaryAvailable() {
+		return nil, fmt.Errorf("%w: expected at %s (see docs/BIOS-INTEL-SETUP.md)", bios.ErrBinaryMissing, p.binPath)
 	}
 
 	// Write staging file.
