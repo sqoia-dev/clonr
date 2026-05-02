@@ -34,7 +34,7 @@ INITRAMFS_KERNEL_VERSION ?= 5.14.0-503.40.1.el9_5.x86_64
 # Dev cloner: SSH-pull fallback (see scripts/build-initramfs.sh mode 3).
 MODULES_PATH ?=
 
-.PHONY: all client server clientd privhelper static clean test web initramfs initramfs-verify schemas
+.PHONY: all client server clientd privhelper static clean test test-backend web initramfs initramfs-verify schemas
 
 all: web client server clientd privhelper
 
@@ -62,8 +62,11 @@ privhelper:
 static:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -a -o bin/clustr-static ./cmd/clustr
 
-test:
+test: web
 	go test ./... -v
+
+test-backend:
+	go test $$(go list ./... | grep -v internal/server) -v
 
 # schemas regenerates JSON Schema + OpenAPI 3.1 files from pkg/api types.
 # CI runs this and fails if the committed schemas differ from the generated ones:
