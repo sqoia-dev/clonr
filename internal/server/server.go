@@ -1640,7 +1640,10 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/images/{id}/shell-session", factory.OpenShellSession)
 			r.Delete("/images/{id}/shell-session/{sid}", factory.CloseShellSession)
 			r.Post("/images/{id}/shell-session/{sid}/exec", factory.ExecInSession)
-			r.Get("/images/{id}/shell-session/{sid}/ws", factory.ShellWS)
+			// wsTokenLift hoists ?token= into the Authorization header for
+			// browser WS connections (browsers cannot set custom headers on
+			// WS upgrade requests). HTTP endpoints never use this middleware.
+			r.With(wsTokenLift).Get("/images/{id}/shell-session/{sid}/ws", factory.ShellWS)
 
 			// Active deploy detection (for shell modal warning)
 			r.Get("/images/{id}/active-deploys", factory.ActiveDeploys)
@@ -1750,7 +1753,10 @@ func (s *Server) buildRouter() chi.Router {
 			consoleH := &handlers.ConsoleHandler{
 				DB: handlers.NewConsoleDBAdapter(s.db),
 			}
-			r.Get("/console/{node_id}", consoleH.HandleConsole)
+			// wsTokenLift hoists ?token= into the Authorization header for
+			// browser WS connections (browsers cannot set custom headers on
+			// WS upgrade requests). HTTP endpoints never use this middleware.
+			r.With(wsTokenLift).Get("/console/{node_id}", consoleH.HandleConsole)
 
 			// BIOS handler declaration — referenced by both node-level and
 			// top-level routes registered in the blocks below.

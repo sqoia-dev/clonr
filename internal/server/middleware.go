@@ -660,15 +660,49 @@ func requireImageAccess(imageIDParam string, database *db.DB) func(http.Handler)
 	}
 }
 
-// extractBearerToken pulls the raw token from Authorization: Bearer <token>.
-// Falls back to ?token= query param for WebSocket compatibility.
+// extractBearerToken returns the raw token from the Authorization: Bearer header only.
+// HTTP endpoints MUST use this function. Query-param tokens are rejected here because
+// they leak into access logs, browser history, proxy logs, and referrer headers.
+// For WebSocket upgrade requests — where browsers cannot set custom headers — use
+// wsTokenLift middleware instead, which hoists ?token= into the Authorization header
+// before the auth middleware runs.
 func extractBearerToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
 	parts := strings.SplitN(auth, " ", 2)
 	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
 		return parts[1]
 	}
-	return r.URL.Query().Get("token")
+	return ""
+}
+
+// wsTokenLift is middleware that hoists a ?token= query parameter into the
+// Authorization: Bearer header so that apiKeyAuth can process it normally.
+// This middleware MUST only be applied to WebSocket upgrade endpoints.
+//
+// Browsers cannot set custom headers on the WebSocket upgrade request, so
+// ?token= is the only viable auth transport for browser-originated WS
+// connections. Hoisting it into the header here keeps a single auth code
+// path in apiKeyAuth while restricting query-param acceptance to WS routes.
+//
+// HTTP endpoints never see this middleware; they get 401 when Authorization
+// is absent, which prevents token leakage via logs/proxies/referrers.
+func wsTokenLift(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only act if no Authorization header is already present and a token
+		// query param exists.  When both are present, the header wins and we
+		// leave the request unmodified.
+		if r.Header.Get("Authorization") == "" {
+			if tok := r.URL.Query().Get("token"); tok != "" {
+				// Clone the request so we don't mutate the original; then
+				// inject the Authorization header for downstream middleware.
+				r2 := r.Clone(r.Context())
+				r2.Header.Set("Authorization", "Bearer "+tok)
+				next.ServeHTTP(w, r2)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // sha256Hex returns the lowercase hex-encoded SHA-256 of s.

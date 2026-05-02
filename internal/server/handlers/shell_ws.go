@@ -92,7 +92,9 @@ func wrapNspawnInScope(sessionID string, nspawnArgs []string) *exec.Cmd {
 // base rootfs (ADR-0009 overlayfs model). Until that lands, invalidating the
 // sidecar forces a fresh hash computation on next blob fetch, which avoids the
 // mismatch at the cost of one extra full-tar pass.
-func invalidateImageSidecar(imageDir, imageID string) {
+//
+// Returns true if the sidecar existed (i.e. the image was marked as mutated).
+func invalidateImageSidecar(imageDir, imageID string) bool {
 	sidecarPath := filepath.Join(imageDir, imageID, "tar-sha256")
 	err := os.Remove(sidecarPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -100,14 +102,16 @@ func invalidateImageSidecar(imageDir, imageID string) {
 			Str("image_id", imageID).
 			Str("path", sidecarPath).
 			Msg("shell session close: failed to remove tar-sha256 sidecar")
-		return
+		return false
 	}
-	if !os.IsNotExist(err) {
+	existed := !os.IsNotExist(err)
+	if existed {
 		log.Info().
 			Str("image_id", imageID).
 			Str("path", sidecarPath).
 			Msg("shell session closed — invalidated tar-sha256 sidecar; next blob fetch will recompute")
 	}
+	return existed
 }
 
 // wsUpgrader validates that browser WebSocket connections originate from the
@@ -181,10 +185,14 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upgrade to WebSocket. Auth token may be supplied via query param for
-	// browsers that cannot set custom headers during WebSocket handshake.
-	// (The bearer auth middleware already checked the Authorization header;
-	// if we are here the auth layer already approved the request.)
+	// AUTH: bearer token may be supplied via Authorization header OR ?token=
+	// query param. The query-param fallback exists ONLY because browsers cannot
+	// set custom headers on WebSocket upgrade requests; wsTokenLift middleware
+	// hoists ?token= into the Authorization header before apiKeyAuth runs, so
+	// by the time execution reaches here the request is already authenticated.
+	// This is the ONE place in the API where ?token= is accepted. HTTP endpoints
+	// reject query-param tokens (see wsTokenLift / extractBearerToken in
+	// middleware.go — query fallback is absent from the shared HTTP auth path).
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade already wrote the HTTP error response.
@@ -228,10 +236,18 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RISK-1(a): send mutation warning as the first WebSocket frame so any
+	// non-browser client (CLI tools, scripts) also receives the advisory before
+	// any user data flows.
+	_ = conn.WriteJSON(wsMsg{
+		Type: "warning",
+		Data: api.ShellMutationWarning,
+	})
+
 	log.Info().Str("session_id", sessionID).Str("image_id", imageID).Str("rootdir", rootDir).
 		Msg("shell ws: terminal session started")
 
-	// Audit: shell session opened.
+	// Audit: shell session WebSocket connected.
 	if h.Audit != nil {
 		h.Audit.Record(r.Context(), actorID, actorLabel,
 			db.AuditActionImageShellStart, "image", imageID,
@@ -284,14 +300,6 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		_ = cmd.Wait()
 		log.Info().Str("session_id", sessionID).Str("image_id", imageID).
 			Msg("shell ws: terminal session ended")
-		// Audit: shell session closed.
-		if h.Audit != nil {
-			h.Audit.Record(r.Context(), actorID, actorLabel,
-				db.AuditActionImageShellEnd, "image", imageID,
-				r.RemoteAddr, nil,
-				map[string]any{"session_id": sessionID},
-			)
-		}
 		// Invalidate the tar-sha256 sidecar so the next blob fetch recomputes
 		// the tarball hash. The shell session may have written files into the
 		// rootfs (e.g. /root/.bash_history) that would cause a hash mismatch
@@ -300,7 +308,15 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		// TODO(ADR-0009): remove this hotfix once the overlayfs shell model
 		// lands — overlayfs sessions write into an ephemeral upper layer and
 		// never mutate the base rootfs.
-		invalidateImageSidecar(h.ImageDir, imageID)
+		mutated := invalidateImageSidecar(h.ImageDir, imageID)
+		// Audit: shell session closed. RISK-1(a) — record whether mutation occurred.
+		if h.Audit != nil {
+			h.Audit.Record(r.Context(), actorID, actorLabel,
+				db.AuditActionImageShellClose, "image", imageID,
+				r.RemoteAddr, nil,
+				map[string]any{"session_id": sessionID, "mutated": mutated},
+			)
+		}
 	}()
 
 	// PTY → WebSocket: stream shell output to browser.

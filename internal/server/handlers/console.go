@@ -97,6 +97,15 @@ func (h *ConsoleHandler) HandleConsole(w http.ResponseWriter, r *http.Request) {
 
 	modeParam := r.URL.Query().Get("mode")
 
+	// AUTH: bearer token may be supplied via Authorization header OR ?token=
+	// query param. The query-param fallback exists ONLY because browsers cannot
+	// set custom headers on WebSocket upgrade requests; wsTokenLift middleware
+	// hoists ?token= into the Authorization header before apiKeyAuth runs, so
+	// by the time execution reaches here the request is already authenticated.
+	// This is one of the TWO places in the API where ?token= is accepted (the
+	// other is ShellWS). HTTP endpoints reject query-param tokens — see
+	// wsTokenLift / extractBearerToken in middleware.go.
+
 	// Upgrade to WebSocket before any blocking work so the client gets a fast
 	// error response if the upgrade fails.
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
