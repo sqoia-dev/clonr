@@ -5151,6 +5151,9 @@
               "hardware_profile": true,
               "detected_firmware": {
                 "type": "string"
+              },
+              "multicast_mode": {
+                "type": "string"
               }
             },
             "additionalProperties": false,
