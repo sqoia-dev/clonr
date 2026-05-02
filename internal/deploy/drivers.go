@@ -116,8 +116,15 @@ func detectDistro(root string) (Distro, error) {
 					return Distro{Family: "ubuntu", Major: major}, nil
 				}
 			}
+			if id == "debian" {
+				major := parseMajorVersion(verID)
+				if major > 0 {
+					return Distro{Family: "debian", Major: major}, nil
+				}
+			}
 		}
-		// Generic Debian — no driver in v1; driverFor returns ErrNoDriver.
+		// Generic Debian (no os-release or unrecognised) — major 0; driverFor
+		// returns ErrNoDriver for unknown majors.
 		return Distro{Family: "debian", Major: 0}, nil
 	}
 
@@ -146,6 +153,21 @@ func detectDistro(root string) (Distro, error) {
 		return Distro{Family: "ubuntu", Major: major}, nil
 	case "rhel", "rocky", "almalinux", "centos", "fedora":
 		return Distro{Family: "el", Major: major}, nil
+	case "sles", "sle_hpc":
+		return Distro{Family: "sles", Major: major}, nil
+	case "debian":
+		return Distro{Family: "debian", Major: major}, nil
+	}
+	// Check ID_LIKE for SLES variants (e.g. SLES for SAP sets ID=sles_sap but
+	// ID_LIKE=sles).
+	idLike := osRel["ID_LIKE"]
+	for _, like := range strings.Fields(idLike) {
+		switch like {
+		case "sles":
+			return Distro{Family: "sles", Major: major}, nil
+		case "debian":
+			return Distro{Family: "debian", Major: major}, nil
+		}
 	}
 	return Distro{}, &ErrDistroUnknown{Root: root}
 }

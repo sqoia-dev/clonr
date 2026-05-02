@@ -44,11 +44,15 @@ func (d *ubuntu24Driver) WriteSystemFiles(root string, cfg api.NodeConfig) error
 
 // InstallBootloader installs GRUB2 using the Ubuntu package binary names.
 // Ubuntu ships grub-install (not grub2-install); the flags and semantics are
-// identical to the EL path for BIOS/GPT deployments.
+// identical to the EL path for both BIOS/GPT and UEFI deployments.
 //
-// EFI: delegated to FilesystemDeployer.Finalize which has the full partition
-// table and ESP device path. Sprint 26 target: migrate EFI here.
+// EFI: runs grub-install --target=x86_64-efi inside the deployed chroot.
+//      Required packages in the image: grub-efi-amd64, grub-efi-amd64-bin,
+//      shim-signed.
 func (d *ubuntu24Driver) InstallBootloader(ctx *bootloaderCtx) error {
+	if ctx.IsEFI {
+		return installUbuntuGRUBEFI(ctx)
+	}
 	if len(ctx.AllTargets) == 0 {
 		return nil
 	}
