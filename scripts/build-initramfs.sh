@@ -10,10 +10,30 @@
 #   - clustr binary must be statically compiled (CGO_ENABLED=0)
 #   - busybox-static package OR internet access to download busybox
 #   - cpio, gzip
-#   - sshpass + access to clustr-server (192.168.1.151) for kernel modules
-#     (virtio_net, net_failover, failover required for virtio NIC in initramfs)
 #
-# Example:
+# Kernel module sourcing — choose one of three modes (evaluated in order):
+#
+#   1. MODULES_PATH=/path/to/modules  (preferred, reproducible)
+#      Modules are read from a local directory (e.g. /modules inside the
+#      ghcr.io/sqoia-dev/initramfs-builder image, or a volume mount).
+#      No SSH, no network access to the lab server.  This is the CI path.
+#
+#      make initramfs MODULES_PATH=/modules
+#
+#      Locally (via builder image):
+#        docker run --rm -v $(pwd):/clustr \
+#          ghcr.io/sqoia-dev/initramfs-builder:5.14.0-503.40.1.el9_5.x86_64 \
+#          make -C /clustr initramfs MODULES_PATH=/modules
+#
+#   2. CLUSTR_CI_MODE=1  (local host has kernel modules at /lib/modules)
+#      Legacy CI path — kept for backwards compatibility.
+#
+#   3. CLUSTR_SERVER_HOST / CLUSTR_SERVER_USER / CLUSTR_SERVER_PASS  (SSH pull)
+#      Pulls modules from a remote Rocky Linux host over SSH.
+#      Still supported for local dev on the cloner (192.168.1.151).
+#      CI no longer depends on this path.
+#
+# Example (MODULES_PATH mode):
 #   CGO_ENABLED=0 go build -o bin/clustr ./cmd/clustr
 #   ./scripts/build-initramfs.sh bin/clustr initramfs-clustr.img
 
@@ -22,6 +42,12 @@ set -euo pipefail
 CLUSTR_BIN="${1:?Usage: build-initramfs.sh <clustr-binary> [output]}"
 OUTPUT="${2:-initramfs-clustr.img}"
 
+# ── Mode selection ────────────────────────────────────────────────────────────
+# MODULES_PATH mode: caller provides pre-populated kernel module directory.
+# This decouples the build from any live host and enables reproducible output.
+MODULES_PATH="${MODULES_PATH:-}"
+
+# Legacy: CLUSTR_CI_MODE=1 forces local mode using the host's /lib/modules.
 # clustr-server SSH credentials — used to pull kernel modules.
 # The initramfs kernel version must match the modules being loaded.
 # SECURITY: SSH key-based auth is strongly preferred over password auth.
@@ -31,7 +57,8 @@ CLUSTR_SERVER_HOST="${CLUSTR_SERVER_HOST:-192.168.1.151}"
 
 # Detect local mode — skip SSH when building on the server itself, or in CI
 # (CLUSTR_CI_MODE=1 disables remote SSH; kernel modules are sourced locally).
-if [[ "$CLUSTR_SERVER_HOST" == "127.0.0.1" || "$CLUSTR_SERVER_HOST" == "localhost" || "$CLUSTR_SERVER_HOST" == "::1" || "${CLUSTR_CI_MODE:-0}" == "1" ]]; then
+# MODULES_PATH being set always implies local mode.
+if [[ -n "$MODULES_PATH" || "$CLUSTR_SERVER_HOST" == "127.0.0.1" || "$CLUSTR_SERVER_HOST" == "localhost" || "$CLUSTR_SERVER_HOST" == "::1" || "${CLUSTR_CI_MODE:-0}" == "1" ]]; then
     LOCAL_MODE=1
 else
     LOCAL_MODE=0
@@ -39,8 +66,8 @@ fi
 
 # SSH credentials are only required in remote mode.
 if [[ "$LOCAL_MODE" -eq 0 ]]; then
-    CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:?ERROR: CLUSTR_SERVER_USER must be set (or set CLUSTR_CI_MODE=1 to skip SSH)}"
-    CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:?ERROR: CLUSTR_SERVER_PASS must be set (or set CLUSTR_CI_MODE=1 to skip SSH)}"
+    CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:?ERROR: CLUSTR_SERVER_USER must be set (or set MODULES_PATH, or CLUSTR_CI_MODE=1)}"
+    CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:?ERROR: CLUSTR_SERVER_PASS must be set (or set MODULES_PATH, or CLUSTR_CI_MODE=1)}"
 else
     CLUSTR_SERVER_USER="${CLUSTR_SERVER_USER:-}"
     CLUSTR_SERVER_PASS="${CLUSTR_SERVER_PASS:-}"
@@ -698,208 +725,324 @@ echo "  [+] Installed busybox and symlinks"
 # Out of scope: lspci-alias auto-detection. If the explicit list proves fragile
 # after real-hardware lab validation, Sprint 21 can add lspci resolution.
 # ──────────────────────────────────────────────────────────────────────────────
-echo "  [+] Fetching kernel modules from clustr-server ${CLUSTR_SERVER_HOST}..."
+# ── Module allowlist ─────────────────────────────────────────────────────────
+# Canonical module names (underscores, no .ko suffix).
+# The enumerator searches for each name under the kernel module tree,
+# handling both foo.ko and foo.ko.xz, and any subdirectory layout.
+# Adding a name here is sufficient — no file paths to maintain.
+MODULE_ALLOWLIST=(
+    # VMs (keep existing virtio support)
+    failover net_failover virtio_net
+    virtio_scsi virtio_blk
 
-# Discover the kernel version from the server.
-KVER=$(remote_exec "uname -r" 2>/dev/null)
+    # Mellanox/NVIDIA ConnectX NICs (CX-3 through CX-6+)
+    mlx5_core mlx5_ib
+    mlx4_core mlx4_en mlx4_ib
 
-if [[ -z "$KVER" ]]; then
-    echo "WARNING: cannot reach clustr-server — skipping kernel modules." >&2
-    echo "         NIC drivers will not be loaded; DHCP may fail." >&2
-    KVER="unknown"
-else
-    echo "      kernel version: $KVER"
+    # Intel NICs (XL710 i40e, E810 ice, 82599 ixgbe, 1G igb, e1000e)
+    i40e ice ixgbe igb e1000e
 
-    # ── Module allowlist ──────────────────────────────────────────────────────
-    # Canonical module names (underscores, no .ko suffix).
-    # The enumerator below searches for each name under the kernel module tree,
-    # handling both foo.ko and foo.ko.xz, and any subdirectory layout.
-    # Adding a name here is sufficient — no file paths to maintain.
-    MODULE_ALLOWLIST=(
-        # VMs (keep existing virtio support)
-        failover net_failover virtio_net
-        virtio_scsi virtio_blk
+    # Broadcom NICs
+    bnxt_en bnx2x tg3
 
-        # Mellanox/NVIDIA ConnectX NICs (CX-3 through CX-6+)
-        mlx5_core mlx5_ib
-        mlx4_core mlx4_en mlx4_ib
+    # NVMe storage
+    nvme nvme_core
 
-        # Intel NICs (XL710 i40e, E810 ice, 82599 ixgbe, 1G igb, e1000e)
-        i40e ice ixgbe igb e1000e
+    # Hardware RAID controllers
+    megaraid_sas mpt3sas aacraid
 
-        # Broadcom NICs
-        bnxt_en bnx2x tg3
+    # SCSI mid-layer (required by hardware HBAs above)
+    sd_mod scsi_mod
 
-        # NVMe storage
-        nvme nvme_core
+    # Device Mapper (LVM + thin provisioning)
+    dm_mod dm_mirror dm_snapshot dm_thin_pool
 
-        # Hardware RAID controllers
-        megaraid_sas mpt3sas aacraid
+    # Filesystems
+    xfs btrfs ext4 jbd2 mbcache fat vfat
 
-        # SCSI mid-layer (required by hardware HBAs above)
-        sd_mod scsi_mod
+    # Crypto / CRC (required by xfs, btrfs, dm layers)
+    crc32c_generic libcrc32c
+    crc32c-intel    # x86 hardware acceleration (hyphen form in tree)
 
-        # Device Mapper (LVM + thin provisioning)
-        dm_mod dm_mirror dm_snapshot dm_thin_pool
+    # MD software RAID personalities
+    raid0 raid1 raid10 raid456
+)
 
-        # Filesystems
-        xfs btrfs ext4 jbd2 mbcache fat vfat
+# ── Directories to search ─────────────────────────────────────────────────────
+# Walk these recursively; find handles subdirectory depth automatically.
+SEARCH_DIRS=(
+    "net"
+    "drivers/net"
+    "drivers/scsi"
+    "drivers/block"
+    "drivers/nvme"
+    "drivers/md"
+    "drivers/infiniband"
+    "fs"
+    "arch/x86/crypto"
+    "lib"
+    "crypto"
+)
 
-        # Crypto / CRC (required by xfs, btrfs, dm layers)
-        crc32c_generic libcrc32c
-        crc32c-intel    # x86 hardware acceleration (hyphen form in tree)
+# ── Module source selection ───────────────────────────────────────────────────
+# Mode 1 (preferred): MODULES_PATH is set — modules live in a local directory.
+#   CI runs inside the builder image where /modules is pre-populated.
+#   No SSH or network access required; fully reproducible.
+#
+# Mode 2 (legacy): CLUSTR_CI_MODE=1 or localhost — modules at /lib/modules.
+#
+# Mode 3 (dev cloner): SSH pull from CLUSTR_SERVER_HOST.
+#   Still supported; CI no longer depends on this path.
+if [[ -n "$MODULES_PATH" ]]; then
+    # ── MODULES_PATH mode ─────────────────────────────────────────────────────
+    # Derive KVER from the directory name inside MODULES_PATH.
+    # The builder image copies /lib/modules/$KVER → /modules, so exactly one
+    # subdirectory should exist. We pick the first non-empty one.
+    KVER=$(find "$MODULES_PATH" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1 || true)
+    if [[ -z "$KVER" ]]; then
+        # Fallback: MODULES_PATH is itself the kernel version directory.
+        KVER=$(basename "$MODULES_PATH")
+    fi
+    KMOD_SRC="${MODULES_PATH}/${KVER}/kernel"
+    if [[ ! -d "$KMOD_SRC" ]]; then
+        # Caller may have passed the versioned dir directly.
+        KMOD_SRC="${MODULES_PATH}/kernel"
+        if [[ ! -d "$KMOD_SRC" ]]; then
+            echo "ERROR: MODULES_PATH=${MODULES_PATH}: cannot find kernel/ subdirectory." >&2
+            echo "       Expected: ${MODULES_PATH}/<kver>/kernel or ${MODULES_PATH}/kernel" >&2
+            exit 1
+        fi
+    fi
+    echo "  [+] Using local kernel modules from MODULES_PATH=${MODULES_PATH} (kver=${KVER})"
 
-        # MD software RAID personalities
-        raid0 raid1 raid10 raid456
-    )
-
-    # ── Directories to search on the server ──────────────────────────────────
-    # We walk these recursively; the find command below handles subdirectory
-    # depth automatically so we don't need to enumerate leaf directories.
-    SEARCH_DIRS=(
-        "net"
-        "drivers/net"
-        "drivers/scsi"
-        "drivers/block"
-        "drivers/nvme"
-        "drivers/md"
-        "drivers/infiniband"
-        "fs"
-        "arch/x86/crypto"
-        "lib"
-        "crypto"
-    )
-
-    KMOD_BASE="/lib/modules/$KVER/kernel"
     KMOD_LOCAL="$WORKDIR/lib/modules/$KVER/kernel"
     MANIFEST_FILE="${OUTPUT%.img}.modules.manifest"
-    # Initialize manifest (overwrite any prior run)
     : > "$MANIFEST_FILE"
 
-    # ── enumerate_and_fetch <module_name> ────────────────────────────────────
-    # Walks each SEARCH_DIR on the server looking for <module_name>.ko or
-    # <module_name>.ko.xz (recursively). Copies every match into the initramfs,
-    # decompresses .xz files, and appends a manifest line.
-    #
-    # We normalize hyphens↔underscores when comparing names because the kernel
-    # tree uses hyphens in some file names (crc32c-intel.ko) while modprobe
-    # canonicalizes to underscores. We match both forms.
-    enumerate_and_fetch() {
+    # enumerate_local <module_name>
+    # Walks SEARCH_DIRS under KMOD_SRC looking for <mod>.ko / <mod>.ko.xz.
+    # Copies matches into the staging tree, decompresses .xz, appends manifest.
+    enumerate_local() {
         local mod_name="$1"
-        # Build a grep-friendly alternation: foo_bar matches foo_bar and foo-bar.
         local mod_hyp="${mod_name//_/-}"
         local mod_und="${mod_name//-/_}"
         local found=0
 
         for search_dir in "${SEARCH_DIRS[@]}"; do
-            local remote_dir="${KMOD_BASE}/${search_dir}"
-            # List .ko and .ko.xz files in this subtree matching either form.
+            local src_dir="${KMOD_SRC}/${search_dir}"
+            [[ -d "$src_dir" ]] || continue
+
             local hits
-            hits=$(remote_exec "
-                find '${remote_dir}' -type f \( -name '${mod_hyp}.ko' -o -name '${mod_hyp}.ko.xz' \
-                    -o -name '${mod_und}.ko' -o -name '${mod_und}.ko.xz' \) 2>/dev/null
-            " 2>/dev/null || true)
+            hits=$(find "$src_dir" -type f \( \
+                -name "${mod_hyp}.ko"  -o -name "${mod_hyp}.ko.xz" \
+                -o -name "${mod_und}.ko" -o -name "${mod_und}.ko.xz" \
+            \) 2>/dev/null | sort || true)
 
-            if [[ -z "$hits" ]]; then
-                continue
-            fi
+            [[ -z "$hits" ]] && continue
 
-            while IFS= read -r remote_path; do
-                [[ -z "$remote_path" ]] && continue
-                # Compute relative path from kernel base
-                local rel_path="${remote_path#${KMOD_BASE}/}"
+            while IFS= read -r src_path; do
+                [[ -z "$src_path" ]] && continue
+                local rel_path="${src_path#${KMOD_SRC}/}"
                 local local_dest="${KMOD_LOCAL}/${rel_path}"
                 mkdir -p "$(dirname "$local_dest")"
+                cp -f "$src_path" "$local_dest"
 
-                if remote_copy "${remote_path}" "${local_dest}"; then
-                    local ko_path="$local_dest"
-                    # Decompress .xz in place (busybox insmod needs uncompressed ELF)
-                    if [[ "$local_dest" == *.xz ]]; then
-                        if xz -d "$local_dest" 2>/dev/null; then
-                            ko_path="${local_dest%.xz}"
-                        else
-                            echo "      WARNING: failed to decompress ${local_dest}" >&2
-                            rm -f "$local_dest"
-                            continue
-                        fi
+                local ko_path="$local_dest"
+                if [[ "$local_dest" == *.xz ]]; then
+                    if xz -d "$local_dest" 2>/dev/null; then
+                        ko_path="${local_dest%.xz}"
+                    else
+                        echo "      WARNING: failed to decompress ${local_dest}" >&2
+                        rm -f "$local_dest"
+                        continue
                     fi
-                    # Append manifest line: <module_name> <relative_path> <sha256>
-                    local ko_rel="${ko_path#${WORKDIR}/}"
-                    local ko_sha256
-                    ko_sha256=$(sha256sum "$ko_path" 2>/dev/null | awk '{print $1}' || echo "unavailable")
-                    echo "${mod_und} ${ko_rel} ${ko_sha256}" >> "$MANIFEST_FILE"
-                    echo "        + $(basename "$ko_path")"
-                    found=1
-                else
-                    echo "      WARNING: could not fetch ${remote_path}" >&2
                 fi
+                # Manifest line: <module_name> <relative_path> <sha256>
+                # SHA256 computed after decompression for consistency.
+                local ko_rel="${ko_path#${WORKDIR}/}"
+                local ko_sha256
+                ko_sha256=$(sha256sum "$ko_path" 2>/dev/null | awk '{print $1}' || echo "unavailable")
+                echo "${mod_und} ${ko_rel} ${ko_sha256}" >> "$MANIFEST_FILE"
+                echo "        + $(basename "$ko_path")"
+                found=1
             done <<< "$hits"
         done
 
         if [[ "$found" -eq 0 ]]; then
-            echo "      (not found on server — may be built-in or not installed): ${mod_name}"
+            echo "      (not in MODULES_PATH — may be built-in): ${mod_name}"
         fi
     }
 
-    echo "      enumerating modules from allowlist..."
+    echo "      enumerating modules from allowlist (local)..."
     for mod in "${MODULE_ALLOWLIST[@]}"; do
         printf "    [*] %-25s " "${mod}:"
-        enumerate_and_fetch "$mod"
+        enumerate_local "$mod"
     done
 
-    # ── Generate modules.dep (modprobe dependency file) ───────────────────────
-    # Run depmod on the server to generate a dep file for our exact module set,
-    # then copy it. If depmod is unavailable, fall back to a hand-written dep
-    # file that covers the known dependency chains.
     MODDEP_DIR="$WORKDIR/lib/modules/$KVER"
 
-    # Try server-side depmod for an accurate dep file.
-    if remote_exec "command -v depmod >/dev/null 2>&1"; then
-        TMP_KMOD_DIR=$(remote_exec "mktemp -d /tmp/clustr-depmod.XXXXXXXX" 2>/dev/null || echo "")
-        if [[ -n "$TMP_KMOD_DIR" ]]; then
-            # Copy our fetched .ko files to the server temp dir so depmod can scan them.
-            # This is best-effort: if it fails we fall back to the static dep map.
-            # We list the .ko files we actually embedded.
-            EMBEDDED_KOS=$(find "$KMOD_LOCAL" -name "*.ko" 2>/dev/null | \
-                sed "s|${WORKDIR}/||" || true)
-            server_depmod_ok=0
-            if [[ -n "$EMBEDDED_KOS" ]]; then
-                # Build a temporary module layout on the server mirroring ours.
-                while IFS= read -r rel_ko; do
-                    [[ -z "$rel_ko" ]] && continue
-                    remote_dir_path="${TMP_KMOD_DIR}/$(dirname "$rel_ko")"
-                    remote_exec "mkdir -p '${remote_dir_path}'" 2>/dev/null || true
-                    # Push the .ko to the server for depmod scanning.
-                    # (sshpass scp in reverse: push local→remote)
-                    if [[ "$LOCAL_MODE" -eq 1 ]]; then
-                        cp -f "$WORKDIR/$rel_ko" "${TMP_KMOD_DIR}/${rel_ko}" 2>/dev/null || true
-                    else
-                        sshpass -p "$CLUSTR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
-                            "$WORKDIR/$rel_ko" \
-                            "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}:${TMP_KMOD_DIR}/${rel_ko}" \
-                            2>/dev/null || true
-                    fi
-                done <<< "$EMBEDDED_KOS"
-                FAKE_KVER="depmod-fake"
-                DEP_OUTPUT=$(remote_exec "
-                    depmod -b '${TMP_KMOD_DIR}' '${FAKE_KVER}' 2>/dev/null &&
-                    cat '${TMP_KMOD_DIR}/lib/modules/${FAKE_KVER}/modules.dep' 2>/dev/null || true
-                " 2>/dev/null || true)
-                if [[ -n "$DEP_OUTPUT" ]]; then
-                    echo "$DEP_OUTPUT" > "$MODDEP_DIR/modules.dep"
-                    server_depmod_ok=1
-                    echo "      generated modules.dep via server depmod"
-                fi
-                remote_exec "rm -rf '${TMP_KMOD_DIR}'" 2>/dev/null || true
+    # Run local depmod when available.  Prefer it over the static fallback because
+    # it generates accurate inter-module dependency chains.
+    if command -v depmod &>/dev/null; then
+        TMP_DEPMOD_DIR=$(mktemp -d /tmp/clustr-depmod.XXXXXXXX)
+        # Mirror embedded .ko layout for depmod.
+        cp -r "$WORKDIR/lib" "$TMP_DEPMOD_DIR/" 2>/dev/null || true
+        FAKE_KVER="depmod-fake"
+        # Rename the versioned dir to our fake version so depmod finds it.
+        if [[ -d "${TMP_DEPMOD_DIR}/lib/modules/$KVER" ]]; then
+            mv "${TMP_DEPMOD_DIR}/lib/modules/$KVER" \
+               "${TMP_DEPMOD_DIR}/lib/modules/${FAKE_KVER}"
+        fi
+        if depmod -b "$TMP_DEPMOD_DIR" "$FAKE_KVER" 2>/dev/null; then
+            DEP_FILE="${TMP_DEPMOD_DIR}/lib/modules/${FAKE_KVER}/modules.dep"
+            if [[ -s "$DEP_FILE" ]]; then
+                cp "$DEP_FILE" "$MODDEP_DIR/modules.dep"
+                echo "      generated modules.dep via local depmod"
             fi
-            if [[ "$server_depmod_ok" -eq 0 ]]; then
-                echo "      depmod push failed — using static dep map" >&2
+        fi
+        rm -rf "$TMP_DEPMOD_DIR"
+    fi
+
+else
+    # ── SSH / legacy local mode ───────────────────────────────────────────────
+    if [[ "$LOCAL_MODE" -eq 1 ]]; then
+        echo "  [+] Fetching kernel modules (CLUSTR_CI_MODE=1 / localhost)..."
+    else
+        echo "  [+] Fetching kernel modules from clustr-server ${CLUSTR_SERVER_HOST}..."
+    fi
+
+    # Discover the kernel version from the server (or local host).
+    KVER=$(remote_exec "uname -r" 2>/dev/null)
+
+    if [[ -z "$KVER" ]]; then
+        echo "WARNING: cannot reach clustr-server — skipping kernel modules." >&2
+        echo "         NIC drivers will not be loaded; DHCP may fail." >&2
+        KVER="unknown"
+    else
+        echo "      kernel version: $KVER"
+
+        KMOD_BASE="/lib/modules/$KVER/kernel"
+        KMOD_LOCAL="$WORKDIR/lib/modules/$KVER/kernel"
+        MANIFEST_FILE="${OUTPUT%.img}.modules.manifest"
+        : > "$MANIFEST_FILE"
+
+        # ── enumerate_and_fetch <module_name> ────────────────────────────────
+        # Walks each SEARCH_DIR on the server looking for <module_name>.ko or
+        # <module_name>.ko.xz (recursively). Copies every match into the initramfs,
+        # decompresses .xz files, and appends a manifest line.
+        #
+        # We normalize hyphens↔underscores when comparing names because the kernel
+        # tree uses hyphens in some file names (crc32c-intel.ko) while modprobe
+        # canonicalizes to underscores. We match both forms.
+        enumerate_and_fetch() {
+            local mod_name="$1"
+            local mod_hyp="${mod_name//_/-}"
+            local mod_und="${mod_name//-/_}"
+            local found=0
+
+            for search_dir in "${SEARCH_DIRS[@]}"; do
+                local remote_dir="${KMOD_BASE}/${search_dir}"
+                local hits
+                hits=$(remote_exec "
+                    find '${remote_dir}' -type f \( -name '${mod_hyp}.ko' -o -name '${mod_hyp}.ko.xz' \
+                        -o -name '${mod_und}.ko' -o -name '${mod_und}.ko.xz' \) 2>/dev/null
+                " 2>/dev/null || true)
+
+                if [[ -z "$hits" ]]; then
+                    continue
+                fi
+
+                while IFS= read -r remote_path; do
+                    [[ -z "$remote_path" ]] && continue
+                    local rel_path="${remote_path#${KMOD_BASE}/}"
+                    local local_dest="${KMOD_LOCAL}/${rel_path}"
+                    mkdir -p "$(dirname "$local_dest")"
+
+                    if remote_copy "${remote_path}" "${local_dest}"; then
+                        local ko_path="$local_dest"
+                        if [[ "$local_dest" == *.xz ]]; then
+                            if xz -d "$local_dest" 2>/dev/null; then
+                                ko_path="${local_dest%.xz}"
+                            else
+                                echo "      WARNING: failed to decompress ${local_dest}" >&2
+                                rm -f "$local_dest"
+                                continue
+                            fi
+                        fi
+                        local ko_rel="${ko_path#${WORKDIR}/}"
+                        local ko_sha256
+                        ko_sha256=$(sha256sum "$ko_path" 2>/dev/null | awk '{print $1}' || echo "unavailable")
+                        echo "${mod_und} ${ko_rel} ${ko_sha256}" >> "$MANIFEST_FILE"
+                        echo "        + $(basename "$ko_path")"
+                        found=1
+                    else
+                        echo "      WARNING: could not fetch ${remote_path}" >&2
+                    fi
+                done <<< "$hits"
+            done
+
+            if [[ "$found" -eq 0 ]]; then
+                echo "      (not found on server — may be built-in or not installed): ${mod_name}"
+            fi
+        }
+
+        echo "      enumerating modules from allowlist..."
+        for mod in "${MODULE_ALLOWLIST[@]}"; do
+            printf "    [*] %-25s " "${mod}:"
+            enumerate_and_fetch "$mod"
+        done
+
+        MODDEP_DIR="$WORKDIR/lib/modules/$KVER"
+
+        # Try server-side depmod for an accurate dep file.
+        if remote_exec "command -v depmod >/dev/null 2>&1"; then
+            TMP_KMOD_DIR=$(remote_exec "mktemp -d /tmp/clustr-depmod.XXXXXXXX" 2>/dev/null || echo "")
+            if [[ -n "$TMP_KMOD_DIR" ]]; then
+                EMBEDDED_KOS=$(find "$KMOD_LOCAL" -name "*.ko" 2>/dev/null | \
+                    sed "s|${WORKDIR}/||" || true)
+                server_depmod_ok=0
+                if [[ -n "$EMBEDDED_KOS" ]]; then
+                    while IFS= read -r rel_ko; do
+                        [[ -z "$rel_ko" ]] && continue
+                        remote_dir_path="${TMP_KMOD_DIR}/$(dirname "$rel_ko")"
+                        remote_exec "mkdir -p '${remote_dir_path}'" 2>/dev/null || true
+                        if [[ "$LOCAL_MODE" -eq 1 ]]; then
+                            cp -f "$WORKDIR/$rel_ko" "${TMP_KMOD_DIR}/${rel_ko}" 2>/dev/null || true
+                        else
+                            sshpass -p "$CLUSTR_SERVER_PASS" scp -o StrictHostKeyChecking=accept-new \
+                                "$WORKDIR/$rel_ko" \
+                                "${CLUSTR_SERVER_USER}@${CLUSTR_SERVER_HOST}:${TMP_KMOD_DIR}/${rel_ko}" \
+                                2>/dev/null || true
+                        fi
+                    done <<< "$EMBEDDED_KOS"
+                    FAKE_KVER="depmod-fake"
+                    DEP_OUTPUT=$(remote_exec "
+                        depmod -b '${TMP_KMOD_DIR}' '${FAKE_KVER}' 2>/dev/null &&
+                        cat '${TMP_KMOD_DIR}/lib/modules/${FAKE_KVER}/modules.dep' 2>/dev/null || true
+                    " 2>/dev/null || true)
+                    if [[ -n "$DEP_OUTPUT" ]]; then
+                        echo "$DEP_OUTPUT" > "$MODDEP_DIR/modules.dep"
+                        server_depmod_ok=1
+                        echo "      generated modules.dep via server depmod"
+                    fi
+                    remote_exec "rm -rf '${TMP_KMOD_DIR}'" 2>/dev/null || true
+                fi
+                if [[ "$server_depmod_ok" -eq 0 ]]; then
+                    echo "      depmod push failed — using static dep map" >&2
+                fi
             fi
         fi
     fi
+fi
 
-    # Fall back to a static modules.dep covering known dependency chains.
-    # This covers the common case; depmod-generated is preferred when available.
+# ── modules.dep static fallback ───────────────────────────────────────────────
+# Covers the common case; depmod-generated is preferred when available.
+# MODDEP_DIR is set by whichever mode ran above; if KVER was "unknown" (SSH
+# mode, server unreachable), skip module metadata generation entirely.
+if [[ "${KVER:-unknown}" != "unknown" ]]; then
+    MODDEP_DIR="$WORKDIR/lib/modules/$KVER"
+    mkdir -p "$MODDEP_DIR"
+
     if [[ ! -s "$MODDEP_DIR/modules.dep" ]]; then
         cat > "$MODDEP_DIR/modules.dep" << 'MODDEP'
 kernel/net/core/failover.ko:
@@ -934,8 +1077,7 @@ MODDEP
         echo "      generated static fallback modules.dep"
     fi
 
-    # modules.alias: PCI device ID to module name mappings for common devices.
-    # The init script uses modprobe which reads this file.
+    # modules.alias: PCI device ID → module name mappings for common devices.
     cat > "$MODDEP_DIR/modules.alias" << 'MODALIAS'
 alias virtio:d00000001v* virtio_net
 alias virtio:d00000008v* virtio_scsi
@@ -955,11 +1097,15 @@ alias pci:v00001000d* megaraid_sas
 alias pci:v00001000d00000097* mpt3sas
 alias pci:v00009005d* aacraid
 MODALIAS
-
-    # ── Log manifest location ─────────────────────────────────────────────────
-    MOD_COUNT=$(wc -l < "$MANIFEST_FILE" 2>/dev/null || echo 0)
-    echo "      manifest: $MANIFEST_FILE ($MOD_COUNT modules)"
     echo "      generated modules.alias"
+
+    # Manifest summary (MANIFEST_FILE may not exist if no modules were found).
+    if [[ -f "${MANIFEST_FILE:-}" ]]; then
+        MOD_COUNT=$(wc -l < "$MANIFEST_FILE" 2>/dev/null || echo 0)
+        # Sort manifest lines deterministically for reproducible content.
+        sort -o "$MANIFEST_FILE" "$MANIFEST_FILE"
+        echo "      manifest: $MANIFEST_FILE ($MOD_COUNT modules, sorted)"
+    fi
 fi
 
 echo "  [+] Kernel modules ready"
@@ -1162,11 +1308,22 @@ fi
 echo "  [+] All required binaries present in initramfs rootfs"
 
 # Build the cpio archive and compress with gzip.
-echo "Packing cpio archive..."
+#
+# Reproducibility requirements (verified by CI "Verify reproducible initramfs" step):
+#   1. File list is sorted deterministically (find . | sort).
+#   2. cpio --reproducible zeros all timestamps, inode numbers, and device IDs
+#      so the archive bytes are identical across runs on the same input.
+#   3. gzip -n strips the embedded filename and timestamp header fields.
+#   4. SOURCE_DATE_EPOCH=0 pins the gzip mtime field to the Unix epoch.
+#      Some gzip builds honour this env var; -n covers those that don't.
+#
+# The manifest is already sorted (see above).  Together these four measures
+# produce bit-identical output for a given input file set.
+echo "Packing cpio archive (reproducible)..."
 (
     cd "$WORKDIR"
-    find . | sort | cpio --quiet -H newc -o 2>/dev/null
-) | gzip -9 > "$OUTPUT"
+    find . | sort | cpio --quiet --reproducible -H newc -o 2>/dev/null
+) | SOURCE_DATE_EPOCH=0 gzip -9 -n > "$OUTPUT"
 
 SIZE="$(du -h "$OUTPUT" | cut -f1)"
 echo ""

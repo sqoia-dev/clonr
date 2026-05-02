@@ -1477,9 +1477,10 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
   In: `Api-Version: v1` response header on every API request. Generate JSON schemas from `pkg/api` types via `github.com/invopop/jsonschema`. Ship them under `/usr/share/clustr/schema/v1/` and serve at `/api/v1/schemas/`. OpenAPI 3.1 spec at `/api/v1/openapi.json`. Out: `/api/v2/...` parallel routes.
   Depends on: nothing.
 
-- [ ] **#162 — Reproducible initramfs builder, Path A (LOW, M)**
+- [x] **#162 — Reproducible initramfs builder, Path A (LOW, M)** — landed, CI green.
   Owner: Gilfoyle.
   In: replace SSH-pull from 192.168.1.151 with a Make-driven local kernel-module extraction step. Ship a build-time builder image (CI uses it; not a runtime dep). Bit-identical output across builds. Out: Buildroot migration (Path B) — defer.
+  Landed: `packaging/initramfs-builder/Dockerfile` (Rocky 9 + pinned kernel RPMs + /modules); `make initramfs MODULES_PATH=` + `make initramfs-verify`; `--reproducible` cpio + `-n` gzip + sorted manifest; `.github/workflows/initramfs-builder.yml` (workflow_dispatch, build+push); `initramfs.yml` updated to run inside builder container (no SSH dep). SSH-pull path kept as dev-cloner fallback.
   Depends on: #120 (landed).
   Owner: Dinesh.
   In: implement the node-side handler for `disk_capture_request` (defined by #146 in `internal/clientd/messages.go`). Run `lsblk -J` (or equivalent) on the node, parse into `api.DiskLayout`, send back as `disk_capture_result`. Without this, `POST /api/v1/disk-layouts/capture/{node_id}` returns 504. Out: alternative capture sources (sfdisk, parted) — lsblk only in v1.

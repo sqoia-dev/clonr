@@ -13,13 +13,26 @@ on:
 #
 # Combined with release.yml's needs: [lab-validate], the full gate chain is:
 #   go test passes (ci.yml / test job)
-#   → initramfs built (this workflow)
+#   → initramfs built + reproducibility verified (this workflow)
 #   → lab-validate passes (vm201 BIOS + vm202 UEFI)
 #   → release artifacts published (release.yml)
 #
-# Implementation: this workflow calls ci.yml as a reusable workflow and declares
-# needs: [ci] on the build job.  The ci job must complete successfully before
-# the initramfs is built and attached to the release.
+# #162 (Path A): SSH-pull-from-cloner replaced with builder image.
+#   CI pulls ghcr.io/sqoia-dev/initramfs-builder:<kernel-version>, which
+#   contains the pinned kernel modules at /modules.  The build runs inside the
+#   container; MODULES_PATH=/modules is passed to make.  No dependency on
+#   192.168.1.151 availability.
+#
+#   Builder image is built separately via initramfs-builder.yml (workflow_dispatch).
+#   It is NOT rebuilt on every push.
+#
+# Reproducibility: two back-to-back builds are compared by SHA256.  A mismatch
+# fails the job before the artifact is attached to the release.
+
+env:
+  # Must match packaging/initramfs-builder/Dockerfile ARG KERNEL_VERSION
+  # and Makefile INITRAMFS_KERNEL_VERSION.
+  KERNEL_VERSION: "5.14.0-503.40.1.el9_5.x86_64"
 
 jobs:
   # ─── CI gate ─────────────────────────────────────────────────────────────────
@@ -38,13 +51,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
+    # Run the job inside the builder image so /modules is already populated.
+    # The image is pushed by initramfs-builder.yml; pulled here as a cache.
+    container:
+      image: ghcr.io/sqoia-dev/initramfs-builder:${{ env.KERNEL_VERSION }}
+      # modules: pre-populated at /modules inside the image; no volume mount needed.
+      options: --user root
+
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
-          cache: true
+      - name: Install Go inside builder container
+        # The builder image ships golang from dnf; verify it is on PATH.
+        run: go version
 
       - name: Build static clustr client
         env:
@@ -56,18 +76,22 @@ jobs:
               -o bin/clustr \
               ./cmd/clustr
 
-      - name: Build initramfs
-        # CLUSTR_CI_MODE=1 switches the build script to local mode:
-        # kernel modules are sourced from the runner's installed packages
-        # instead of SSH-ing to the lab server (192.168.1.151).
-        # The resulting initramfs is functional but kernel modules may differ
-        # from the production lab build; lab-validate.yml catches regressions.
-        env:
-          CLUSTR_CI_MODE: "1"
-        run: bash scripts/build-initramfs.sh bin/clustr
+      # ── Reproducibility check ─────────────────────────────────────────────
+      # Build twice with make initramfs-verify, which asserts SHA256 equality.
+      # Both builds run in the same container, same /modules, same binaries.
+      # Any source of non-determinism (unsorted find, embedded timestamps) fails here.
+      - name: Verify reproducible initramfs (build twice, assert SHA256 match)
+        run: make initramfs-verify MODULES_PATH=/modules
+
+      # ── Final build for release artifact ─────────────────────────────────
+      # initramfs-verify cleans up its temp images; produce the release artifact.
+      - name: Build release initramfs
+        run: make initramfs MODULES_PATH=/modules
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
         with:
           append_body: false
-          files: initramfs-clustr.img
+          files: |
+            initramfs-clustr.img
+            initramfs-clustr.modules.manifest

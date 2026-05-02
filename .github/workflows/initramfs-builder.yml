@@ -1,0 +1,85 @@
+name: Build initramfs builder image
+
+# PURPOSE: Build and push the clustr initramfs builder image to GHCR.
+#
+# This workflow runs on-demand only (workflow_dispatch).  It is NOT triggered on
+# every push.  Run it when the pinned kernel version changes.
+#
+# The builder image contains:
+#   - Rocky Linux 9 with the pinned kernel + kernel-modules RPMs
+#   - All tools required by scripts/build-initramfs.sh
+#   - /modules directory pre-populated from /lib/modules/$KERNEL_VERSION
+#
+# After pushing, update Makefile INITRAMFS_KERNEL_VERSION if you changed the pin.
+# The initramfs.yml workflow pulls this image tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: >
+          Rocky 9 kernel version to embed (e.g. 5.14.0-503.40.1.el9_5.x86_64).
+          Must match the kernel installed on cluster nodes.
+        required: true
+        default: "5.14.0-503.40.1.el9_5.x86_64"
+      push:
+        description: "Push image to GHCR (set to 'false' for a dry-run build)"
+        required: false
+        default: "true"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: sqoia-dev/initramfs-builder
+
+jobs:
+  build-and-push:
+    name: Build + push initramfs-builder:${{ github.event.inputs.kernel_version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ github.event.inputs.push == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.event.inputs.kernel_version }}
+
+      - name: Build (and push if requested)
+        uses: docker/build-push-action@v6
+        with:
+          context: packaging/initramfs-builder
+          file: packaging/initramfs-builder/Dockerfile
+          build-args: |
+            KERNEL_VERSION=${{ github.event.inputs.kernel_version }}
+          push: ${{ github.event.inputs.push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers between runs — kernel RPM download is the expensive step.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: >-
+            ${{ github.event.inputs.push == 'true'
+              && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME)
+              || '' }}
+
+      - name: Print image digest
+        if: ${{ github.event.inputs.push == 'true' }}
+        run: |
+          echo "Pushed: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.kernel_version }}"
+          echo "Update Makefile INITRAMFS_KERNEL_VERSION if you changed the pin."
