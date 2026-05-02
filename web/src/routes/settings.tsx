@@ -8,7 +8,7 @@ import { useSession } from "@/contexts/auth"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import type { ListAPIKeysResponse, CreateAPIKeyResponse, HealthResponse, ListGPGKeysResponse, GPGKey, LocalUser, ListLocalUsersResponse, BootEntry, ListBootEntriesResponse } from "@/lib/types"
-import { cn } from "@/lib/utils"
+import { cn, generateTempPassword } from "@/lib/utils"
 import { formatDistanceToNow } from "date-fns"
 
 function relativeTime(iso?: string | null) {
@@ -113,10 +113,7 @@ function LocalUsersSection() {
 
   const resetPassMutation = useMutation({
     mutationFn: (userId: string) => {
-      // Generate a random temp password.
-      const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-      let pwd = ""
-      for (let i = 0; i < 16; i++) pwd += chars[Math.floor(Math.random() * chars.length)]
+      const pwd = generateTempPassword()
       return apiFetch(`/api/v1/admin/users/${userId}/reset-password`, {
         method: "POST",
         body: JSON.stringify({ password: pwd }),
