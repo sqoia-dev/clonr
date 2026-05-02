@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // iPXE boot script template.
@@ -109,8 +111,8 @@ echo
 menu Select boot option:
 item --gap --
 item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
-item reimage                              Reimage this node
-item rescue                               Rescue shell
+item reimage                              Reimage this node{{range .ExtraEntries}}
+item entry_{{.ID}}                        {{.Name}}{{end}}
 item --gap --
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
@@ -119,15 +121,13 @@ sanboot --no-describe --drive 0x80 || exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
-
-:rescue
-echo
-echo  Rescue shell is not yet configured for this node.
-echo  Contact your administrator or reimage to recover.
-echo
-sleep 10
-goto disk
-`
+{{range .ExtraEntries}}
+:entry_{{.ID}}
+echo Booting {{.Name}}...
+kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
+{{if .InitrdURL}}initrd {{.InitrdURL}}
+{{end}}boot || goto disk
+{{end}}`
 
 // diskBootUEFITemplate is the iPXE response for UEFI-firmware nodes in NodeStateDeployed.
 //
@@ -167,8 +167,8 @@ echo
 menu Select boot option:
 item --gap --
 item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
-item reimage                              Reimage this node
-item rescue                               Rescue shell
+item reimage                              Reimage this node{{range .ExtraEntries}}
+item entry_{{.ID}}                        {{.Name}}{{end}}
 item --gap --
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
 
@@ -177,15 +177,13 @@ exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
-
-:rescue
-echo
-echo  Rescue shell is not yet configured for this node.
-echo  Contact your administrator or reimage to recover.
-echo
-sleep 10
-goto disk
-`
+{{range .ExtraEntries}}
+:entry_{{.ID}}
+echo Booting {{.Name}}...
+kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
+{{if .InitrdURL}}initrd {{.InitrdURL}}
+{{end}}boot || goto disk
+{{end}}`
 
 // waitRetryTemplate is served to nodes in reimage_pending state that have no
 // base_image_id assigned. The node sleeps 60 seconds in iPXE and retries,
@@ -213,6 +211,9 @@ type diskBootScriptData struct {
 	ServerURL string
 	// Version is the clustr server version string displayed in the boot menu.
 	Version string
+	// ExtraEntries are operator-defined boot entries from the boot_entries table.
+	// Each enabled entry is appended to the menu and rendered as a label block.
+	ExtraEntries []api.BootEntry
 }
 
 // GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
@@ -237,12 +238,23 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 // serverURL is the public URL of clustr-serverd (e.g. http://10.99.0.1:8080).
 // It is embedded in the boot script for the reimage re-chain URL.
 // The ${mac} variable in the script is expanded by iPXE at runtime.
-func GenerateDiskBootScript(hostname, firmware, serverURL, version string) ([]byte, error) {
+//
+// extraEntries is the list of enabled boot_entries rows to append to the menu.
+// Pass nil or an empty slice to render the standard two-item menu.
+func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extraEntries []api.BootEntry) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
 		tmpl = diskBootBIOSTmpl
 	}
-	data := diskBootScriptData{Hostname: hostname, ServerURL: serverURL, Version: version}
+	if extraEntries == nil {
+		extraEntries = []api.BootEntry{}
+	}
+	data := diskBootScriptData{
+		Hostname:     hostname,
+		ServerURL:    serverURL,
+		Version:      version,
+		ExtraEntries: extraEntries,
+	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("pxe/boot: render disk boot script: %w", err)

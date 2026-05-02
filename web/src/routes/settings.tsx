@@ -1,13 +1,13 @@
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users, GitCommit } from "lucide-react"
+import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users, GitCommit, Radio } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSession } from "@/contexts/auth"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { ListAPIKeysResponse, CreateAPIKeyResponse, HealthResponse, ListGPGKeysResponse, GPGKey, LocalUser, ListLocalUsersResponse } from "@/lib/types"
+import type { ListAPIKeysResponse, CreateAPIKeyResponse, HealthResponse, ListGPGKeysResponse, GPGKey, LocalUser, ListLocalUsersResponse, BootEntry, ListBootEntriesResponse } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { formatDistanceToNow } from "date-fns"
 
@@ -42,6 +42,7 @@ export function SettingsPage() {
       <ServerConfigSection />
       <GPGKeysSection />
       <TwoStageCommitSection />
+      <BootMenuSection />
 
       {/* SET-5: Logout */}
       <section className="border-t border-border pt-8">
@@ -876,6 +877,264 @@ function TwoStageCommitSection() {
               </div>
             )
           })}
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ─── Boot Menu section (#160) ─────────────────────────────────────────────────
+
+const BOOT_ENTRY_KINDS: { value: string; label: string }[] = [
+  { value: "kernel", label: "Generic kernel" },
+  { value: "memtest", label: "Memtest" },
+  { value: "rescue", label: "Rescue shell" },
+  { value: "iso", label: "ISO chainload" },
+]
+
+function BootMenuSection() {
+  const qc = useQueryClient()
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [editEntry, setEditEntry] = React.useState<BootEntry | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = React.useState<string | null>(null)
+
+  // Add form state.
+  const [newName, setNewName] = React.useState("")
+  const [newKind, setNewKind] = React.useState("kernel")
+  const [newKernelURL, setNewKernelURL] = React.useState("")
+  const [newInitrdURL, setNewInitrdURL] = React.useState("")
+  const [newCmdline, setNewCmdline] = React.useState("")
+  const [addError, setAddError] = React.useState("")
+
+  const { data, isLoading, isError } = useQuery<ListBootEntriesResponse>({
+    queryKey: ["boot-entries"],
+    queryFn: () => apiFetch<ListBootEntriesResponse>("/api/v1/boot-entries"),
+    staleTime: 15000,
+  })
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      apiFetch("/api/v1/boot-entries", {
+        method: "POST",
+        body: JSON.stringify({
+          name: newName,
+          kind: newKind,
+          kernel_url: newKernelURL,
+          initrd_url: newInitrdURL || undefined,
+          cmdline: newCmdline || undefined,
+          enabled: true,
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["boot-entries"] })
+      setAddOpen(false)
+      setNewName(""); setNewKind("kernel"); setNewKernelURL(""); setNewInitrdURL(""); setNewCmdline(""); setAddError("")
+      toast({ title: "Boot entry created" })
+    },
+    onError: (err) => setAddError(String(err)),
+  })
+
+  const toggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      apiFetch(`/api/v1/boot-entries/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["boot-entries"] })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Toggle failed", description: String(err) }),
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (e: BootEntry) =>
+      apiFetch(`/api/v1/boot-entries/${e.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: e.name,
+          kind: e.kind,
+          kernel_url: e.kernel_url,
+          initrd_url: e.initrd_url,
+          cmdline: e.cmdline,
+          enabled: e.enabled,
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["boot-entries"] })
+      setEditEntry(null)
+      toast({ title: "Boot entry updated" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Update failed", description: String(err) }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/v1/boot-entries/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["boot-entries"] })
+      setDeleteConfirm(null)
+      toast({ title: "Boot entry deleted" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Delete failed", description: String(err) }),
+  })
+
+  const entries = data?.entries ?? []
+
+  return (
+    <section id="boot-menu" className="border-t border-border pt-8">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-sm font-medium flex items-center gap-2">
+          <Radio className="h-4 w-4" /> Boot Menu
+        </h2>
+        <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setAddOpen(true)}>
+          <Plus className="h-3.5 w-3.5" /> Add entry
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground mb-4">
+        Enabled entries appear in the iPXE boot menu for deployed nodes at PXE-serve time.
+        The Rescue Shell entry is disabled by default until a rescue image is available.
+      </p>
+
+      {/* Add entry form */}
+      {addOpen && (
+        <div className="mb-4 rounded-md border border-border bg-card px-4 py-4 space-y-3">
+          <p className="text-sm font-medium">New boot entry</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Name</label>
+              <Input className="h-8 text-sm" placeholder="My custom entry" value={newName} onChange={(e) => setNewName(e.target.value)} />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Kind</label>
+              <select
+                className="h-8 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={newKind}
+                onChange={(e) => setNewKind(e.target.value)}
+              >
+                {BOOT_ENTRY_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Kernel URL</label>
+            <Input className="h-8 text-sm font-mono" placeholder="/api/v1/boot/vmlinuz or https://..." value={newKernelURL} onChange={(e) => setNewKernelURL(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Initrd URL <span className="text-muted-foreground/60">(optional)</span></label>
+            <Input className="h-8 text-sm font-mono" placeholder="/api/v1/boot/initramfs.img" value={newInitrdURL} onChange={(e) => setNewInitrdURL(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Cmdline <span className="text-muted-foreground/60">(optional)</span></label>
+            <Input className="h-8 text-sm font-mono" placeholder="console=ttyS0,115200n8" value={newCmdline} onChange={(e) => setNewCmdline(e.target.value)} />
+          </div>
+          {addError && <p className="text-xs text-destructive">{addError}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" disabled={!newName || !newKernelURL || createMutation.isPending} onClick={() => createMutation.mutate()}>
+              Create
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setAddOpen(false); setAddError("") }}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {/* Edit entry form */}
+      {editEntry && (
+        <div className="mb-4 rounded-md border border-border bg-card px-4 py-4 space-y-3">
+          <p className="text-sm font-medium">Edit: {editEntry.name}</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Name</label>
+              <Input className="h-8 text-sm" value={editEntry.name} onChange={(e) => setEditEntry({ ...editEntry, name: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Kind</label>
+              <select
+                className="h-8 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={editEntry.kind}
+                onChange={(e) => setEditEntry({ ...editEntry, kind: e.target.value as BootEntry["kind"] })}
+              >
+                {BOOT_ENTRY_KINDS.map(k => <option key={k.value} value={k.value}>{k.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Kernel URL</label>
+            <Input className="h-8 text-sm font-mono" value={editEntry.kernel_url} onChange={(e) => setEditEntry({ ...editEntry, kernel_url: e.target.value })} />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Initrd URL <span className="text-muted-foreground/60">(optional)</span></label>
+            <Input className="h-8 text-sm font-mono" value={editEntry.initrd_url ?? ""} onChange={(e) => setEditEntry({ ...editEntry, initrd_url: e.target.value })} />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Cmdline <span className="text-muted-foreground/60">(optional)</span></label>
+            <Input className="h-8 text-sm font-mono" value={editEntry.cmdline ?? ""} onChange={(e) => setEditEntry({ ...editEntry, cmdline: e.target.value })} />
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={updateMutation.isPending} onClick={() => updateMutation.mutate(editEntry)}>Save</Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditEntry(null)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {isError && <p className="text-sm text-destructive">Failed to load boot entries.</p>}
+
+      {!isLoading && entries.length === 0 && (
+        <p className="text-sm text-muted-foreground">No custom entries. Stock entries (Memtest, Rescue) were seeded by migration.</p>
+      )}
+
+      {entries.length > 0 && (
+        <div className="space-y-2">
+          {entries.map((entry) => (
+            <div key={entry.id} className="rounded-md border border-border bg-card px-4 py-3">
+              {deleteConfirm === entry.id ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-destructive">Delete <span className="font-medium">{entry.name}</span>? This cannot be undone.</p>
+                  <div className="flex gap-2">
+                    <Button variant="destructive" size="sm" className="h-7 text-xs" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate(entry.id)}>
+                      Delete
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setDeleteConfirm(null)}>Cancel</Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium">{entry.name}</p>
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">{entry.kind}</span>
+                    </div>
+                    <p className="text-xs font-mono text-muted-foreground truncate mt-0.5">{entry.kernel_url}</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Enabled toggle */}
+                    <button
+                      role="switch"
+                      aria-checked={entry.enabled}
+                      onClick={() => toggleMutation.mutate({ id: entry.id, enabled: !entry.enabled })}
+                      disabled={toggleMutation.isPending}
+                      title={entry.enabled ? "Disable" : "Enable"}
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none",
+                        entry.enabled ? "bg-primary" : "bg-input"
+                      )}
+                    >
+                      <span className={cn(
+                        "pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform",
+                        entry.enabled ? "translate-x-4" : "translate-x-0"
+                      )} />
+                    </button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={() => setEditEntry(entry)}>
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => setDeleteConfirm(entry.id)}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </section>

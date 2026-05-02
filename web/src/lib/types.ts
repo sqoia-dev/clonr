@@ -827,3 +827,24 @@ export interface ListSlurmPartitionsResponse {
   partitions: SlurmPartitionInfo[]
   total: number
 }
+
+// ── Boot Menu entries (#160) ─────────────────────────────────────────────────
+
+export type BootEntryKind = "kernel" | "iso" | "rescue" | "memtest"
+
+export interface BootEntry {
+  id: string
+  name: string
+  kind: BootEntryKind
+  kernel_url: string
+  initrd_url?: string
+  cmdline?: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ListBootEntriesResponse {
+  entries: BootEntry[]
+  total: number
+}

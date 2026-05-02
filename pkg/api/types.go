@@ -1841,6 +1841,58 @@ type ListBundlesResponse struct {
 	Total   int      `json:"total"`
 }
 
+// ─── Boot Menu entries (#160) ────────────────────────────────────────────────
+
+// BootEntryKind is the type of a boot entry.
+type BootEntryKind string
+
+const (
+	BootEntryKindKernel  BootEntryKind = "kernel"
+	BootEntryKindISO     BootEntryKind = "iso"
+	BootEntryKindRescue  BootEntryKind = "rescue"
+	BootEntryKindMemtest BootEntryKind = "memtest"
+)
+
+// BootEntry is a single row in the boot_entries table.
+// Enabled entries are appended to the iPXE disk-boot menu at PXE-serve time.
+type BootEntry struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`      // "kernel" | "iso" | "rescue" | "memtest"
+	KernelURL string    `json:"kernel_url"`
+	InitrdURL string    `json:"initrd_url,omitempty"` // optional
+	Cmdline   string    `json:"cmdline,omitempty"`    // optional
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ListBootEntriesResponse is returned by GET /api/v1/boot-entries.
+type ListBootEntriesResponse struct {
+	Entries []BootEntry `json:"entries"`
+	Total   int         `json:"total"`
+}
+
+// CreateBootEntryRequest is the body for POST /api/v1/boot-entries.
+type CreateBootEntryRequest struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	KernelURL string `json:"kernel_url"`
+	InitrdURL string `json:"initrd_url,omitempty"`
+	Cmdline   string `json:"cmdline,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"` // defaults to true when nil
+}
+
+// UpdateBootEntryRequest is the body for PUT /api/v1/boot-entries/{id}.
+type UpdateBootEntryRequest struct {
+	Name      string `json:"name,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	KernelURL string `json:"kernel_url,omitempty"`
+	InitrdURL string `json:"initrd_url,omitempty"`
+	Cmdline   string `json:"cmdline,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+}
+
 // NetworkNodeConfig carries the resolved per-node network configuration
 // injected into NodeConfig during the deploy pipeline.
 type NetworkNodeConfig struct {

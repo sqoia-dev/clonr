@@ -18,6 +18,7 @@ import (
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
+
 // BootHandler serves boot assets and dynamic iPXE scripts over HTTP.
 // Boot files (vmlinuz, initramfs.img) are served from BootDir.
 // iPXE chainload files (ipxe.efi, undionly.kpxe) are served from TFTPDir.
@@ -44,6 +45,18 @@ type BootHandler struct {
 	// time. The returned raw key is embedded in the kernel cmdline as clustr.token.
 	// When nil (e.g. in tests that don't need auth), an empty token is used.
 	MintNodeToken func(nodeID string) (rawKey string, err error)
+}
+
+// ServeRescueInitramfs handles GET /api/v1/boot/rescue.cpio.gz.
+// Serves the rescue initramfs from BootDir when present.
+func (h *BootHandler) ServeRescueInitramfs(w http.ResponseWriter, r *http.Request) {
+	h.serveFile(w, r, filepath.Join(h.BootDir, "rescue.cpio.gz"), "application/octet-stream")
+}
+
+// ServeMemtest handles GET /api/v1/boot/extra/memtest.
+// Serves the memtest86+ binary from BootDir/extra/memtest when present.
+func (h *BootHandler) ServeMemtest(w http.ResponseWriter, r *http.Request) {
+	h.serveFile(w, r, filepath.Join(h.BootDir, "extra", "memtest"), "application/octet-stream")
 }
 
 // ServeIPXEScript handles GET /api/v1/boot/ipxe.
@@ -301,6 +314,9 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 //
 // Firmware source priority: node.DetectedFirmware (set at PXE registration from
 // /sys/firmware/efi check) > image.Firmware > default "uefi".
+//
+// Enabled boot_entries rows are fetched from the DB and appended to the menu.
+// A failure to fetch entries is logged but does not prevent serving the script.
 func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConfig) ([]byte, error) {
 	firmware := node.DetectedFirmware
 	if firmware == "" && h.DB != nil && node.BaseImageID != "" {
@@ -316,9 +332,23 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 	if firmware == "" {
 		firmware = "uefi"
 	}
+
+	// Load enabled boot_entries to append to the menu.
+	var extraEntries []api.BootEntry
+	if h.DB != nil {
+		var err error
+		extraEntries, err = h.DB.ListBootEntries(r.Context(), true)
+		if err != nil {
+			log.Warn().Err(err).Str("node", node.Hostname).
+				Msg("boot: could not load boot_entries — serving standard menu")
+			extraEntries = nil
+		}
+	}
+
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
+		Int("extra_entries", len(extraEntries)).
 		Msg("boot: generating disk boot script")
-	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version)
+	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version, extraEntries)
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw

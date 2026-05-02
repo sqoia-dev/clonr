@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h) in the
 // disk boot path, a boot menu with a reimage option, and no bare `exit` line.
 func TestGenerateDiskBootScript_BIOS(t *testing.T) {
-	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080", "v0.1.0-test")
+	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080", "v0.1.0-test", nil)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(bios) returned error: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 // docs/boot-architecture.md), a boot menu with reimage option, and NOT sanboot
 // (INT 13h is a BIOS concept) and NOT a grub.efi chain URL (removed path).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test")
+	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", nil)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(uefi) returned error: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 // TestGenerateDiskBootScript_DefaultsToUEFI verifies that an empty/unknown firmware
 // string is treated as UEFI (safe default for new images).
 func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080", "v0.1.0-test")
+	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080", "v0.1.0-test", nil)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript('') returned error: %v", err)
 	}
@@ -130,6 +131,63 @@ func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
 	}
 	if !exitFound {
 		t.Errorf("default (UEFI) disk boot script must contain bare 'exit' line; got:\n%s", out)
+	}
+}
+
+// TestGenerateDiskBootScript_ExtraEntries verifies that enabled boot_entries are
+// appended to the iPXE menu and rendered as label blocks with kernel/initrd/boot.
+func TestGenerateDiskBootScript_ExtraEntries(t *testing.T) {
+	entries := []api.BootEntry{
+		{
+			ID:        "test-memtest-id",
+			Name:      "Memtest86+",
+			Kind:      "memtest",
+			KernelURL: "/api/v1/boot/extra/memtest",
+			Enabled:   true,
+		},
+		{
+			ID:        "test-rescue-id",
+			Name:      "Rescue Shell",
+			Kind:      "rescue",
+			KernelURL: "/api/v1/boot/vmlinuz",
+			InitrdURL: "/api/v1/boot/rescue.cpio.gz",
+			Cmdline:   "console=ttyS0,115200n8",
+			Enabled:   true,
+		},
+	}
+	script, err := GenerateDiskBootScript("node-test", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", entries)
+	if err != nil {
+		t.Fatalf("GenerateDiskBootScript with extra entries returned error: %v", err)
+	}
+	out := string(script)
+
+	// Both entries should appear in the menu.
+	if !strings.Contains(out, "entry_test-memtest-id") {
+		t.Errorf("missing memtest menu item; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Memtest86+") {
+		t.Errorf("missing memtest label text; got:\n%s", out)
+	}
+	if !strings.Contains(out, "entry_test-rescue-id") {
+		t.Errorf("missing rescue menu item; got:\n%s", out)
+	}
+
+	// Both should have kernel lines.
+	if !strings.Contains(out, "/api/v1/boot/extra/memtest") {
+		t.Errorf("missing memtest kernel_url; got:\n%s", out)
+	}
+	if !strings.Contains(out, "/api/v1/boot/vmlinuz") {
+		t.Errorf("missing rescue kernel_url; got:\n%s", out)
+	}
+
+	// Rescue should have initrd line.
+	if !strings.Contains(out, "/api/v1/boot/rescue.cpio.gz") {
+		t.Errorf("missing rescue initrd_url; got:\n%s", out)
+	}
+
+	// Rescue cmdline should appear.
+	if !strings.Contains(out, "console=ttyS0,115200n8") {
+		t.Errorf("missing rescue cmdline; got:\n%s", out)
 	}
 }
 
