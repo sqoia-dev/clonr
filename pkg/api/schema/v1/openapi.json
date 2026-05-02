@@ -827,6 +827,9 @@
                   "type": "string"
                 },
                 "type": "object"
+              },
+              "bios_only": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false,
@@ -3528,6 +3531,9 @@
               "dry_run": {
                 "type": "boolean"
               },
+              "bios_only": {
+                "type": "boolean"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -5517,6 +5523,43 @@
               "password"
             ]
           },
+          "BiosProfile": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "vendor",
+              "settings_json",
+              "created_at",
+              "updated_at"
+            ]
+          },
           "BondConfig": {
             "properties": {
               "id": {
@@ -6144,6 +6187,12 @@
               },
               "dry_run": {
                 "type": "boolean"
+              },
+              "bios_profile": {
+                "$ref": "#/$defs/BiosProfile"
+              },
+              "bios_only": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false,
@@ -6460,6 +6509,9 @@
                 "type": "string"
               },
               "dry_run": {
+                "type": "boolean"
+              },
+              "bios_only": {
                 "type": "boolean"
               },
               "created_at": {
