@@ -608,7 +608,12 @@ export function NodesPage() {
     return () => {
       clearTimeout(reconnectTimer)
       es?.close()
-      setStatus("disconnected")
+      // Do NOT call setStatus("disconnected") here. The cleanup runs on every
+      // effect re-run (retryToken change) and on unmount (navigation away).
+      // Calling it on cleanup was starting the 30s paused-banner timer on every
+      // page navigation, causing false "Live updates paused" warnings on all
+      // pages. The onerror handler already signals "reconnecting" for genuine
+      // connection failures; cleanup should just close the socket silently.
     }
     // retryToken forces reconnect when the banner "Retry" is clicked (POL-6).
   }, [refetch, setStatus, retryToken])

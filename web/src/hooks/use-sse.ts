@@ -71,7 +71,10 @@ export function useSSE<T>({
       destroyed = true
       clearTimeout(reconnectTimer)
       es?.close()
-      onStatusRef.current?.("disconnected")
+      // Do NOT fire "disconnected" on cleanup: this runs on every effect re-run
+      // (retryToken change) and on unmount (navigation). Propagating "disconnected"
+      // here starts the paused-banner timer on page navigation, causing false
+      // "Live updates paused" warnings. Genuine failures are signalled via onerror.
     }
     // retryToken in deps: any change forces teardown + immediate reconnect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
