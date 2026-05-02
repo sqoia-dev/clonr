@@ -652,9 +652,9 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		}
 	}
 
-	logPhase("Applying node configuration")
-	reportStep("Applying node identity (hostname, network, users)")
-	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
+	logPhase("In-chroot reconfigure")
+	reportStep("Applying node identity to target filesystem (hostname, network, users)")
+	if err := inChrootReconfigure(ctx, cfg, mountRoot); err != nil {
 		return err
 	}
 

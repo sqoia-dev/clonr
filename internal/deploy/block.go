@@ -430,7 +430,7 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		_ = exec.Command("umount", mountRoot).Run()
 	}()
 
-	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
+	if err := inChrootReconfigure(ctx, cfg, mountRoot); err != nil {
 		return err
 	}
 
