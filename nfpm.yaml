@@ -47,9 +47,13 @@ homepage: https://github.com/sqoia-dev/clustr
 license: MIT
 
 # systemd-container provides systemd-nspawn, required by the image-shell feature.
-# Package name is identical across EL8, EL9, and EL10.
+# memtest86+ ships in EL8 BaseOS and EL9/EL10 AppStream — no EPEL required.
+# udpcast (fleet-reimage multicast, Sprint 25 #157) is not packaged for EL8/9/10
+# in EPEL or base repos; operator must install manually — see README.
+# Package names are identical across EL8, EL9, and EL10.
 depends:
   - systemd-container
+  - memtest86+
 
 rpm:
   group: System Environment/Daemons

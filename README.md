@@ -37,12 +37,67 @@ sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el10/clustr.repo
 sudo dnf install clustr-serverd
 ```
 
+`clustr-serverd` pulls in `memtest86+` automatically (ships in EL8 BaseOS and
+EL9/EL10 AppStream — no EPEL required).
+
 ### CLI only
 
 ```sh
 # Add the repo for your EL version first (see above), then:
 sudo dnf install clustr
 ```
+
+### Optional: udpcast (fleet-reimage multicast)
+
+udpcast is required for the fleet-reimage multicast feature (imaging many nodes
+simultaneously over a single multicast stream). It is not packaged for EL8/9/10
+in any base or EPEL repository, so you must install it from source or a third-party
+build.
+
+**Build from source (recommended):**
+
+```sh
+sudo dnf install -y gcc make autoconf automake
+wget https://sourceforge.net/projects/udpcast/files/latest/download -O udpcast.tar.gz
+tar xf udpcast.tar.gz && cd udpcast-*
+./configure && make && sudo make install
+```
+
+`udpcast` and `udp-sender` / `udp-receiver` will be installed to `/usr/local/bin/`.
+clustr expects `udp-sender` and `udp-receiver` on `PATH`.
+
+Without udpcast, single-node reimage works normally. Fleet-reimage (multicast)
+will fail at dispatch with an "udpcast not available" error.
+
+### Optional: Intel BIOS settings push
+
+If you intend to use clustr's BIOS settings push feature on Intel-based nodes,
+you must install Intel's `syscfg` utility manually. Intel's EULA prohibits
+redistribution, so clustr cannot bundle it.
+
+1. Download `syscfg` from Intel's website. Search for
+   **"Intel Server Configuration Utility (SYSCFG)"** or
+   **"Save and Restore System Configuration Utility"** at:
+   https://www.intel.com/content/www/us/en/download/center/
+
+2. Extract the archive and locate the `syscfg` binary for Linux.
+
+3. Copy it to the clustr vendor directory:
+
+   ```sh
+   sudo mkdir -p /var/lib/clustr/vendor-bios/intel
+   sudo cp syscfg /var/lib/clustr/vendor-bios/intel/syscfg
+   sudo chmod 0755 /var/lib/clustr/vendor-bios/intel/syscfg
+   ```
+
+4. Restart the service:
+
+   ```sh
+   sudo systemctl restart clustr-serverd
+   ```
+
+Without this binary, BIOS profile features report "intel-syscfg not configured"
+and Intel BIOS push is unavailable. All other clustr features work without it.
 
 ## Quick start
 

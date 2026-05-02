@@ -14,16 +14,12 @@
 # Kernel module sourcing — choose one of three modes (evaluated in order):
 #
 #   1. MODULES_PATH=/path/to/modules  (preferred, reproducible)
-#      Modules are read from a local directory (e.g. /modules inside the
-#      ghcr.io/sqoia-dev/initramfs-builder image, or a volume mount).
+#      Modules are read from a local directory.
 #      No SSH, no network access to the lab server.  This is the CI path.
+#      CI runs inside a stock rockylinux:9 GHA container and sets:
+#        MODULES_PATH=/lib/modules/$(ls /lib/modules)
 #
-#      make initramfs MODULES_PATH=/modules
-#
-#      Locally (via builder image):
-#        docker run --rm -v $(pwd):/clustr \
-#          ghcr.io/sqoia-dev/initramfs-builder:5.14.0-503.40.1.el9_5.x86_64 \
-#          make -C /clustr initramfs MODULES_PATH=/modules
+#      make initramfs MODULES_PATH=/lib/modules/$(ls /lib/modules)
 #
 #   2. CLUSTR_CI_MODE=1  (local host has kernel modules at /lib/modules)
 #      Legacy CI path — kept for backwards compatibility.

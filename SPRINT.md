@@ -1471,15 +1471,14 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
 
 All six tasks (#157–#162) landed. The complete CLUSTERVISOR-GAP-SPRINT plan from Richard's review is now shipped end-to-end.
 
-clustr now has: UDPCast multicast fleet reimage with per-receiver unicast fallback; `DistroDriver` interface with el8/el9/el10/ubuntu24 implementations and netplan-based Ubuntu provisioning; BIOS settings push (Intel first via `intel-syscfg`, Provider interface ready for Dell/Supermicro); per-image stateless/netboot menu entries (Memtest + Rescue); `Api-Version: v1` + JSON schemas for 46 API types + OpenAPI 3.1 export with CI diff-check; reproducible initramfs builder via Docker image with bit-identical SHA256-verified output.
+clustr now has: UDPCast multicast fleet reimage with per-receiver unicast fallback; `DistroDriver` interface with el8/el9/el10/ubuntu24 implementations and netplan-based Ubuntu provisioning; BIOS settings push (Intel first via `intel-syscfg`, Provider interface ready for Dell/Supermicro); per-image stateless/netboot menu entries (Memtest + Rescue); `Api-Version: v1` + JSON schemas for 46 API types + OpenAPI 3.1 export with CI diff-check; reproducible initramfs builder via stock `rockylinux:9` GHA container with bit-identical SHA256-verified output.
 
 ### v0.x release-prep bootstrap checklist (carried forward)
 
 These four operator-install bootstraps are required before the next tagged release:
-1. **Trigger `initramfs-builder.yml` workflow once** (manual `workflow_dispatch`) so the builder image lands in `ghcr.io/sqoia-dev/initramfs-builder` (#162)
-2. **Install `udpcast` package** from EPEL on the clustr-serverd host for udp-sender; nodes pick up udp-receiver from initramfs (#157)
-3. **Drop `intel-syscfg` at `/var/lib/clustr/vendor-bios/intel/syscfg`** if BIOS push is desired (operator-supplied per Intel EULA) (#159)
-4. **Drop a Memtest binary at `BootDir/extra/memtest`** if Memtest boot menu entry should work (#160)
+1. **Install `udpcast` package** from EPEL on the clustr-serverd host for udp-sender; nodes pick up udp-receiver from initramfs (#157)
+2. **Drop `intel-syscfg` at `/var/lib/clustr/vendor-bios/intel/syscfg`** if BIOS push is desired (operator-supplied per Intel EULA) (#159)
+3. **Drop a Memtest binary at `BootDir/extra/memtest`** if Memtest boot menu entry should work (#160)
 
 ### Sprint 26+ backlog (carried forward from Sprint 25 punts)
 
@@ -1515,8 +1514,7 @@ Plus the architectural follow-ups Richard noted: clientd message-type registry e
 - [x] **#162 — Reproducible initramfs builder, Path A (LOW, M)** — landed, CI green.
   Owner: Gilfoyle.
   In: replace SSH-pull from 192.168.1.151 with a Make-driven local kernel-module extraction step. Ship a build-time builder image (CI uses it; not a runtime dep). Bit-identical output across builds. Out: Buildroot migration (Path B) — defer.
-  Landed: `packaging/initramfs-builder/Dockerfile` (Rocky 9 + pinned kernel RPMs + /modules); `make initramfs MODULES_PATH=` + `make initramfs-verify`; `--reproducible` cpio + `-n` gzip + sorted manifest; `.github/workflows/initramfs-builder.yml` (workflow_dispatch, build+push); `initramfs.yml` updated to run inside builder container (no SSH dep). SSH-pull path kept as dev-cloner fallback.
-  **Bootstrap note:** before next v0.x tag, someone must manually trigger `initramfs-builder.yml` once to push the builder image to GHCR; `initramfs.yml` will fail at `docker pull` on tag push until then.
+  Landed: `make initramfs MODULES_PATH=` + `make initramfs-verify`; `--reproducible` cpio + `-n` gzip + sorted manifest; `initramfs.yml` runs inside stock `rockylinux:9` GHA container (no custom image to build/maintain); SSH-pull path kept as dev-cloner fallback.
   Depends on: #120 (landed).
   Owner: Dinesh.
   In: implement the node-side handler for `disk_capture_request` (defined by #146 in `internal/clientd/messages.go`). Run `lsblk -J` (or equivalent) on the node, parse into `api.DiskLayout`, send back as `disk_capture_result`. Without this, `POST /api/v1/disk-layouts/capture/{node_id}` returns 504. Out: alternative capture sources (sfdisk, parted) — lsblk only in v1.

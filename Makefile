@@ -23,19 +23,15 @@ LDFLAGS    := -ldflags="-X main.version=$(VERSION) \
               -X main.builtinSlurmBundleSHA256=$(BUNDLE_SHA256) \
               -s -w"
 
-# Kernel version pinned in packaging/initramfs-builder/Dockerfile.
-# Update here when the production kernel is bumped.
+# Reference kernel version — matches production cluster nodes.
+# CI resolves MODULES_PATH dynamically from the single installed kernel in
+# the rockylinux:9 GHA container; update this comment when the prod kernel bumps.
 INITRAMFS_KERNEL_VERSION ?= 5.14.0-503.40.1.el9_5.x86_64
 
-# Builder image at ghcr.io/sqoia-dev/initramfs-builder:<kernel-version>.
-# Built via .github/workflows/initramfs-builder.yml (manual dispatch).
-# Not built on every push — only when the kernel pin changes.
-INITRAMFS_BUILDER_IMAGE ?= ghcr.io/sqoia-dev/initramfs-builder:$(INITRAMFS_KERNEL_VERSION)
-
 # MODULES_PATH: directory containing kernel modules.
-# In CI this is /modules (pre-populated inside the builder image).
-# Locally: docker run --rm -v $(pwd):/clustr $(INITRAMFS_BUILDER_IMAGE) \
-#            make -C /clustr initramfs MODULES_PATH=/modules
+# CI: /lib/modules/$(ls /lib/modules) inside the rockylinux:9 GHA container.
+# In-product button (CLUSTR_CI_MODE=1): /lib/modules on the clustr-serverd host.
+# Dev cloner: SSH-pull fallback (see scripts/build-initramfs.sh mode 3).
 MODULES_PATH ?=
 
 .PHONY: all client server clientd privhelper static clean test web initramfs initramfs-verify schemas
@@ -84,22 +80,19 @@ clean:
 # Prerequisites:
 #   - bin/clustr must already be built (make static or make client)
 #   - MODULES_PATH must point to a directory containing kernel modules
-#     (see INITRAMFS_BUILDER_IMAGE above for the CI/local workflow)
 #
-# Typical CI invocation (inside builder container):
-#   make initramfs MODULES_PATH=/modules
+# Typical CI invocation (inside rockylinux:9 GHA container):
+#   make initramfs MODULES_PATH=/lib/modules/$(ls /lib/modules)
 #
-# Typical local invocation (pulls builder image):
-#   docker run --rm -v $(shell pwd):/clustr $(INITRAMFS_BUILDER_IMAGE) \
-#     make -C /clustr static initramfs MODULES_PATH=/modules
+# In-product "Build initramfs" button (CLUSTR_CI_MODE=1 on clustr-serverd host):
+#   scripts/build-initramfs.sh detects Rocky 9 and sources /lib/modules directly.
 initramfs: bin/clustr
 	@if [ -z "$(MODULES_PATH)" ]; then \
 	  echo ""; \
 	  echo "ERROR: MODULES_PATH is not set."; \
 	  echo ""; \
-	  echo "  CI:    make initramfs MODULES_PATH=/modules"; \
-	  echo "  Local: docker run --rm -v \$$(pwd):/clustr $(INITRAMFS_BUILDER_IMAGE)"; \
-	  echo "           make -C /clustr initramfs MODULES_PATH=/modules"; \
+	  echo "  CI:    make initramfs MODULES_PATH=/lib/modules/\$$(ls /lib/modules)"; \
+	  echo "  Dev:   set CLUSTR_CI_MODE=1 (if on Rocky 9) or MODULES_PATH=/path/to/modules"; \
 	  echo ""; \
 	  exit 1; \
 	fi

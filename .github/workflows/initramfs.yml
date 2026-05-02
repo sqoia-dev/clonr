@@ -17,14 +17,10 @@ on:
 #   → lab-validate passes (vm201 BIOS + vm202 UEFI)
 #   → release artifacts published (release.yml)
 #
-# #162 (Path A): SSH-pull-from-cloner replaced with builder image.
-#   CI pulls ghcr.io/sqoia-dev/initramfs-builder:<kernel-version>, which
-#   contains the pinned kernel modules at /modules.  The build runs inside the
-#   container; MODULES_PATH=/modules is passed to make.  No dependency on
-#   192.168.1.151 availability.
-#
-#   Builder image is built separately via initramfs-builder.yml (workflow_dispatch).
-#   It is NOT rebuilt on every push.
+# #162 (revised): CI runs inside a stock rockylinux:9 GHA container.
+#   dnf installs kernel-modules at job startup; MODULES_PATH is set to the
+#   only-installed kernel directory under /lib/modules.  No custom builder
+#   image to build, push, version, or maintain.
 #
 # Reproducibility: two back-to-back builds are compared by SHA256.  A mismatch
 # fails the job before the artifact is attached to the release.
@@ -47,23 +43,33 @@ jobs:
     permissions:
       contents: write
 
-    # Run the job inside the builder image so /modules is already populated.
-    # The image is pushed by initramfs-builder.yml; pulled here as a cache.
-    # IMPORTANT: container.image cannot reference env.* — kernel version is
-    # hardcoded here.  Must match packaging/initramfs-builder/Dockerfile ARG
-    # KERNEL_VERSION and Makefile INITRAMFS_KERNEL_VERSION.
-    # Update all three locations together when the kernel pin changes.
+    # Run inside stock Rocky Linux 9.  dnf installs kernel-modules from the
+    # standard Rocky repos; no custom image required.
     container:
-      image: ghcr.io/sqoia-dev/initramfs-builder:5.14.0-503.40.1.el9_5.x86_64
-      # modules: pre-populated at /modules inside the image; no volume mount needed.
+      image: rockylinux:9
       options: --user root
 
     steps:
-      - uses: actions/checkout@v5
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            kernel-modules \
+            kernel-modules-extra \
+            cpio \
+            xz \
+            gzip \
+            file \
+            binutils \
+            findutils \
+            kmod \
+            busybox \
+            tar \
+            pigz \
+            make \
+            git \
+            golang
 
-      - name: Install Go inside builder container
-        # The builder image ships golang from dnf; verify it is on PATH.
-        run: go version
+      - uses: actions/checkout@v4
 
       - name: Build static clustr client
         env:
@@ -75,17 +81,27 @@ jobs:
               -o bin/clustr \
               ./cmd/clustr
 
+      # The stock Rocky 9 container has exactly one kernel-modules version
+      # installed; resolve it dynamically so the workflow works across kernel
+      # updates without any pin to maintain.
+      - name: Resolve MODULES_PATH
+        id: modules
+        run: |
+          KVER=$(ls /lib/modules)
+          echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
+          echo "modules_path=/lib/modules/${KVER}" >> "$GITHUB_OUTPUT"
+
       # ── Reproducibility check ─────────────────────────────────────────────
       # Build twice with make initramfs-verify, which asserts SHA256 equality.
-      # Both builds run in the same container, same /modules, same binaries.
+      # Both builds run in the same container, same /lib/modules, same binaries.
       # Any source of non-determinism (unsorted find, embedded timestamps) fails here.
       - name: Verify reproducible initramfs (build twice, assert SHA256 match)
-        run: make initramfs-verify MODULES_PATH=/modules
+        run: make initramfs-verify MODULES_PATH=${{ steps.modules.outputs.modules_path }}
 
       # ── Final build for release artifact ─────────────────────────────────
       # initramfs-verify cleans up its temp images; produce the release artifact.
       - name: Build release initramfs
-        run: make initramfs MODULES_PATH=/modules
+        run: make initramfs MODULES_PATH=${{ steps.modules.outputs.modules_path }}
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
