@@ -40,6 +40,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/alerts"
 	"github.com/sqoia-dev/clustr/internal/allocation"
 	"github.com/sqoia-dev/clustr/internal/selector"
+	"github.com/sqoia-dev/clustr/internal/multicast"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	webui "github.com/sqoia-dev/clustr/internal/server/web"
@@ -111,6 +112,10 @@ type Server struct {
 	// (after the notifier is available) and started in StartBackgroundWorkers().
 	alertEngine *alerts.Engine
 	alertStore  *alerts.StateStore
+
+	// multicastScheduler is the Sprint 25 #157 UDPCast fleet-reimage scheduler.
+	// Initialised in buildRouter() after the DB is available.
+	multicastScheduler *multicast.Scheduler
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -1064,6 +1069,21 @@ func (s *Server) buildRouter() chi.Router {
 		},
 	}
 
+	// Sprint 25 #157 — UDPCast multicast fleet-reimage scheduler.
+	// The sender stub is wired in Commit 1; sender.Run is wired in Commit 2.
+	s.multicastScheduler = multicast.NewScheduler(
+		s.db,
+		multicast.StubSender, // TODO(#157 commit 2): replace with sender.Run
+		serverURL,
+	)
+	if err := s.multicastScheduler.Start(context.Background()); err != nil {
+		log.Error().Err(err).Msg("multicast: scheduler Start failed (non-fatal, continuing)")
+	}
+	multicastH := &handlers.MulticastHandler{
+		Scheduler: s.multicastScheduler,
+		DB:        s.db,
+	}
+
 	// S4-1: Prometheus metrics endpoint — unauthenticated so scrapers can reach it
 	// without managing API keys. Restrict at the network/reverse-proxy level if needed.
 	r.Get("/metrics", (&handlers.MetricsHandler{}).ServeHTTP)
@@ -1717,6 +1737,10 @@ func (s *Server) buildRouter() chi.Router {
 			}
 			r.Get("/console/{node_id}", consoleH.HandleConsole)
 
+			// BIOS handler declaration — referenced by both node-level and
+			// top-level routes registered in the blocks below.
+			biosH := &handlers.BiosHandler{DB: s.db}
+
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.
 			r.Get("/nodes/{id}/layout-recommendation", layoutH.GetLayoutRecommendation)
@@ -1725,6 +1749,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/nodes/{id}/layout/validate", layoutH.ValidateLayout)
 			r.Put("/nodes/{id}/group", layoutH.AssignNodeGroup)
 			r.Get("/nodes/{id}/effective-mounts", layoutH.GetEffectiveMounts)
+
+			// BIOS profile node bindings (#159).
+			r.Put("/nodes/{id}/bios-profile", biosH.AssignProfile)
+			r.Delete("/nodes/{id}/bios-profile", biosH.DetachProfile)
+			r.Get("/nodes/{id}/bios-profile", biosH.GetNodeProfile)
 
 			// Disk layout catalog (#146) — named, reusable layouts that can be
 			// assigned to node groups (default) or individual nodes (override).
@@ -1746,6 +1775,23 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/boot-entries/{id}", bootEntriesH.GetBootEntry)
 			r.Put("/boot-entries/{id}", bootEntriesH.UpdateBootEntry)
 			r.Delete("/boot-entries/{id}", bootEntriesH.DeleteBootEntry)
+
+			// Sprint 25 #157 — UDPCast multicast fleet-reimage.
+			// enqueue: node/operator enrolls in a multicast session.
+			// wait:    node long-polls until the session fires or falls back.
+			// outcome: node reports udp-receiver result after the transfer.
+			r.Post("/multicast/enqueue", multicastH.Enqueue)
+			r.Get("/multicast/sessions/{id}", multicastH.GetSession)
+			r.Get("/multicast/sessions/{id}/wait", multicastH.Wait)
+			r.Post("/multicast/sessions/{id}/members/{node_id}/outcome", multicastH.RecordOutcome)
+
+			// BIOS profiles (#159) — vendor-agnostic BIOS settings management.
+			r.Post("/bios-profiles", biosH.CreateProfile)
+			r.Get("/bios-profiles", biosH.ListProfiles)
+			r.Get("/bios-profiles/{id}", biosH.GetProfile)
+			r.Put("/bios-profiles/{id}", biosH.UpdateProfile)
+			r.Delete("/bios-profiles/{id}", biosH.DeleteProfile)
+			r.Get("/bios/providers/{vendor}/verify", biosH.VerifyProvider)
 
 			// Rack model (#149) — physical rack inventory and node U-slot assignments.
 			racksH := &handlers.RacksHandler{DB: s.db}

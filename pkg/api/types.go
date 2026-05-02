@@ -1905,3 +1905,79 @@ type NetworkNodeConfig struct {
 	// and opensm.service is enabled. Only set on the designated head node group.
 	OpenSMConf string `json:"opensm_conf,omitempty"`
 }
+
+// ─── BIOS profiles (#159) ─────────────────────────────────────────────────────
+
+// BiosProfile is a named, reusable set of vendor-specific BIOS settings stored
+// in bios_profiles.  settings_json is an opaque flat JSON object whose keys are
+// vendor-defined setting names and whose values are the desired setting values.
+//
+// Example settings_json for Intel SYSCFG:
+//
+//	{"Intel(R) Hyper-Threading Technology": "Disable", "Power Performance Tuning": "OS Controls EPB"}
+//
+// clustr does not own the settings schema; the operator must match the keys and
+// values to what their firmware version accepts.  See docs/BIOS-INTEL-SETUP.md.
+type BiosProfile struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Vendor       string    `json:"vendor"`        // "intel"; "dell"/"supermicro" in future sprints
+	SettingsJSON string    `json:"settings_json"` // raw JSON object: {"name": "value", ...}
+	Description  string    `json:"description,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// NodeBiosProfile is the per-node binding stored in node_bios_profile.
+// The absence of a row means the node has no assigned BIOS profile.
+type NodeBiosProfile struct {
+	NodeID               string     `json:"node_id"`
+	ProfileID            string     `json:"profile_id"`
+	LastAppliedAt        *time.Time `json:"last_applied_at,omitempty"`   // nil until first apply
+	AppliedSettingsHash  string     `json:"applied_settings_hash,omitempty"` // sha256(settings_json) at last apply
+	LastApplyError       string     `json:"last_apply_error,omitempty"`  // non-empty on last failure
+}
+
+// CreateBiosProfileRequest is the body for POST /api/v1/bios-profiles.
+type CreateBiosProfileRequest struct {
+	Name         string `json:"name"`
+	Vendor       string `json:"vendor"`
+	SettingsJSON string `json:"settings_json"` // must be a valid JSON object
+	Description  string `json:"description,omitempty"`
+}
+
+// UpdateBiosProfileRequest is the body for PUT /api/v1/bios-profiles/{id}.
+type UpdateBiosProfileRequest struct {
+	Name         string `json:"name,omitempty"`
+	SettingsJSON string `json:"settings_json,omitempty"`
+	Description  string `json:"description,omitempty"`
+}
+
+// AssignBiosProfileRequest is the body for PUT /api/v1/nodes/{id}/bios-profile.
+type AssignBiosProfileRequest struct {
+	ProfileID string `json:"profile_id"`
+}
+
+// BiosProfileResponse wraps a single BiosProfile for API responses.
+type BiosProfileResponse struct {
+	Profile BiosProfile `json:"profile"`
+}
+
+// ListBiosProfilesResponse is the response body for GET /api/v1/bios-profiles.
+type ListBiosProfilesResponse struct {
+	Profiles []BiosProfile `json:"profiles"`
+	Total    int           `json:"total"`
+}
+
+// NodeBiosProfileResponse wraps a NodeBiosProfile for API responses.
+type NodeBiosProfileResponse struct {
+	Binding NodeBiosProfile `json:"binding"`
+}
+
+// BiosProviderVerifyResponse is the response for GET /api/v1/bios/providers/{vendor}/verify.
+type BiosProviderVerifyResponse struct {
+	Vendor    string `json:"vendor"`
+	Available bool   `json:"available"` // true when operator binary is present and executable
+	BinPath   string `json:"bin_path"`  // expected path for operator reference
+	Message   string `json:"message,omitempty"`
+}
