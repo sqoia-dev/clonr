@@ -1,0 +1,92 @@
+<?xml version="1.0" ?>
+<!DOCTYPE nvidia_smi_log SYSTEM "nvsmi_device_v12.dtd">
+<nvidia_smi_log>
+        <timestamp>Thu May  1 12:00:00 2026</timestamp>
+        <driver_version>525.105.17</driver_version>
+        <cuda_version>12.0</cuda_version>
+        <attached_gpus>2</attached_gpus>
+        <gpu id="00000000:01:00.0">
+                <product_name>NVIDIA A100-SXM4-80GB</product_name>
+                <minor_number>0</minor_number>
+                <utilization>
+                        <gpu_util>42 %</gpu_util>
+                        <memory_util>17 %</memory_util>
+                        <encoder_util>0 %</encoder_util>
+                        <decoder_util>0 %</decoder_util>
+                </utilization>
+                <fb_memory_usage>
+                        <total>81920 MiB</total>
+                        <reserved>688 MiB</reserved>
+                        <used>14336 MiB</used>
+                        <free>66896 MiB</free>
+                </fb_memory_usage>
+                <temperature>
+                        <gpu_temp>58 C</gpu_temp>
+                        <gpu_temp_max_threshold>90 C</gpu_temp_max_threshold>
+                        <gpu_temp_slow_threshold>87 C</gpu_temp_slow_threshold>
+                </temperature>
+                <fan_speed>N/A</fan_speed>
+                <power_readings>
+                        <power_draw>302.45 W</power_draw>
+                        <power_limit>400.00 W</power_limit>
+                </power_readings>
+                <pci>
+                        <pci_gpu_link_info>
+                                <pcie_gen>
+                                        <current_link_gen>4</current_link_gen>
+                                        <max_link_gen>4</max_link_gen>
+                                </pcie_gen>
+                        </pci_gpu_link_info>
+                </pci>
+                <ecc_errors>
+                        <volatile>
+                                <sram_uncorrectable>0</sram_uncorrectable>
+                        </volatile>
+                        <aggregate>
+                                <sram_uncorrectable>0</sram_uncorrectable>
+                        </aggregate>
+                </ecc_errors>
+        </gpu>
+        <gpu id="00000000:81:00.0">
+                <product_name>NVIDIA A100-SXM4-80GB</product_name>
+                <minor_number>1</minor_number>
+                <utilization>
+                        <gpu_util>89 %</gpu_util>
+                        <memory_util>71 %</memory_util>
+                        <encoder_util>0 %</encoder_util>
+                        <decoder_util>0 %</decoder_util>
+                </utilization>
+                <fb_memory_usage>
+                        <total>81920 MiB</total>
+                        <reserved>688 MiB</reserved>
+                        <used>57344 MiB</used>
+                        <free>23888 MiB</free>
+                </fb_memory_usage>
+                <temperature>
+                        <gpu_temp>71 C</gpu_temp>
+                        <gpu_temp_max_threshold>90 C</gpu_temp_max_threshold>
+                        <gpu_temp_slow_threshold>87 C</gpu_temp_slow_threshold>
+                </temperature>
+                <fan_speed>N/A</fan_speed>
+                <power_readings>
+                        <power_draw>378.12 W</power_draw>
+                        <power_limit>400.00 W</power_limit>
+                </power_readings>
+                <pci>
+                        <pci_gpu_link_info>
+                                <pcie_gen>
+                                        <current_link_gen>4</current_link_gen>
+                                        <max_link_gen>4</max_link_gen>
+                                </pcie_gen>
+                        </pci_gpu_link_info>
+                </pci>
+                <ecc_errors>
+                        <volatile>
+                                <sram_uncorrectable>3</sram_uncorrectable>
+                        </volatile>
+                        <aggregate>
+                                <sram_uncorrectable>7</sram_uncorrectable>
+                        </aggregate>
+                </ecc_errors>
+        </gpu>
+</nvidia_smi_log>

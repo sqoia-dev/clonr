@@ -97,6 +97,10 @@ func New(serverURL, tokenPath, version string) (*Client, error) {
 	reg.Register(stats.NewNVMePlugin())
 	reg.Register(stats.NewInfiniBandPlugin())
 	reg.Register(stats.NewFirmwarePlugin())
+	reg.Register(stats.NewNvidiaPlugin())
+	reg.Register(stats.NewMegaRAIDPlugin())
+	reg.Register(stats.NewZFSPlugin())
+	reg.Register(stats.NewNTPPlugin())
 
 	return &Client{
 		serverURL:     serverURL,
