@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sqoia-dev/clustr/internal/clientd"
@@ -32,7 +33,9 @@ import (
 type cpTestHub struct {
 	nodeResults  map[string]clientd.OperatorExecResultPayload
 	disconnected map[string]bool
-	pending      map[string]chan clientd.OperatorExecResultPayload
+	// mu guards pending against concurrent access from parallel node goroutines.
+	mu      sync.Mutex
+	pending map[string]chan clientd.OperatorExecResultPayload
 }
 
 func newCpTestHub(results map[string]clientd.OperatorExecResultPayload, disconnected ...string) *cpTestHub {
@@ -50,12 +53,19 @@ func newCpTestHub(results map[string]clientd.OperatorExecResultPayload, disconne
 	}
 }
 
-func (h *cpTestHub) IsConnected(nodeID string) bool  { return !h.disconnected[nodeID] }
-func (h *cpTestHub) UnregisterOperatorExec(msgID string) { delete(h.pending, msgID) }
+func (h *cpTestHub) IsConnected(nodeID string) bool { return !h.disconnected[nodeID] }
+
+func (h *cpTestHub) UnregisterOperatorExec(msgID string) {
+	h.mu.Lock()
+	delete(h.pending, msgID)
+	h.mu.Unlock()
+}
 
 func (h *cpTestHub) RegisterOperatorExec(msgID string) <-chan clientd.OperatorExecResultPayload {
 	ch := make(chan clientd.OperatorExecResultPayload, 1)
+	h.mu.Lock()
 	h.pending[msgID] = ch
+	h.mu.Unlock()
 	return ch
 }
 
@@ -66,7 +76,10 @@ func (h *cpTestHub) Send(nodeID string, msg clientd.ServerMessage) error {
 	if msgID == "" {
 		msgID = msg.MsgID
 	}
-	if ch, ok := h.pending[msgID]; ok {
+	h.mu.Lock()
+	ch, ok := h.pending[msgID]
+	h.mu.Unlock()
+	if ok {
 		result := h.nodeResults[nodeID]
 		result.RefMsgID = msgID
 		ch <- result

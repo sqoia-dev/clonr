@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sqoia-dev/clustr/internal/clientd"
@@ -47,6 +48,8 @@ type execTestHub struct {
 	// disconnected lists node IDs that are offline.
 	disconnected map[string]bool
 
+	// mu guards pending against concurrent access from parallel node goroutines.
+	mu sync.Mutex
 	// pending channels registered by RegisterOperatorExec, keyed by msgID.
 	pending map[string]chan clientd.OperatorExecResultPayload
 }
@@ -83,7 +86,10 @@ func (h *execTestHub) Send(nodeID string, msg clientd.ServerMessage) error {
 	}
 
 	// Deliver the result to the registered channel (if any).
-	if ch, ok := h.pending[msgID]; ok {
+	h.mu.Lock()
+	ch, ok := h.pending[msgID]
+	h.mu.Unlock()
+	if ok {
 		result := h.nodeResults[nodeID]
 		result.RefMsgID = msgID
 		ch <- result
@@ -93,12 +99,16 @@ func (h *execTestHub) Send(nodeID string, msg clientd.ServerMessage) error {
 
 func (h *execTestHub) RegisterOperatorExec(msgID string) <-chan clientd.OperatorExecResultPayload {
 	ch := make(chan clientd.OperatorExecResultPayload, 1)
+	h.mu.Lock()
 	h.pending[msgID] = ch
+	h.mu.Unlock()
 	return ch
 }
 
 func (h *execTestHub) UnregisterOperatorExec(msgID string) {
+	h.mu.Lock()
 	delete(h.pending, msgID)
+	h.mu.Unlock()
 }
 
 // Compile-time interface check.
@@ -111,9 +121,10 @@ var _ ExecHubIface = (*execTestHub)(nil)
 // continuation lines before the blank event-separator).
 //
 // The server writes multi-line event data as:
-//   data: <first line of payload>\n
-//   <continuation lines>\n
-//   \n   ← event separator
+//
+//	data: <first line of payload>\n
+//	<continuation lines>\n
+//	\n   ← event separator
 //
 // This function reassembles the full payload per event (without the "data: " prefix).
 func collectSSELines(t *testing.T, h *ExecHandler, reqBody map[string]interface{}) []string {
