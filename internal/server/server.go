@@ -1021,7 +1021,10 @@ func (s *Server) buildRouter() chi.Router {
 	progress := &handlers.ProgressHandler{Store: s.progress}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
 	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}
-	nodeHealthH := &handlers.NodeHealthHandler{DB: s.db, Hub: s.clientdHub}
+	nodeHealthH := &handlers.NodeHealthHandler{
+		DB:  handlers.NewNodeHealthDBAdapter(s.db, selector.NewDBAdapter(s.db)),
+		Hub: s.clientdHub,
+	}
 	reimageH := &handlers.ReimageHandler{
 		DB:           s.db,
 		Orchestrator: s.reimageOrchestrator,

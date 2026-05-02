@@ -9,9 +9,11 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
@@ -19,6 +21,11 @@ import (
 type NodeHealthDBIface interface {
 	ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error)
 	GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error)
+	// ListAllNodes returns all node configs in the lightweight selector shape.
+	// Satisfied by selector.DBAdapter.ListAllNodes; wired in server.go.
+	ListAllNodes(ctx context.Context) ([]selector.SelectorNode, error)
+	// ListGroupMemberIDs returns the node IDs of all members of the named group.
+	ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error)
 }
 
 // NodeHealthHubIface is the subset of ClientdHub used by the health handler.
@@ -53,38 +60,128 @@ type NodeHealthResponse struct {
 	AsOf        time.Time         `json:"as_of"`
 }
 
-// GetClusterHealth handles GET /api/v1/health.
-// Returns reachability + heartbeat summary for all nodes (or a subset via ?selector).
+// GetClusterHealth handles GET /api/v1/cluster/health.
+// Returns reachability + heartbeat summary for all nodes (or a subset via selector query params).
 //
-// Query params:
+// Selector query parameters (mirror the CLI selector grammar):
 //
-//	selector=NODE  — single node ID (same as GET /nodes/{id}/health but wrapped in array)
-//	-n, selector handled by the thin flag layer in the CLI; server just takes a bare param.
+//	nodes=HOSTLIST   — hostlist expression (node01, node[01-32], …)
+//	group=NAME       — node group name
+//	all=true         — all registered nodes (default when no selector given)
+//	active=true      — active nodes only (deployed_verified state)
+//	racks=LIST       — rack names (comma-separated; resolved after #138)
+//	chassis=LIST     — chassis names (comma-separated; resolved after #138)
+//	ignore_status=true — bypass active-state filter
+//
+// Legacy compat: ?selector=NODE_ID still accepted (maps to nodes=NODE_ID).
 func (h *NodeHealthHandler) GetClusterHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Load all nodes.
-	nodes, err := h.DB.ListNodeConfigs(ctx, "")
+	q := r.URL.Query()
+
+	// Build a SelectorSet from query parameters.
+	set := selector.SelectorSet{
+		Nodes:        q.Get("nodes"),
+		Group:        q.Get("group"),
+		All:          q.Get("all") == "true",
+		Active:       q.Get("active") == "true",
+		Racks:        q.Get("racks"),
+		Chassis:      q.Get("chassis"),
+		IgnoreStatus: q.Get("ignore_status") == "true",
+	}
+
+	// Legacy compat: ?selector=NODE_ID (single node lookup, pre-#125 CLI behaviour).
+	if legacySel := q.Get("selector"); legacySel != "" && set.Nodes == "" {
+		set.Nodes = legacySel
+	}
+
+	// Load all nodes (full config for health assembly).
+	allNodes, err := h.DB.ListNodeConfigs(ctx, "")
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	// Optional single-node filter from ?selector= query param.
-	if sel := r.URL.Query().Get("selector"); sel != "" {
-		var filtered []api.NodeConfig
-		for _, n := range nodes {
-			if n.ID == sel || n.Hostname == sel {
-				filtered = append(filtered, n)
-				break
-			}
-		}
-		nodes = filtered
+	// If no selector is specified, return all nodes (backward-compatible default).
+	if set.IsEmpty() {
+		entries := buildHealthEntries(allNodes, h.Hub)
+		resp := summariseHealth(entries)
+		writeJSON(w, http.StatusOK, resp)
+		return
 	}
 
-	entries := buildHealthEntries(nodes, h.Hub)
+	// Resolve the selector to a set of node IDs, then filter the full node list.
+	nodeIDs, err := selector.Resolve(ctx, h.DB, set)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, api.ErrorResponse{
+			Error: err.Error(),
+			Code:  "selector_error",
+		})
+		return
+	}
+
+	idSet := make(map[string]struct{}, len(nodeIDs))
+	for _, id := range nodeIDs {
+		idSet[id] = struct{}{}
+	}
+
+	var filtered []api.NodeConfig
+	for _, n := range allNodes {
+		if _, ok := idSet[n.ID]; ok {
+			filtered = append(filtered, n)
+		}
+	}
+
+	entries := buildHealthEntries(filtered, h.Hub)
 	resp := summariseHealth(entries)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// nodeHealthMatchesSelector returns true when n.ID or n.Hostname matches sel.
+// Used for the legacy ?selector= parameter.
+func nodeHealthMatchesSelector(n api.NodeConfig, sel string) bool {
+	return n.ID == sel || strings.EqualFold(n.Hostname, sel)
+}
+
+// ─── NodeHealthDBAdapter ──────────────────────────────────────────────────────
+
+// nodeHealthDBInner is the set of methods used from *db.DB.
+type nodeHealthDBInner interface {
+	ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error)
+	GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error)
+}
+
+// NodeHealthDBAdapter satisfies NodeHealthDBIface by composing the raw DB with
+// the selector.DBAdapter (which adds ListAllNodes / ListGroupMemberIDs).
+type NodeHealthDBAdapter struct {
+	inner    nodeHealthDBInner
+	selInner *selector.DBAdapter
+}
+
+// NewNodeHealthDBAdapter creates a NodeHealthDBAdapter.
+// inner is *db.DB; selInner is selector.NewDBAdapter(db).
+func NewNodeHealthDBAdapter(inner nodeHealthDBInner, selInner *selector.DBAdapter) *NodeHealthDBAdapter {
+	return &NodeHealthDBAdapter{inner: inner, selInner: selInner}
+}
+
+// ListNodeConfigs delegates to the underlying DB.
+func (a *NodeHealthDBAdapter) ListNodeConfigs(ctx context.Context, baseImageID string) ([]api.NodeConfig, error) {
+	return a.inner.ListNodeConfigs(ctx, baseImageID)
+}
+
+// GetNodeConfig delegates to the underlying DB.
+func (a *NodeHealthDBAdapter) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
+	return a.inner.GetNodeConfig(ctx, id)
+}
+
+// ListAllNodes delegates to the selector adapter.
+func (a *NodeHealthDBAdapter) ListAllNodes(ctx context.Context) ([]selector.SelectorNode, error) {
+	return a.selInner.ListAllNodes(ctx)
+}
+
+// ListGroupMemberIDs delegates to the selector adapter.
+func (a *NodeHealthDBAdapter) ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error) {
+	return a.selInner.ListGroupMemberIDs(ctx, groupName)
 }
 
 // GetNodeHealth handles GET /api/v1/nodes/{id}/health.

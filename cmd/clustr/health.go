@@ -1,24 +1,26 @@
 package main
 
-// health.go — `clustr health` command (#130)
+// health.go — `clustr health` command (#130, refactored in #125 cleanup)
 //
 // Usage:
-//   clustr health [-n NODE | -A] [--summary | --ping | --wait [--timeout DUR]]
+//
+//	clustr health [selector flags] [--summary | --ping | --wait [--timeout DUR]]
 //
 // Displays per-node reachability, heartbeat age, and status summary.
-//
-// TODO(#125): replace the -n / -A local flag parsing with selector.RegisterSelectorFlags
-// once the selector grammar package lands.
+// Accepts the full selector grammar shared by exec, cp, and console.
 
 import (
 	"context"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/sqoia-dev/clustr/internal/selector"
 )
 
 // nodeHealthEntry and nodeHealthResponse mirror the server-side types in
@@ -43,10 +45,7 @@ type cliNodeHealthResponse struct {
 
 func newHealthCmd() *cobra.Command {
 	var (
-		// TODO(#125): replace -n / -A with selector.RegisterSelectorFlags(cmd)
-		// once the selector grammar package (internal/selector/) lands.
-		flagNode    string
-		flagAll     bool
+		sel         selector.SelectorSet
 		flagSummary bool
 		flagPing    bool
 		flagWait    bool
@@ -66,9 +65,11 @@ reports the round-trip latency. (Not yet implemented in Sprint 21; shown as N/A.
 --wait polls every 2s until all targeted nodes show reachable=true, or until
 --timeout (default 5m) expires.
 
-Selector flags (minimal, pre-#125):
-  -n  single node by ID or hostname
-  -A  all registered nodes (default when neither -n nor -A is provided)`,
+Selector flags (full grammar from #125):
+  -n HOSTLIST  node01, node[01-32], node[01-04,08,12-15]
+  -g NAME      node group
+  -A           all registered nodes (default when no selector given)
+  -a           active nodes only (deployed_verified state)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Resolve timeout.
 			timeout := 5 * time.Minute
@@ -81,10 +82,10 @@ Selector flags (minimal, pre-#125):
 			}
 
 			if flagWait {
-				return runHealthWait(flagNode, timeout)
+				return runHealthWait(sel, timeout)
 			}
 
-			resp, err := fetchHealth(flagNode, flagAll)
+			resp, err := fetchHealthSel(sel)
 			if err != nil {
 				return err
 			}
@@ -99,9 +100,7 @@ Selector flags (minimal, pre-#125):
 		},
 	}
 
-	// TODO(#125): replace with selector.RegisterSelectorFlags(cmd)
-	cmd.Flags().StringVarP(&flagNode, "node", "n", "", "Target a single node by ID or hostname")
-	cmd.Flags().BoolVarP(&flagAll, "all", "A", false, "Target all registered nodes (default)")
+	selector.RegisterSelectorFlags(cmd, &sel)
 	cmd.Flags().BoolVar(&flagSummary, "summary", true, "Show summary table (default)")
 	cmd.Flags().BoolVar(&flagPing, "ping", false, "Request active heartbeat ping from each node's clientd")
 	cmd.Flags().BoolVar(&flagWait, "wait", false, "Poll until all targets are reachable")
@@ -110,18 +109,38 @@ Selector flags (minimal, pre-#125):
 	return cmd
 }
 
-// fetchHealth calls GET /api/v1/cluster/health or GET /api/v1/nodes/{id}/health.
-func fetchHealth(nodeID string, all bool) (*cliNodeHealthResponse, error) {
+// fetchHealthSel calls GET /api/v1/cluster/health with selector query params.
+func fetchHealthSel(sel selector.SelectorSet) (*cliNodeHealthResponse, error) {
 	ctx := context.Background()
 	c := clientFromFlags()
 
-	var path string
-	if nodeID != "" {
-		// Single-node path.
-		path = "/api/v1/nodes/" + nodeID + "/health"
-	} else {
-		// Cluster-wide path (all nodes).
-		path = "/api/v1/cluster/health"
+	// Build query string from selector fields.
+	q := url.Values{}
+	if sel.Nodes != "" {
+		q.Set("nodes", sel.Nodes)
+	}
+	if sel.Group != "" {
+		q.Set("group", sel.Group)
+	}
+	if sel.All {
+		q.Set("all", "true")
+	}
+	if sel.Active {
+		q.Set("active", "true")
+	}
+	if sel.Racks != "" {
+		q.Set("racks", sel.Racks)
+	}
+	if sel.Chassis != "" {
+		q.Set("chassis", sel.Chassis)
+	}
+	if sel.IgnoreStatus {
+		q.Set("ignore_status", "true")
+	}
+
+	path := "/api/v1/cluster/health"
+	if len(q) > 0 {
+		path = path + "?" + q.Encode()
 	}
 
 	var resp cliNodeHealthResponse
@@ -182,14 +201,14 @@ func formatAge(secs float64) string {
 
 // runHealthWait polls the health endpoint every 2s until all targeted nodes
 // show reachable=true, or until timeout expires.
-func runHealthWait(nodeID string, timeout time.Duration) error {
+func runHealthWait(sel selector.SelectorSet, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	tick := 2 * time.Second
 
 	fmt.Fprintf(os.Stderr, "Waiting for nodes to become reachable (timeout: %s)...\n", timeout)
 
 	for {
-		resp, err := fetchHealth(nodeID, nodeID == "")
+		resp, err := fetchHealthSel(sel)
 		if err != nil {
 			return fmt.Errorf("health wait: %w", err)
 		}
