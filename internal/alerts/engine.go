@@ -52,10 +52,11 @@ type HeartbeatChecker interface {
 // invoke Engine methods from other goroutines. State accessed by Engine methods
 // is reached through StateStore, which has its own thread-safety contract.
 type Engine struct {
-	rulesDir   string
-	stats      StatsQuerier
-	nodeDB     *db.DB // for last_seen_at queries (offline node rule)
-	store      *StateStore
+	rulesDir string
+	stats    StatsQuerier
+	nodeDB   *db.DB // for last_seen_at queries (offline node rule)
+	store    *StateStore
+	silences *SilenceStore // may be nil if silences table not available
 	dispatcher *Dispatcher
 
 	mu    sync.RWMutex // protects rules and ruleMtimes
@@ -71,8 +72,9 @@ type Engine struct {
 //   - stats: the node_stats query backend.
 //   - nodeDB: the full *db.DB, used for per-node last_seen_at queries.
 //   - store: the alert state store.
+//   - silences: the silence store; may be nil (silences are skipped).
 //   - dispatcher: the outbound notification dispatcher.
-func New(rulesDir string, stats StatsQuerier, nodeDB *db.DB, store *StateStore, dispatcher *Dispatcher) *Engine {
+func New(rulesDir string, stats StatsQuerier, nodeDB *db.DB, store *StateStore, silences *SilenceStore, dispatcher *Dispatcher) *Engine {
 	if rulesDir == "" {
 		rulesDir = defaultRulesDir
 	}
@@ -81,9 +83,25 @@ func New(rulesDir string, stats StatsQuerier, nodeDB *db.DB, store *StateStore, 
 		stats:      stats,
 		nodeDB:     nodeDB,
 		store:      store,
+		silences:   silences,
 		dispatcher: dispatcher,
 		ruleMtimes: make(map[string]time.Time),
 	}
+}
+
+// isSilenced returns true when a current silence covers (ruleName, nodeID).
+// Returns false on any DB error so we never suppress alerts due to query failures.
+func (e *Engine) isSilenced(ctx context.Context, ruleName, nodeID string) bool {
+	if e.silences == nil {
+		return false
+	}
+	ok, err := e.silences.IsSilenced(ctx, ruleName, nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("rule", ruleName).Str("node_id", nodeID).
+			Msg("alerts: silence check failed — treating as not silenced")
+		return false
+	}
+	return ok
 }
 
 // Run starts the engine loop.  Blocks until ctx is cancelled.
@@ -352,7 +370,9 @@ func (e *Engine) evaluateRuleAllNodes(ctx context.Context, r *Rule, since, until
 					}
 					log.Info().Str("rule", r.Name).Str("node_id", nodeID).
 						Float64("value", lastValue).Msg("alerts: FIRING")
-					e.dispatcher.Fire(ctx, r, alert)
+					if !e.isSilenced(ctx, r.Name, nodeID) {
+						e.dispatcher.Fire(ctx, r, alert)
+					}
 				} else {
 					// Still firing — update the last_value but don't re-dispatch.
 					e.store.UpdateLastValue(ctx, key, lastValue)
@@ -484,7 +504,9 @@ func (e *Engine) evaluateOfflineRule(ctx context.Context, r *Rule) {
 			}
 			log.Info().Str("rule", r.Name).Str("node_id", nodeID).
 				Msg("alerts: node OFFLINE — FIRING")
-			e.dispatcher.Fire(ctx, r, alert)
+			if !e.isSilenced(ctx, r.Name, nodeID) {
+				e.dispatcher.Fire(ctx, r, alert)
+			}
 		}
 	}
 

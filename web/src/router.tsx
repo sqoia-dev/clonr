@@ -9,6 +9,8 @@ import { ActivityPage } from "@/routes/activity"
 import { SettingsPage } from "@/routes/settings"
 import { IdentityPage } from "@/routes/identity"
 import { SlurmPage } from "@/routes/slurm"
+import { AlertsPage } from "@/routes/alerts"
+import { DatacenterPage } from "@/routes/datacenter"
 import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
@@ -138,6 +140,18 @@ const slurmRoute = createRoute({
   component: SlurmPage,
 })
 
+const alertsRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/alerts",
+  component: AlertsPage,
+})
+
+const datacenterRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/datacenter",
+  component: DatacenterPage,
+})
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
@@ -150,6 +164,8 @@ const routeTree = rootRoute.addChildren([
     settingsRoute,
     identityRoute,
     slurmRoute,
+    alertsRoute,
+    datacenterRoute,
   ]),
 ])
 

@@ -11,7 +11,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
-import { Server, Image as ImageIcon, Activity, Settings, ShieldCheck, Cpu, RefreshCw, Key, Clock, ChevronLeft, Plus, Pencil, Trash2, Layers } from "lucide-react"
+import { Server, Image as ImageIcon, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, RefreshCw, Key, Clock, ChevronLeft, Plus, Pencil, Trash2, Layers } from "lucide-react"
 import { apiFetch } from "@/lib/api"
 import type { ListNodesResponse, ListImagesResponse } from "@/lib/types"
 
@@ -55,10 +55,12 @@ function loadRecentEntities(): RecentEntity[] {
 const navRoutes = [
   { label: "Nodes", path: "/nodes", icon: Server },
   { label: "Images", path: "/images", icon: ImageIcon },
+  { label: "Slurm", path: "/slurm", icon: Cpu },
+  { label: "Alerts", path: "/alerts", icon: Bell },
+  { label: "Datacenter", path: "/datacenter", icon: Building2 },
   { label: "Activity", path: "/activity", icon: Activity },
   { label: "Identity", path: "/identity", icon: ShieldCheck },
   { label: "Settings", path: "/settings", icon: Settings },
-  { label: "Slurm", path: "/slurm", icon: Cpu },
 ]
 
 // ─── CommandPalette ───────────────────────────────────────────────────────────
@@ -108,6 +110,8 @@ export function CommandPalette({ open, onClose }: Props) {
     else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined } })
     else if (path === "/identity") navigate({ to: "/identity" })
     else if (path === "/slurm") navigate({ to: "/slurm" })
+    else if (path === "/alerts") navigate({ to: "/alerts" })
+    else if (path === "/datacenter") navigate({ to: "/datacenter" })
     else navigate({ to: "/settings" })
   }
 
