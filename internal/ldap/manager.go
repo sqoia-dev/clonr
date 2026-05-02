@@ -110,6 +110,19 @@ func (m *Manager) SetStagingDB(s StagingIface) {
 	m.StagingDB = s
 }
 
+// ApplyUserCreate commits a CreateUserRequest directly against the directory.
+// Used by the two-stage commit replay path in server.buildChangesHandler (#154).
+func (m *Manager) ApplyUserCreate(ctx context.Context, req CreateUserRequest) error {
+	if req.UID == "" {
+		return fmt.Errorf("ldap: ApplyUserCreate: uid is required")
+	}
+	dit, err := m.WriteBind(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: ApplyUserCreate: write bind: %w", err)
+	}
+	return dit.CreateUser(req)
+}
+
 // New creates a new LDAP Manager. Call StartBackgroundWorkers to start health checks.
 func New(cfg config.ServerConfig, database *db.DB) *Manager {
 	m := &Manager{

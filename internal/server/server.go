@@ -1963,23 +1963,14 @@ func (s *Server) buildChangesHandler(getActorInfo func(r *http.Request) (string,
 		Audit:        s.audit,
 		GetActorInfo: getActorInfo,
 		CommitFns: map[string]handlers.ChangesCommitFn{
-			// ldap_user: replay the payload by calling the LDAP manager's write bind.
+			// ldap_user: replay the payload through ApplyUserCreate which wraps
+			// WriteBind + ditClient.CreateUser without exposing the unexported ditClient.
 			"ldap_user": func(ctx context.Context, c db.PendingChange) error {
 				var req ldapmodule.CreateUserRequest
 				if err := json.Unmarshal([]byte(c.Payload), &req); err != nil {
 					return fmt.Errorf("ldap_user commit: decode payload: %w", err)
 				}
-				if req.UID == "" {
-					return fmt.Errorf("ldap_user commit: uid is required in payload")
-				}
-				dit, err := s.ldapMgr.WriteBind(ctx)
-				if err != nil {
-					return fmt.Errorf("ldap_user commit: write bind: %w", err)
-				}
-				if err := dit.CreateUser(req); err != nil {
-					return fmt.Errorf("ldap_user commit: create user: %w", err)
-				}
-				return nil
+				return s.ldapMgr.ApplyUserCreate(ctx, req)
 			},
 			// sudoers_rule: replay the payload by adding a sudoer to the node.
 			"sudoers_rule": func(ctx context.Context, c db.PendingChange) error {
