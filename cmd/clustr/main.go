@@ -145,6 +145,8 @@ func init() {
 	rootCmd.AddCommand(newExecCmd())    // #126
 	rootCmd.AddCommand(newCpCmd())      // #127
 	rootCmd.AddCommand(newConsoleCmd()) // #128
+	rootCmd.AddCommand(newAlertsCmd())  // #134
+	rootCmd.AddCommand(newStatsCmd())   // #134
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.

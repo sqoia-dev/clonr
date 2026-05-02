@@ -13,10 +13,10 @@ import (
 
 // fakeAlertsStore implements AlertsStore for testing.
 type fakeAlertsStore struct {
-	active  []alerts.Alert
-	recent  []alerts.Alert
+	active []alerts.Alert
+	recent []alerts.Alert
 	// filtered returns active + recent combined for QueryFiltered.
-	all     []alerts.Alert
+	all []alerts.Alert
 }
 
 func (f *fakeAlertsStore) QueryActive(ctx context.Context) ([]alerts.Alert, error) {
@@ -27,13 +27,16 @@ func (f *fakeAlertsStore) QueryRecent(ctx context.Context) ([]alerts.Alert, erro
 	return f.recent, nil
 }
 
-func (f *fakeAlertsStore) QueryFiltered(ctx context.Context, severities []string, nodeID, state string) ([]alerts.Alert, error) {
+func (f *fakeAlertsStore) QueryFiltered(ctx context.Context, severities []string, nodeID, ruleName, state string) ([]alerts.Alert, error) {
 	var out []alerts.Alert
 	for _, a := range f.all {
 		if state != "" && a.State != state {
 			continue
 		}
 		if nodeID != "" && a.NodeID != nodeID {
+			continue
+		}
+		if ruleName != "" && a.RuleName != ruleName {
 			continue
 		}
 		if len(severities) > 0 {

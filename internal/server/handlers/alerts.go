@@ -6,6 +6,7 @@ package handlers
 //
 //	severity=warn,critical   — comma-separated severity filter
 //	node=<node_id>           — filter by node
+//	rule=<rule_name>         — filter by rule name
 //	state=firing|resolved    — filter by state; default returns both
 //
 // Response shape:
@@ -31,7 +32,7 @@ import (
 type AlertsStore interface {
 	QueryActive(ctx context.Context) ([]alerts.Alert, error)
 	QueryRecent(ctx context.Context) ([]alerts.Alert, error)
-	QueryFiltered(ctx context.Context, severities []string, nodeID, state string) ([]alerts.Alert, error)
+	QueryFiltered(ctx context.Context, severities []string, nodeID, ruleName, state string) ([]alerts.Alert, error)
 }
 
 // AlertsHandler handles the GET /api/v1/alerts endpoint.
@@ -52,6 +53,7 @@ func (h *AlertsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	severityParam := strings.TrimSpace(q.Get("severity"))
 	nodeParam := strings.TrimSpace(q.Get("node"))
+	ruleParam := strings.TrimSpace(q.Get("rule"))
 	stateParam := strings.TrimSpace(q.Get("state"))
 
 	// Parse comma-separated severity list.
@@ -67,8 +69,8 @@ func (h *AlertsHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	// If any filter is set, use the filtered query; otherwise use the default
 	// two-bucket view (active + recent 24h resolved).
-	if severityParam != "" || nodeParam != "" || stateParam != "" {
-		rows, err := h.Store.QueryFiltered(ctx, severities, nodeParam, stateParam)
+	if severityParam != "" || nodeParam != "" || ruleParam != "" || stateParam != "" {
+		rows, err := h.Store.QueryFiltered(ctx, severities, nodeParam, ruleParam, stateParam)
 		if err != nil {
 			log.Error().Err(err).Msg("alerts: QueryFiltered failed")
 			writeError(w, err)

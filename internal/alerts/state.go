@@ -329,8 +329,8 @@ func (s *StateStore) QueryRecent(ctx context.Context) ([]Alert, error) {
 }
 
 // QueryFiltered applies the optional filters: severity (comma-separated),
-// node_id, state.  Used by the GET /api/v1/alerts handler.
-func (s *StateStore) QueryFiltered(ctx context.Context, severities []string, nodeID, state string) ([]Alert, error) {
+// node_id, rule_name, state.  Used by the GET /api/v1/alerts handler.
+func (s *StateStore) QueryFiltered(ctx context.Context, severities []string, nodeID, ruleName, state string) ([]Alert, error) {
 	q := `SELECT id, rule_name, node_id, sensor, labels_json, severity, state,
 		fired_at, resolved_at, last_value, threshold_op, threshold_val
 		FROM alerts WHERE 1=1`
@@ -350,6 +350,10 @@ func (s *StateStore) QueryFiltered(ctx context.Context, severities []string, nod
 	if nodeID != "" {
 		q += " AND node_id = ?"
 		args = append(args, nodeID)
+	}
+	if ruleName != "" {
+		q += " AND rule_name = ?"
+		args = append(args, ruleName)
 	}
 	if state != "" {
 		q += " AND state = ?"
