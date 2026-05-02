@@ -11,7 +11,6 @@ package handlers
 //   - max_exit_code in summary reflects per-node codes
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -107,7 +106,16 @@ var _ ExecHubIface = (*execTestHub)(nil)
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// collectSSELines sends a POST to the handler and returns all data: lines.
+// collectSSEEvents sends a POST to the handler and returns the full payload
+// of each SSE event (everything after "data: " in the first line, plus any
+// continuation lines before the blank event-separator).
+//
+// The server writes multi-line event data as:
+//   data: <first line of payload>\n
+//   <continuation lines>\n
+//   \n   ← event separator
+//
+// This function reassembles the full payload per event (without the "data: " prefix).
 func collectSSELines(t *testing.T, h *ExecHandler, reqBody map[string]interface{}) []string {
 	t.Helper()
 	bodyJSON, _ := json.Marshal(reqBody)
@@ -119,27 +127,53 @@ func collectSSELines(t *testing.T, h *ExecHandler, reqBody map[string]interface{
 		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
 	}
 
-	var lines []string
-	scanner := bufio.NewScanner(w.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			lines = append(lines, line[len("data: "):])
-		}
-	}
-	return lines
+	return parseSSEEvents(w.Body.String())
 }
 
-// parseSummary parses the last SSE line as an execSummaryEvent.
+// parseSSEEvents splits a raw SSE body into event payloads.
+// Each event is delimited by a blank line. The first line of a data event
+// begins with "data: "; continuation lines are appended with "\n".
+func parseSSEEvents(body string) []string {
+	var events []string
+	var current strings.Builder
+	inEvent := false
+
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "data: ") {
+			if inEvent {
+				current.WriteByte('\n')
+			}
+			current.WriteString(line[len("data: "):])
+			inEvent = true
+		} else if line == "" {
+			if inEvent {
+				events = append(events, current.String())
+				current.Reset()
+				inEvent = false
+			}
+		} else if inEvent {
+			// Continuation line (part of same event payload).
+			current.WriteByte('\n')
+			current.WriteString(line)
+		}
+	}
+	if inEvent && current.Len() > 0 {
+		events = append(events, current.String())
+	}
+	return events
+}
+
+// parseSummary parses the last SSE event payload as an execSummaryEvent.
 func parseSummary(t *testing.T, lines []string) execSummaryEvent {
 	t.Helper()
 	if len(lines) == 0 {
-		t.Fatal("no SSE lines received")
+		t.Fatal("no SSE events received")
 	}
-	last := lines[len(lines)-1]
+	last := strings.TrimSpace(lines[len(lines)-1])
 	var s execSummaryEvent
 	if err := json.Unmarshal([]byte(last), &s); err != nil {
-		t.Fatalf("last SSE line is not valid JSON: %v — line: %s", err, last)
+		t.Fatalf("last SSE event is not valid JSON: %v — event: %s", err, last)
 	}
 	if s.Type != "summary" {
 		t.Fatalf("expected type=summary, got %q", s.Type)
