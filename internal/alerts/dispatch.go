@@ -11,12 +11,92 @@ import (
 	"github.com/sqoia-dev/clustr/internal/webhook"
 )
 
+// mailJob is an envelope for a single SMTP delivery task queued by Fire or Resolve.
+type mailJob struct {
+	to      []string
+	subject string
+	body    string
+	// contextual fields for structured logging only.
+	ruleName string
+	nodeID   string
+	event    string
+}
+
 // Dispatcher routes alert fire/resolve events to the existing webhook and SMTP
-// dispatchers.  Both are optional: if either is nil or unconfigured, the event
+// dispatchers. Both are optional: if either is nil or unconfigured, the event
 // is logged and skipped — the engine never fails because of a missing notifier.
+//
+// THREAD-SAFETY: Fire and Resolve are non-blocking and safe for concurrent use.
+// SMTP delivery is handled by a fixed pool of background worker goroutines owned
+// by this Dispatcher. Workers are started via Start(ctx) and exit when ctx is
+// cancelled. mailQueue overflow drops the job and emits a Warn log — no SMTP
+// send is ever performed on the engine tick goroutine.
 type Dispatcher struct {
-	Webhook *webhook.Dispatcher        // may be nil
-	Mailer  notifications.Mailer       // may be nil
+	Webhook *webhook.Dispatcher  // may be nil
+	Mailer  notifications.Mailer // may be nil
+
+	mailQueue chan mailJob
+}
+
+const (
+	mailQueueCapacity = 256
+	mailWorkerCount   = 4
+)
+
+// Start launches the SMTP worker pool. Call this once from clustr-serverd's
+// startup, after the Dispatcher is constructed but before Engine.Run is called.
+// Workers run until ctx is cancelled; they drain any in-flight jobs before
+// exiting. Start is not safe to call more than once on the same Dispatcher.
+func (d *Dispatcher) Start(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	d.mailQueue = make(chan mailJob, mailQueueCapacity)
+	for i := 0; i < mailWorkerCount; i++ {
+		go d.mailWorker(ctx)
+	}
+}
+
+// Stop closes the mailQueue channel, signalling workers to drain and exit.
+// Optional: ctx cancellation (passed to Start) is the primary shutdown signal.
+// Do not call Stop if Start was not called.
+func (d *Dispatcher) Stop() {
+	if d == nil || d.mailQueue == nil {
+		return
+	}
+	close(d.mailQueue)
+}
+
+// mailWorker drains mailQueue until the channel is closed or ctx is cancelled.
+func (d *Dispatcher) mailWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-d.mailQueue:
+			if !ok {
+				return
+			}
+			// Use a background context for delivery so a single slow MX does not
+			// propagate cancellation to unrelated jobs.
+			sendCtx := context.Background()
+			if err := d.Mailer.Send(sendCtx, job.to, job.subject, job.body); err != nil {
+				log.Error().
+					Err(err).
+					Str("alert_rule", job.ruleName).
+					Str("node_id", job.nodeID).
+					Strs("to", job.to).
+					Msg("alerts: email send failed")
+				continue
+			}
+			log.Info().
+				Str("alert_rule", job.ruleName).
+				Str("node_id", job.nodeID).
+				Strs("to", job.to).
+				Str("event", job.event).
+				Msg("alerts: email sent")
+		}
+	}
 }
 
 // alertWebhookPayload extends webhook.Payload with alert-specific fields.
@@ -37,6 +117,7 @@ type alertWebhookPayload struct {
 }
 
 // Fire dispatches a firing notification for alert a using the rule's notify config.
+// Non-blocking: SMTP jobs are queued; webhook delivery is fire-and-forget.
 func (d *Dispatcher) Fire(ctx context.Context, r *Rule, a *Alert) {
 	if d == nil {
 		return
@@ -45,6 +126,7 @@ func (d *Dispatcher) Fire(ctx context.Context, r *Rule, a *Alert) {
 }
 
 // Resolve dispatches a resolution notification for alert a.
+// Non-blocking: SMTP jobs are queued; webhook delivery is fire-and-forget.
 func (d *Dispatcher) Resolve(ctx context.Context, r *Rule, a *Alert) {
 	if d == nil {
 		return
@@ -54,6 +136,7 @@ func (d *Dispatcher) Resolve(ctx context.Context, r *Rule, a *Alert) {
 
 func (d *Dispatcher) dispatch(ctx context.Context, event string, r *Rule, a *Alert) {
 	// Webhook — if configured and rule requests it.
+	// Webhook delivery is already asynchronous inside the webhook package.
 	if r.Notify.Webhook && d.Webhook != nil {
 		wpl := webhook.Payload{
 			Event:     event,
@@ -69,7 +152,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, event string, r *Rule, a *Ale
 			Msg("alerts: webhook dispatched")
 	}
 
-	// SMTP — send to every address listed in notify.email.
+	// SMTP — enqueue to the worker pool; never block the engine tick goroutine.
 	if len(r.Notify.Email) > 0 {
 		if d.Mailer == nil || !d.Mailer.IsConfigured() {
 			log.Info().
@@ -78,23 +161,36 @@ func (d *Dispatcher) dispatch(ctx context.Context, event string, r *Rule, a *Ale
 				Msg("alerts: SMTP not configured — email notification skipped")
 			return
 		}
-		subject := fmt.Sprintf("[clustr] %s: %s on %s", r.Severity, r.Name, a.NodeID)
-		body := d.buildEmailBody(event, r, a)
-		if err := d.Mailer.Send(ctx, r.Notify.Email, subject, body); err != nil {
-			log.Error().
-				Err(err).
-				Str("alert_rule", r.Name).
-				Str("node_id", a.NodeID).
-				Strs("to", r.Notify.Email).
-				Msg("alerts: email send failed")
+		// If Start() was never called (e.g. in tests that don't need delivery),
+		// fall back to a direct synchronous send rather than panicking.
+		if d.mailQueue == nil {
+			subject := fmt.Sprintf("[clustr] %s: %s on %s", r.Severity, r.Name, a.NodeID)
+			body := d.buildEmailBody(event, r, a)
+			if err := d.Mailer.Send(ctx, r.Notify.Email, subject, body); err != nil {
+				log.Error().Err(err).Str("alert_rule", r.Name).Str("node_id", a.NodeID).
+					Strs("to", r.Notify.Email).Msg("alerts: email send failed (no worker pool)")
+			}
 			return
 		}
-		log.Info().
-			Str("alert_rule", r.Name).
-			Str("node_id", a.NodeID).
-			Strs("to", r.Notify.Email).
-			Str("event", event).
-			Msg("alerts: email sent")
+
+		subject := fmt.Sprintf("[clustr] %s: %s on %s", r.Severity, r.Name, a.NodeID)
+		body := d.buildEmailBody(event, r, a)
+		job := mailJob{
+			to:       r.Notify.Email,
+			subject:  subject,
+			body:     body,
+			ruleName: r.Name,
+			nodeID:   a.NodeID,
+			event:    event,
+		}
+		select {
+		case d.mailQueue <- job:
+		default:
+			log.Warn().
+				Str("alert_rule", r.Name).
+				Str("node_id", a.NodeID).
+				Msg("alerts: mail queue full, dropping email notification")
+		}
 	}
 }
 

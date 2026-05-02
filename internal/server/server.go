@@ -110,8 +110,9 @@ type Server struct {
 
 	// alertEngine is the #133 alert rule engine.  Initialised in buildRouter()
 	// (after the notifier is available) and started in StartBackgroundWorkers().
-	alertEngine *alerts.Engine
-	alertStore  *alerts.StateStore
+	alertEngine      *alerts.Engine
+	alertStore       *alerts.StateStore
+	alertDispatcher  *alerts.Dispatcher
 
 	// multicastScheduler is the Sprint 25 #157 UDPCast fleet-reimage scheduler.
 	// Initialised in buildRouter() after the DB is available.
@@ -298,7 +299,10 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// Sprint 22 #131: stats retention sweeper + Prometheus exposition cache.
 	go s.runStatsRetentionSweeper(ctx)
 	go s.runStatsPrometheusRefresher(ctx)
-	// Sprint 22 #133: alert rule engine.
+	// Sprint 22 #133: alert rule engine.  Start SMTP worker pool before engine.
+	if s.alertDispatcher != nil {
+		s.alertDispatcher.Start(ctx)
+	}
 	if s.alertEngine != nil {
 		go s.alertEngine.Run(ctx)
 	}
@@ -1194,6 +1198,7 @@ func (s *Server) buildRouter() chi.Router {
 				silenceStore := alerts.NewSilenceStore(s.db)
 				s.alertStore = alertStore
 				s.alertSilences = silenceStore
+				s.alertDispatcher = alertDispatcher
 				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.db), s.db, alertStore, silenceStore, alertDispatcher)
 			}
 		}
@@ -1494,6 +1499,7 @@ func (s *Server) buildRouter() chi.Router {
 			DB:     s.db,
 			Hub:    s.clientdHub,
 			Broker: s.broker,
+			BiosDB: s.db,
 			SudoersNodeConfig: func(ctx context.Context) (*api.SudoersNodeConfig, error) {
 				return s.ldapMgr.SudoersNodeConfig(ctx)
 			},
@@ -1710,9 +1716,15 @@ func (s *Server) buildRouter() chi.Router {
 				}
 
 				// Sprint 24 #155: alert rules listing (engine-loaded rules).
+				// UX-9: PUT /api/v1/alerts/rules/{name} for in-UI rule editing.
 				if s.alertEngine != nil {
-					rulesH := &handlers.AlertRulesHandler{Engine: s.alertEngine}
+					rulesH := &handlers.AlertRulesHandler{
+						Engine:  s.alertEngine,
+						StatsDB: handlers.NewAlertRulesDBAdapter(s.db.SQL()),
+						// RuleWriter defaults to privhelper.RuleWrite when nil.
+					}
 					r.Get("/alerts/rules", rulesH.HandleList)
+					r.Put("/alerts/rules/{name}", rulesH.HandleUpdate)
 				}
 			}
 
@@ -1758,6 +1770,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Delete("/nodes/{id}/bios-profile", biosH.DetachProfile)
 			r.Get("/nodes/{id}/bios-profile", biosH.GetNodeProfile)
 			r.Post("/nodes/{id}/bios/read", clientdH.ReadBiosOnNode)
+			r.Post("/nodes/{id}/bios/apply", clientdH.BiosApplyOnNode)
 
 			// Disk layout catalog (#146) — named, reusable layouts that can be
 			// assigned to node groups (default) or individual nodes (override).
