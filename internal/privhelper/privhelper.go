@@ -116,6 +116,38 @@ func CATrustExtract(ctx context.Context) error {
 	return nil
 }
 
+// BiosRead invokes the bios-read verb to read current BIOS settings from the
+// node.  The vendor binary (operator-supplied) is exec'd by the helper and its
+// stdout (key=value lines) is returned as a byte slice for the caller to parse.
+//
+// Used by the post-boot drift check path (clientd → privhelper → vendor binary).
+// Inside initramfs, ReadCurrent is called directly without privhelper.
+func BiosRead(ctx context.Context, vendor string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, helperPath, "bios-read", vendor) //#nosec G204 -- vendor is a plain identifier; helper validates against allowlist
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("privhelper: bios-read %s: %w\noutput: %s", vendor, err, strings.TrimRight(string(out), "\n"))
+	}
+	return out, nil
+}
+
+// BiosApply invokes the bios-apply verb to apply BIOS settings from a staged
+// profile file.  The profilePath must be a regular .json file under
+// /var/lib/clustr/bios-staging/ — the caller is responsible for writing the
+// profile JSON there before calling this.
+//
+// This is the post-boot apply path: clientd writes profile JSON, calls
+// BiosApply, then cleans up the staging file.  Returns a wrapped error that
+// includes the helper's stderr output on failure.
+func BiosApply(ctx context.Context, vendor, profilePath string) error {
+	cmd := exec.CommandContext(ctx, helperPath, "bios-apply", vendor, profilePath) //#nosec G204 -- vendor and profilePath are plain identifiers; helper validates both
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: bios-apply %s: %w\noutput: %s", vendor, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
 // CapBitTest invokes the cap-bit-test verb and returns the reported effective
 // UID. Returns (0, nil) when the setuid bit is set correctly; returns (n, nil)
 // where n is the server process UID if the bit is missing.

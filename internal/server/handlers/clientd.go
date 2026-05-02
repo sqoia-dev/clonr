@@ -57,6 +57,10 @@ type ClientdHubIface interface {
 	RegisterDiskCapture(msgID string) <-chan clientd.DiskCaptureResultPayload
 	UnregisterDiskCapture(msgID string)
 	DeliverDiskCaptureResult(msgID string, payload clientd.DiskCaptureResultPayload) bool
+	// BiosRead registry — used for bios_read_request round-trips (#159).
+	RegisterBiosRead(msgID string) <-chan clientd.BiosReadResultPayload
+	UnregisterBiosRead(msgID string)
+	DeliverBiosReadResult(msgID string, payload clientd.BiosReadResultPayload) bool
 }
 
 // ClientdHandler handles the clustr-clientd WebSocket endpoint and related REST queries.
@@ -172,6 +176,18 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 
 	case "disk_capture_result":
 		h.handleDiskCaptureResult(nodeID, msg)
+
+	case "bios_read_result":
+		h.handleBiosReadResult(nodeID, msg)
+
+	case "bios_apply_result":
+		// bios_apply_result is a node→server message for the post-boot apply path
+		// (reserved; not triggered by the server in v1 — BIOS apply runs in
+		// initramfs per Sprint 25 D1).  Log and discard.
+		log.Debug().Str("node_id", nodeID).Msg("clientd ws: bios_apply_result received (post-boot apply path not active in v1)")
+
+	case "bios_drift":
+		h.handleBiosDrift(nodeID, msg)
 
 	case "stats_batch":
 		h.handleStatsBatch(ctx, nodeID, msg)
@@ -773,6 +789,115 @@ func (h *ClientdHandler) ExecOnNode(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-r.Context().Done():
 		// Client disconnected before result arrived — silently drop.
+		return
+	}
+}
+
+// ─── BIOS message handlers (#159) ─────────────────────────────────────────────
+
+// handleBiosReadResult processes a "bios_read_result" message from the node
+// and delivers it to the waiting ReadBios HTTP handler via the hub registry.
+func (h *ClientdHandler) handleBiosReadResult(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.BiosReadResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: malformed bios_read_result payload")
+		return
+	}
+	delivered := h.Hub.DeliverBiosReadResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Str("vendor", payload.Vendor).
+		Int("setting_count", len(payload.Settings)).
+		Str("error", payload.Error).
+		Bool("delivered", delivered).
+		Msg("clientd ws: bios_read_result received from node")
+}
+
+// handleBiosDrift processes a "bios_drift" message from the node.
+// Drift is logged at warn level; future work will route through the alert engine.
+func (h *ClientdHandler) handleBiosDrift(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.BiosDriftPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: malformed bios_drift payload")
+		return
+	}
+	log.Warn().
+		Str("node_id", nodeID).
+		Str("vendor", payload.Vendor).
+		Str("profile_id", payload.ProfileID).
+		Str("expected_hash", payload.ExpectedHash).
+		Str("actual_hash", payload.ActualHash).
+		Int("drifted_settings", len(payload.DriftedSettings)).
+		Time("detected_at", payload.DetectedAt).
+		Msg("clientd ws: bios drift detected on node")
+}
+
+// ReadBiosOnNode sends a bios_read_request to a connected node and waits for
+// the bios_read_result reply.  Exposed as POST /api/v1/nodes/{id}/bios/read.
+func (h *ClientdHandler) ReadBiosOnNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	if nodeID == "" {
+		writeValidationError(w, "missing node_id")
+		return
+	}
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clustr-clientd offline)",
+			Code:  "node_offline",
+		})
+		return
+	}
+
+	var req struct {
+		Vendor string `json:"vendor"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.Vendor == "" {
+		req.Vendor = "intel" // default vendor
+	}
+
+	msgID := uuid.New().String()
+	resultCh := h.Hub.RegisterBiosRead(msgID)
+	defer h.Hub.UnregisterBiosRead(msgID)
+
+	raw, _ := json.Marshal(clientd.BiosReadRequestPayload{
+		RefMsgID: msgID,
+		Vendor:   req.Vendor,
+	})
+	if err := h.Hub.Send(nodeID, clientd.ServerMessage{
+		Type:    "bios_read_request",
+		MsgID:   msgID,
+		Payload: json.RawMessage(raw),
+	}); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+			Error: "failed to send bios_read_request to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.Error != "" {
+			writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+				Error: "node reported bios read error: " + result.Error,
+				Code:  "bios_read_error",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	case <-time.After(30 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for bios_read_result from node (30s)",
+			Code:  "bios_read_timeout",
+		})
+	case <-r.Context().Done():
 		return
 	}
 }

@@ -1752,10 +1752,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.Put("/nodes/{id}/group", layoutH.AssignNodeGroup)
 			r.Get("/nodes/{id}/effective-mounts", layoutH.GetEffectiveMounts)
 
-			// BIOS profile node bindings (#159).
+			// BIOS profile node bindings and live read (#159).
 			r.Put("/nodes/{id}/bios-profile", biosH.AssignProfile)
 			r.Delete("/nodes/{id}/bios-profile", biosH.DetachProfile)
 			r.Get("/nodes/{id}/bios-profile", biosH.GetNodeProfile)
+			r.Post("/nodes/{id}/bios/read", clientdH.ReadBiosOnNode)
 
 			// Disk layout catalog (#146) — named, reusable layouts that can be
 			// assigned to node groups (default) or individual nodes (override).

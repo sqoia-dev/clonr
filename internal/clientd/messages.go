@@ -414,3 +414,103 @@ type SlurmFileApplyResult struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 }
+
+// ─── BIOS settings message types (#159) ──────────────────────────────────────
+
+// BiosReadRequestPayload is the payload for the "bios_read_request"
+// server→node message.  The server sends this to request a snapshot of current
+// BIOS settings from a running node via clustr-clientd.  The node replies with
+// "bios_read_result" carrying the raw settings.
+//
+// Used by: the periodic drift check; GET /api/v1/nodes/{id}/bios/current.
+type BiosReadRequestPayload struct {
+	// RefMsgID is the server's msg_id; echoed in the bios_read_result reply.
+	RefMsgID string `json:"ref_msg_id"`
+	// Vendor is the provider to use ("intel").
+	Vendor string `json:"vendor"`
+}
+
+// BiosReadResultPayload is the payload for the "bios_read_result"
+// node→server message.  The node sends this after reading current BIOS
+// settings via the vendor binary (or reporting an error).
+type BiosReadResultPayload struct {
+	// RefMsgID echoes the msg_id from the corresponding bios_read_request.
+	RefMsgID string `json:"ref_msg_id"`
+	// Vendor identifies the provider that produced these settings.
+	Vendor string `json:"vendor"`
+	// Settings is the flat list of current BIOS settings on the node.
+	// Empty (not nil) on error.
+	Settings []BiosSetting `json:"settings"`
+	// Error is a human-readable failure description; empty on success.
+	Error string `json:"error,omitempty"`
+}
+
+// BiosApplyRequestPayload is the payload for the "bios_apply_request"
+// server→node message.  This is the POST-boot apply path (future; not enabled
+// in v1 — BIOS apply runs in initramfs per D1 of the Sprint 25 design).
+// The message handler exists so the post-boot path can be enabled without a
+// protocol change.  The node replies with "bios_apply_result".
+type BiosApplyRequestPayload struct {
+	// RefMsgID is the server's msg_id; echoed in the bios_apply_result reply.
+	RefMsgID string `json:"ref_msg_id"`
+	// Vendor is the provider to use ("intel").
+	Vendor string `json:"vendor"`
+	// SettingsJSON is the raw profile settings JSON object to apply.
+	// The node writes this to /var/lib/clustr/bios-staging/<id>.json and
+	// passes the path to the privhelper bios-apply verb.
+	SettingsJSON string `json:"settings_json"`
+	// ProfileID is the bios_profiles.id of the source profile for audit.
+	ProfileID string `json:"profile_id"`
+}
+
+// BiosApplyResultPayload is the payload for the "bios_apply_result"
+// node→server message.  The node sends this after applying (or failing to
+// apply) a bios_apply_request.
+type BiosApplyResultPayload struct {
+	// RefMsgID echoes the msg_id from the corresponding bios_apply_request.
+	RefMsgID string `json:"ref_msg_id"`
+	// ProfileID echoes the profile_id from the request for audit correlation.
+	ProfileID string `json:"profile_id"`
+	// OK is true when the apply completed without error.
+	OK bool `json:"ok"`
+	// AppliedCount is the number of settings that were changed.
+	// 0 is valid when the node was already at the desired state.
+	AppliedCount int `json:"applied_count"`
+	// Error is a human-readable failure description; empty on success.
+	Error string `json:"error,omitempty"`
+}
+
+// BiosDriftPayload is the payload for the "bios_drift" node→server message.
+// The node sends this when the periodic drift check (every 24h) detects that
+// current BIOS settings diverge from the applied_settings_hash recorded at the
+// last successful apply.
+//
+// Drift is REPORTED only — clustr never auto-corrects BIOS drift.
+// The operator must trigger a re-apply via `clustr bios apply`.
+type BiosDriftPayload struct {
+	// NodeID is the node's UUID (redundant with the WebSocket session but
+	// included for easy log correlation when payload is stored standalone).
+	NodeID string `json:"node_id"`
+	// Vendor identifies the provider that detected drift.
+	Vendor string `json:"vendor"`
+	// ProfileID is the bios_profiles.id of the assigned profile.
+	ProfileID string `json:"profile_id"`
+	// ExpectedHash is the applied_settings_hash stored in node_bios_profile.
+	ExpectedHash string `json:"expected_hash"`
+	// ActualHash is sha256(current_settings_json) computed on the node.
+	ActualHash string `json:"actual_hash"`
+	// DetectedAt is the wall-clock time the drift was detected on the node.
+	DetectedAt time.Time `json:"detected_at"`
+	// DriftedSettings contains the settings that differ (name + current value).
+	// Populated on a best-effort basis; may be empty if the diff was computed
+	// only via hash comparison.
+	DriftedSettings []BiosSetting `json:"drifted_settings,omitempty"`
+}
+
+// BiosSetting is a single BIOS key/value pair in the clientd message wire format.
+// Mirrors internal/bios.Setting for cross-package serialisation — defined here
+// so the server can import it without creating an import cycle.
+type BiosSetting struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}

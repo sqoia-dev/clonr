@@ -47,6 +47,18 @@
 //	                             clustr-clientd after an LDAP CA rotation push
 //	                             places a new cert at
 //	                             /etc/pki/ca-trust/source/anchors/clustr-ca.crt.
+//	bios-read <vendor>           Read current BIOS settings via the operator-
+//	                             supplied vendor binary. vendor must match
+//	//	                          ^[a-z]+$ and be in the embedded allowlist
+//	                             {intel, dell, supermicro}. Prints JSON to stdout.
+//	                             Used by the post-boot drift check in clientd.
+//	bios-apply <vendor> <profile-blob-path>
+//	                             Apply BIOS settings from <profile-blob-path>.
+//	                             vendor must be in the allowlist. path must be a
+//	                             regular .json file under
+//	                             /var/lib/clustr/bios-staging/ (mode 0700 root).
+//	                             Rebuilds argv internally; caller cannot inject
+//	                             flags. Audits to audit_log.
 //
 // # Usage
 //
@@ -207,7 +219,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply\n")
 		os.Exit(1)
 	}
 
@@ -235,6 +247,10 @@ func main() {
 		exitCode = verbServiceControl(callerUID, verbArgs)
 	case "ca-trust-extract":
 		exitCode = verbCATrustExtract(callerUID)
+	case "bios-read":
+		exitCode = verbBiosRead(callerUID, verbArgs)
+	case "bios-apply":
+		exitCode = verbBiosApply(callerUID, verbArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: unknown verb %q\n", verb)
 		exitCode = 1
@@ -654,4 +670,192 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("close tmp: %w", err)
 	}
 	return os.Rename(tmp, dst)
+}
+
+// ─── bios-read ────────────────────────────────────────────────────────────────
+
+// biosVendorAllowlist is the set of vendor identifiers accepted by bios-read
+// and bios-apply.  New vendors require a clustr-privhelper rebuild — intentional.
+var biosVendorAllowlist = map[string]bool{
+	"intel":      true,
+	"dell":       true,
+	"supermicro": true,
+}
+
+// biosBinaryForVendor returns the correct binary path for vendor.
+func biosBinaryForVendor(vendor string) string {
+	switch vendor {
+	case "dell":
+		return "/var/lib/clustr/vendor-bios/dell/racadm"
+	case "supermicro":
+		return "/var/lib/clustr/vendor-bios/supermicro/sum"
+	default: // intel
+		return "/var/lib/clustr/vendor-bios/intel/syscfg"
+	}
+}
+
+// isSafeVendor returns true when vendor matches ^[a-z]+$ and is in the allowlist.
+func isSafeVendor(vendor string) bool {
+	if vendor == "" || !biosVendorAllowlist[vendor] {
+		return false
+	}
+	for _, c := range vendor {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// verbBiosRead reads current BIOS settings via the operator-supplied vendor
+// binary.  Prints JSON to stdout; the calling clustr-clientd process reads it.
+//
+// Argv whitelist: bios-read <vendor>
+//   - vendor must match ^[a-z]+$ and be in biosVendorAllowlist
+//   - helper rebuilds argv: /path/to/syscfg /s -
+func verbBiosRead(callerUID int, args []string) int {
+	if len(args) != 1 {
+		msg := "bios-read requires exactly one argument: <vendor>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-read", args, 1, msg)
+		return 1
+	}
+
+	vendor := args[0]
+	if !isSafeVendor(vendor) {
+		msg := fmt.Sprintf("bios-read: vendor %q not in allowlist {intel, dell, supermicro}", vendor)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-read", args, 1, msg)
+		return 1
+	}
+
+	binPath := biosBinaryForVendor(vendor)
+
+	// Validate binary exists and is executable before exec.
+	info, err := os.Stat(binPath)
+	if err != nil || !info.Mode().IsRegular() || (info.Mode().Perm()&0o111 == 0) {
+		msg := fmt.Sprintf("bios-read: vendor binary not found or not executable: %s", binPath)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-read", args, 1, msg)
+		return 1
+	}
+
+	// Build argv internally — caller cannot inject flags.
+	// Intel SYSCFG: /s - prints all settings to stdout.
+	cmd := exec.Command(binPath, "/s", "-") //#nosec G204 -- binPath is a fixed operator-supplied path validated above; no user input
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	execErr := cmd.Run()
+	exitCode := 0
+	if execErr != nil {
+		if exitErr, ok := execErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "bios-read", args, exitCode, "")
+	return exitCode
+}
+
+// ─── bios-apply ───────────────────────────────────────────────────────────────
+
+// biosStagingDir is the only directory prefix that bios-apply may read profile
+// blobs from.  The caller (clustr-clientd) writes the profile JSON there with
+// os.WriteFile(path, blob, 0600) first; the helper reads it, validates the
+// path, and passes it to the vendor binary.
+const biosStagingDir = "/var/lib/clustr/bios-staging/"
+
+// verbBiosApply applies BIOS settings from a staged profile blob.
+//
+// Argv whitelist: bios-apply <vendor> <profile-blob-path>
+//   - vendor must match ^[a-z]+$ and be in biosVendorAllowlist
+//   - profile-blob-path must be a regular .json file under biosStagingDir
+//   - helper rebuilds argv: /path/to/syscfg /r <profile-blob-path>
+func verbBiosApply(callerUID int, args []string) int {
+	if len(args) != 2 {
+		msg := "bios-apply requires exactly two arguments: <vendor> <profile-blob-path>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+
+	vendor := args[0]
+	profilePath := args[1]
+
+	// Validate vendor.
+	if !isSafeVendor(vendor) {
+		msg := fmt.Sprintf("bios-apply: vendor %q not in allowlist {intel, dell, supermicro}", vendor)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+
+	// Validate profile path: must be absolute, under biosStagingDir, end in .json.
+	if !strings.HasPrefix(profilePath, "/") {
+		msg := "bios-apply: profile path must be absolute"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+	cleanPath := filepath.Clean(profilePath)
+	if !strings.HasPrefix(cleanPath, biosStagingDir) {
+		msg := fmt.Sprintf("bios-apply: profile path must be under %s", biosStagingDir)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+	if !strings.HasSuffix(cleanPath, ".json") {
+		msg := "bios-apply: profile path must end in .json"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+
+	// Validate file is a regular file (not a symlink, directory, device, etc.).
+	info, err := os.Lstat(cleanPath)
+	if err != nil {
+		msg := fmt.Sprintf("bios-apply: stat profile path: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 2, msg)
+		return 2
+	}
+	if !info.Mode().IsRegular() {
+		msg := "bios-apply: profile path is not a regular file"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+
+	binPath := biosBinaryForVendor(vendor)
+
+	// Validate binary exists.
+	binInfo, err := os.Stat(binPath)
+	if err != nil || !binInfo.Mode().IsRegular() || (binInfo.Mode().Perm()&0o111 == 0) {
+		msg := fmt.Sprintf("bios-apply: vendor binary not found or not executable: %s", binPath)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "bios-apply", args, 1, msg)
+		return 1
+	}
+
+	// Build argv internally — caller provided only the profile path, no flags.
+	// Intel SYSCFG: /r <profile-file> reads settings and applies them.
+	cmd := exec.Command(binPath, "/r", cleanPath) //#nosec G204 -- binPath is operator-supplied fixed path; cleanPath is validated to be under biosStagingDir and end in .json
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	execErr := cmd.Run()
+	exitCode := 0
+	if execErr != nil {
+		if exitErr, ok := execErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 2
+		}
+	}
+
+	writeAudit(callerUID, "bios-apply", args, exitCode, "")
+	return exitCode
 }

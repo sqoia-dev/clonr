@@ -108,6 +108,10 @@ type ClientdHub struct {
 	// diskCaptureRegistry maps outbound msg_id → pendingDiskCaptureResult so the
 	// capture HTTP handler can block until the node replies with disk_capture_result.
 	diskCaptureRegistry sync.Map
+
+	// biosReadRegistry maps outbound msg_id → pendingBiosReadResult so the
+	// ReadBios HTTP handler can block until the node replies with bios_read_result.
+	biosReadRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -320,6 +324,44 @@ func (h *ClientdHub) DeliverDiskCaptureResult(msgID string, payload clientd.Disk
 		return false
 	}
 	pe := v.(pendingDiskCaptureResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+// ─── BiosRead registry (#159) ─────────────────────────────────────────────────
+
+// pendingBiosReadResult is the in-flight state for a bios_read_request.
+type pendingBiosReadResult struct {
+	ch chan clientd.BiosReadResultPayload
+}
+
+// RegisterBiosRead creates a pending BIOS read entry for msgID and returns the
+// channel to read the BiosReadResultPayload from.  The caller must call
+// UnregisterBiosRead(msgID) when done.
+func (h *ClientdHub) RegisterBiosRead(msgID string) <-chan clientd.BiosReadResultPayload {
+	ch := make(chan clientd.BiosReadResultPayload, 1)
+	h.biosReadRegistry.Store(msgID, pendingBiosReadResult{ch: ch})
+	return ch
+}
+
+// UnregisterBiosRead removes a pending BIOS read entry.
+func (h *ClientdHub) UnregisterBiosRead(msgID string) {
+	h.biosReadRegistry.Delete(msgID)
+}
+
+// DeliverBiosReadResult delivers a BiosReadResultPayload to the waiting HTTP
+// handler.  Called by the WebSocket handler when it receives a
+// "bios_read_result" message from the node.  Returns true if delivered.
+func (h *ClientdHub) DeliverBiosReadResult(msgID string, payload clientd.BiosReadResultPayload) bool {
+	v, ok := h.biosReadRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingBiosReadResult)
 	select {
 	case pe.ch <- payload:
 		return true
