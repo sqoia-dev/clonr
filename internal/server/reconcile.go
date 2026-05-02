@@ -37,6 +37,24 @@ func (s *Server) ReconcileStuckBuilds(ctx context.Context) error {
 
 	reconciled := 0
 	for _, img := range images {
+		// Initramfs artifacts (build_method="initramfs") are created by
+		// BuildInitramfsFromImage as a side-effect of the initramfs build.
+		// They are not resumable through the phase-based resume mechanism;
+		// marking them interrupted would show a misleading "Resume" button in
+		// the UI. Mark them error instead so the operator knows to re-run the
+		// initramfs build.
+		if img.BuildMethod == "initramfs" {
+			log.Warn().
+				Str("image_id", img.ID).
+				Str("image_name", img.Name).
+				Msg("reconcile: initramfs artifact stuck in building — marking error")
+			if dbErr := s.db.UpdateBaseImageStatus(ctx, img.ID, api.ImageStatusError, "initramfs build was interrupted by server restart"); dbErr != nil {
+				log.Error().Err(dbErr).Str("image_id", img.ID).
+					Msg("reconcile: failed to mark initramfs artifact as error")
+			}
+			continue
+		}
+
 		phase := s.classifyStuckPhase(img.ID)
 		log.Warn().
 			Str("image_id", img.ID).

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // newInitramfsTestServer creates a test server with auth dev mode enabled.
@@ -200,6 +200,49 @@ func TestReconcileStuckBuilds_MarksResumable(t *testing.T) {
 	}
 	if updated.Status != api.ImageStatusInterrupted {
 		t.Errorf("expected status=interrupted, got %q", updated.Status)
+	}
+}
+
+// TestReconcileStuckBuilds_InitramfsArtifactMarkedError verifies that
+// ReconcileStuckBuilds marks a stuck initramfs artifact (build_method=initramfs)
+// as status=error rather than interrupted/resumable.  These artifacts cannot be
+// resumed through the phase-based resume mechanism; marking them interrupted
+// was the direct cause of the "always interrupted" UX bug (the autodeploy timer
+// restarts clustr-serverd every 2 min, which is shorter than a typical initramfs
+// build; every restart triggered reconcile on the in-flight building record).
+func TestReconcileStuckBuilds_InitramfsArtifactMarkedError(t *testing.T) {
+	srv, _, database := newInitramfsTestServer(t)
+	ctx := context.Background()
+
+	img := api.BaseImage{
+		ID:          "img-reconcile-initramfs",
+		Name:        "stuck-initramfs-artifact",
+		Status:      api.ImageStatusBuilding,
+		Format:      api.ImageFormatBlock,
+		BuildMethod: "initramfs",
+		Tags:        []string{},
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := database.CreateBaseImage(ctx, img); err != nil {
+		t.Fatalf("create image: %v", err)
+	}
+
+	if err := srv.ReconcileStuckBuilds(ctx); err != nil {
+		t.Fatalf("ReconcileStuckBuilds: %v", err)
+	}
+
+	updated, err := database.GetBaseImage(ctx, img.ID)
+	if err != nil {
+		t.Fatalf("GetBaseImage: %v", err)
+	}
+	// Must be error, not interrupted — initramfs artifacts are not resumable.
+	if updated.Status != api.ImageStatusError {
+		t.Errorf("initramfs artifact: expected status=error after reconcile, got %q", updated.Status)
+	}
+	// Must not be marked resumable.
+	_, resumable, _ := database.GetImageResumePhase(ctx, img.ID)
+	if resumable {
+		t.Errorf("initramfs artifact: expected resumable=false after reconcile, got true")
 	}
 }
 
