@@ -1299,17 +1299,17 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
   In: `internal/selector/` package with one `Resolve(*SelectorSet) []NodeID`. Selector flags: `-n NODE` (hostlist syntax — `node[01-32]`), `-g GROUP`, `--racks RACK`, `--chassis CHASSIS`, `-A` (all), `-a` (active), `--ignore-status`. Cobra-side flag wiring shared by every batch command. Out: per-rack / per-chassis resolution against the rack model — racks/chassis return empty until rack model lands; falls back gracefully.
   Depends on: nothing. Foundation for the rest of Sprint 21.
 
-- [ ] **#126 — `clustr exec` over clientd WebSocket (HIGH, L)**
+- [x] **#126 — `clustr exec` over clientd WebSocket (HIGH, L)** — landed `ab8f704` (with fix-ups `7a60d9f` + `26050b0`), CI green at `26050b0`. Reuses clientd WebSocket; new message types in `internal/clientd/messages.go`; `ExecHubIface` for handler→hub routing keyed by `msg_id` via `sync.Map` registry.
   Owner: Dinesh; arch by Richard.
   In: new server endpoint `POST /api/v1/exec` (SSE-streamed, one stream per target). Reuse existing `clustr-clientd` WebSocket as transport — no new SSH/port management on the operator workstation. Output formats: `inline`, `header`, `consolidate`, `realtime`, `json` (match cv-exec exactly). CLI wires through the selector grammar. Out: file-streaming (#127), pty/tty exec (#128).
   Depends on: #125.
 
-- [ ] **#127 — `clustr cp` (HIGH, M)**
+- [x] **#127 — `clustr cp` (HIGH, M)** — landed `ab8f704` (bundled with #126), CI green at `26050b0`. `CpHubIface` mirrors `ExecHubIface` pattern.
   Owner: Dinesh.
   In: `POST /api/v1/cp` server-side. Recursive, `--preserve` (mode/owner/timestamps), `--include-self`, parallel. Reuse same clientd WebSocket transport. Out: rsync-style delta (one-shot push only in v1).
   Depends on: #125 #126.
 
-- [ ] **#128 — `clustr console --ipmi-sol` and `--ssh` (HIGH, M)**
+- [x] **#128 — `clustr console --ipmi-sol` and `--ssh` (HIGH, M)** — landed `be7a999`, CI green. `health.go` selector migration follow-up landed `696c8e7`. Server-side broker pipes `ipmitool sol activate` / SSH PTY directly (no clientd hop yet); reserved `console_request`/`console_data` clientd message types defined for Sprint 24 in-browser console. Client-side `~.` escape via 3-state byte machine on stdin raw mode.
   Owner: Dinesh; arch by Richard for the SOL broker.
   In: `WS /api/v1/console/{node_id}` brokered server-side. IPMI SOL via `ipmitool sol activate`; SSH PTY as fallback. Escape character `~.` (default), configurable via `-e`. Generalise the pattern from `internal/image/shell.go`. Out: in-browser console (lands in Sprint 24).
   Depends on: #125. Independent of #126/#127.
@@ -1319,7 +1319,35 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
   In: CLI wires to existing IPMI surface; add filter / head / tail / level on top.
   Depends on: nothing.
 
-- [x] **#130 — `clustr health [--summary|--ping|--wait]` (MEDIUM, S)** — landed `48eb03c`, CI green. Three `TODO(#125)` markers in `cmd/clustr/health.go` for selector-flag migration once #125's `RegisterSelectorFlags` is consumed (Stream A will fold these in during #126/#127).
+- [x] **#130 — `clustr health [--summary|--ping|--wait]` (MEDIUM, S)** — landed `48eb03c`, selector cleanup `696c8e7`, CI green. Migrated to `selector.RegisterSelectorFlags` so it accepts the full selector grammar (`-n hostlist`, `-g group`, `-A`, `-a`, `--racks`, `--chassis`, `--ignore-status`).
+
+---
+
+## Sprint 22 — Stats + alerts (HIGH) — "answer 'is anything broken right now?'"
+
+**Started:** 2026-05-02
+**Theme:** On-node stats collectors plus a small YAML-rule alert engine. From this sprint forward clustr can answer "which nodes have a degraded RAID array" / "is anything broken right now?" without external tooling. ClusterVisor's `cv-stats` + `cv-alerts` is a complete self-contained answer to the operator's daily questions; clustr's current Prometheus `/metrics` is server-side only with no on-node collectors and no alerting. P1 in IMPROVEMENTS, second-largest functional gap.
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` Sprint 22 section. Approved by founder 2026-05-02.
+
+### Tasks
+
+- [ ] **#131 — Stats collector folded into `clustr-clientd` (HIGH, L)**
+  Owner: Dinesh; arch by Richard.
+  In: new `internal/clientd/stats/` subpackage with plugin pattern (`Plugin` interface: `Name()`, `Collect(ctx) []Sample`). Plugin set v1: `cpu`, `memory`, `disks`, `md`, `net`, `system`, `nvme`, `infiniband` (link state + counters via `ibstat`), `firmware`. Push samples over the existing clientd WebSocket. New server table `node_stats(node_id, plugin, sensor, value, ts)` + retention sweeper (default 7d). New endpoint `GET /api/v1/nodes/{id}/stats?plugin=&since=`. Prometheus exposition extended to include per-node series. Out: GPU plugins (#132).
+  Depends on: #120 (real-hardware initramfs — same kernel module assumptions on running nodes).
+
+- [ ] **#132 — GPU + RAID + ZFS + NTP plugins (HIGH, M)**
   Owner: Dinesh.
-  In: aggregate per-node health summary endpoint + CLI. `--wait` polls until all targets are reachable or timeout.
-  Depends on: nothing.
+  In: `nvidia` (via `nvidia-smi -q -x`), `megaraid` (via `storcli`), `zfs` (`zpool status -p`), `ntp` (`chronyc tracking`). Plugins are optional — if the binary isn't present, the plugin reports "not configured" cleanly and stays out of the metric series. Out: rocm (defer until a customer with AMD GPUs).
+  Depends on: #131.
+
+- [ ] **#133 — Alert rule engine + YAML rules (HIGH, M)**
+  Owner: Dinesh; arch by Richard.
+  In: `internal/alerts/` package. YAML rules under `/etc/clustr/rules.d/*.yml` (mode 0640 root:clustr). Default rule set shipped: `disk-percent`, `infiniband-down`, `hw-raid-degraded`, `sw-raid-degraded`, `zpool-degraded`, `cluster-mces-errors`, `cluster-nodes-offline`, `appliance-diskspacelow`. Rules evaluate on a 60s tick. Routes through the existing webhook dispatcher and SMTP notifier — no new delivery infrastructure. New endpoint `GET /api/v1/alerts` (active + history). Out: silence-with-expiry (Sprint 24 UI).
+  Depends on: #131.
+
+- [ ] **#134 — `clustr alerts` + `clustr stats` CLI (MEDIUM, S)**
+  Owner: Dinesh.
+  In: `clustr alerts -L | -S | -R` and `clustr stats -n NODE -s REGEX` shapes match cv-alerts / cv-stats. Out: silence/ack flow (waits on UI in Sprint 24).
+  Depends on: #131 #133.
