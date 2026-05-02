@@ -701,14 +701,24 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 		return err
 	}
 
-	// Install the GRUB bootloader if the layout includes a bios_grub partition.
-	// For RAID1 nodes, grub2-install must run on EVERY raw member disk so the
-	// node can boot from either disk if one fails. We collect grub install targets
-	// from two sources:
-	//   1. d.targetDisk (the raw disk picked by selectTargetDisk for single-disk layouts).
-	//   2. Every member disk in every RAIDSpec (for RAID-on-whole-disk layouts).
-	// For a RAID1 layout with two members both disks get a bootloader; for a
-	// single-disk layout only that disk does. Duplicates are de-duped.
+	// Install the bootloader via the DistroDriver. The driver handles both BIOS
+	// (grub2-install --target=i386-pc on each raw member disk) and UEFI
+	// (grub2-install --target=x86_64-efi inside the deployed chroot) paths.
+	//
+	// BIOS path: triggered when any partition has the bios_grub/biosboot flag.
+	//   AllTargets is the de-duped list of raw member disks (RAID1 requires a
+	//   bootloader on every disk so the node can boot from either one).
+	//
+	// UEFI path: triggered when any partition has the esp/boot flag. The driver
+	//   verifies grubx64.efi presence (ADR-0009), runs grub2-install in the
+	//   deployed chroot, and verifies BOOTX64.EFI post-install.
+	//
+	// Both checks run independently; a layout that somehow has both flags attempts
+	// both paths (misconfigured layouts fail loudly rather than silently).
+	//
+	// TODO(Sprint 26+): Ubuntu EFI driver, ubuntu22/ubuntu20, debian, sles drivers
+	// plug into this same dispatch. Add a new distro_<name>.go with an init()
+	// registration and implement InstallBootloader; no changes needed here.
 	hasBIOSGrub := false
 	for _, p := range d.layout.Partitions {
 		for _, flag := range p.Flags {
@@ -718,19 +728,36 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 			}
 		}
 	}
-	if hasBIOSGrub {
-		logPhase("Installing BIOS bootloader")
-		reportStep("Installing BIOS bootloader")
-		log := logger()
-		bootDir := filepath.Join(mountRoot, "boot")
+	hasESP := false
+	{
+		targetCount := make(map[string]int)
+		for _, p := range d.layout.Partitions {
+			target := resolvePartitionDisk(d.targetDisk, p)
+			targetCount[target]++
+			for _, flag := range p.Flags {
+				if flag == "esp" || flag == "boot" {
+					if target == d.targetDisk {
+						hasESP = true
+					}
+					break
+				}
+			}
+		}
+	}
 
-		// Determine whether this is a RAID-on-whole-disk layout (all non-biosboot
-		// partitions live on md devices). grubInstallTargets() returns the raw member
-		// disks in all RAID topologies because GRUB's diskfilter driver is read-only
-		// and cannot write through md virtual devices. For RAID-on-whole-disk, the raw
-		// member disks have no standalone partition table, so --force is required to
-		// skip GRUB's "no filesystem found" safety check. We also bake mdraid1x and
-		// diskfilter into core.img so GRUB can find /boot on the md array at runtime.
+	if hasBIOSGrub || hasESP {
+		// Detect the distro from the deployed rootfs and look up its driver.
+		distro, err := detectDistro(mountRoot)
+		if err != nil {
+			return fmt.Errorf("deploy: finalize: detect distro for bootloader dispatch: %w", err)
+		}
+		driver, err := driverFor(distro)
+		if err != nil {
+			return fmt.Errorf("deploy: finalize: no DistroDriver for %s/%d: %w",
+				distro.Family, distro.Major, err)
+		}
+
+		// Determine RAID-on-whole-disk: all non-biosboot partitions live on md devices.
 		raidOnWholeDisk := false
 		for _, p := range d.layout.Partitions {
 			if p.Device == "" {
@@ -752,203 +779,45 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 			}
 		}
 
-		// Collect all raw disks that need a bootloader.
-		grubTargets := grubInstallTargets(d.targetDisk, d.layout)
-		log.Info().Strs("disks", grubTargets).Bool("raid_on_whole_disk", raidOnWholeDisk).
-			Msg("finalize: installing GRUB bootloader on all RAID member disks (BIOS/GPT)")
-
-		var grubSucceeded int
-		var grubLastErr error
-		for _, grubDisk := range grubTargets {
-			log.Info().Str("disk", grubDisk).Str("bootDir", bootDir).
-				Msg("finalize: running grub2-install")
-			grubArgs := []string{
-				"--target=i386-pc",
-				"--boot-directory=" + bootDir,
-				"--recheck",
+		if hasBIOSGrub {
+			logPhase("Installing BIOS bootloader")
+			reportStep("Installing BIOS bootloader")
+			grubTargets := grubInstallTargets(d.targetDisk, d.layout)
+			logger().Info().Strs("disks", grubTargets).Bool("raid_on_whole_disk", raidOnWholeDisk).
+				Msg("finalize: installing GRUB bootloader on all RAID member disks (BIOS/GPT)")
+			bctx := &bootloaderCtx{
+				Ctx:               ctx,
+				MountRoot:         mountRoot,
+				TargetDisk:        d.targetDisk,
+				AllTargets:        grubTargets,
+				IsRAID:            len(d.layout.RAIDArrays) > 0,
+				IsRAIDOnWholeDisk: raidOnWholeDisk,
+				IsEFI:             false,
 			}
-			if len(d.layout.RAIDArrays) > 0 {
-				// For any RAID topology, grub2-install detects md superblock metadata
-				// on the target disk's partitions and refuses to embed without --force.
-				// --force bypasses the "embedding is not possible, but this is required
-				// for RAID and LVM install" error that grub2-install emits when it
-				// detects RAID membership on the disk.
-				grubArgs = append(grubArgs, "--force")
-			}
-			if raidOnWholeDisk {
-				// RAID-on-whole-disk additionally requires:
-				//
-				// --skip-fs-probe: The raw member disk has no partition table of its
-				//   own (it was handed directly to mdadm), so grub2-probe cannot find
-				//   any filesystem. This flag tells GRUB to write directly to the raw
-				//   disk's MBR boot sector without probing.
-				//
-				// --modules: bake mdraid1x, diskfilter, and the /boot filesystem
-				//   driver into core.img so GRUB can locate and READ /boot on the md
-				//   array at runtime before loading any module files from a partition.
-				//   Without the filesystem module (xfs, ext2, etc.), GRUB can assemble
-				//   the md array but cannot read grub.cfg from it and drops to rescue.
-				//
-				//   part_gpt is required to read GPT partition tables on the raw disks.
-				//   xfs and ext2 cover the two common /boot filesystems on RHEL/Rocky.
-				grubArgs = append(grubArgs,
-					"--skip-fs-probe",
-					"--modules=mdraid1x diskfilter part_gpt xfs ext2",
-				)
-			}
-			grubArgs = append(grubArgs, grubDisk)
-			if err := runAndLog(ctx, "grub2-install", exec.CommandContext(ctx, "grub2-install", grubArgs...)); err != nil {
-				grubLastErr = err
-				log.Warn().Err(err).Str("disk", grubDisk).
-					Msg("WARNING: finalize: grub2-install failed on this disk — will continue if other member disks succeed")
-			} else {
-				grubSucceeded++
-				log.Info().Str("disk", grubDisk).Msg("finalize: GRUB bootloader installed")
+			if err := driver.InstallBootloader(bctx); err != nil {
+				return err
 			}
 		}
 
-		// For BIOS deploys, a failed grub2-install means the node cannot boot.
-		// If ALL target disks failed, the deployment is fatal — return an error so
-		// the deploy-complete callback is never fired and deploy-failed is sent instead.
-		// If at least one raw RAID member disk succeeded, the node is bootable (RAID1
-		// redundancy means one good disk is enough), so log a warning and continue.
-		if grubSucceeded == 0 && len(grubTargets) > 0 {
-			return &BootloaderError{
-				Targets: grubTargets,
-				Cause:   grubLastErr,
+		if hasESP {
+			logPhase("Installing UEFI bootloader")
+			reportStep("Installing UEFI bootloader")
+			logger().Info().Str("disk", d.targetDisk).
+				Msg("finalize: UEFI ESP detected — installing EFI bootloader via driver")
+			reportStep("Verifying EFI system partition")
+			bctx := &bootloaderCtx{
+				Ctx:        ctx,
+				MountRoot:  mountRoot,
+				TargetDisk: d.targetDisk,
+				AllTargets: []string{d.targetDisk},
+				IsEFI:      true,
 			}
-		}
-		if grubLastErr != nil {
-			log.Warn().Int("succeeded", grubSucceeded).Int("total", len(grubTargets)).
-				Msg("WARNING: finalize: grub2-install failed on some disks but at least one succeeded — node is bootable (degraded RAID)")
-		}
-	}
-
-	// Install the UEFI bootloader if the layout includes an ESP partition.
-	// This branch is mutually exclusive with hasBIOSGrub in practice (a layout is
-	// either BIOS or UEFI), but both checks run independently so a misconfigured
-	// layout that somehow has both flags will attempt both paths.
-	//
-	// Steps:
-	//   1. Confirm the ESP is mounted at <mountRoot>/boot/efi.
-	//   2. If grubx64.efi is absent, install grub2-efi-x64 + shim-x64 via dnf
-	//      inside the chroot (the RPM %post scriptlet copies grubx64.efi to the
-	//      mounted ESP under /boot/efi/EFI/rocky/).
-	//   3. Run grub2-install --target=x86_64-efi INSIDE THE CHROOT so module
-	//      versions match the deployed OS. --removable writes \EFI\BOOT\BOOTX64.EFI
-	//      with the correct prefix baked in — this is the post-deploy boot target.
-	//      --no-nvram skips grub2-install's own NVRAM write (no NVRAM entry needed).
-	//   4. Verify \EFI\BOOT\BOOTX64.EFI exists post-install (fatal if missing).
-	//      Firmware uses UEFI removable-media auto-discovery to find this binary.
-	//      No custom NVRAM OS entry is created. See docs/boot-architecture.md §8.
-	//
-	// Steps 1–4 are FATAL — a UEFI node without \EFI\BOOT\BOOTX64.EFI cannot boot.
-	hasESP := false
-	espPartNum := 0
-	{
-		// Find the ESP partition and its 1-based partition number on d.targetDisk.
-		// Use the same per-target counter logic as partitionDevices/createFilesystems
-		// so the number matches what was actually written to the GPT.
-		targetCount := make(map[string]int)
-		for _, p := range d.layout.Partitions {
-			target := resolvePartitionDisk(d.targetDisk, p)
-			targetCount[target]++
-			for _, flag := range p.Flags {
-				if flag == "esp" || flag == "boot" {
-					if target == d.targetDisk {
-						hasESP = true
-						espPartNum = targetCount[target]
-					}
-					break
-				}
+			reportStep("Running GRUB installer in chroot")
+			if err := driver.InstallBootloader(bctx); err != nil {
+				return err
 			}
+			reportStep("Verifying bootloader binary")
 		}
-	}
-	if hasESP {
-		logPhase("Installing UEFI bootloader")
-		log := logger()
-		efiDir := filepath.Join(mountRoot, "boot", "efi")
-		grubx64Path := filepath.Join(efiDir, "EFI", "rocky", "grubx64.efi")
-
-		log.Info().Str("disk", d.targetDisk).Int("esp_part", espPartNum).
-			Str("efi_dir", efiDir).Msg("finalize: UEFI ESP detected — installing EFI bootloader")
-
-		// Confirm the ESP is actually mounted. mountPartitions already ran above
-		// but we verify here so a misconfigured layout fails loudly.
-		reportStep("Verifying EFI system partition")
-		log.Info().Msg("  → Verifying ESP mount point...")
-		if _, err := os.Stat(efiDir); err != nil {
-			return fmt.Errorf("deploy: finalize: UEFI ESP mount point %s not accessible: %w", efiDir, err)
-		}
-
-		// Step 2: verify grubx64.efi is present on the ESP. Per ADR-0009
-		// (content-only images) all boot dependencies must be baked into the
-		// image at build time. The deploy initramfs has no DNS (resolv.conf
-		// points at systemd-resolved stub 127.0.0.53 which is unreachable from
-		// the node), so dnf install is not a viable fallback — it hangs for
-		// ~4 minutes then fails, causing a deploy exit 1.
-		//
-		// If grubx64.efi is absent the image was built without grub2-efi-x64 /
-		// shim-x64. The fix is to rebuild the image with UEFI packages; see the
-		// kickstart %packages section. Fail fast with a clear message rather than
-		// silently attempting a network operation that cannot succeed.
-		log.Info().Msg("  → Checking grubx64.efi presence in image...")
-		if _, err := os.Stat(grubx64Path); os.IsNotExist(err) {
-			return &BootloaderError{
-				Targets: []string{d.targetDisk},
-				Cause: fmt.Errorf("UEFI: %s is missing from the deployed image — "+
-					"rebuild the image with grub2-efi-x64, grub2-efi-x64-modules, and shim-x64 "+
-					"in the kickstart %%packages section (ADR-0009: content-only images must ship all boot dependencies)", grubx64Path),
-			}
-		}
-		log.Info().Str("path", grubx64Path).
-			Msg("finalize: grubx64.efi present on ESP — proceeding with grub2-install")
-
-		// Step 3: run grub2-install --target=x86_64-efi inside the deployed chroot.
-		// Running inside the chroot is essential: grub2-install reads GRUB modules
-		// from /usr/lib/grub/x86_64-efi/ inside the chroot (the deployed OS's own
-		// modules) rather than from the deploy initramfs. A module version mismatch
-		// between the grubx64.efi binary and the module set causes GRUB to crash at
-		// boot with "symbol not found", which appears as a flicker/black screen at
-		// the OVMF picker when the user selects the disk.
-		//
-		// --removable writes \EFI\BOOT\BOOTX64.EFI with the correct prefix baked in.
-		// This is the load-bearing binary for UEFI removable-media auto-discovery
-		// (UEFI §3.5.1.1). --no-nvram skips grub2-install's own NVRAM write — no
-		// custom OS NVRAM entry is created (see docs/boot-architecture.md §8).
-		reportStep("Running GRUB installer in chroot")
-		log.Info().Msg("  → Running grub2-install --target=x86_64-efi in chroot...")
-		log.Info().Str("disk", d.targetDisk).Msg("finalize: running grub2-install --target=x86_64-efi inside chroot")
-		if err := runGrub2InstallEFIInChroot(ctx, mountRoot); err != nil {
-			return &BootloaderError{
-				Targets: []string{d.targetDisk},
-				Cause:   fmt.Errorf("UEFI: grub2-install --target=x86_64-efi in chroot: %w", err),
-			}
-		}
-		log.Info().Msg("finalize: grub2-install --target=x86_64-efi (chroot) succeeded")
-
-		// Step 4: verify BOOTX64.EFI exists post-install. grub2-install --removable
-		// writes \EFI\BOOT\BOOTX64.EFI with the correct prefix baked in — this is
-		// the load-bearing binary for UEFI removable-media auto-discovery (§3.5.1.1).
-		// grub2-install can exit 0 but silently skip writing the binary in some edge
-		// cases (missing modules, wrong chroot state). A missing BOOTX64.EFI means
-		// removable-media discovery will find nothing and OVMF will loop at the picker.
-		reportStep("Verifying bootloader binary")
-		bootx64Path := filepath.Join(efiDir, "EFI", "BOOT", "BOOTX64.EFI")
-		if _, err := os.Stat(bootx64Path); err != nil {
-			return &BootloaderError{
-				Targets: []string{d.targetDisk},
-				Cause: fmt.Errorf("UEFI: grub2-install --removable exited 0 but %s is missing — "+
-					"removable-media boot will fail: %w", bootx64Path, err),
-			}
-		}
-		log.Info().Str("path", bootx64Path).Msg("  ✓ BOOTX64.EFI verified post-install (removable-media boot target)")
-		// Soft check: \EFI\rocky\grubx64.efi is the RPM-shipped binary, not load-bearing.
-		if _, err := os.Stat(grubx64Path); err != nil {
-			log.Warn().Err(err).Str("path", grubx64Path).Msg("finalize: \\EFI\\rocky\\grubx64.efi missing (non-fatal — BOOTX64.EFI is load-bearing)")
-		}
-
-		log.Info().Msg("finalize: skipping NVRAM entry creation — relying on UEFI removable-media discovery of \\EFI\\BOOT\\BOOTX64.EFI (see docs/boot-architecture.md §8)")
 	}
 
 	// If the layout includes RAID arrays, wait for the initial resync to complete

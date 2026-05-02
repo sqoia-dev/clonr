@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,25 +21,25 @@ func TestRawDiskFromDevice(t *testing.T) {
 		want string
 	}{
 		// Traditional SATA/SAS devices with direct digit suffix.
-		{"/dev/sda", "/dev/sda"},   // whole disk — no change
-		{"/dev/sdb", "/dev/sdb"},   // whole disk — no change
-		{"/dev/sda1", "/dev/sda"},  // partition 1
-		{"/dev/sda2", "/dev/sda"},  // partition 2
-		{"/dev/sda3", "/dev/sda"},  // partition 3
-		{"/dev/sdb2", "/dev/sdb"},  // second disk, partition 2
-		{"/dev/sdc4", "/dev/sdc"},  // third disk, partition 4
-		{"/dev/hda3", "/dev/hda"},  // legacy IDE disk
+		{"/dev/sda", "/dev/sda"},  // whole disk — no change
+		{"/dev/sdb", "/dev/sdb"},  // whole disk — no change
+		{"/dev/sda1", "/dev/sda"}, // partition 1
+		{"/dev/sda2", "/dev/sda"}, // partition 2
+		{"/dev/sda3", "/dev/sda"}, // partition 3
+		{"/dev/sdb2", "/dev/sdb"}, // second disk, partition 2
+		{"/dev/sdc4", "/dev/sdc"}, // third disk, partition 4
+		{"/dev/hda3", "/dev/hda"}, // legacy IDE disk
 
 		// NVMe devices use 'p' separator before partition number.
-		{"/dev/nvme0n1", "/dev/nvme0n1"},     // whole disk — no change
-		{"/dev/nvme0n1p1", "/dev/nvme0n1"},   // partition 1
-		{"/dev/nvme0n1p2", "/dev/nvme0n1"},   // partition 2
-		{"/dev/nvme1n1p3", "/dev/nvme1n1"},   // second NVMe, partition 3
+		{"/dev/nvme0n1", "/dev/nvme0n1"},   // whole disk — no change
+		{"/dev/nvme0n1p1", "/dev/nvme0n1"}, // partition 1
+		{"/dev/nvme0n1p2", "/dev/nvme0n1"}, // partition 2
+		{"/dev/nvme1n1p3", "/dev/nvme1n1"}, // second NVMe, partition 3
 
 		// Bare names (no /dev/ prefix) — returned as-is (no stripping needed
 		// for the /dev/ prefix path, but the function must not panic).
-		{"sda", "sda"},    // no /dev/, no digit — unchanged
-		{"sda2", "sda"},   // no /dev/ prefix but still strips digit
+		{"sda", "sda"},  // no /dev/, no digit — unchanged
+		{"sda2", "sda"}, // no /dev/ prefix but still strips digit
 	}
 
 	for _, tc := range tests {
@@ -166,7 +167,7 @@ func TestSortMountEntries(t *testing.T) {
 			want: []string{"/"},
 		},
 		{
-			name: "empty — no-op",
+			name:  "empty — no-op",
 			input: []mountEntry{},
 			want:  []string{},
 		},
@@ -270,32 +271,32 @@ func TestNoEfibootmgrCreateDuringFinalize(t *testing.T) {
 	}
 }
 
-// TestBootx64PathIsLoadBearing asserts that the finalize UEFI path verifies
-// \EFI\BOOT\BOOTX64.EFI (the removable-media binary) rather than only
-// \EFI\rocky\grubx64.efi (the RPM-shipped binary that drops to grub prompt).
+// TestBootx64PathIsLoadBearing asserts that the EL UEFI path (installELGRUBEFI
+// in distro_el.go) verifies \EFI\BOOT\BOOTX64.EFI (the removable-media binary)
+// rather than only \EFI\rocky\grubx64.efi (the RPM-shipped binary that drops to
+// grub prompt). After the Sprint 26 DistroDriver refactor the logic lives in
+// distro_el.go, not rsync.go; the test follows the code.
+//
 // Catches regressions where the BootloaderError guard is reverted to the old path.
 func TestBootx64PathIsLoadBearing(t *testing.T) {
-	src := filepath.Join("rsync.go")
+	src := filepath.Join("distro_el.go")
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("cannot read rsync.go: %v", err)
+		t.Fatalf("cannot read distro_el.go: %v", err)
 	}
 	content := string(data)
 
-	// (b) BOOTX64.EFI must be referenced near a BootloaderError return.
+	// BOOTX64.EFI must be referenced in the EFI install path.
 	if !strings.Contains(content, "BOOTX64.EFI") {
-		t.Error("rsync.go must verify BOOTX64.EFI post-install and return BootloaderError on miss " +
+		t.Error("distro_el.go must verify BOOTX64.EFI post-install and return BootloaderError on miss " +
 			"(removable-media boot target — see docs/boot-architecture.md §8)")
 	}
 
-	// The grubx64.efi check must be downgraded to a warning, not a BootloaderError.
-	// We check by confirming "BOOTX64.EFI" appears before "BootloaderError" within
-	// the UEFI verification block. A simple heuristic: count occurrences and ensure
-	// BOOTX64 is used as the hard gate.
+	// BootloaderError must be returned when BOOTX64.EFI is missing.
 	bootx64Idx := strings.Index(content, "BOOTX64.EFI")
 	bootloaderErrIdx := strings.Index(content, "BootloaderError{")
 	if bootx64Idx < 0 || bootloaderErrIdx < 0 {
-		t.Error("expected both BOOTX64.EFI verification and BootloaderError in rsync.go")
+		t.Error("expected both BOOTX64.EFI verification and BootloaderError in distro_el.go")
 		return
 	}
 	// The BOOTX64 stat check should precede (or coincide with) the BootloaderError
@@ -306,9 +307,9 @@ func TestBootx64PathIsLoadBearing(t *testing.T) {
 // These are parser utilities retained for future BMC-less bare-metal use.
 func TestParseBootOrderUnit(t *testing.T) {
 	cases := []struct {
-		name   string
-		input  string
-		want   []string
+		name  string
+		input string
+		want  []string
 	}{
 		{
 			name:  "standard output with BootOrder line",
@@ -345,5 +346,141 @@ func TestParseBootOrderUnit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ── DistroDriver dispatch unit tests ────────────────────────────────────────
+
+// stubDriver is a minimal DistroDriver that records InstallBootloader calls
+// and returns a configurable error. Used to verify Finalize dispatch without
+// requiring real block devices or a chroot environment.
+type stubDriver struct {
+	distro    Distro
+	calls     []*bootloaderCtx
+	returnErr error
+}
+
+func (s *stubDriver) Distro() Distro { return s.distro }
+
+func (s *stubDriver) WriteSystemFiles(_ string, _ api.NodeConfig) error { return nil }
+
+func (s *stubDriver) InstallBootloader(ctx *bootloaderCtx) error {
+	s.calls = append(s.calls, ctx)
+	return s.returnErr
+}
+
+// TestDriverDispatch_BIOS verifies that InstallBootloader is called exactly
+// once with IsEFI=false and the correct AllTargets when a BIOS layout is
+// dispatched via driverFor.
+func TestDriverDispatch_BIOS(t *testing.T) {
+	stub := &stubDriver{}
+	testDistro := Distro{Family: "eltest", Major: 9}
+	stub.distro = testDistro
+	RegisterDriver(stub)
+	defer delete(drivers, driverKey(testDistro))
+
+	driver, err := driverFor(testDistro)
+	if err != nil {
+		t.Fatalf("driverFor returned unexpected error: %v", err)
+	}
+
+	bctx := &bootloaderCtx{
+		MountRoot:  "/mnt/test",
+		TargetDisk: "/dev/sda",
+		AllTargets: []string{"/dev/sda", "/dev/sdb"},
+		IsRAID:     true,
+		IsEFI:      false,
+	}
+	if err := driver.InstallBootloader(bctx); err != nil {
+		t.Fatalf("InstallBootloader returned unexpected error: %v", err)
+	}
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 InstallBootloader call, got %d", len(stub.calls))
+	}
+	got := stub.calls[0]
+	if got.IsEFI {
+		t.Error("BIOS dispatch: IsEFI must be false")
+	}
+	if got.MountRoot != "/mnt/test" {
+		t.Errorf("MountRoot: got %q, want %q", got.MountRoot, "/mnt/test")
+	}
+	if len(got.AllTargets) != 2 {
+		t.Errorf("AllTargets len: got %d, want 2", len(got.AllTargets))
+	}
+}
+
+// TestDriverDispatch_EFI verifies that InstallBootloader is called exactly
+// once with IsEFI=true for a UEFI layout dispatch.
+func TestDriverDispatch_EFI(t *testing.T) {
+	stub := &stubDriver{}
+	testDistro := Distro{Family: "eltest", Major: 10}
+	stub.distro = testDistro
+	RegisterDriver(stub)
+	defer delete(drivers, driverKey(testDistro))
+
+	driver, err := driverFor(testDistro)
+	if err != nil {
+		t.Fatalf("driverFor returned unexpected error: %v", err)
+	}
+
+	bctx := &bootloaderCtx{
+		MountRoot:  "/mnt/uefitest",
+		TargetDisk: "/dev/sda",
+		AllTargets: []string{"/dev/sda"},
+		IsEFI:      true,
+	}
+	if err := driver.InstallBootloader(bctx); err != nil {
+		t.Fatalf("InstallBootloader returned unexpected error: %v", err)
+	}
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 InstallBootloader call, got %d", len(stub.calls))
+	}
+	got := stub.calls[0]
+	if !got.IsEFI {
+		t.Error("EFI dispatch: IsEFI must be true")
+	}
+	if got.MountRoot != "/mnt/uefitest" {
+		t.Errorf("MountRoot: got %q, want %q", got.MountRoot, "/mnt/uefitest")
+	}
+}
+
+// TestDriverDispatch_ErrorPropagates verifies that errors returned by
+// InstallBootloader propagate through the dispatch layer unchanged.
+func TestDriverDispatch_ErrorPropagates(t *testing.T) {
+	sentinel := fmt.Errorf("grub install failed: disk offline")
+	stub := &stubDriver{returnErr: sentinel}
+	testDistro := Distro{Family: "eltest", Major: 8}
+	stub.distro = testDistro
+	RegisterDriver(stub)
+	defer delete(drivers, driverKey(testDistro))
+
+	driver, err := driverFor(testDistro)
+	if err != nil {
+		t.Fatalf("driverFor returned unexpected error: %v", err)
+	}
+
+	bctx := &bootloaderCtx{
+		MountRoot:  "/mnt/err",
+		TargetDisk: "/dev/sda",
+		AllTargets: []string{"/dev/sda"},
+	}
+	got := driver.InstallBootloader(bctx)
+	if !errors.Is(got, sentinel) {
+		t.Errorf("expected sentinel error, got: %v", got)
+	}
+}
+
+// TestDriverDispatch_NoDriverReturnsError verifies that driverFor returns
+// ErrNoDriver for an unregistered distro key.
+func TestDriverDispatch_NoDriverReturnsError(t *testing.T) {
+	_, err := driverFor(Distro{Family: "sles", Major: 15})
+	if err == nil {
+		t.Fatal("expected ErrNoDriver for unregistered distro, got nil")
+	}
+	var noDriver *ErrNoDriver
+	if !errors.As(err, &noDriver) {
+		t.Errorf("expected *ErrNoDriver, got %T: %v", err, err)
 	}
 }

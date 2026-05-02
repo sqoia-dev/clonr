@@ -65,6 +65,10 @@ type bootloaderCtx struct {
 	// IsRAIDOnWholeDisk is true when RAID partitions reference md device paths
 	// directly (no dedicated bios_grub partition on each member disk).
 	IsRAIDOnWholeDisk bool
+	// IsEFI is true when the disk layout contains an ESP partition and the
+	// bootloader must be installed via the UEFI path (grub2-install --target=x86_64-efi
+	// inside the deployed chroot). Mutually exclusive with BIOS in practice.
+	IsEFI bool
 }
 
 // drivers is the registry populated by each driver's init() function.
