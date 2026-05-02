@@ -10,8 +10,9 @@ import (
 // ─── Fake DB ─────────────────────────────────────────────────────────────────
 
 type fakeDB struct {
-	nodes  []SelectorNode
-	groups map[string][]NodeID // group name → node IDs
+	nodes     []SelectorNode
+	groups    map[string][]NodeID // group name → node IDs
+	rackNodes map[string][]NodeID // rack name → node IDs
 }
 
 func (f *fakeDB) ListAllNodes(_ context.Context) ([]SelectorNode, error) {
@@ -26,8 +27,23 @@ func (f *fakeDB) ListGroupMemberIDs(_ context.Context, name string) ([]NodeID, e
 	return ids, nil
 }
 
+func (f *fakeDB) ListNodeIDsByRackNames(_ context.Context, names []string) ([]NodeID, error) {
+	seen := make(map[NodeID]struct{})
+	var out []NodeID
+	for _, name := range names {
+		for _, id := range f.rackNodes[name] {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				out = append(out, id)
+			}
+		}
+	}
+	return out, nil
+}
+
 // makeDB is a helper that builds a fakeDB with nodes n01..n05 where n01..n03
 // are active (deployed_verified) and n04..n05 are inactive.
+// Rack assignments: rack-a → {n01, n02}, rack-b → {n03, n04}.
 func makeDB() *fakeDB {
 	return &fakeDB{
 		nodes: []SelectorNode{
@@ -49,6 +65,10 @@ func makeDB() *fakeDB {
 		groups: map[string][]NodeID{
 			"compute": {"id-n01", "id-n02", "id-n04"},
 			"login":   {"id-n03"},
+		},
+		rackNodes: map[string][]NodeID{
+			"rack-a": {"id-n01", "id-n02"},
+			"rack-b": {"id-n03", "id-n04"},
 		},
 	}
 }
@@ -259,14 +279,41 @@ func TestResolve_Group(t *testing.T) {
 	}
 }
 
-func TestResolve_RacksEmptyFallback(t *testing.T) {
+func TestResolve_RacksByName(t *testing.T) {
 	db := makeDB()
-	got, err := Resolve(context.Background(), db, SelectorSet{Racks: "rack01"})
+	// rack-a contains n01 and n02.
+	got, err := Resolve(context.Background(), db, SelectorSet{Racks: "rack-a"})
 	if err != nil {
-		t.Fatalf("rack selector should not error before #138 lands: %v", err)
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := sorted([]NodeID{"id-n01", "id-n02"})
+	if !reflect.DeepEqual(sorted(got), want) {
+		t.Errorf("got %v, want %v", sorted(got), want)
+	}
+}
+
+func TestResolve_RacksMultiple(t *testing.T) {
+	db := makeDB()
+	// rack-a + rack-b → n01, n02, n03, n04 (union, deduped).
+	got, err := Resolve(context.Background(), db, SelectorSet{Racks: "rack-a,rack-b"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := sorted([]NodeID{"id-n01", "id-n02", "id-n03", "id-n04"})
+	if !reflect.DeepEqual(sorted(got), want) {
+		t.Errorf("got %v, want %v", sorted(got), want)
+	}
+}
+
+func TestResolve_RacksUnknownRackReturnsEmpty(t *testing.T) {
+	db := makeDB()
+	// Unknown rack name — the DB returns empty, not an error.
+	got, err := Resolve(context.Background(), db, SelectorSet{Racks: "rack-unknown"})
+	if err != nil {
+		t.Fatalf("unknown rack should not error: %v", err)
 	}
 	if len(got) != 0 {
-		t.Errorf("rack selector should return empty before #138 lands, got %v", got)
+		t.Errorf("unknown rack should return empty, got %v", got)
 	}
 }
 

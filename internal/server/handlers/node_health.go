@@ -26,6 +26,8 @@ type NodeHealthDBIface interface {
 	ListAllNodes(ctx context.Context) ([]selector.SelectorNode, error)
 	// ListGroupMemberIDs returns the node IDs of all members of the named group.
 	ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error)
+	// ListNodeIDsByRackNames returns node IDs for all nodes in the named racks.
+	ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]selector.NodeID, error)
 }
 
 // NodeHealthHubIface is the subset of ClientdHub used by the health handler.
@@ -182,6 +184,11 @@ func (a *NodeHealthDBAdapter) ListAllNodes(ctx context.Context) ([]selector.Sele
 // ListGroupMemberIDs delegates to the selector adapter.
 func (a *NodeHealthDBAdapter) ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error) {
 	return a.selInner.ListGroupMemberIDs(ctx, groupName)
+}
+
+// ListNodeIDsByRackNames delegates to the selector adapter.
+func (a *NodeHealthDBAdapter) ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]selector.NodeID, error) {
+	return a.selInner.ListNodeIDsByRackNames(ctx, rackNames)
 }
 
 // GetNodeHealth handles GET /api/v1/nodes/{id}/health.

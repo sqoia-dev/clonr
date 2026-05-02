@@ -48,8 +48,7 @@ type SelectorSet struct {
 	Active bool
 
 	// Racks is a comma-separated list of rack names (--racks).
-	// The rack model lands in #138; until then Resolve returns empty results for
-	// this selector without error.
+	// Resolves to all node IDs assigned to the named racks via node_rack_position.
 	Racks string
 
 	// Chassis is a comma-separated list of chassis names (--chassis).
@@ -82,7 +81,7 @@ func RegisterSelectorFlags(cmd *cobra.Command, set *SelectorSet) {
 	cmd.Flags().StringVarP(&set.Group, "group", "g", "", "Node group name")
 	cmd.Flags().BoolVarP(&set.All, "all", "A", false, "All registered nodes")
 	cmd.Flags().BoolVarP(&set.Active, "active", "a", false, "Active nodes (deployed_verified state only)")
-	cmd.Flags().StringVar(&set.Racks, "racks", "", "Rack names (comma-separated) — resolved after #138 lands")
+	cmd.Flags().StringVar(&set.Racks, "racks", "", "Rack names (comma-separated)")
 	cmd.Flags().StringVar(&set.Chassis, "chassis", "", "Chassis names (comma-separated) — resolved after #138 lands")
 	cmd.Flags().BoolVar(&set.IgnoreStatus, "ignore-status", false,
 		"Bypass the active-only filter; return all nodes matched by the other selectors regardless of deploy state")
@@ -95,6 +94,9 @@ type SelectorDB interface {
 	ListAllNodes(ctx context.Context) ([]SelectorNode, error)
 	// ListGroupMemberIDs returns the node IDs of all members of the named group.
 	ListGroupMemberIDs(ctx context.Context, groupName string) ([]NodeID, error)
+	// ListNodeIDsByRackNames returns node IDs for all nodes assigned to any of
+	// the named racks. Empty slice (not error) when no nodes are assigned.
+	ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]NodeID, error)
 }
 
 // SelectorNode carries the minimal node fields needed by the resolver.
@@ -110,7 +112,8 @@ type SelectorNode struct {
 //
 // Rules:
 //   - Empty SelectorSet → error "at least one selector required"
-//   - --racks / --chassis → accepted but return empty (rack model not yet in DB)
+//   - --racks → resolves to all node IDs in node_rack_position for named racks
+//   - --chassis → accepted but returns empty (chassis model not yet in DB)
 //   - --ignore-status → suppresses the active-state filter when -a is used;
 //     also suppresses state filtering for -n / -g selectors
 //   - Nodes from multiple selectors in the same invocation are unioned
@@ -215,10 +218,27 @@ func Resolve(ctx context.Context, db SelectorDB, set SelectorSet) ([]NodeID, err
 		}
 	}
 
-	// --racks / --chassis — accepted, empty-fallback (rack model lands in #138).
-	// We silently return nothing for these selectors; we do NOT error.
-	// The sprint spec says: "return empty results gracefully (rack model lands later)".
-	_ = set.Racks
+	// --racks — resolve to all node IDs assigned to the named racks (#149).
+	// Each rack name resolves via node_rack_position JOIN racks on name.
+	if set.Racks != "" {
+		names := strings.Split(set.Racks, ",")
+		for i, n := range names {
+			names[i] = strings.TrimSpace(n)
+		}
+		rackIDs, rackErr := db.ListNodeIDsByRackNames(ctx, names)
+		if rackErr != nil {
+			return nil, fmt.Errorf("selector: racks %q: %w", set.Racks, rackErr)
+		}
+		for _, id := range rackIDs {
+			n, ok := byID[id]
+			if !ok {
+				continue // node removed between position assignment and query
+			}
+			add(n.ID)
+		}
+	}
+
+	// --chassis — empty-fallback until chassis model lands (post-#149).
 	_ = set.Chassis
 
 	// Deterministic output order.

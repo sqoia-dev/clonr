@@ -40,6 +40,10 @@ func (f *execTestDB) ListGroupMemberIDs(_ context.Context, groupName string) ([]
 	return nil, fmt.Errorf("group %q not found", groupName)
 }
 
+func (f *execTestDB) ListNodeIDsByRackNames(_ context.Context, _ []string) ([]selector.NodeID, error) {
+	return nil, nil
+}
+
 // execTestHub satisfies ExecHubIface.
 // Send() immediately delivers the pre-configured result to the registered channel.
 type execTestHub struct {

@@ -1554,6 +1554,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/status", images.GetImageStatus)
 			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
 			r.Put("/images/{id}/disklayout", images.PutDiskLayout)
+			r.Put("/images/{id}/install-instructions", images.PutInstallInstructions)
 			r.Post("/images/{id}/blob", images.UploadBlob)
 			r.Get("/images/{id}/metadata", images.GetImageMetadata)
 			r.Put("/images/{id}/tags", images.UpdateImageTags)
@@ -1706,6 +1707,16 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/disk-layouts/{id}", diskLayoutsH.GetLayout)
 			r.Put("/disk-layouts/{id}", diskLayoutsH.UpdateLayout)
 			r.Delete("/disk-layouts/{id}", diskLayoutsH.DeleteLayout)
+
+			// Rack model (#149) — physical rack inventory and node U-slot assignments.
+			racksH := &handlers.RacksHandler{DB: s.db}
+			r.Get("/racks", racksH.ListRacks)
+			r.Post("/racks", racksH.CreateRack)
+			r.Get("/racks/{id}", racksH.GetRack)
+			r.Put("/racks/{id}", racksH.UpdateRack)
+			r.Delete("/racks/{id}", racksH.DeleteRack)
+			r.Put("/racks/{id}/positions/{node_id}", racksH.SetPosition)
+			r.Delete("/racks/{id}/positions/{node_id}", racksH.DeletePosition)
 
 			// Node groups — named sets of nodes sharing a disk layout override.
 			r.Get("/node-groups", nodeGroups.ListNodeGroups)

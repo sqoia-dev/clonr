@@ -52,3 +52,8 @@ func (a *DBAdapter) ListGroupMemberIDs(ctx context.Context, groupName string) ([
 	}
 	return ids, nil
 }
+
+// ListNodeIDsByRackNames delegates to the DB layer added in #149.
+func (a *DBAdapter) ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]NodeID, error) {
+	return a.db.ListNodeIDsByRackNames(ctx, rackNames)
+}

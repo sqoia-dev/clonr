@@ -22,6 +22,7 @@ import (
 type ExecDBIface interface {
 	ListAllNodes(ctx context.Context) ([]selector.SelectorNode, error)
 	ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error)
+	ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]selector.NodeID, error)
 }
 
 // ExecHubIface is the hub interface required by ExecHandler.
@@ -73,9 +74,9 @@ type execSSEEvent struct {
 
 // execSummaryEvent is the final SSE event reporting per-node exit codes.
 type execSummaryEvent struct {
-	Type    string                      `json:"type"` // "summary"
-	Results []execNodeResult            `json:"results"`
-	MaxExit int                         `json:"max_exit_code"`
+	Type    string           `json:"type"` // "summary"
+	Results []execNodeResult `json:"results"`
+	MaxExit int              `json:"max_exit_code"`
 }
 
 type execNodeResult struct {
@@ -572,4 +573,8 @@ func (a *ExecDBAdapter) ListAllNodes(ctx context.Context) ([]selector.SelectorNo
 
 func (a *ExecDBAdapter) ListGroupMemberIDs(ctx context.Context, groupName string) ([]selector.NodeID, error) {
 	return a.inner.ListGroupMemberIDs(ctx, groupName)
+}
+
+func (a *ExecDBAdapter) ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([]selector.NodeID, error) {
+	return a.inner.ListNodeIDsByRackNames(ctx, rackNames)
 }

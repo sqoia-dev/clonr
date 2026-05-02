@@ -21,11 +21,11 @@ const (
 type ImageStatus string
 
 const (
-	ImageStatusBuilding     ImageStatus = "building"
-	ImageStatusReady        ImageStatus = "ready"
-	ImageStatusError        ImageStatus = "error"
-	ImageStatusArchived     ImageStatus = "archived"
-	ImageStatusInterrupted  ImageStatus = "interrupted" // F2/F3: build interrupted, resumable
+	ImageStatusBuilding    ImageStatus = "building"
+	ImageStatusReady       ImageStatus = "ready"
+	ImageStatusError       ImageStatus = "error"
+	ImageStatusArchived    ImageStatus = "archived"
+	ImageStatusInterrupted ImageStatus = "interrupted" // F2/F3: build interrupted, resumable
 )
 
 // ImageFormat describes how the image blob is stored on disk.
@@ -53,14 +53,14 @@ const (
 // Entries are stored on NodeConfig and NodeGroup; the effective list is the
 // group entries merged with node entries (node overrides group by mount point).
 type FstabEntry struct {
-	Source     string `json:"source"`              // e.g. "nfs-server:/export/home"
-	MountPoint string `json:"mount_point"`         // e.g. "/home/shared"
-	FSType     string `json:"fs_type"`             // "nfs", "nfs4", "cifs", "lustre", …
-	Options    string `json:"options"`             // "defaults,_netdev,vers=4"
-	Dump       int    `json:"dump"`                // usually 0
-	Pass       int    `json:"pass"`                // usually 0 for network mounts
-	AutoMkdir  bool   `json:"auto_mkdir"`          // create mount point if missing
-	Comment    string `json:"comment,omitempty"`   // human-readable note
+	Source     string `json:"source"`            // e.g. "nfs-server:/export/home"
+	MountPoint string `json:"mount_point"`       // e.g. "/home/shared"
+	FSType     string `json:"fs_type"`           // "nfs", "nfs4", "cifs", "lustre", …
+	Options    string `json:"options"`           // "defaults,_netdev,vers=4"
+	Dump       int    `json:"dump"`              // usually 0
+	Pass       int    `json:"pass"`              // usually 0 for network mounts
+	AutoMkdir  bool   `json:"auto_mkdir"`        // create mount point if missing
+	Comment    string `json:"comment,omitempty"` // human-readable note
 }
 
 // NodeGroup is a named set of nodes that share a disk layout override and other
@@ -68,9 +68,9 @@ type FstabEntry struct {
 // group's DiskLayoutOverride takes precedence over the image default but is
 // overridden by a node-level DiskLayoutOverride.
 type NodeGroup struct {
-	ID                 string       `json:"id"`
-	Name               string       `json:"name"`
-	Description        string       `json:"description"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 	// Role is an optional HPC role label: "compute", "login", "storage", "gpu", "admin".
 	Role               string       `json:"role,omitempty"`
 	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"` // nil = use image default
@@ -78,9 +78,9 @@ type NodeGroup struct {
 	// ExpiresAt is an optional UTC timestamp after which this allocation is
 	// considered expired. Nil means no expiration. Set by admin or PI via
 	// PUT /api/v1/node-groups/{id}/expiration (Sprint F, v1.5.0).
-	ExpiresAt          *time.Time   `json:"expires_at,omitempty"`
-	CreatedAt          time.Time    `json:"created_at"`
-	UpdatedAt          time.Time    `json:"updated_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 // NodeGroupWithCount embeds NodeGroup and adds a live member count from the
@@ -96,18 +96,18 @@ type DiskLayout struct {
 	// RAIDArrays defines software RAID arrays to create before partitioning.
 	// Arrays are created first; PartitionSpec.Device may reference an array name
 	// (e.g. "md0") to partition on top of a RAID array instead of a raw disk.
-	RAIDArrays  []RAIDSpec      `json:"raid_arrays,omitempty"`
+	RAIDArrays []RAIDSpec `json:"raid_arrays,omitempty"`
 	// ZFSPools defines ZFS zpools to create during deployment.
 	// When non-empty, ZFS pool creation replaces the standard mkfs+mount flow for
 	// the affected devices. Supported vdev types: "mirror", "raidz".
 	// v1 constraint: single rpool (root) with optional bpool (/boot) only.
-	ZFSPools    []ZFSPool       `json:"zfs_pools,omitempty"`
-	Partitions  []PartitionSpec `json:"partitions"`
-	Bootloader  Bootloader      `json:"bootloader"`
+	ZFSPools   []ZFSPool       `json:"zfs_pools,omitempty"`
+	Partitions []PartitionSpec `json:"partitions"`
+	Bootloader Bootloader      `json:"bootloader"`
 	// TargetDevice is an optional operator hint specifying the preferred kernel
 	// device name (e.g. "nvme0n1") to deploy to. When set, selectTargetDisk
 	// will prefer this device over automatic selection heuristics.
-	TargetDevice string          `json:"target_device,omitempty"`
+	TargetDevice string `json:"target_device,omitempty"`
 }
 
 // ZFSPool describes a ZFS zpool to create during deployment.
@@ -131,17 +131,17 @@ type ZFSPool struct {
 // RAIDSpec describes a software RAID array to create during deployment.
 type RAIDSpec struct {
 	// Name is the md device name, e.g. "md0".
-	Name    string   `json:"name"`
+	Name string `json:"name"`
 	// Level is the RAID level: "raid0", "raid1", "raid5", "raid6", "raid10".
-	Level   string   `json:"level"`
+	Level string `json:"level"`
 	// Members lists the member devices by kernel name (e.g. "sda", "sdb") or
 	// by size-based selector (e.g. "smallest-2" = the two smallest disks).
 	Members []string `json:"members"`
 	// ChunkKB is the chunk size in KiB. When 0, mdadm picks the default for
 	// the RAID level (typically 512K for raid0/5/6/10, unused for raid1).
-	ChunkKB int      `json:"chunk_kb,omitempty"`
+	ChunkKB int `json:"chunk_kb,omitempty"`
 	// Spare is the number of hot spare devices to include in the array.
-	Spare   int      `json:"spare,omitempty"`
+	Spare int `json:"spare,omitempty"`
 }
 
 // PartitionSpec describes a single partition within a DiskLayout.
@@ -151,11 +151,11 @@ type PartitionSpec struct {
 	// device name (e.g. "md0"), the partition is created on that RAID array.
 	Device     string   `json:"device,omitempty"`
 	Label      string   `json:"label"`
-	SizeBytes  int64    `json:"size_bytes"`  // 0 = fill remaining
-	Filesystem string   `json:"filesystem"`  // "xfs", "ext4", "vfat", "swap"
+	SizeBytes  int64    `json:"size_bytes"` // 0 = fill remaining
+	Filesystem string   `json:"filesystem"` // "xfs", "ext4", "vfat", "swap"
 	MountPoint string   `json:"mountpoint"`
-	Flags      []string `json:"flags"`      // ["boot", "esp"]
-	MinBytes   int64    `json:"min_bytes"`  // minimum disk size to satisfy this layout
+	Flags      []string `json:"flags"`     // ["boot", "esp"]
+	MinBytes   int64    `json:"min_bytes"` // minimum disk size to satisfy this layout
 }
 
 // Bootloader specifies which bootloader is used and its target platform.
@@ -164,22 +164,47 @@ type Bootloader struct {
 	Target string `json:"target"` // "x86_64-efi", "i386-pc"
 }
 
+// InstallInstruction is a single step run inside the deployed filesystem during
+// the in-chroot phase of every deploy, AFTER node-identity config is applied
+// and BEFORE bootloader installation. Instructions are run in order; the image
+// author is responsible for idempotency on re-deploys.
+//
+// Opcode semantics:
+//
+//   - "modify"    — find-and-replace within an existing file. Payload is a
+//     JSON-encoded {"find": "<regex>", "replace": "<string>"}.
+//     Target must exist; if it does not, the deploy fails.
+//
+//   - "overwrite" — write Payload (as text) to Target, replacing if present.
+//     Mode 0644 is used unless the file already exists with a
+//     different mode (in which case the existing mode is preserved).
+//     Target's parent directory must already exist.
+//
+//   - "script"    — write Payload as a POSIX shell script to a temp file and
+//     run it inside the target via chroot(2). Fails the deploy if
+//     the script exits non-zero.
+type InstallInstruction struct {
+	Opcode  string `json:"opcode"`  // "modify" | "overwrite" | "script"
+	Target  string `json:"target"`  // path within the chrooted target root
+	Payload string `json:"payload"` // semantics depend on opcode
+}
+
 // BaseImage is a deployable OS image, stripped of all node-specific identity.
 // It is immutable once finalized (Status == ImageStatusReady).
 type BaseImage struct {
-	ID           string        `json:"id"`
-	Name         string        `json:"name"`
-	Version      string        `json:"version"`
-	OS           string        `json:"os"`
-	Arch         string        `json:"arch"`
-	Status       ImageStatus   `json:"status"`
-	Format       ImageFormat   `json:"format"`
+	ID      string      `json:"id"`
+	Name    string      `json:"name"`
+	Version string      `json:"version"`
+	OS      string      `json:"os"`
+	Arch    string      `json:"arch"`
+	Status  ImageStatus `json:"status"`
+	Format  ImageFormat `json:"format"`
 	// Firmware identifies the firmware interface this image was built for.
 	// "uefi" (default) or "bios" (legacy). Existing images without this field
 	// stored default to "uefi" via the DB column DEFAULT.
 	Firmware     ImageFirmware `json:"firmware"`
 	SizeBytes    int64         `json:"size_bytes"`
-	Checksum     string        `json:"checksum"`     // sha256 hex of the blob
+	Checksum     string        `json:"checksum"` // sha256 hex of the blob
 	DiskLayout   DiskLayout    `json:"disk_layout"`
 	Tags         []string      `json:"tags"`
 	SourceURL    string        `json:"source_url,omitempty"`
@@ -187,13 +212,17 @@ type BaseImage struct {
 	ErrorMessage string        `json:"error_message,omitempty"`
 	// BuildMethod identifies how the image was created: "pull", "import", "capture", "iso".
 	// Used by the UI to decide which detail view to show (e.g. build progress panel).
-	BuildMethod  string        `json:"build_method,omitempty"`
+	BuildMethod string `json:"build_method,omitempty"`
 	// BuiltForRoles holds the HPC role IDs that were selected when the image was
 	// built via the Build from ISO flow. Used by the node-assignment UI to warn
 	// when a node's role tag doesn't match the image's built-for roles.
-	BuiltForRoles []string     `json:"built_for_roles,omitempty"`
-	CreatedAt    time.Time     `json:"created_at"`
-	FinalizedAt  *time.Time    `json:"finalized_at,omitempty"`
+	BuiltForRoles []string `json:"built_for_roles,omitempty"`
+	// InstallInstructions is an ordered list of filesystem mutations applied
+	// inside the deployed root during every deploy's in-chroot phase.
+	// Omitted from the API response when empty.
+	InstallInstructions []InstallInstruction `json:"install_instructions,omitempty"`
+	CreatedAt           time.Time            `json:"created_at"`
+	FinalizedAt         *time.Time           `json:"finalized_at,omitempty"`
 }
 
 // InterfaceConfig holds the static network configuration for one NIC on a node.
@@ -221,11 +250,11 @@ type BMCNodeConfig struct {
 // IBInterfaceConfig holds per-device InfiniBand / IPoIB configuration applied
 // during node finalization.
 type IBInterfaceConfig struct {
-	DeviceName string   `json:"device_name"`        // e.g. "mlx5_0"
-	PKeys      []string `json:"pkeys"`              // partition keys, e.g. ["0x8001"]
-	IPoIBMode  string   `json:"ipoib_mode"`         // "connected" or "datagram"
+	DeviceName string   `json:"device_name"`          // e.g. "mlx5_0"
+	PKeys      []string `json:"pkeys"`                // partition keys, e.g. ["0x8001"]
+	IPoIBMode  string   `json:"ipoib_mode"`           // "connected" or "datagram"
 	IPAddress  string   `json:"ip_address,omitempty"` // IPoIB IP in CIDR notation
-	MTU        int      `json:"mtu,omitempty"`      // typically 65520 for connected mode
+	MTU        int      `json:"mtu,omitempty"`        // typically 65520 for connected mode
 }
 
 // PowerProviderConfig holds the type and backend-specific fields for a node's
@@ -374,20 +403,20 @@ type LDAPNodeConfig struct {
 type SudoersNodeConfig struct {
 	// GroupCN is the CN of the LDAP posixGroup whose members receive sudo access.
 	// E.g. "clustr-admins". The drop-in file is named after this CN.
-	GroupCN  string `json:"group_cn"`
+	GroupCN string `json:"group_cn"`
 	// NoPasswd, when true, writes NOPASSWD:ALL so members can sudo without a password.
-	NoPasswd bool   `json:"no_passwd"`
+	NoPasswd bool `json:"no_passwd"`
 }
 
 // HostEntry represents a single /etc/hosts entry for a cluster node.
 // Populated transiently at registration time; never stored in the database.
 type HostEntry struct {
-	IP       string   `json:"ip"`
-	Hostname string   `json:"hostname"`
-	FQDN     string   `json:"fqdn,omitempty"`
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname"`
+	FQDN     string `json:"fqdn,omitempty"`
 	// Aliases holds additional hostnames written after Hostname on the same line.
 	// Used to add service-specific aliases (e.g. "clustr-server" for LDAP resolution).
-	Aliases  []string `json:"aliases,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // NodeProviderValues lists the valid values for NodeConfig.Provider.
@@ -408,40 +437,40 @@ func IsValidNodeProvider(s string) bool {
 // NodeConfig holds everything that makes a deployed image specific to one
 // physical node. Applied at deploy time — never baked into the BaseImage blob.
 type NodeConfig struct {
-	ID              string               `json:"id"`
-	Hostname        string               `json:"hostname"`
-	HostnameAuto    bool                 `json:"hostname_auto"`
-	FQDN            string               `json:"fqdn"`
-	PrimaryMAC      string               `json:"primary_mac"`
-	Interfaces      []InterfaceConfig    `json:"interfaces"`
-	SSHKeys         []string             `json:"ssh_keys"`
-	KernelArgs      string               `json:"kernel_args"`
+	ID           string            `json:"id"`
+	Hostname     string            `json:"hostname"`
+	HostnameAuto bool              `json:"hostname_auto"`
+	FQDN         string            `json:"fqdn"`
+	PrimaryMAC   string            `json:"primary_mac"`
+	Interfaces   []InterfaceConfig `json:"interfaces"`
+	SSHKeys      []string          `json:"ssh_keys"`
+	KernelArgs   string            `json:"kernel_args"`
 	// Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or ""
 	// (unset). This is a metadata label — it does not automatically reconfigure BMC.
 	// Added in migration 076.
-	Provider        string               `json:"provider,omitempty"`
+	Provider string `json:"provider,omitempty"`
 	// Tags holds unstructured node labels used for filtering and Slurm role assignment.
 	// Renamed from Groups in S2-4; the JSON field "groups" is also emitted for one
 	// release (v0.x) for backward compatibility with existing CLI versions.
-	Tags            []string             `json:"tags"`
+	Tags []string `json:"tags"`
 	// Groups is deprecated — use Tags. Kept for JSON backward compatibility through v1.0.
 	// Removed in v1.1. Callers should read Tags; Groups mirrors Tags during the
 	// dual-emit window.
-	Groups          []string             `json:"groups"`
-	CustomVars      map[string]string    `json:"custom_vars"`
-	BaseImageID     string               `json:"base_image_id,omitempty"`
-	BMC             *BMCNodeConfig       `json:"bmc,omitempty"`
-	IBConfig        []IBInterfaceConfig  `json:"ib_config,omitempty"`
+	Groups      []string            `json:"groups"`
+	CustomVars  map[string]string   `json:"custom_vars"`
+	BaseImageID string              `json:"base_image_id,omitempty"`
+	BMC         *BMCNodeConfig      `json:"bmc,omitempty"`
+	IBConfig    []IBInterfaceConfig `json:"ib_config,omitempty"`
 	// PowerProvider selects the power management backend for this node.
 	// If nil, the server falls back to legacy BMC-based IPMI when BMC is set.
-	PowerProvider   *PowerProviderConfig `json:"power_provider,omitempty"`
+	PowerProvider *PowerProviderConfig `json:"power_provider,omitempty"`
 	// GroupID optionally links this node to a NodeGroup. When set, the group's
 	// DiskLayoutOverride is consulted during layout resolution if the node has
 	// no node-level override.
-	GroupID         string               `json:"group_id,omitempty"`
+	GroupID string `json:"group_id,omitempty"`
 	// DiskLayoutOverride, when non-nil, completely replaces the image's disk
 	// layout for this specific node. Takes highest priority in resolution.
-	DiskLayoutOverride *DiskLayout       `json:"disk_layout_override,omitempty"`
+	DiskLayoutOverride *DiskLayout `json:"disk_layout_override,omitempty"`
 	// LDAPConfig, when non-nil, causes finalization to write sssd.conf, ldap.conf,
 	// and the CA certificate bundle into the deployed filesystem so the node can
 	// authenticate users against the clustr LDAP server.
@@ -479,7 +508,7 @@ type NodeConfig struct {
 	// The effective list is group mounts merged with node mounts; use
 	// EffectiveExtraMounts to resolve. Stored as node-level on NodeConfig only
 	// after server-side merging for the deploy path.
-	ExtraMounts        []FstabEntry      `json:"extra_mounts,omitempty"`
+	ExtraMounts []FstabEntry `json:"extra_mounts,omitempty"`
 	// VerifyTimeoutOverride, when non-nil, overrides CLUSTR_VERIFY_TIMEOUT for this
 	// specific node. Value is in seconds. A value of 0 disables the timeout for this
 	// node entirely. NULL means use the global default. Added in migration 054.
@@ -488,7 +517,7 @@ type NodeConfig struct {
 	// PowerCycle. The PXE boot handler returns the full clustr initramfs boot
 	// script while this flag is set, causing the node to deploy fresh.
 	// Cleared by the deploy-complete callback once deployment finalizes.
-	ReimagePending  bool                 `json:"reimage_pending,omitempty"`
+	ReimagePending bool `json:"reimage_pending,omitempty"`
 	// LastDeployFailedAt is the Unix timestamp of the most recent failed deploy.
 	// Used by State() to determine NodeStateFailed.
 	LastDeployFailedAt *time.Time `json:"last_deploy_failed_at,omitempty"`
@@ -513,18 +542,18 @@ type NodeConfig struct {
 
 	// HardwareProfile is the raw hardware discovery JSON from the node.
 	// Populated on auto-registration; nil when node was created manually.
-	HardwareProfile json.RawMessage      `json:"hardware_profile,omitempty"`
+	HardwareProfile json.RawMessage `json:"hardware_profile,omitempty"`
 	// DetectedFirmware is the node's boot firmware type reported by the deploy
 	// agent on registration: "uefi" or "bios". Empty for manually-created nodes
 	// or legacy registrations that predate this field.
-	DetectedFirmware string               `json:"detected_firmware,omitempty"`
+	DetectedFirmware string `json:"detected_firmware,omitempty"`
 	// LDAPReady is set by the server when a node phones home via verify-boot and
 	// includes sssd status. nil = not yet checked; true = sssd connected;
 	// false = sssd not ready (see LDAPReadyDetail). Sprint 15 #99.
-	LDAPReady       *bool  `json:"ldap_ready,omitempty"`
-	LDAPReadyDetail string `json:"ldap_ready_detail,omitempty"`
-	CreatedAt        time.Time            `json:"created_at"`
-	UpdatedAt        time.Time            `json:"updated_at"`
+	LDAPReady       *bool     `json:"ldap_ready,omitempty"`
+	LDAPReadyDetail string    `json:"ldap_ready_detail,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // State derives the current lifecycle state of this node from its stored fields.
@@ -697,54 +726,54 @@ type PullRequest struct {
 
 // CreateNodeConfigRequest is the body for POST /api/v1/nodes.
 type CreateNodeConfigRequest struct {
-	Hostname    string            `json:"hostname"`
-	FQDN        string            `json:"fqdn"`
-	PrimaryMAC  string            `json:"primary_mac"`
-	Interfaces  []InterfaceConfig `json:"interfaces"`
-	SSHKeys     []string          `json:"ssh_keys"`
-	KernelArgs  string            `json:"kernel_args"`
+	Hostname   string            `json:"hostname"`
+	FQDN       string            `json:"fqdn"`
+	PrimaryMAC string            `json:"primary_mac"`
+	Interfaces []InterfaceConfig `json:"interfaces"`
+	SSHKeys    []string          `json:"ssh_keys"`
+	KernelArgs string            `json:"kernel_args"`
 	// Tags holds unstructured node labels for filtering and Slurm role assignment.
-	Tags        []string          `json:"tags"`
+	Tags []string `json:"tags"`
 	// Groups is a deprecated alias for Tags, accepted for backward compatibility through v1.0.
 	Groups      []string          `json:"groups"`
 	CustomVars  map[string]string `json:"custom_vars"`
 	BaseImageID string            `json:"base_image_id"`
 	// Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "".
-	Provider    string            `json:"provider,omitempty"`
+	Provider string `json:"provider,omitempty"`
 }
 
 // UpdateNodeConfigRequest is the body for PUT /api/v1/nodes/:id.
 type UpdateNodeConfigRequest struct {
-	Hostname           string               `json:"hostname"`
-	FQDN               string               `json:"fqdn"`
-	PrimaryMAC         string               `json:"primary_mac"`
-	Interfaces         []InterfaceConfig    `json:"interfaces"`
-	SSHKeys            []string             `json:"ssh_keys"`
-	KernelArgs         string               `json:"kernel_args"`
+	Hostname   string            `json:"hostname"`
+	FQDN       string            `json:"fqdn"`
+	PrimaryMAC string            `json:"primary_mac"`
+	Interfaces []InterfaceConfig `json:"interfaces"`
+	SSHKeys    []string          `json:"ssh_keys"`
+	KernelArgs string            `json:"kernel_args"`
 	// Tags holds unstructured node labels for filtering and Slurm role assignment.
-	Tags               []string             `json:"tags"`
+	Tags []string `json:"tags"`
 	// Groups is a deprecated alias for Tags, accepted for backward compatibility through v1.0.
-	Groups             []string             `json:"groups"`
-	CustomVars         map[string]string    `json:"custom_vars"`
-	BaseImageID        string               `json:"base_image_id"`
+	Groups      []string          `json:"groups"`
+	CustomVars  map[string]string `json:"custom_vars"`
+	BaseImageID string            `json:"base_image_id"`
 	// PowerProvider, when non-nil, replaces the power provider config for this
 	// node. Omit (or send null) to preserve the existing provider and credentials.
 	// Use ClearPowerProvider=true to explicitly remove the power provider.
-	PowerProvider      *PowerProviderConfig `json:"power_provider,omitempty"`
+	PowerProvider *PowerProviderConfig `json:"power_provider,omitempty"`
 	// ClearPowerProvider, when true, explicitly removes the power provider config.
 	// Use this instead of omitting power_provider (which preserves the existing
 	// config) when you want to revert to the legacy BMC/IPMI fallback.
-	ClearPowerProvider  bool                `json:"clear_power_provider,omitempty"`
-	GroupID            string               `json:"group_id,omitempty"`
+	ClearPowerProvider bool   `json:"clear_power_provider,omitempty"`
+	GroupID            string `json:"group_id,omitempty"`
 	// DiskLayoutOverride, when non-nil, replaces the image/group disk layout for
 	// this node. Send null or omit to clear a previously set override.
-	DiskLayoutOverride *DiskLayout          `json:"disk_layout_override,omitempty"`
+	DiskLayoutOverride *DiskLayout `json:"disk_layout_override,omitempty"`
 	// ClearLayoutOverride, when true, explicitly removes any node-level override.
 	// Use this instead of sending an empty DiskLayoutOverride, which is ambiguous.
-	ClearLayoutOverride bool                `json:"clear_layout_override,omitempty"`
+	ClearLayoutOverride bool `json:"clear_layout_override,omitempty"`
 	// ExtraMounts replaces the node-level extra fstab entries. Send an empty
 	// slice to clear all node-level mounts (group mounts are unaffected).
-	ExtraMounts         []FstabEntry        `json:"extra_mounts,omitempty"`
+	ExtraMounts []FstabEntry `json:"extra_mounts,omitempty"`
 	// VerifyTimeoutOverride, when non-nil, overrides CLUSTR_VERIFY_TIMEOUT for this
 	// node. Value is in seconds. Set to 0 to disable the timeout for this node.
 	// Omit (null) to use the global default.
@@ -767,13 +796,13 @@ type CreateNodeGroupRequest struct {
 
 // UpdateNodeGroupRequest is the body for PUT /api/v1/node-groups/:id.
 type UpdateNodeGroupRequest struct {
-	Name               string       `json:"name"`
-	Description        string       `json:"description"`
-	Role               string       `json:"role,omitempty"`
-	DiskLayoutOverride *DiskLayout  `json:"disk_layout_override,omitempty"`
+	Name                string      `json:"name"`
+	Description         string      `json:"description"`
+	Role                string      `json:"role,omitempty"`
+	DiskLayoutOverride  *DiskLayout `json:"disk_layout_override,omitempty"`
 	ClearLayoutOverride bool        `json:"clear_layout_override,omitempty"`
 	// ExtraMounts replaces the group-level extra fstab entries.
-	ExtraMounts         []FstabEntry `json:"extra_mounts,omitempty"`
+	ExtraMounts []FstabEntry `json:"extra_mounts,omitempty"`
 }
 
 // AddGroupMembersRequest is the body for POST /api/v1/node-groups/:id/members.
@@ -790,27 +819,27 @@ type GroupMembersResponse struct {
 
 // GroupReimageRequest is the body for POST /api/v1/node-groups/:id/reimage.
 type GroupReimageRequest struct {
-	ImageID            string `json:"image_id"`
-	Concurrency        int    `json:"concurrency,omitempty"`        // default 5
-	PauseOnFailurePct  int    `json:"pause_on_failure_pct,omitempty"` // default 20
+	ImageID           string `json:"image_id"`
+	Concurrency       int    `json:"concurrency,omitempty"`          // default 5
+	PauseOnFailurePct int    `json:"pause_on_failure_pct,omitempty"` // default 20
 }
 
 // GroupReimageJobStatus is the response from POST /api/v1/node-groups/:id/reimage
 // and GET /api/v1/reimages/jobs/:jobID.
 type GroupReimageJobStatus struct {
-	JobID              string    `json:"job_id"`
-	GroupID            string    `json:"group_id"`
-	ImageID            string    `json:"image_id"`
-	Status             string    `json:"status"`
-	TotalNodes         int       `json:"total_nodes"`
-	TriggeredNodes     int       `json:"triggered_nodes"`
-	SucceededNodes     int       `json:"succeeded_nodes"`
-	FailedNodes        int       `json:"failed_nodes"`
-	Concurrency        int       `json:"concurrency"`
-	PauseOnFailurePct  int       `json:"pause_on_failure_pct"`
-	ErrorMessage       string    `json:"error_message,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	JobID             string    `json:"job_id"`
+	GroupID           string    `json:"group_id"`
+	ImageID           string    `json:"image_id"`
+	Status            string    `json:"status"`
+	TotalNodes        int       `json:"total_nodes"`
+	TriggeredNodes    int       `json:"triggered_nodes"`
+	SucceededNodes    int       `json:"succeeded_nodes"`
+	FailedNodes       int       `json:"failed_nodes"`
+	Concurrency       int       `json:"concurrency"`
+	PauseOnFailurePct int       `json:"pause_on_failure_pct"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // AssignGroupRequest is the body for PUT /api/v1/nodes/:id/group.
@@ -845,33 +874,33 @@ type LayoutRecommendation struct {
 // so that storage node provisioning can be reviewed and overridden independently.
 type StorageRecommendation struct {
 	// OSLayout is the mdadm RAID1 layout for the OS drives (2 smallest drives).
-	OSLayout  DiskLayout  `json:"os_layout"`
+	OSLayout DiskLayout `json:"os_layout"`
 	// ZFSPools contains the data pool plus optional SLOG/L2ARC vdevs.
-	ZFSPools  []ZFSPool   `json:"zfs_pools"`
+	ZFSPools []ZFSPool `json:"zfs_pools"`
 	// Reasoning contains a human-readable explanation of every decision made.
-	Reasoning []string    `json:"reasoning"`
+	Reasoning []string `json:"reasoning"`
 	// Warnings lists non-fatal concerns the operator should review.
-	Warnings  []string    `json:"warnings,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 	// Stats summarises capacity and drive allocation at a glance.
-	Stats     StorageStats `json:"stats"`
+	Stats StorageStats `json:"stats"`
 }
 
 // StorageStats provides a capacity summary for a StorageRecommendation.
 type StorageStats struct {
 	// RawCapacityBytes is the total raw bytes across all data drives.
-	RawCapacityBytes    int64   `json:"raw_capacity_bytes"`
+	RawCapacityBytes int64 `json:"raw_capacity_bytes"`
 	// UsableCapacityBytes is the estimated usable capacity after parity overhead.
-	UsableCapacityBytes int64   `json:"usable_capacity_bytes"`
+	UsableCapacityBytes int64 `json:"usable_capacity_bytes"`
 	// VdevCount is the number of ZFS vdevs in the data pool.
-	VdevCount           int     `json:"vdev_count"`
+	VdevCount int `json:"vdev_count"`
 	// DrivesForOS is the number of drives consumed by the OS RAID1.
-	DrivesForOS         int     `json:"drives_for_os"`
+	DrivesForOS int `json:"drives_for_os"`
 	// DrivesForData is the number of HDD/SSD drives allocated to the ZFS data pool.
-	DrivesForData       int     `json:"drives_for_data"`
+	DrivesForData int `json:"drives_for_data"`
 	// DrivesForCache is the number of NVMe/SSD drives used for SLOG + L2ARC.
-	DrivesForCache      int     `json:"drives_for_cache"`
+	DrivesForCache int `json:"drives_for_cache"`
 	// ParityOverhead is the fraction of raw capacity consumed by parity (e.g. 0.20 for raidz2/10-wide).
-	ParityOverhead      float64 `json:"parity_overhead"`
+	ParityOverhead float64 `json:"parity_overhead"`
 }
 
 // LayoutValidationRequest is the body for POST /api/v1/nodes/:id/layout/validate.
@@ -888,10 +917,10 @@ type LayoutValidationResponse struct {
 
 // EffectiveLayoutResponse is returned by GET /api/v1/nodes/:id/effective-layout.
 type EffectiveLayoutResponse struct {
-	Layout DiskLayout `json:"layout"`
-	Source string     `json:"source"` // "node", "group", or "image"
-	GroupID string    `json:"group_id,omitempty"`
-	ImageID string    `json:"image_id,omitempty"`
+	Layout  DiskLayout `json:"layout"`
+	Source  string     `json:"source"` // "node", "group", or "image"
+	GroupID string     `json:"group_id,omitempty"`
+	ImageID string     `json:"image_id,omitempty"`
 }
 
 // EffectiveMountsResponse is returned by GET /api/v1/nodes/:id/effective-mounts.
@@ -916,9 +945,9 @@ type EffectiveMountsResponse struct {
 // spec; it is stored as JSON in the DB column layout_json.
 //
 // Precedence during deploy (highest → lowest):
-//   1. node.disk_layout_id          — per-node override
-//   2. node_groups.disk_layout_id   — group default
-//   3. existing inline override / image default
+//  1. node.disk_layout_id          — per-node override
+//  2. node_groups.disk_layout_id   — group default
+//  3. existing inline override / image default
 type StoredDiskLayout struct {
 	ID           string     `json:"id"`
 	Name         string     `json:"name"`
@@ -933,6 +962,34 @@ type StoredDiskLayout struct {
 type ListDiskLayoutsResponse struct {
 	Layouts []StoredDiskLayout `json:"layouts"`
 	Total   int                `json:"total"`
+}
+
+// ─── Rack model (#149) ───────────────────────────────────────────────────────
+
+// Rack represents a physical rack unit in the datacenter inventory.
+type Rack struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	HeightU   int       `json:"height_u"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// Positions is populated when ?include=positions is used on list/get endpoints.
+	Positions []NodeRackPosition `json:"positions,omitempty"`
+}
+
+// NodeRackPosition describes the physical U-slot assignment for a node in a rack.
+type NodeRackPosition struct {
+	NodeID  string `json:"node_id"`
+	RackID  string `json:"rack_id"`
+	SlotU   int    `json:"slot_u"`
+	HeightU int    `json:"height_u"`
+}
+
+// ListRacksResponse is returned by GET /api/v1/racks.
+type ListRacksResponse struct {
+	Racks []Rack `json:"racks"`
+	Total int    `json:"total"`
 }
 
 // --- Response types ---
@@ -1036,10 +1093,10 @@ type ListNodesResponse struct {
 
 // HealthResponse is returned by GET /api/v1/health.
 type HealthResponse struct {
-	Status           string `json:"status"`
-	Version          string `json:"version,omitempty"`
-	CommitSHA        string `json:"commit,omitempty"`
-	BuildTime        string `json:"build_time,omitempty"`
+	Status    string `json:"status"`
+	Version   string `json:"version,omitempty"`
+	CommitSHA string `json:"commit,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
 	// FlipBackFailures is the number of verify-boot flip-back failures since
 	// the process started. Non-zero indicates Proxmox boot-order reset failures.
 	// Only present when the server has tracking wired (S4-9).
@@ -1137,9 +1194,9 @@ type ProbeISORequest struct {
 
 // ProbeISOResponse is returned by POST /api/v1/factory/probe-iso.
 type ProbeISOResponse struct {
-	URL         string                `json:"url"`
-	Distro      string                `json:"distro"`
-	VolumeLabel string                `json:"volume_label,omitempty"`
+	URL          string                `json:"url"`
+	Distro       string                `json:"distro"`
+	VolumeLabel  string                `json:"volume_label,omitempty"`
 	Environments []ISOEnvironmentGroup `json:"environments"`
 	// NoComps is true when the ISO does not contain comps XML (Ubuntu, Debian,
 	// minimal ISOs without group data). The UI should suppress the picker.
@@ -1334,13 +1391,13 @@ type ReimageRequest struct {
 	DryRun       bool          `json:"dry_run,omitempty"`
 	CreatedAt    time.Time     `json:"created_at"`
 	// Terminal-state detail — populated on deploy-failed; nil on success or in-flight.
-	ExitCode     *int          `json:"exit_code,omitempty"`
-	ExitName     string        `json:"exit_name,omitempty"`
-	Phase        string        `json:"phase,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	ExitName string `json:"exit_name,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 	// InjectVars holds the per-deployment custom variable overrides (S4-11).
 	// Merged with the node's custom_vars at trigger time; not persisted.
 	// Delivered to the deploy agent via initramfs kernel cmdline.
-	InjectVars   map[string]string `json:"inject_vars,omitempty"`
+	InjectVars map[string]string `json:"inject_vars,omitempty"`
 }
 
 // DeployFailedPayload is the JSON body for POST /api/v1/nodes/:id/deploy-failed.
@@ -1382,18 +1439,18 @@ type VerifyBootRequest struct {
 type CreateReimageRequest struct {
 	// ImageID is the base image to deploy. If empty the node's currently
 	// assigned base_image_id is used.
-	ImageID     string     `json:"image_id,omitempty"`
+	ImageID string `json:"image_id,omitempty"`
 	// ScheduledAt, when non-nil, defers the reimage. nil = immediate.
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 	// DryRun sets next boot to PXE and power-cycles but does not wipe the disk.
-	DryRun      bool       `json:"dry_run,omitempty"`
+	DryRun bool `json:"dry_run,omitempty"`
 	// Force skips the image-ready and active-reimage pre-checks.
-	Force       bool       `json:"force,omitempty"`
+	Force bool `json:"force,omitempty"`
 	// InjectVars, when non-nil, is merged with the node's custom_vars for THIS
 	// deployment only (not persisted to the database). Keys in InjectVars override
 	// the node's stored custom_vars. The merged set is delivered to the deploy
 	// agent via initramfs kernel cmdline. (S4-11)
-	InjectVars  map[string]string `json:"inject_vars,omitempty"`
+	InjectVars map[string]string `json:"inject_vars,omitempty"`
 }
 
 // ListReimagesResponse wraps the reimage history list.
@@ -1466,27 +1523,27 @@ const (
 // NetworkSwitch is an inventory record for a physical switch in the cluster fabric.
 // clustr does not program switches in v1; this is documentation + SM-detection input.
 type NetworkSwitch struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Role        NetworkSwitchRole `json:"role"`
-	Vendor      string            `json:"vendor,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	MgmtIP      string            `json:"mgmt_ip,omitempty"`
-	Notes       string            `json:"notes,omitempty"`
-	IsManaged   bool              `json:"is_managed"` // for IB: false = no built-in SM
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Role      NetworkSwitchRole `json:"role"`
+	Vendor    string            `json:"vendor,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	MgmtIP    string            `json:"mgmt_ip,omitempty"`
+	Notes     string            `json:"notes,omitempty"`
+	IsManaged bool              `json:"is_managed"` // for IB: false = no built-in SM
 	// MACAddress is the MAC seen in the DHCP discover that triggered auto-discovery.
 	// Empty for manually created switches.
-	MACAddress  string            `json:"mac_address,omitempty"`
+	MACAddress string `json:"mac_address,omitempty"`
 	// Status is "confirmed" (admin-created or admin-confirmed) or "discovered" (auto-detected via DHCP).
-	Status      string            `json:"status,omitempty"`
+	Status string `json:"status,omitempty"`
 	// DiscoveredAt is set when auto-discovery created this record.
-	DiscoveredAt *time.Time       `json:"discovered_at,omitempty"`
+	DiscoveredAt *time.Time `json:"discovered_at,omitempty"`
 	// PortCount is the total number of switchports; used by the cabling plan generator.
-	PortCount   int               `json:"port_count,omitempty"`
+	PortCount int `json:"port_count,omitempty"`
 	// UplinkPorts is a comma-separated list of uplink port numbers excluded from node assignment.
-	UplinkPorts string            `json:"uplink_ports,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	UplinkPorts string    `json:"uplink_ports,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // BondMember identifies a NIC to be enslaved to a bond.
@@ -1502,11 +1559,11 @@ type BondMember struct {
 type BondConfig struct {
 	ID             string       `json:"id"`
 	ProfileID      string       `json:"profile_id"`
-	BondName       string       `json:"bond_name"`              // "bond0"
-	Mode           string       `json:"mode"`                   // "802.3ad", "active-backup", etc.
+	BondName       string       `json:"bond_name"` // "bond0"
+	Mode           string       `json:"mode"`      // "802.3ad", "active-backup", etc.
 	MTU            int          `json:"mtu"`
-	VLANID         int          `json:"vlan_id"`                // 0 = no VLAN
-	IPMethod       string       `json:"ip_method"`              // "static", "dhcp", "none"
+	VLANID         int          `json:"vlan_id"`   // 0 = no VLAN
+	IPMethod       string       `json:"ip_method"` // "static", "dhcp", "none"
 	IPCIDR         string       `json:"ip_cidr,omitempty"`
 	LACPRate       string       `json:"lacp_rate,omitempty"`
 	XmitHashPolicy string       `json:"xmit_hash_policy,omitempty"`
@@ -1547,7 +1604,7 @@ type OpenSMConfig struct {
 	ID                string    `json:"id"`
 	Enabled           bool      `json:"enabled"`
 	HeadNodeProfileID string    `json:"head_node_profile_id"`
-	ConfContent       string    `json:"conf_content"`   // full opensm.conf text
+	ConfContent       string    `json:"conf_content"` // full opensm.conf text
 	LogPrefix         string    `json:"log_prefix"`
 	SMPriority        int       `json:"sm_priority"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -1559,7 +1616,7 @@ type OpenSMConfig struct {
 // SlurmModuleConfig is the module state returned by GET /api/v1/slurm/status.
 type SlurmModuleConfig struct {
 	Enabled      bool     `json:"enabled"`
-	Status       string   `json:"status"`        // not_configured|ready|disabled|error
+	Status       string   `json:"status"` // not_configured|ready|disabled|error
 	ClusterName  string   `json:"cluster_name"`
 	ManagedFiles []string `json:"managed_files"`
 }
@@ -1568,12 +1625,12 @@ type SlurmModuleConfig struct {
 // Nil means the Slurm module is not active; finalize.go skips writeSlurmConfig().
 // Non-nil means the module is enabled and this node should receive Slurm configs.
 type SlurmNodeConfig struct {
-	ClusterName  string            `json:"cluster_name"`
-	Roles        []string          `json:"roles,omitempty"`        // e.g. ["controller"] or ["compute"]
-	Configs      []SlurmConfigFile `json:"configs"`      // rendered content per file, ready to write
-	Scripts      []SlurmScriptFile `json:"scripts,omitempty"`
+	ClusterName string            `json:"cluster_name"`
+	Roles       []string          `json:"roles,omitempty"` // e.g. ["controller"] or ["compute"]
+	Configs     []SlurmConfigFile `json:"configs"`         // rendered content per file, ready to write
+	Scripts     []SlurmScriptFile `json:"scripts,omitempty"`
 	// SlurmRepoURL is the dnf repo URL for auto-install.  Empty = skip auto-install.
-	SlurmRepoURL string            `json:"slurm_repo_url,omitempty"`
+	SlurmRepoURL string `json:"slurm_repo_url,omitempty"`
 	// MungeKey is the raw munge key bytes, base64-encoded (standard encoding).
 	// finalize.go decodes this and writes it to /etc/munge/munge.key (mode 0400,
 	// owner munge:munge) so munged can start on first boot.
@@ -1610,7 +1667,7 @@ type SlurmScriptFile struct {
 // SlurmNodeOverride holds per-node hardware parameters and GRES data.
 type SlurmNodeOverride struct {
 	NodeID    string            `json:"node_id"`
-	Params    map[string]string `json:"params"`     // keyed by override_key
+	Params    map[string]string `json:"params"` // keyed by override_key
 	UpdatedAt int64             `json:"updated_at"`
 }
 
@@ -1703,7 +1760,7 @@ type DHCPLease struct {
 	NodeID      string     `json:"node_id"`
 	Hostname    string     `json:"hostname"`
 	MAC         string     `json:"mac"`
-	IP          string     `json:"ip"`           // plain dotted-decimal, no CIDR suffix
+	IP          string     `json:"ip"` // plain dotted-decimal, no CIDR suffix
 	Role        string     `json:"role,omitempty"`
 	DeployState string     `json:"deploy_state"`
 	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`

@@ -102,6 +102,10 @@ func (f *cpTestDB) ListGroupMemberIDs(_ context.Context, groupName string) ([]se
 	return nil, fmt.Errorf("group %q not found", groupName)
 }
 
+func (f *cpTestDB) ListNodeIDsByRackNames(_ context.Context, _ []string) ([]selector.NodeID, error) {
+	return nil, nil
+}
+
 func makeCpNodes(ids []string) []selector.SelectorNode {
 	var out []selector.SelectorNode
 	for _, id := range ids {
