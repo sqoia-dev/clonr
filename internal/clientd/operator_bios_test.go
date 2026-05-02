@@ -67,9 +67,14 @@ func TestHandleBiosApplyRequest_EmptySettingsJSON(t *testing.T) {
 }
 
 func TestHandleBiosApplyRequest_PrivhelperSuccess(t *testing.T) {
+	// Redirect staging dir to a temp directory so tests don't need /var/lib/clustr.
+	orig := biosStagingDir
+	biosStagingDir = t.TempDir() + "/"
+	defer func() { biosStagingDir = orig }()
+
 	// Stub biosApplyViaPrivhelper to succeed without spawning a real process.
-	orig := biosApplyViaPrivhelper
-	defer func() { biosApplyViaPrivhelper = orig }()
+	origApply := biosApplyViaPrivhelper
+	defer func() { biosApplyViaPrivhelper = origApply }()
 
 	var capturedVendor, capturedPath string
 	biosApplyViaPrivhelper = func(ctx context.Context, vendor, profilePath string) error {
@@ -109,6 +114,10 @@ func TestHandleBiosApplyRequest_PrivhelperSuccess(t *testing.T) {
 }
 
 func TestHandleBiosApplyRequest_PrivhelperError(t *testing.T) {
+	origDir := biosStagingDir
+	biosStagingDir = t.TempDir() + "/"
+	defer func() { biosStagingDir = origDir }()
+
 	orig := biosApplyViaPrivhelper
 	defer func() { biosApplyViaPrivhelper = orig }()
 
@@ -135,6 +144,10 @@ func TestHandleBiosApplyRequest_PrivhelperError(t *testing.T) {
 }
 
 func TestHandleBiosApplyRequest_RefMsgIDEcho(t *testing.T) {
+	origDir := biosStagingDir
+	biosStagingDir = t.TempDir() + "/"
+	defer func() { biosStagingDir = origDir }()
+
 	orig := biosApplyViaPrivhelper
 	defer func() { biosApplyViaPrivhelper = orig }()
 	biosApplyViaPrivhelper = func(_ context.Context, _, _ string) error { return nil }

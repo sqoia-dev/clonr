@@ -65,11 +65,12 @@ const (
 	// against the last-applied hash.  Once per day is sufficient for drift
 	// detection — settings don't change on their own.
 	biosDriftCheckInterval = 24 * time.Hour
-
-	// biosStagingDir is where clientd writes the profile JSON before calling
-	// privhelper bios-apply.  Must match the privhelper's biosStagingDir constant.
-	biosStagingDir = "/var/lib/clustr/bios-staging/"
 )
+
+// biosStagingDir is where clientd writes the profile JSON before calling
+// privhelper bios-apply.  Must match the privhelper's biosStagingDir constant.
+// Declared as a var (not const) so tests can redirect to t.TempDir().
+var biosStagingDir = "/var/lib/clustr/bios-staging/"
 
 // HandleBiosReadRequest processes a "bios_read_request" message from the server.
 // It reads current BIOS settings via the vendor provider and sends back a
