@@ -7,6 +7,25 @@
   },
   "components": {
     "schemas": {
+      "AssignBiosProfileRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/assign-bios-profile-request",
+        "$ref": "#/$defs/AssignBiosProfileRequest",
+        "$defs": {
+          "AssignBiosProfileRequest": {
+            "properties": {
+              "profile_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "profile_id"
+            ]
+          }
+        }
+      },
       "BMCNodeConfig": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bmc-node-config",
@@ -315,6 +334,136 @@
           }
         }
       },
+      "BiosProfile": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bios-profile",
+        "$ref": "#/$defs/BiosProfile",
+        "$defs": {
+          "BiosProfile": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "vendor",
+              "settings_json",
+              "created_at",
+              "updated_at"
+            ]
+          }
+        }
+      },
+      "BiosProfileResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bios-profile-response",
+        "$ref": "#/$defs/BiosProfileResponse",
+        "$defs": {
+          "BiosProfile": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "vendor",
+              "settings_json",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "BiosProfileResponse": {
+            "properties": {
+              "profile": {
+                "$ref": "#/$defs/BiosProfile"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "profile"
+            ]
+          }
+        }
+      },
+      "BiosProviderVerifyResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bios-provider-verify-response",
+        "$ref": "#/$defs/BiosProviderVerifyResponse",
+        "$defs": {
+          "BiosProviderVerifyResponse": {
+            "properties": {
+              "vendor": {
+                "type": "string"
+              },
+              "available": {
+                "type": "boolean"
+              },
+              "bin_path": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "vendor",
+              "available",
+              "bin_path"
+            ]
+          }
+        }
+      },
       "BondConfig": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bond-config",
@@ -583,6 +732,36 @@
               "sha256",
               "kind",
               "source"
+            ]
+          }
+        }
+      },
+      "CreateBiosProfileRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/create-bios-profile-request",
+        "$ref": "#/$defs/CreateBiosProfileRequest",
+        "$defs": {
+          "CreateBiosProfileRequest": {
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "name",
+              "vendor",
+              "settings_json"
             ]
           }
         }
@@ -1161,6 +1340,69 @@
               "mac_address",
               "name",
               "ip_address"
+            ]
+          }
+        }
+      },
+      "ListBiosProfilesResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/list-bios-profiles-response",
+        "$ref": "#/$defs/ListBiosProfilesResponse",
+        "$defs": {
+          "BiosProfile": {
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "vendor": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "vendor",
+              "settings_json",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "ListBiosProfilesResponse": {
+            "properties": {
+              "profiles": {
+                "items": {
+                  "$ref": "#/$defs/BiosProfile"
+                },
+                "type": "array"
+              },
+              "total": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "profiles",
+              "total"
             ]
           }
         }
@@ -3546,6 +3788,84 @@
               "name",
               "created_at",
               "updated_at"
+            ]
+          }
+        }
+      },
+      "NodeBiosProfile": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/node-bios-profile",
+        "$ref": "#/$defs/NodeBiosProfile",
+        "$defs": {
+          "NodeBiosProfile": {
+            "properties": {
+              "node_id": {
+                "type": "string"
+              },
+              "profile_id": {
+                "type": "string"
+              },
+              "last_applied_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "applied_settings_hash": {
+                "type": "string"
+              },
+              "last_apply_error": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "node_id",
+              "profile_id"
+            ]
+          }
+        }
+      },
+      "NodeBiosProfileResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/node-bios-profile-response",
+        "$ref": "#/$defs/NodeBiosProfileResponse",
+        "$defs": {
+          "NodeBiosProfile": {
+            "properties": {
+              "node_id": {
+                "type": "string"
+              },
+              "profile_id": {
+                "type": "string"
+              },
+              "last_applied_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "applied_settings_hash": {
+                "type": "string"
+              },
+              "last_apply_error": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "node_id",
+              "profile_id"
+            ]
+          },
+          "NodeBiosProfileResponse": {
+            "properties": {
+              "binding": {
+                "$ref": "#/$defs/NodeBiosProfile"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "binding"
             ]
           }
         }
@@ -6584,6 +6904,28 @@
               "members",
               "mountpoint"
             ]
+          }
+        }
+      },
+      "UpdateBiosProfileRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/update-bios-profile-request",
+        "$ref": "#/$defs/UpdateBiosProfileRequest",
+        "$defs": {
+          "UpdateBiosProfileRequest": {
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "settings_json": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object"
           }
         }
       },

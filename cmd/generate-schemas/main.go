@@ -77,6 +77,16 @@ var schemaTypes = []reflect.Type{
 	reflect.TypeOf(api.StoredDiskLayout{}),
 	reflect.TypeOf(api.DeployProgress{}),
 	reflect.TypeOf(api.BuildState{}),
+	// BIOS profiles (#159)
+	reflect.TypeOf(api.BiosProfile{}),
+	reflect.TypeOf(api.NodeBiosProfile{}),
+	reflect.TypeOf(api.CreateBiosProfileRequest{}),
+	reflect.TypeOf(api.UpdateBiosProfileRequest{}),
+	reflect.TypeOf(api.AssignBiosProfileRequest{}),
+	reflect.TypeOf(api.BiosProfileResponse{}),
+	reflect.TypeOf(api.ListBiosProfilesResponse{}),
+	reflect.TypeOf(api.NodeBiosProfileResponse{}),
+	reflect.TypeOf(api.BiosProviderVerifyResponse{}),
 }
 
 func main() {

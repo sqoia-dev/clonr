@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/node-bios-profile-response",
+  "$ref": "#/$defs/NodeBiosProfileResponse",
+  "$defs": {
+    "NodeBiosProfile": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "last_applied_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "applied_settings_hash": {
+          "type": "string"
+        },
+        "last_apply_error": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id",
+        "profile_id"
+      ]
+    },
+    "NodeBiosProfileResponse": {
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/NodeBiosProfile"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "binding"
+      ]
+    }
+  }
+}
