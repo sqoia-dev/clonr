@@ -12,7 +12,7 @@ import (
 // TestGenerateDiskBootScript_BIOS verifies BIOS nodes get sanboot (INT 13h) in the
 // disk boot path, a boot menu with a reimage option, and no bare `exit` line.
 func TestGenerateDiskBootScript_BIOS(t *testing.T) {
-	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080", "v0.1.0-test", nil)
+	script, err := GenerateDiskBootScript("node207", "bios", "http://10.0.0.1:8080", "v0.1.0-test", nil, false)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(bios) returned error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestGenerateDiskBootScript_BIOS(t *testing.T) {
 // docs/boot-architecture.md), a boot menu with reimage option, and NOT sanboot
 // (INT 13h is a BIOS concept) and NOT a grub.efi chain URL (removed path).
 func TestGenerateDiskBootScript_UEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", nil)
+	script, err := GenerateDiskBootScript("node201", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", nil, false)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript(uefi) returned error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestGenerateDiskBootScript_UEFI(t *testing.T) {
 // TestGenerateDiskBootScript_DefaultsToUEFI verifies that an empty/unknown firmware
 // string is treated as UEFI (safe default for new images).
 func TestGenerateDiskBootScript_DefaultsToUEFI(t *testing.T) {
-	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080", "v0.1.0-test", nil)
+	script, err := GenerateDiskBootScript("node-unknown", "", "http://10.0.0.1:8080", "v0.1.0-test", nil, false)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript('') returned error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestGenerateDiskBootScript_ExtraEntries(t *testing.T) {
 			Enabled:   true,
 		},
 	}
-	script, err := GenerateDiskBootScript("node-test", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", entries)
+	script, err := GenerateDiskBootScript("node-test", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", entries, false)
 	if err != nil {
 		t.Fatalf("GenerateDiskBootScript with extra entries returned error: %v", err)
 	}
@@ -188,6 +188,31 @@ func TestGenerateDiskBootScript_ExtraEntries(t *testing.T) {
 	// Rescue cmdline should appear.
 	if !strings.Contains(out, "console=ttyS0,115200n8") {
 		t.Errorf("missing rescue cmdline; got:\n%s", out)
+	}
+}
+
+// TestGenerateDiskBootScript_MulticastMenuItem verifies that the reimage-fleet
+// menu item appears when multicastEnabled=true and is absent when false.
+func TestGenerateDiskBootScript_MulticastMenuItem(t *testing.T) {
+	scriptOn, err := GenerateDiskBootScript("node-mc", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", nil, true)
+	if err != nil {
+		t.Fatalf("GenerateDiskBootScript(multicastEnabled=true) error: %v", err)
+	}
+	outOn := string(scriptOn)
+	if !strings.Contains(outOn, "reimage-fleet") {
+		t.Errorf("multicastEnabled=true: expected 'reimage-fleet' in menu; got:\n%s", outOn)
+	}
+	if !strings.Contains(outOn, "multicast=1") {
+		t.Errorf("multicastEnabled=true: expected 'multicast=1' in reimage-fleet chain URL; got:\n%s", outOn)
+	}
+
+	scriptOff, err := GenerateDiskBootScript("node-mc", "uefi", "http://10.0.0.1:8080", "v0.1.0-test", nil, false)
+	if err != nil {
+		t.Fatalf("GenerateDiskBootScript(multicastEnabled=false) error: %v", err)
+	}
+	outOff := string(scriptOff)
+	if strings.Contains(outOff, "reimage-fleet") {
+		t.Errorf("multicastEnabled=false: unexpected 'reimage-fleet' in menu; got:\n%s", outOff)
 	}
 }
 

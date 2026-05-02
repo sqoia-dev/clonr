@@ -99,6 +99,10 @@ func (h *BootHandler) ServeMemtest(w http.ResponseWriter, r *http.Request) {
 func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 	mac := strings.ToLower(r.URL.Query().Get("mac"))
 	forceReimage := r.URL.Query().Get("force_reimage") == "1"
+	// multicast=1 is set by the "reimage-fleet" iPXE menu item. When present,
+	// we embed clustr.multicast=1 + clustr.session_poll_url into the kernel cmdline
+	// so the deploy agent can enqueue itself in a multicast session.
+	wantMulticast := r.URL.Query().Get("multicast") == "1"
 
 	// If we have a MAC and a DB, look up the node state and route the boot.
 	if mac != "" && h.DB != nil {
@@ -230,13 +234,15 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 
 			// Mint a fresh node-scoped token for this deploy run.
 			token := h.mintToken(r, nodeCfg.ID)
-			script, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
+			mcastParams := h.multicastBootParams(r, mac, nodeCfg.ID, wantMulticast)
+			script, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token, mcastParams)
 			if genErr != nil {
 				log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script")
 				http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
 				return
 			}
 			log.Info().Str("mac", mac).Str("node_id", nodeCfg.ID).Str("ssh_pass", sshPass).
+				Bool("multicast", wantMulticast).
 				Msg("boot: deploy boot script served — SSH debug password for this boot")
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
@@ -273,7 +279,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 					Str("node_id", created.ID).
 					Msg("boot: auto-registered unknown MAC — serving boot script with fresh token")
 				token := h.mintToken(r, created.ID)
-				autoScript, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token)
+				autoScript, sshPass, genErr := pxe.GenerateBootScript(h.ServerURL, "clustr-node-"+token, "")
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate boot script for auto-registered node")
 					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -293,7 +299,7 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 
 	// Default: return the full clustr initramfs boot script with no token.
 	// Covers: requests without a MAC parameter, or auto-register failures.
-	script, sshPass, err := pxe.GenerateBootScript(h.ServerURL, "")
+	script, sshPass, err := pxe.GenerateBootScript(h.ServerURL, "", "")
 	if err != nil {
 		log.Error().Err(err).Msg("boot: generate iPXE script")
 		http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
@@ -345,10 +351,47 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 		}
 	}
 
+	// Check multicast config to determine whether to show the fleet reimage option.
+	// A failure to read the config is non-fatal: omit the menu item rather than error.
+	var multicastEnabled bool
+	if h.DB != nil {
+		mCfg, mErr := h.DB.MulticastGetConfig(r.Context())
+		if mErr != nil {
+			log.Warn().Err(mErr).Str("node", node.Hostname).
+				Msg("boot: could not read multicast_config — omitting fleet-reimage menu item")
+		} else {
+			multicastEnabled = mCfg.Enabled
+		}
+	}
+
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
 		Int("extra_entries", len(extraEntries)).
+		Bool("multicast_enabled", multicastEnabled).
 		Msg("boot: generating disk boot script")
-	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version, extraEntries)
+	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version, extraEntries, multicastEnabled)
+}
+
+// multicastBootParams returns the kernel cmdline fragment for multicast delivery
+// when wantMulticast is true and multicast is enabled in the DB config.
+// Returns "" when multicast is disabled or wantMulticast is false.
+// The session poll URL points to the node-specific wait endpoint so the deploy
+// agent knows where to poll after enrolling.
+func (h *BootHandler) multicastBootParams(r *http.Request, mac, nodeID string, wantMulticast bool) string {
+	if !wantMulticast || h.DB == nil {
+		return ""
+	}
+	mCfg, err := h.DB.MulticastGetConfig(r.Context())
+	if err != nil {
+		log.Warn().Err(err).Str("mac", mac).Msg("boot: could not read multicast_config — no multicast params in cmdline")
+		return ""
+	}
+	if !mCfg.Enabled {
+		return ""
+	}
+	// clustr.multicast=1 signals the deploy agent to attempt multicast delivery.
+	// The deploy agent enrolls itself via the standard multicast API endpoints
+	// using the same CLUSTR_SERVER base URL already in its cmdline.
+	return "clustr.multicast=1"
 }
 
 // mintToken calls MintNodeToken if configured and logs failures. Returns the raw

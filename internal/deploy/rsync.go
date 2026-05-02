@@ -214,37 +214,50 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// We open the HTTP connection now so the TCP handshake + TLS + server seek
 	// happen while we are busy with local disk operations. The body is buffered
 	// via an os.Pipe (64KB kernel buffer) so the server can push data ahead of us.
+	//
+	// When opts.ImageStream is set the caller has already opened a stream (e.g.
+	// from udp-receiver's stdout pipe) and we skip the HTTP fetch entirely.
 	type blobResult struct {
 		resp           *http.Response
 		totalBytes     int64
 		serverChecksum string // X-Clustr-Blob-SHA256 response header, if present
 		err            error
+		// streamReader is set when opts.ImageStream is used instead of HTTP.
+		streamReader io.Reader
 	}
 	blobCh := make(chan blobResult, 1)
 
-	go func() {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
-		if err != nil {
-			blobCh <- blobResult{err: fmt.Errorf("build download request: %w", err)}
-			return
-		}
-		if opts.AuthToken != "" {
-			req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
-		}
-		logger().Info().Str("url", opts.ImageURL).Msg("prefetching image blob (concurrent with partitioning)")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			blobCh <- blobResult{err: fmt.Errorf("network error fetching blob: %w", err)}
-			return
-		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			blobCh <- blobResult{err: fmt.Errorf("HTTP %d fetching blob from %s", resp.StatusCode, opts.ImageURL)}
-			return
-		}
-		serverChecksum := resp.Header.Get("X-Clustr-Blob-SHA256")
-		blobCh <- blobResult{resp: resp, totalBytes: resp.ContentLength, serverChecksum: serverChecksum}
-	}()
+	if opts.ImageStream != nil {
+		// Multicast / pipe path: use the pre-opened reader directly.
+		// Content length is unknown (-1); checksum verification is skipped
+		// (UDPCast provides its own CRC at the UDP layer).
+		logger().Info().Msg("deploy: using pre-opened ImageStream (multicast / pipe mode)")
+		blobCh <- blobResult{streamReader: opts.ImageStream, totalBytes: -1}
+	} else {
+		go func() {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.ImageURL, nil)
+			if err != nil {
+				blobCh <- blobResult{err: fmt.Errorf("build download request: %w", err)}
+				return
+			}
+			if opts.AuthToken != "" {
+				req.Header.Set("Authorization", "Bearer "+opts.AuthToken)
+			}
+			logger().Info().Str("url", opts.ImageURL).Msg("prefetching image blob (concurrent with partitioning)")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				blobCh <- blobResult{err: fmt.Errorf("network error fetching blob: %w", err)}
+				return
+			}
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+				resp.Body.Close()
+				blobCh <- blobResult{err: fmt.Errorf("HTTP %d fetching blob from %s", resp.StatusCode, opts.ImageURL)}
+				return
+			}
+			serverChecksum := resp.Header.Get("X-Clustr-Blob-SHA256")
+			blobCh <- blobResult{resp: resp, totalBytes: resp.ContentLength, serverChecksum: serverChecksum}
+		}()
+	}
 
 	// ── Rollback setup ────────────────────────────────────────────────────────
 	var rollbackPath string
@@ -416,7 +429,9 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 		doRollback("blob prefetch failed")
 		return fmt.Errorf("deploy: blob prefetch: %w", blob.err)
 	}
-	defer blob.resp.Body.Close()
+	if blob.resp != nil {
+		defer blob.resp.Body.Close()
+	}
 	if blob.totalBytes > 0 {
 		reportStep("Downloading image")
 		logger().Info().Str("size", humanReadableBytes(blob.totalBytes)).Msg("image blob connection ready — extracting")
@@ -432,6 +447,13 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// is a tar stream hash via X-Clustr-Blob-SHA256. Without the header, skip
 	// verification entirely so the first-stream case (before the server caches the
 	// tar checksum sidecar) does not falsely reject a correct download.
+	//
+	// When using ImageStream (multicast path), skip checksum verification entirely:
+	// UDPCast provides its own CRC integrity at the UDP layer.
+	if blob.streamReader != nil && opts.ExpectedChecksum != "" {
+		logger().Info().Msg("deploy: ImageStream (multicast) path — skipping post-download checksum (UDPCast CRC covers integrity)")
+		opts.ExpectedChecksum = ""
+	}
 	expectedChecksum := opts.ExpectedChecksum
 	if blob.serverChecksum != "" {
 		if expectedChecksum != "" && expectedChecksum != blob.serverChecksum {
@@ -484,10 +506,20 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	reportStep("Extracting image to disk")
 	var extractErr error
 	var bytesReceived int64 // bytes consumed from the last HTTP body before failure
-	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+	// When ImageStream is set, retries are not applicable — multicast is a
+	// one-shot stream; partial failure falls back to unicast at the caller level.
+	maxAttempts := maxDownloadAttempts
+	if blob.streamReader != nil {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		var body io.Reader
 		var bodyClose func()
-		if attempt == 1 {
+		if attempt == 1 && blob.streamReader != nil {
+			// Multicast / pipe path: use the pre-opened stream directly.
+			body = blob.streamReader
+			bodyClose = func() {}
+		} else if attempt == 1 {
 			// First attempt uses the pre-fetched connection (TCP already established).
 			body = blob.resp.Body
 			bodyClose = func() {} // closed by the outer defer blob.resp.Body.Close()

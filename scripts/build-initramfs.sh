@@ -107,6 +107,7 @@ declare -A TOOL_PACKAGES=(
     [busybox]="busybox:busybox-static"
     [dropbear]="dropbear:dropbear-bin"
     [screen]="screen:screen"
+    [udp-receiver]="udpcast:udpcast"
 )
 
 # Remote execution / copy helpers — use local commands when on the same host.
@@ -677,6 +678,33 @@ ${transitive}"
         echo "  [!] screen not found on ${CLUSTR_SERVER_HOST} — using direct exec fallback" >&2
         echo "       Install with: dnf install -y screen   # Rocky/RHEL" >&2
         echo "       Install with: apt-get install -y screen  # Debian/Ubuntu" >&2
+    fi
+
+    # ── udp-receiver (UDPCast multicast image delivery) ───────────────────────
+    # udp-receiver is the receiving end of UDPCast multicast streaming. When
+    # present, the init script uses it instead of HTTP fetch when the server
+    # has assigned the node to a multicast session (signalled by
+    # clustr.multicast=1 + clustr.session_poll_url=... in the kernel cmdline).
+    #
+    # Installed from the EPEL udpcast package on the server host; ~200KB binary.
+    # If not available, the feature is silently disabled — the build still
+    # succeeds and the node falls back to unicast HTTP fetch.
+    #
+    # Install on the server with: dnf install -y udpcast   (EPEL required)
+    echo "[+] Installing udp-receiver (UDPCast multicast)..."
+    UDPRECV_PATH=$(remote_exec "command -v udp-receiver 2>/dev/null || command -v /usr/bin/udp-receiver 2>/dev/null" || echo "")
+    if [[ -n "$UDPRECV_PATH" ]]; then
+        mkdir -p "$WORKDIR/usr/bin"
+        if install_server_binary "$UDPRECV_PATH" "$WORKDIR/usr/bin"; then
+            UDPRECV_SIZE=$(remote_exec "du -sh ${UDPRECV_PATH} 2>/dev/null | cut -f1" || echo "?")
+            echo "  [+] udp-receiver installed at /usr/bin/udp-receiver (${UDPRECV_SIZE})"
+        else
+            echo "  [!] udp-receiver found but could not be installed — multicast disabled" >&2
+        fi
+    else
+        echo "  [!] udp-receiver not found on ${CLUSTR_SERVER_HOST} — multicast image delivery disabled" >&2
+        echo "       Install with: dnf install -y udpcast   # Rocky/RHEL (requires EPEL)" >&2
+        echo "       Install with: apt-get install -y udpcast  # Debian/Ubuntu" >&2
     fi
 fi
 

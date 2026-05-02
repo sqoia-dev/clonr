@@ -428,6 +428,92 @@ func (c *Client) RotateAPIKey(ctx context.Context, id string) (*CreateKeyRespons
 	return &resp, nil
 }
 
+// ─── Multicast session client helpers ────────────────────────────────────────
+
+// MulticastEnqueueRequest is the body for POST /api/v1/multicast/enqueue.
+type MulticastEnqueueRequest struct {
+	ImageID  string `json:"image_id"`
+	LayoutID string `json:"layout_id,omitempty"`
+	NodeID   string `json:"node_id"`
+}
+
+// MulticastEnqueueResponse is the response for POST /api/v1/multicast/enqueue.
+type MulticastEnqueueResponse struct {
+	SessionID string `json:"session_id"`
+}
+
+// MulticastSessionDescriptor contains the parameters for a udp-receiver invocation.
+type MulticastSessionDescriptor struct {
+	MulticastGroup string `json:"multicast_group"`
+	SenderPort     int    `json:"sender_port"`
+	RateBPS        int64  `json:"rate_bps"`
+	ImageURL       string `json:"image_url"`
+}
+
+// MulticastWaitResult is the response from GET /api/v1/multicast/sessions/{id}/wait.
+// When Status is "staging" the client should retry (HTTP 202 with Retry-After).
+// When Status is "transmitting" or "complete" the Descriptor is populated.
+// When Fallback is true the node must use unicast HTTP.
+type MulticastWaitResult struct {
+	Status     string                      `json:"status"`
+	Fallback   bool                        `json:"fallback"`
+	Descriptor *MulticastSessionDescriptor `json:"descriptor,omitempty"`
+}
+
+// MulticastEnqueue enrolls a node in a multicast session.
+func (c *Client) MulticastEnqueue(ctx context.Context, req MulticastEnqueueRequest) (*MulticastEnqueueResponse, error) {
+	var resp MulticastEnqueueResponse
+	if err := c.post(ctx, "/api/v1/multicast/enqueue", req, &resp); err != nil {
+		return nil, fmt.Errorf("client: multicast enqueue: %w", err)
+	}
+	return &resp, nil
+}
+
+// MulticastWait polls the wait endpoint for a multicast session.
+// It issues a single GET; callers must loop until Fallback is true or
+// Descriptor is non-nil. HTTP 202 responses with an empty descriptor are
+// decoded without error — callers should check Fallback/Descriptor.
+func (c *Client) MulticastWait(ctx context.Context, sessionID, nodeID string) (*MulticastWaitResult, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/multicast/sessions/" + sessionID + "/wait")
+	if err != nil {
+		return nil, fmt.Errorf("client: build multicast wait URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("node_id", nodeID)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("client: build multicast wait request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client: multicast wait: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 202 = staging (still waiting for window to fill)
+	// 200 = descriptor ready (or fallback=true)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, c.decodeError(resp)
+	}
+
+	var result MulticastWaitResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("client: decode multicast wait response: %w", err)
+	}
+	return &result, nil
+}
+
+// MulticastRecordOutcome posts the receive outcome for a node in a session.
+// outcome must be one of "success", "failed", or "fellback_unicast".
+func (c *Client) MulticastRecordOutcome(ctx context.Context, sessionID, nodeID, outcome string) error {
+	body := map[string]string{"outcome": outcome}
+	return c.post(ctx, "/api/v1/multicast/sessions/"+sessionID+"/members/"+nodeID+"/outcome", body, nil)
+}
+
 // ─── Generic typed helpers ───────────────────────────────────────────────────
 
 // GetJSON performs a GET to path and decodes the JSON response into out.

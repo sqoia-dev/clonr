@@ -186,6 +186,13 @@ type DeployOpts struct {
 	// Callers should enrich it with node_id and image_id context fields:
 	//   opts.Logger = pkgLog.With().Str("node_id", nodeID).Str("image_id", imageID).Logger()
 	Logger *zerolog.Logger
+	// ImageStream is an optional pre-opened reader for the image blob.
+	// When non-nil it is used instead of fetching ImageURL over HTTP.
+	// The caller is responsible for closing the reader after Deploy returns.
+	// Set by the multicast path in cmd/clustr/main.go to stream from udp-receiver.
+	// Checksum verification is skipped when ImageStream is set (UDPCast provides
+	// its own CRC checks at the UDP layer).
+	ImageStream io.Reader
 }
 
 // ProgressReporter is the interface used by deploy engines to emit structured

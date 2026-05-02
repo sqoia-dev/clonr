@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -888,6 +891,127 @@ func runAutoDeployMode() error {
 	}
 }
 
+// attemptMulticastReceive tries to join a multicast session and start udp-receiver.
+// On success it returns a ReadCloser wrapping udp-receiver's stdout and the
+// session ID. On any failure it returns nil, "" so the caller falls back to
+// unicast HTTP. The caller must call Close() on the returned ReadCloser when
+// done, even if Deploy() succeeds.
+//
+// This function is called by runAutoDeployImage when CLUSTR_MULTICAST_ENABLED=1.
+// It runs only inside the initramfs where /usr/bin/udp-receiver is available.
+func attemptMulticastReceive(ctx context.Context, c *client.Client, imageID string, nodeCfg api.NodeConfig, deployLog zerolog.Logger) (io.ReadCloser, string) {
+	// Check that udp-receiver binary is present.
+	udpRecvBin, err := exec.LookPath("udp-receiver")
+	if err != nil {
+		deployLog.Warn().Msg("multicast: udp-receiver not found in PATH — falling back to unicast")
+		return nil, ""
+	}
+
+	deployLog.Info().Str("image_id", imageID).Str("node_id", nodeCfg.ID).
+		Msg("multicast: enrolling node in multicast session")
+	printPhase(phaseInProgress, "Enrolling in multicast session")
+
+	// Enqueue this node in the multicast session.
+	enqResp, err := c.MulticastEnqueue(ctx, client.MulticastEnqueueRequest{
+		ImageID: imageID,
+		NodeID:  nodeCfg.ID,
+	})
+	if err != nil {
+		deployLog.Warn().Err(err).Msg("multicast: enqueue failed — falling back to unicast")
+		return nil, ""
+	}
+	sessionID := enqResp.SessionID
+	deployLog.Info().Str("session_id", sessionID).Msg("multicast: enrolled in session")
+	printPhase(phaseDone, fmt.Sprintf("Enrolled in multicast session %s — waiting for transmission window", sessionID))
+
+	// Long-poll until session is transmitting or server signals fallback.
+	// Cap total wait at 3 minutes (configurable window is typically 60s + tolerance).
+	deadline := time.Now().Add(3 * time.Minute)
+	printPhase(phaseInProgress, "Waiting for multicast transmission window")
+	var descriptor *client.MulticastSessionDescriptor
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			deployLog.Warn().Msg("multicast: context cancelled while waiting for session")
+			return nil, sessionID
+		}
+		waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+		result, waitErr := c.MulticastWait(waitCtx, sessionID, nodeCfg.ID)
+		waitCancel()
+		if waitErr != nil {
+			deployLog.Warn().Err(waitErr).Msg("multicast: wait poll failed — falling back to unicast")
+			return nil, sessionID
+		}
+		if result.Fallback {
+			deployLog.Info().Msg("multicast: server signalled fallback to unicast")
+			printPhase(phaseDone, "Multicast session below threshold — using unicast")
+			return nil, sessionID
+		}
+		if result.Descriptor != nil {
+			descriptor = result.Descriptor
+			deployLog.Info().
+				Str("group", descriptor.MulticastGroup).
+				Int("port", descriptor.SenderPort).
+				Msg("multicast: session descriptor received — starting udp-receiver")
+			break
+		}
+		// Status is "staging" — sleep briefly and retry.
+		time.Sleep(2 * time.Second)
+	}
+	if descriptor == nil {
+		deployLog.Warn().Msg("multicast: timed out waiting for session descriptor — falling back to unicast")
+		return nil, sessionID
+	}
+
+	printPhase(phaseInProgress, fmt.Sprintf("Receiving multicast stream from %s:%d",
+		descriptor.MulticastGroup, descriptor.SenderPort))
+
+	// Fork udp-receiver. Its stdout is the image byte stream.
+	// #nosec G204 -- udpRecvBin is resolved by exec.LookPath; args are from server-provided descriptor
+	cmd := exec.CommandContext(ctx, udpRecvBin, //#nosec G204
+		"--mcast-rdv-addr", descriptor.MulticastGroup,
+		"--mcast-data-addr", descriptor.MulticastGroup,
+		"--portbase", strconv.Itoa(descriptor.SenderPort),
+		"--nosync", // don't fsync; deployer handles durability
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		deployLog.Warn().Err(err).Msg("multicast: failed to create stdout pipe — falling back to unicast")
+		return nil, sessionID
+	}
+	if err := cmd.Start(); err != nil {
+		deployLog.Warn().Err(err).Msg("multicast: failed to start udp-receiver — falling back to unicast")
+		return nil, sessionID
+	}
+
+	deployLog.Info().Int("pid", cmd.Process.Pid).Msg("multicast: udp-receiver started")
+
+	// Return a ReadCloser that closes the pipe and waits for the process.
+	return &udpRecvReader{
+		ReadCloser: stdout,
+		cmd:        cmd,
+		log:        deployLog,
+	}, sessionID
+}
+
+// udpRecvReader wraps udp-receiver's stdout pipe and waits for the process on Close.
+type udpRecvReader struct {
+	io.ReadCloser
+	cmd *exec.Cmd
+	log zerolog.Logger
+}
+
+func (r *udpRecvReader) Close() error {
+	err := r.ReadCloser.Close()
+	if waitErr := r.cmd.Wait(); waitErr != nil {
+		r.log.Warn().Err(waitErr).Msg("multicast: udp-receiver exited with error")
+		if err == nil {
+			err = waitErr
+		}
+	}
+	return err
+}
+
 // sleepCtx returns a channel that closes after d, or immediately if ctx is done.
 func sleepCtx(ctx context.Context, d time.Duration) <-chan struct{} {
 	ch := make(chan struct{})
@@ -1105,6 +1229,30 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	blobURL := cfg.ServerURL + "/api/v1/images/" + img.ID + "/blob"
 	deployLog.Info().Str("url", blobURL).Msg("starting image write")
 
+	// ── Multicast delivery (Phase 4 — Sprint 25 #157 Commit 3) ───────────────
+	// When CLUSTR_MULTICAST_ENABLED=1 is set by the initramfs init script (from
+	// clustr.multicast=1 in the kernel cmdline), attempt to receive the image
+	// via UDPCast multicast. On any failure, fall back to unicast HTTP.
+	//
+	// Multicast path:
+	//   1. POST /multicast/enqueue to join the session for this (image, layout)
+	//   2. Long-poll GET /multicast/sessions/{id}/wait until descriptor arrives
+	//      or server signals fallback_unicast
+	//   3. Fork udp-receiver piped into deployer.Deploy via ImageStream
+	//   4. POST outcome (success | failed | fellback_unicast) to server
+	//   5. On any error, fall back to unicast HTTP silently
+	var imageStream io.ReadCloser
+	var multicastSessionID string
+	multicastEnabled := os.Getenv("CLUSTR_MULTICAST_ENABLED") == "1"
+	if multicastEnabled {
+		imageStream, multicastSessionID = attemptMulticastReceive(ctx, c, img.ID, nodeCfg, deployLog)
+	}
+	defer func() {
+		if imageStream != nil {
+			imageStream.Close()
+		}
+	}()
+
 	opts := deploy.DeployOpts{
 		ImageURL:         blobURL,
 		AuthToken:        cfg.AuthToken,
@@ -1113,6 +1261,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		MountRoot:        mountRoot,
 		ExpectedChecksum: img.Checksum,
 		Reporter:         reporter,
+		ImageStream:      imageStream,
 	}
 
 	var lastLoggedPct int64
@@ -1148,24 +1297,59 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 
 	deployLog.Info().Str("url", blobURL).Msg("downloading image blob from server")
 	start := time.Now()
-	if err := deployer.Deploy(ctx, opts, progressFn); err != nil {
+	deployErr := deployer.Deploy(ctx, opts, progressFn)
+	if deployErr != nil && imageStream != nil {
+		// Multicast delivery failed — record fallback outcome and retry via unicast.
+		deployLog.Warn().Err(deployErr).Msg("multicast delivery failed — falling back to unicast HTTP")
+		imageStream.Close()
+		imageStream = nil
+		if multicastSessionID != "" {
+			recordOutcomeCtx, rcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = c.MulticastRecordOutcome(recordOutcomeCtx, multicastSessionID, nodeCfg.ID, "fellback_unicast")
+			rcCancel()
+		}
+		// Retry with unicast: rebuild opts without ImageStream.
+		opts.ImageStream = nil
+		// Reset progress tracking for the retry.
+		lastLoggedPct = 0
+		lastPhase = ""
+		deployErr = deployer.Deploy(ctx, opts, progressFn)
+	}
+	if deployErr != nil {
 		consolePrintln("") // end any in-progress \r line
 		if lastPhase != "" {
 			printPhase(phaseFailed, phaseLabel(lastPhase))
 		}
-		deployLog.Error().Err(err).Msg("image deploy failed")
+		deployLog.Error().Err(deployErr).Msg("image deploy failed")
 		var failPhase string
 		if lastPhase != "" {
 			failPhase = lastPhase
 		} else {
 			failPhase = "deploy"
 		}
-		printDeployError(failPhase, err.Error())
+		printDeployError(failPhase, deployErr.Error())
+		// Record failed outcome if we were in a multicast session.
+		if multicastSessionID != "" {
+			recordOutcomeCtx, rcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = c.MulticastRecordOutcome(recordOutcomeCtx, multicastSessionID, nodeCfg.ID, "failed")
+			rcCancel()
+		}
 		// Classify the failure. The deployer runs partition, format, download, and
 		// extract phases internally. We surface ExitDownload here since a blob stream
 		// or checksum failure is the most common path; partition/format errors from
 		// the underlying deployer will still surface via the error message.
-		return Wrap(ExitDownload, "deploy", fmt.Errorf("deploy: %w", err))
+		return Wrap(ExitDownload, "deploy", fmt.Errorf("deploy: %w", deployErr))
+	}
+	// Record success outcome if we received via multicast.
+	if multicastSessionID != "" {
+		outcome := "success"
+		if imageStream == nil {
+			// imageStream was closed above after multicast failure — we fell back.
+			outcome = "fellback_unicast"
+		}
+		recordOutcomeCtx, rcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = c.MulticastRecordOutcome(recordOutcomeCtx, multicastSessionID, nodeCfg.ID, outcome)
+		rcCancel()
 	}
 	// Close the last progress line and mark it done.
 	consolePrintln("")

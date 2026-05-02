@@ -38,7 +38,7 @@ import (
 // the server at INFO level so the operator can find it via journalctl.
 const bootScriptTemplate = `#!ipxe
 set server-url {{.ServerURL}}
-kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clustr.server=${server-url} clustr.mac=${mac} clustr.token={{.Token}} clustr.ssh=1 clustr.ssh.pass={{.SSHPass}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
+kernel ${server-url}/api/v1/boot/vmlinuz initrd=initramfs.img clustr.server=${server-url} clustr.mac=${mac} clustr.token={{.Token}} clustr.ssh=1 clustr.ssh.pass={{.SSHPass}}{{if .MulticastParams}} {{.MulticastParams}}{{end}} console=ttyS0,115200n8 console=tty0 earlyprintk=vga panic=60
 initrd --name initramfs.img ${server-url}/api/v1/boot/initramfs.img
 boot
 `
@@ -47,9 +47,10 @@ var bootTmpl = template.Must(template.New("boot").Parse(bootScriptTemplate))
 
 // bootScriptData holds template vars for the iPXE boot script.
 type bootScriptData struct {
-	ServerURL string
-	Token   string // full clustr-node-<hex> token, embedded in kernel cmdline
-	SSHPass string // random per-boot password for dropbear SSH debug access
+	ServerURL       string
+	Token           string // full clustr-node-<hex> token, embedded in kernel cmdline
+	SSHPass         string // random per-boot password for dropbear SSH debug access
+	MulticastParams string // optional "clustr.multicast=1 clustr.session_poll_url=..." params
 }
 
 // randomSSHPass generates a short random hex string for use as a per-boot
@@ -71,9 +72,17 @@ func randomSSHPass() string {
 // cmdline as clustr.ssh.pass=<value>. The password is returned as the second
 // return value so callers can log it at INFO level — operators can then retrieve
 // it via journalctl when they need to SSH into a deploying node.
-func GenerateBootScript(serverURL, token string) (script []byte, sshPass string, err error) {
+//
+// multicastParams is optional; when non-empty it is appended verbatim to the
+// kernel cmdline (e.g. "clustr.multicast=1 clustr.session_poll_url=<url>").
+func GenerateBootScript(serverURL, token, multicastParams string) (script []byte, sshPass string, err error) {
 	sshPass = randomSSHPass()
-	data := bootScriptData{ServerURL: serverURL, Token: token, SSHPass: sshPass}
+	data := bootScriptData{
+		ServerURL:       serverURL,
+		Token:           token,
+		SSHPass:         sshPass,
+		MulticastParams: multicastParams,
+	}
 	var buf bytes.Buffer
 	if execErr := bootTmpl.Execute(&buf, data); execErr != nil {
 		return nil, "", fmt.Errorf("pxe/boot: render boot script: %w", execErr)
@@ -111,7 +120,8 @@ echo
 menu Select boot option:
 item --gap --
 item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
-item reimage                              Reimage this node{{range .ExtraEntries}}
+item reimage                              Reimage this node{{if .MulticastEnabled}}
+item reimage-fleet                        Reimage via multicast (fleet){{end}}{{range .ExtraEntries}}
 item entry_{{.ID}}                        {{.Name}}{{end}}
 item --gap --
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
@@ -121,7 +131,10 @@ sanboot --no-describe --drive 0x80 || exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
-{{range .ExtraEntries}}
+{{if .MulticastEnabled}}
+:reimage-fleet
+chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1&multicast=1 || goto disk
+{{end}}{{range .ExtraEntries}}
 :entry_{{.ID}}
 echo Booting {{.Name}}...
 kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
@@ -167,7 +180,8 @@ echo
 menu Select boot option:
 item --gap --
 item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
-item reimage                              Reimage this node{{range .ExtraEntries}}
+item reimage                              Reimage this node{{if .MulticastEnabled}}
+item reimage-fleet                        Reimage via multicast (fleet){{end}}{{range .ExtraEntries}}
 item entry_{{.ID}}                        {{.Name}}{{end}}
 item --gap --
 choose --default disk --timeout 5000 target && goto ${target} || goto disk
@@ -177,7 +191,10 @@ exit
 
 :reimage
 chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1 || goto disk
-{{range .ExtraEntries}}
+{{if .MulticastEnabled}}
+:reimage-fleet
+chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1&multicast=1 || goto disk
+{{end}}{{range .ExtraEntries}}
 :entry_{{.ID}}
 echo Booting {{.Name}}...
 kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
@@ -214,6 +231,9 @@ type diskBootScriptData struct {
 	// ExtraEntries are operator-defined boot entries from the boot_entries table.
 	// Each enabled entry is appended to the menu and rendered as a label block.
 	ExtraEntries []api.BootEntry
+	// MulticastEnabled controls whether the "Reimage via multicast (fleet)" menu
+	// item is shown. Set by GenerateDiskBootScript when multicast_config.enabled=true.
+	MulticastEnabled bool
 }
 
 // GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
@@ -241,7 +261,10 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 //
 // extraEntries is the list of enabled boot_entries rows to append to the menu.
 // Pass nil or an empty slice to render the standard two-item menu.
-func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extraEntries []api.BootEntry) ([]byte, error) {
+//
+// multicastEnabled controls whether the "Reimage via multicast (fleet)" item
+// appears in the menu. Pass true when multicast_config.enabled=true in the DB.
+func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extraEntries []api.BootEntry, multicastEnabled bool) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
 		tmpl = diskBootBIOSTmpl
@@ -250,10 +273,11 @@ func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extra
 		extraEntries = []api.BootEntry{}
 	}
 	data := diskBootScriptData{
-		Hostname:     hostname,
-		ServerURL:    serverURL,
-		Version:      version,
-		ExtraEntries: extraEntries,
+		Hostname:         hostname,
+		ServerURL:        serverURL,
+		Version:          version,
+		ExtraEntries:     extraEntries,
+		MulticastEnabled: multicastEnabled,
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {

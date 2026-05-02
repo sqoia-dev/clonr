@@ -57,14 +57,17 @@ log "kernel : $(uname -r)"
 # ── Step 3: parse kernel command line ─────────────────────────────────────────
 CLUSTR_SERVER=""
 CLUSTR_MAC=""
+CLUSTR_MULTICAST=""
 for arg in $(cat /proc/cmdline); do
     case $arg in
-        clustr.server=*) CLUSTR_SERVER="${arg#clustr.server=}" ;;
-        clustr.mac=*)    CLUSTR_MAC="${arg#clustr.mac=}" ;;
+        clustr.server=*)    CLUSTR_SERVER="${arg#clustr.server=}" ;;
+        clustr.mac=*)       CLUSTR_MAC="${arg#clustr.mac=}" ;;
+        clustr.multicast=*) CLUSTR_MULTICAST="${arg#clustr.multicast=}" ;;
     esac
 done
-log "server : ${CLUSTR_SERVER:-not set}"
-log "mac    : ${CLUSTR_MAC:-auto-detect}"
+log "server    : ${CLUSTR_SERVER:-not set}"
+log "mac       : ${CLUSTR_MAC:-auto-detect}"
+log "multicast : ${CLUSTR_MULTICAST:-off}"
 
 # ── Step 4: load virtio NIC modules ───────────────────────────────────────────
 # Dependency order: failover → net_failover → virtio_net
@@ -338,6 +341,25 @@ if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/sbin/dropbear ]; then
     log "  (password available via serial/IPMI console only — not logged)"
     log "  Then: screen -r clustr-deploy"
     log "--- end SSH info ---"
+fi
+
+# ── Step 8c: export multicast session parameters (if present) ────────────────
+# When the PXE boot handler embedded multicast params in the kernel cmdline,
+# export them so the clustr deploy agent (runAutoDeployMode) can:
+#   1. Call POST /multicast/enqueue to join the session
+#   2. Long-poll GET /multicast/sessions/{id}/wait for the session descriptor
+#   3. Fork udp-receiver to receive the image stream
+#   4. Fall back to unicast HTTP if udp-receiver fails or session falls back
+#
+# These are read by runAutoDeployMode in cmd/clustr/main.go.
+if [ "$CLUSTR_MULTICAST" = "1" ]; then
+    if [ -x /usr/bin/udp-receiver ]; then
+        export CLUSTR_MULTICAST_ENABLED=1
+        log "multicast: enabled — udp-receiver present"
+    else
+        log "multicast: WARNING: udp-receiver not found in initramfs — will fall back to unicast"
+        export CLUSTR_MULTICAST_ENABLED=0
+    fi
 fi
 
 log "running: /usr/bin/clustr deploy --auto --server ${CLUSTR_SERVER} --token <redacted>"
