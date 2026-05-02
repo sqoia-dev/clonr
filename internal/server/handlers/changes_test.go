@@ -128,11 +128,11 @@ func newTestChangesHandler() (*ChangesHandler, *fakeChangesDB) {
 	return h, fdb
 }
 
-func postJSON(t *testing.T, h http.Handler, path string, body interface{}) *httptest.ResponseRecorder {
+func postChangesJSON(t *testing.T, h http.Handler, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		t.Fatalf("postJSON: encode: %v", err)
+		t.Fatalf("postChangesJSON: encode: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
@@ -154,7 +154,7 @@ func getReq(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorde
 // TestChanges_StageMissingKind verifies that staging without a kind returns 400.
 func TestChanges_StageMissingKind(t *testing.T) {
 	h, _ := newTestChangesHandler()
-	w := postJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
+	w := postChangesJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
 		"target":  "user1",
 		"payload": map[string]string{"uid": "user1"},
 	})
@@ -166,7 +166,7 @@ func TestChanges_StageMissingKind(t *testing.T) {
 // TestChanges_Stage verifies that a valid stage request creates a pending change.
 func TestChanges_Stage(t *testing.T) {
 	h, fdb := newTestChangesHandler()
-	w := postJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
+	w := postChangesJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
 		"kind":    "ldap_user",
 		"target":  "testuser",
 		"payload": map[string]string{"uid": "testuser", "cn": "Test User"},
@@ -219,7 +219,7 @@ func TestChanges_StageListCommitClear(t *testing.T) {
 
 	// Stage two changes.
 	for _, uid := range []string{"alice", "bob"} {
-		w := postJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
+		w := postChangesJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
 			"kind":    "ldap_user",
 			"target":  uid,
 			"payload": map[string]string{"uid": uid},
@@ -276,7 +276,7 @@ func TestChanges_CommitUnknownKind(t *testing.T) {
 	h, _ := newTestChangesHandler()
 
 	// Stage a change with an unknown kind.
-	w := postJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
+	w := postChangesJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
 		"kind":    "unknown_kind",
 		"target":  "x",
 		"payload": map[string]string{"x": "y"},
@@ -312,7 +312,7 @@ func TestChanges_Clear(t *testing.T) {
 	h, fdb := newTestChangesHandler()
 
 	// Stage one.
-	postJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
+	postChangesJSON(t, http.HandlerFunc(h.HandleStage), "/api/v1/changes", map[string]interface{}{
 		"kind":    "node_network",
 		"target":  "node-abc",
 		"payload": map[string]string{"ip": "10.0.0.5"},
