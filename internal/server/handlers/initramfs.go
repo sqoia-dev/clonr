@@ -296,6 +296,23 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 	h.liveSHA256 = scriptSHA256
 	h.mu.Unlock()
 
+	// Auto-place initramfs and kernel into the boot directory.
+	bootDir := filepath.Dir(h.InitramfsPath)
+	sizeMiB := float64(scriptSize) / (1024 * 1024)
+	logLines = append(logLines, fmt.Sprintf("Built initramfs (%.1f MiB) — placed at %s", sizeMiB, h.InitramfsPath))
+
+	kver, placed, kernelErr := ensureKernelPlaced(bootDir)
+	if kernelErr != nil {
+		log.Warn().Err(kernelErr).Msg("initramfs rebuild: kernel auto-place failed (non-fatal)")
+		logLines = append(logLines, "Warning: kernel auto-place failed: "+kernelErr.Error())
+	} else if placed {
+		logLines = append(logLines, fmt.Sprintf("Kernel placed at %s/vmlinuz (%s)", bootDir, kver))
+		logLines = append(logLines, "Ready to PXE boot.")
+	} else {
+		logLines = append(logLines, fmt.Sprintf("Kernel at %s/vmlinuz already current (%s)", bootDir, kver))
+		logLines = append(logLines, "Ready to PXE boot.")
+	}
+
 	// Finalize DB record — use a background context so a slow or disconnected
 	// HTTP client does not cancel the write after a successful build.
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -778,24 +795,54 @@ buildDone:
 		return
 	}
 
+	// Finalize the initramfs system path (same as regular rebuild). Must happen
+	// before os.Remove(stagingPath) so the rename has a source file to move.
+	if h.InitramfsPath != "" {
+		if renameErr := os.Rename(stagingPath, h.InitramfsPath); renameErr != nil {
+			log.Warn().Err(renameErr).Msg("initramfs build: atomic rename to system path failed (non-fatal)")
+		} else {
+			h.mu.Lock()
+			h.liveSHA256 = scriptSHA256
+			h.mu.Unlock()
+		}
+	}
+
 	// Copy built initramfs into the image store (if ImageDir is set).
+	// Use the system path as source when available (staging has been renamed away),
+	// otherwise fall back to stagingPath (rename failed or InitramfsPath unset).
+	imgSrc := stagingPath
+	if h.InitramfsPath != "" {
+		if _, statErr := os.Stat(h.InitramfsPath); statErr == nil {
+			imgSrc = h.InitramfsPath
+		}
+	}
 	if h.ImageDir != "" {
 		imageDir := filepath.Join(h.ImageDir, img.ID)
 		if err := os.MkdirAll(imageDir, 0o755); err == nil {
 			destPath := filepath.Join(imageDir, "image.img")
-			if copyErr := initramfsCopyFile(stagingPath, destPath); copyErr != nil {
+			if copyErr := initramfsCopyFile(imgSrc, destPath); copyErr != nil {
 				log.Warn().Err(copyErr).Str("image_id", img.ID).Msg("initramfs build: copy to image store failed")
 			}
 		}
 	}
+	// Only remove staging if it still exists (rename may have consumed it).
 	os.Remove(stagingPath) //nolint:errcheck
 
-	// Finalize the initramfs system path (same as regular rebuild).
-	if h.InitramfsPath != "" {
-		_ = os.Rename(stagingPath, h.InitramfsPath)
-		h.mu.Lock()
-		h.liveSHA256 = scriptSHA256
-		h.mu.Unlock()
+	// Auto-place kernel into the boot directory.
+	bootDir := filepath.Dir(h.InitramfsPath)
+	sizeMiB := float64(scriptSize) / (1024 * 1024)
+	sendEvent(map[string]any{"type": "log", "line": fmt.Sprintf("Built initramfs (%.1f MiB) — placed at %s", sizeMiB, h.InitramfsPath)})
+
+	kverPlaced, placed, kernelErr := ensureKernelPlaced(bootDir)
+	if kernelErr != nil {
+		log.Warn().Err(kernelErr).Msg("initramfs build: kernel auto-place failed (non-fatal)")
+		sendEvent(map[string]any{"type": "log", "line": "Warning: kernel auto-place failed: " + kernelErr.Error()})
+	} else if placed {
+		sendEvent(map[string]any{"type": "log", "line": fmt.Sprintf("Kernel placed at %s/vmlinuz (%s)", bootDir, kverPlaced)})
+		sendEvent(map[string]any{"type": "log", "line": "Ready to PXE boot."})
+	} else {
+		sendEvent(map[string]any{"type": "log", "line": fmt.Sprintf("Kernel at %s/vmlinuz already current (%s)", bootDir, kverPlaced)})
+		sendEvent(map[string]any{"type": "log", "line": "Ready to PXE boot."})
 	}
 
 	// Finalize the image record.
@@ -880,6 +927,43 @@ func initramfsCopyFile(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// ensureKernelPlaced copies /boot/vmlinuz-$(uname -r) to bootDir/vmlinuz when
+// the destination is absent or older than the running kernel. Returns the
+// kernel version string on success (or on a non-fatal skip) so callers can
+// surface it in the build log. /boot/vmlinuz-<kver> is world-readable on
+// Rocky 9 (rw-r--r-- root:root), so no privilege escalation is required.
+func ensureKernelPlaced(bootDir string) (kver string, placed bool, err error) {
+	out, err := exec.Command("uname", "-r").Output()
+	if err != nil {
+		return "", false, fmt.Errorf("uname -r: %w", err)
+	}
+	kver = strings.TrimSpace(string(out))
+
+	src := "/boot/vmlinuz-" + kver
+	dst := filepath.Join(bootDir, "vmlinuz")
+
+	srcStat, err := os.Stat(src)
+	if err != nil {
+		return kver, false, fmt.Errorf("kernel source not found at %s: %w", src, err)
+	}
+
+	// Skip copy if destination already exists and is at least as new as the source.
+	if dstStat, statErr := os.Stat(dst); statErr == nil {
+		if !dstStat.ModTime().Before(srcStat.ModTime()) {
+			return kver, false, nil // already current
+		}
+	}
+
+	if mkErr := os.MkdirAll(bootDir, 0o755); mkErr != nil {
+		return kver, false, fmt.Errorf("mkdir %s: %w", bootDir, mkErr)
+	}
+
+	if copyErr := initramfsCopyFile(src, dst); copyErr != nil {
+		return kver, false, fmt.Errorf("copy %s → %s: %w", src, dst, copyErr)
+	}
+	return kver, true, nil
 }
 
 // parseInitramfsBuildInfo is a helper to unmarshal the rebuild response.
