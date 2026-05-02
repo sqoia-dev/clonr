@@ -388,11 +388,11 @@ func (e *Engine) resolveStaleAlerts(ctx context.Context, r *Rule, activeNodeIDs 
 	// Iterate over a snapshot of active keys to avoid modifying the map while
 	// ranging over it inside Resolve.
 	type candidate struct {
-		key        alertStateKey
-		nodeID     string
+		key    alertStateKey
+		nodeID string
 	}
 	var toResolve []candidate
-	for key := range e.store.active {
+	for _, key := range e.store.ActiveKeys() {
 		if key.ruleName != r.Name {
 			continue
 		}
@@ -486,7 +486,7 @@ func (e *Engine) evaluateOfflineRule(ctx context.Context, r *Rule) {
 	// Resolve for nodes that have come back online.
 	type candidate struct{ key alertStateKey }
 	var toResolve []candidate
-	for key := range e.store.active {
+	for _, key := range e.store.ActiveKeys() {
 		if key.ruleName != r.Name {
 			continue
 		}

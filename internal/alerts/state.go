@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/sqoia-dev/clustr/internal/db"
@@ -19,18 +20,18 @@ const (
 // Alert is the server-side representation of a fired or resolved alert.
 // This is the shape returned by GET /api/v1/alerts.
 type Alert struct {
-	ID           int64              `json:"id"`
-	RuleName     string             `json:"rule_name"`
-	NodeID       string             `json:"node_id"`
-	Sensor       string             `json:"sensor"`
-	Labels       map[string]string  `json:"labels,omitempty"`
-	Severity     string             `json:"severity"`
-	State        string             `json:"state"`
-	FiredAt      time.Time          `json:"fired_at"`
-	ResolvedAt   *time.Time         `json:"resolved_at,omitempty"`
-	LastValue    float64            `json:"last_value"`
-	ThresholdOp  string             `json:"threshold_op"`
-	ThresholdVal float64            `json:"threshold_val"`
+	ID           int64             `json:"id"`
+	RuleName     string            `json:"rule_name"`
+	NodeID       string            `json:"node_id"`
+	Sensor       string            `json:"sensor"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Severity     string            `json:"severity"`
+	State        string            `json:"state"`
+	FiredAt      time.Time         `json:"fired_at"`
+	ResolvedAt   *time.Time        `json:"resolved_at,omitempty"`
+	LastValue    float64           `json:"last_value"`
+	ThresholdOp  string            `json:"threshold_op"`
+	ThresholdVal float64           `json:"threshold_val"`
 }
 
 // alertStateKey uniquely identifies an active alert instance.
@@ -50,10 +51,20 @@ type activeAlert struct {
 	firedAt time.Time
 }
 
+// AlertKey is the exported alias for alertStateKey, used by callers (e.g. the
+// CLI watch endpoint) to identify a specific active-alert instance without
+// importing the unexported type.
+//
+// THREAD-SAFETY: immutable once created; safe to pass across goroutines.
+type AlertKey = alertStateKey
+
 // StateStore holds the in-memory active-alert cache, backed by the alerts table.
-// All methods are called from a single goroutine (the engine tick) so no
-// locking is required.
+//
+// THREAD-SAFETY: all exported methods are safe for concurrent use. The mu
+// RWMutex guards the active map. Internal methods that touch active must
+// hold at least mu.RLock before reading and mu.Lock before writing.
 type StateStore struct {
+	mu     sync.RWMutex
 	db     *db.DB
 	active map[alertStateKey]*activeAlert
 }
@@ -72,7 +83,10 @@ func NewStateStore(database *db.DB) (*StateStore, error) {
 }
 
 // loadActive reads all firing rows from the alerts table and populates the
-// in-memory cache.  Called once on startup.
+// in-memory cache.  Called once on startup before any goroutine can reach the
+// store, but still acquires the write lock for consistency.
+//
+// THREAD-SAFETY: acquires mu.Lock for the final map assignment.
 func (s *StateStore) loadActive(ctx context.Context) error {
 	rows, err := s.db.SQL().QueryContext(ctx, `
 		SELECT id, rule_name, node_id, sensor, labels_json, severity, fired_at, last_value, threshold_op, threshold_val
@@ -84,6 +98,8 @@ func (s *StateStore) loadActive(ctx context.Context) error {
 	}
 	defer rows.Close()
 
+	// Collect into a local map first; acquire the write lock only when writing.
+	loaded := make(map[alertStateKey]*activeAlert)
 	for rows.Next() {
 		var (
 			id                       int64
@@ -110,23 +126,36 @@ func (s *StateStore) loadActive(ctx context.Context) error {
 			sensor:     sensor,
 			labelsJSON: lj,
 		}
-		s.active[key] = &activeAlert{
+		loaded[key] = &activeAlert{
 			dbID:    id,
 			key:     key,
 			firedAt: time.Unix(firedAtUnix, 0).UTC(),
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.active = loaded
+	s.mu.Unlock()
+	return nil
 }
 
 // IsActive returns true if the given key has an active firing alert.
+//
+// THREAD-SAFETY: acquires mu.RLock.
 func (s *StateStore) IsActive(key alertStateKey) bool {
+	s.mu.RLock()
 	_, ok := s.active[key]
+	s.mu.RUnlock()
 	return ok
 }
 
 // Fire persists a new alert row and registers it as active in the cache.
 // Returns the new Alert for dispatch.
+//
+// THREAD-SAFETY: acquires mu.Lock when writing to active.
 func (s *StateStore) Fire(ctx context.Context, r *Rule, nodeID string, labels map[string]string, lastValue float64) (*Alert, error) {
 	lj := labelsToJSON(labels)
 	key := alertStateKey{
@@ -152,7 +181,9 @@ func (s *StateStore) Fire(ctx context.Context, r *Rule, nodeID string, labels ma
 	}
 	id, _ := res.LastInsertId()
 
+	s.mu.Lock()
 	s.active[key] = &activeAlert{dbID: id, key: key, firedAt: now}
+	s.mu.Unlock()
 
 	alert := &Alert{
 		ID:           id,
@@ -172,34 +203,103 @@ func (s *StateStore) Fire(ctx context.Context, r *Rule, nodeID string, labels ma
 
 // Resolve marks the active alert as resolved, updates the DB, and removes it
 // from the in-memory cache.  Returns the resolved Alert for dispatch.
+//
+// THREAD-SAFETY: acquires mu.Lock when modifying active.
 func (s *StateStore) Resolve(ctx context.Context, key alertStateKey, lastValue float64) (*Alert, error) {
+	s.mu.Lock()
 	aa, ok := s.active[key]
 	if !ok {
+		s.mu.Unlock()
 		return nil, nil // not active; nothing to resolve
 	}
+	dbID := aa.dbID
+	delete(s.active, key)
+	s.mu.Unlock()
 
 	now := time.Now().UTC()
 	_, err := s.db.SQL().ExecContext(ctx, `
 		UPDATE alerts SET state = 'resolved', resolved_at = ?, last_value = ?
 		WHERE id = ?
-	`, now.Unix(), lastValue, aa.dbID)
+	`, now.Unix(), lastValue, dbID)
 	if err != nil {
 		return nil, fmt.Errorf("alerts: resolve: update: %w", err)
 	}
-	delete(s.active, key)
 
 	// Fetch the full row to build the response.
-	return s.fetchByID(ctx, aa.dbID)
+	return s.fetchByID(ctx, dbID)
 }
 
 // UpdateLastValue updates the last_value for an active alert (no state change).
+//
+// THREAD-SAFETY: acquires mu.RLock to read active.
 func (s *StateStore) UpdateLastValue(ctx context.Context, key alertStateKey, lastValue float64) {
+	s.mu.RLock()
 	aa, ok := s.active[key]
+	var dbID int64
+	if ok {
+		dbID = aa.dbID
+	}
+	s.mu.RUnlock()
 	if !ok {
 		return
 	}
 	// Best-effort; ignore error.
-	_, _ = s.db.SQL().ExecContext(ctx, `UPDATE alerts SET last_value = ? WHERE id = ?`, lastValue, aa.dbID)
+	_, _ = s.db.SQL().ExecContext(ctx, `UPDATE alerts SET last_value = ? WHERE id = ?`, lastValue, dbID)
+}
+
+// Snapshot returns a point-in-time copy of all active alerts. Safe to range
+// over without holding any lock.
+//
+// THREAD-SAFETY: acquires mu.RLock, copies values out, releases before return.
+func (s *StateStore) Snapshot() []Alert {
+	s.mu.RLock()
+	out := make([]Alert, 0, len(s.active))
+	for _, aa := range s.active {
+		out = append(out, Alert{
+			ID:       aa.dbID,
+			RuleName: aa.key.ruleName,
+			NodeID:   aa.key.nodeID,
+			Sensor:   aa.key.sensor,
+			State:    StateFiring,
+			FiredAt:  aa.firedAt,
+		})
+	}
+	s.mu.RUnlock()
+	return out
+}
+
+// ForEachActive calls fn for each active alert while holding the read lock.
+// fn must NOT call back into any StateStore method (deadlock risk).
+// Keep fn fast — the read lock is held for its entire duration.
+//
+// THREAD-SAFETY: holds mu.RLock for fn's duration.
+func (s *StateStore) ForEachActive(fn func(Alert)) {
+	s.mu.RLock()
+	for _, aa := range s.active {
+		fn(Alert{
+			ID:       aa.dbID,
+			RuleName: aa.key.ruleName,
+			NodeID:   aa.key.nodeID,
+			Sensor:   aa.key.sensor,
+			State:    StateFiring,
+			FiredAt:  aa.firedAt,
+		})
+	}
+	s.mu.RUnlock()
+}
+
+// ActiveKeys returns the current set of active-alert keys. Safe to range over
+// without holding any lock.
+//
+// THREAD-SAFETY: acquires mu.RLock, copies keys out, releases before return.
+func (s *StateStore) ActiveKeys() []AlertKey {
+	s.mu.RLock()
+	keys := make([]AlertKey, 0, len(s.active))
+	for k := range s.active {
+		keys = append(keys, k)
+	}
+	s.mu.RUnlock()
+	return keys
 }
 
 // fetchByID loads a single alert row by its DB ID.
@@ -269,15 +369,15 @@ func (s *StateStore) queryAlerts(ctx context.Context, q string, args ...interfac
 	var out []Alert
 	for rows.Next() {
 		var (
-			id                              int64
-			ruleName, nodeID, sensor        string
-			labelsJSON                      sql.NullString
-			severity, state                 string
-			firedAtUnix                     int64
-			resolvedAtUnix                  sql.NullInt64
-			lastValue                       float64
-			thresholdOp                     string
-			thresholdVal                    float64
+			id                       int64
+			ruleName, nodeID, sensor string
+			labelsJSON               sql.NullString
+			severity, state          string
+			firedAtUnix              int64
+			resolvedAtUnix           sql.NullInt64
+			lastValue                float64
+			thresholdOp              string
+			thresholdVal             float64
 		)
 		if err := rows.Scan(&id, &ruleName, &nodeID, &sensor,
 			&labelsJSON, &severity, &state, &firedAtUnix, &resolvedAtUnix,
@@ -318,15 +418,15 @@ type rowScanner interface {
 
 func scanAlert(row rowScanner) (*Alert, error) {
 	var (
-		id                              int64
-		ruleName, nodeID, sensor        string
-		labelsJSON                      sql.NullString
-		severity, state                 string
-		firedAtUnix                     int64
-		resolvedAtUnix                  sql.NullInt64
-		lastValue                       float64
-		thresholdOp                     string
-		thresholdVal                    float64
+		id                       int64
+		ruleName, nodeID, sensor string
+		labelsJSON               sql.NullString
+		severity, state          string
+		firedAtUnix              int64
+		resolvedAtUnix           sql.NullInt64
+		lastValue                float64
+		thresholdOp              string
+		thresholdVal             float64
 	)
 	if err := row.Scan(&id, &ruleName, &nodeID, &sensor,
 		&labelsJSON, &severity, &state, &firedAtUnix, &resolvedAtUnix,
