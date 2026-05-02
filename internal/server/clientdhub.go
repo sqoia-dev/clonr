@@ -112,6 +112,10 @@ type ClientdHub struct {
 	// biosReadRegistry maps outbound msg_id → pendingBiosReadResult so the
 	// ReadBios HTTP handler can block until the node replies with bios_read_result.
 	biosReadRegistry sync.Map
+
+	// biosApplyRegistry maps outbound msg_id → pendingBiosApplyResult so the
+	// ApplyBios HTTP handler can block until the node replies with bios_apply_result.
+	biosApplyRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -362,6 +366,44 @@ func (h *ClientdHub) DeliverBiosReadResult(msgID string, payload clientd.BiosRea
 		return false
 	}
 	pe := v.(pendingBiosReadResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+// ─── BiosApply registry (Sprint 26) ──────────────────────────────────────────
+
+// pendingBiosApplyResult is the in-flight state for a bios_apply_request.
+type pendingBiosApplyResult struct {
+	ch chan clientd.BiosApplyResultPayload
+}
+
+// RegisterBiosApply creates a pending BIOS apply entry for msgID and returns the
+// channel to read the BiosApplyResultPayload from.  The caller must call
+// UnregisterBiosApply(msgID) when done.
+func (h *ClientdHub) RegisterBiosApply(msgID string) <-chan clientd.BiosApplyResultPayload {
+	ch := make(chan clientd.BiosApplyResultPayload, 1)
+	h.biosApplyRegistry.Store(msgID, pendingBiosApplyResult{ch: ch})
+	return ch
+}
+
+// UnregisterBiosApply removes a pending BIOS apply entry.
+func (h *ClientdHub) UnregisterBiosApply(msgID string) {
+	h.biosApplyRegistry.Delete(msgID)
+}
+
+// DeliverBiosApplyResult delivers a BiosApplyResultPayload to the waiting HTTP
+// handler.  Called by the WebSocket handler when it receives a
+// "bios_apply_result" message from the node.  Returns true if delivered.
+func (h *ClientdHub) DeliverBiosApplyResult(msgID string, payload clientd.BiosApplyResultPayload) bool {
+	v, ok := h.biosApplyRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingBiosApplyResult)
 	select {
 	case pe.ch <- payload:
 		return true

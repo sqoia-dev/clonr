@@ -40,12 +40,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/bios"
 	_ "github.com/sqoia-dev/clustr/internal/bios/intel" // register Intel provider
 )
+
+// privhelperPath is the canonical path for the setuid helper binary.
+// Matches the constant in internal/privhelper/privhelper.go.
+const privhelperPath = "/usr/sbin/clustr-privhelper"
+
+// privhelperBiosApplyCmd constructs the exec.Cmd for bios-apply.
+// Extracted as a function (not inlined) so tests can intercept via
+// biosApplyViaPrivhelper without needing to replace the whole exec path.
+func privhelperBiosApplyCmd(ctx context.Context, vendor, profilePath string) *exec.Cmd {
+	return exec.CommandContext(ctx, privhelperPath, "bios-apply", vendor, profilePath) //#nosec G204 -- vendor and profilePath validated by caller; helper enforces allowlist
+}
 
 const (
 	// biosDriftCheckInterval is how often clientd compares current BIOS settings
@@ -116,25 +129,103 @@ func sendBiosReadResult(send func(ClientMessage) error,
 
 // HandleBiosApplyRequest processes a "bios_apply_request" message from the server.
 //
-// NOTE: In v1, BIOS apply runs in initramfs only (D1 of Sprint 25 design).
-// This handler is wired for protocol completeness but will return an error
-// when invoked on a running (post-boot) node, because:
-//   - Applying BIOS settings post-boot requires a reboot to take effect.
-//   - The intended path is clustr bios apply → reimage with bios_only=true.
+// Post-boot apply path (Sprint 26):
+//  1. Validate vendor is in the allowlist (intel; dell/supermicro are future work).
+//  2. Stage settings_json to /var/lib/clustr/bios-staging/<msg_id>.json.
+//  3. Call clustr-privhelper bios-apply <vendor> <staging-path>.
+//  4. Clean up the staging file.
+//  5. Reply with bios_apply_result.
 //
-// If the design decision D1 is revisited (see docs/SPRINT-25-BIOS-PUSH-DESIGN.md
-// risk section), this handler can be enabled by removing the guard below.
+// Settings are written to BIOS NVRAM.  They take effect on the next POST cycle.
+// This handler does NOT reboot the node — the operator must reboot manually.
 func HandleBiosApplyRequest(ctx context.Context, payload BiosApplyRequestPayload, send func(ClientMessage) error) {
-	log.Warn().
+	log.Info().
 		Str("vendor", payload.Vendor).
 		Str("profile_id", payload.ProfileID).
 		Str("ref_msg_id", payload.RefMsgID).
-		Msg("bios: apply request received post-boot — this path is reserved for future use; BIOS apply runs in initramfs in v1")
+		Msg("bios: post-boot apply request received")
 
-	// Post-boot apply is NOT enabled in v1.  Return a clear, actionable error
-	// so operators who accidentally trigger this get a useful message.
-	sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0,
-		"post-boot BIOS apply is not enabled in v1; use 'clustr bios apply <node>' to apply via initramfs reboot")
+	// Validate vendor allowlist (intel only in this sprint; dell/supermicro are future).
+	allowedVendors := map[string]bool{"intel": true, "dell": true, "supermicro": true}
+	if !allowedVendors[payload.Vendor] {
+		sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0,
+			"unknown vendor "+payload.Vendor+"; supported vendors: intel")
+		return
+	}
+
+	if payload.SettingsJSON == "" {
+		sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0, "settings_json is empty")
+		return
+	}
+
+	// Use msg_id as the staging filename so concurrent applies for different
+	// msg_ids don't collide.  Privhelper validates the path prefix.
+	stagingID := payload.RefMsgID
+	if stagingID == "" {
+		stagingID = payload.ProfileID
+	}
+	stagingPath, err := WriteBiosStagingFile(stagingID, payload.SettingsJSON)
+	if err != nil {
+		log.Error().Err(err).Str("ref_msg_id", payload.RefMsgID).Msg("bios: failed to write staging file")
+		sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0,
+			"staging file write failed: "+err.Error())
+		return
+	}
+	// Clean up staging file regardless of apply outcome.
+	defer func() {
+		if rerr := os.Remove(stagingPath); rerr != nil && !os.IsNotExist(rerr) {
+			log.Warn().Err(rerr).Str("path", stagingPath).Msg("bios: failed to remove staging file")
+		}
+	}()
+
+	log.Info().
+		Str("vendor", payload.Vendor).
+		Str("staging_path", stagingPath).
+		Str("profile_id", payload.ProfileID).
+		Msg("bios: calling privhelper bios-apply")
+
+	// Route through clustr-privhelper per the standing privilege boundary rule.
+	if err := biosApplyViaPrivhelper(ctx, payload.Vendor, stagingPath); err != nil {
+		log.Error().Err(err).
+			Str("vendor", payload.Vendor).
+			Str("profile_id", payload.ProfileID).
+			Msg("bios: privhelper bios-apply failed")
+		sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0, err.Error())
+		return
+	}
+
+	// Count applied settings from the JSON blob so the caller gets a meaningful number.
+	appliedCount := countSettingsJSON(payload.SettingsJSON)
+
+	log.Info().
+		Str("vendor", payload.Vendor).
+		Str("profile_id", payload.ProfileID).
+		Int("applied_count", appliedCount).
+		Msg("bios: post-boot apply succeeded; reboot required for settings to take effect")
+
+	sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, appliedCount, "")
+}
+
+// biosApplyViaPrivhelper is the interface between the handler and the
+// privhelper binary.  Extracted so tests can stub it.
+var biosApplyViaPrivhelper = func(ctx context.Context, vendor, profilePath string) error {
+	cmd := privhelperBiosApplyCmd(ctx, vendor, profilePath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper bios-apply %s: %w; output: %s",
+			vendor, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// countSettingsJSON returns the number of keys in a flat JSON object string.
+// Returns 0 on any parse error (non-fatal; only affects the AppliedCount field).
+func countSettingsJSON(settingsJSON string) int {
+	var m map[string]string
+	if err := json.Unmarshal([]byte(settingsJSON), &m); err != nil {
+		return 0
+	}
+	return len(m)
 }
 
 func sendBiosApplyResult(send func(ClientMessage) error,

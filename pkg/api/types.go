@@ -2021,3 +2021,14 @@ type BiosProviderVerifyResponse struct {
 	BinPath   string `json:"bin_path"`  // expected path for operator reference
 	Message   string `json:"message,omitempty"`
 }
+
+// BiosApplyResponse is the response body for POST /api/v1/nodes/{id}/bios/apply.
+// Applied is the number of settings written to NVRAM.  When Applied is 0 and
+// Message is "no changes — node is already at desired state", the node was
+// already compliant and no privhelper invocation occurred.
+// When Applied > 0, settings have been staged to NVRAM; a reboot is required
+// for them to take effect (Message will say so).
+type BiosApplyResponse struct {
+	Applied int    `json:"applied"`
+	Message string `json:"message"`
+}

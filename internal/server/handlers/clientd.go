@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/bios"
+	_ "github.com/sqoia-dev/clustr/internal/bios/intel" // register Intel provider for Diff
 	"github.com/sqoia-dev/clustr/internal/clientd"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/pkg/api"
@@ -61,6 +63,18 @@ type ClientdHubIface interface {
 	RegisterBiosRead(msgID string) <-chan clientd.BiosReadResultPayload
 	UnregisterBiosRead(msgID string)
 	DeliverBiosReadResult(msgID string, payload clientd.BiosReadResultPayload) bool
+	// BiosApply registry — used for bios_apply_request round-trips (Sprint 26).
+	RegisterBiosApply(msgID string) <-chan clientd.BiosApplyResultPayload
+	UnregisterBiosApply(msgID string)
+	DeliverBiosApplyResult(msgID string, payload clientd.BiosApplyResultPayload) bool
+}
+
+// ClientdBiosDBIface is the subset of *db.DB used by BiosApplyOnNode.
+// Declared as an interface so the handler can be tested without the concrete DB.
+type ClientdBiosDBIface interface {
+	GetNodeBiosProfile(ctx context.Context, nodeID string) (api.NodeBiosProfile, error)
+	GetBiosProfile(ctx context.Context, id string) (api.BiosProfile, error)
+	RecordBiosApply(ctx context.Context, nodeID, settingsHash string) error
 }
 
 // ClientdHandler handles the clustr-clientd WebSocket endpoint and related REST queries.
@@ -73,6 +87,14 @@ type ClientdHandler struct {
 	// SudoersNodeConfig, when non-nil, is called by HandleSudoersPush to fetch the
 	// current sudoers drop-in content for broadcast to connected nodes.
 	SudoersNodeConfig func(ctx context.Context) (*api.SudoersNodeConfig, error)
+	// BiosDB provides BIOS profile lookups for BiosApplyOnNode.
+	// When nil, BiosApplyOnNode returns 503.
+	BiosDB ClientdBiosDBIface
+}
+
+// biosLookup is a package-level var wrapping bios.Lookup to allow test stubbing.
+var biosLookup = func(vendor string) (bios.Provider, error) {
+	return bios.Lookup(vendor)
 }
 
 // HandleClientdWS upgrades the connection to WebSocket and runs the clientd protocol.
@@ -181,10 +203,7 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 		h.handleBiosReadResult(nodeID, msg)
 
 	case "bios_apply_result":
-		// bios_apply_result is a node→server message for the post-boot apply path
-		// (reserved; not triggered by the server in v1 — BIOS apply runs in
-		// initramfs per Sprint 25 D1).  Log and discard.
-		log.Debug().Str("node_id", nodeID).Msg("clientd ws: bios_apply_result received (post-boot apply path not active in v1)")
+		h.handleBiosApplyResult(nodeID, msg)
 
 	case "bios_drift":
 		h.handleBiosDrift(nodeID, msg)
@@ -833,6 +852,222 @@ func (h *ClientdHandler) handleBiosDrift(nodeID string, msg clientd.ClientMessag
 		Int("drifted_settings", len(payload.DriftedSettings)).
 		Time("detected_at", payload.DetectedAt).
 		Msg("clientd ws: bios drift detected on node")
+}
+
+// handleBiosApplyResult processes a "bios_apply_result" message from the node
+// and delivers it to the waiting BiosApplyOnNode HTTP handler via the hub registry.
+func (h *ClientdHandler) handleBiosApplyResult(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.BiosApplyResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: malformed bios_apply_result payload")
+		return
+	}
+	delivered := h.Hub.DeliverBiosApplyResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Str("profile_id", payload.ProfileID).
+		Bool("ok", payload.OK).
+		Int("applied_count", payload.AppliedCount).
+		Str("error", payload.Error).
+		Bool("delivered", delivered).
+		Msg("clientd ws: bios_apply_result received from node")
+}
+
+// BiosApplyOnNode sends a bios_apply_request to a connected node, waits for
+// the bios_apply_result, and returns the outcome to the operator.
+//
+// The handler:
+//  1. Resolves the node's assigned BIOS profile from node_bios_profile.
+//  2. Reads current BIOS settings from the node via bios_read_request.
+//  3. Diffs desired (profile) vs current using the vendor provider.
+//  4. If diff is empty → 200 { applied: 0, message: "no changes" }.
+//  5. If diff is non-empty → sends bios_apply_request, awaits bios_apply_result.
+//
+// Settings are staged to NVRAM on the node; they take effect after the next
+// operator-initiated reboot.  The response always includes a reboot notice.
+//
+// Route: POST /api/v1/nodes/{id}/bios/apply
+func (h *ClientdHandler) BiosApplyOnNode(w http.ResponseWriter, r *http.Request) {
+	if h.BiosDB == nil {
+		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+			Error: "BIOS DB not configured",
+			Code:  "not_configured",
+		})
+		return
+	}
+
+	nodeID := chi.URLParam(r, "id")
+	if nodeID == "" {
+		writeValidationError(w, "missing node_id")
+		return
+	}
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clustr-clientd offline)",
+			Code:  "node_offline",
+		})
+		return
+	}
+
+	// Resolve the profile binding from the DB.
+	binding, err := h.BiosDB.GetNodeBiosProfile(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := h.BiosDB.GetBiosProfile(r.Context(), binding.ProfileID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Read current BIOS settings from the node.
+	readMsgID := uuid.New().String()
+	readResultCh := h.Hub.RegisterBiosRead(readMsgID)
+	defer h.Hub.UnregisterBiosRead(readMsgID)
+
+	readPayload, _ := json.Marshal(clientd.BiosReadRequestPayload{
+		RefMsgID: readMsgID,
+		Vendor:   profile.Vendor,
+	})
+	if err := h.Hub.Send(nodeID, clientd.ServerMessage{
+		Type:    "bios_read_request",
+		MsgID:   readMsgID,
+		Payload: json.RawMessage(readPayload),
+	}); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+			Error: "failed to send bios_read_request to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	var readResult clientd.BiosReadResultPayload
+	select {
+	case readResult = <-readResultCh:
+	case <-time.After(30 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for bios_read_result from node (30s)",
+			Code:  "bios_read_timeout",
+		})
+		return
+	case <-r.Context().Done():
+		return
+	}
+	if readResult.Error != "" {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node reported bios read error: " + readResult.Error,
+			Code:  "bios_read_error",
+		})
+		return
+	}
+
+	// Diff desired (profile) vs current.
+	provider, err := biosLookup(profile.Vendor)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Error: "unknown vendor " + profile.Vendor,
+			Code:  "unknown_vendor",
+		})
+		return
+	}
+
+	// Convert profile settings_json → []bios.Setting.
+	var settingsMap map[string]string
+	if err := json.Unmarshal([]byte(profile.SettingsJSON), &settingsMap); err != nil {
+		writeError(w, fmt.Errorf("parse profile settings_json: %w", err))
+		return
+	}
+	desired := make([]bios.Setting, 0, len(settingsMap))
+	for name, value := range settingsMap {
+		desired = append(desired, bios.Setting{Name: name, Value: value})
+	}
+
+	// Convert wire BiosSetting → bios.Setting.
+	current := make([]bios.Setting, len(readResult.Settings))
+	for i, s := range readResult.Settings {
+		current[i] = bios.Setting{Name: s.Name, Value: s.Value}
+	}
+
+	changes, err := provider.Diff(desired, current)
+	if err != nil {
+		writeError(w, fmt.Errorf("diff bios settings: %w", err))
+		return
+	}
+
+	if len(changes) == 0 {
+		writeJSON(w, http.StatusOK, api.BiosApplyResponse{
+			Applied: 0,
+			Message: "no changes — node is already at desired state",
+		})
+		return
+	}
+
+	// Send bios_apply_request to the node.
+	applyMsgID := uuid.New().String()
+	applyResultCh := h.Hub.RegisterBiosApply(applyMsgID)
+	defer h.Hub.UnregisterBiosApply(applyMsgID)
+
+	applyPayload, _ := json.Marshal(clientd.BiosApplyRequestPayload{
+		RefMsgID:     applyMsgID,
+		Vendor:       profile.Vendor,
+		SettingsJSON: profile.SettingsJSON,
+		ProfileID:    profile.ID,
+	})
+	if err := h.Hub.Send(nodeID, clientd.ServerMessage{
+		Type:    "bios_apply_request",
+		MsgID:   applyMsgID,
+		Payload: json.RawMessage(applyPayload),
+	}); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
+			Error: "failed to send bios_apply_request to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	log.Info().
+		Str("node_id", nodeID).
+		Str("profile_id", profile.ID).
+		Str("vendor", profile.Vendor).
+		Int("changes", len(changes)).
+		Str("msg_id", applyMsgID).
+		Msg("clientd: bios_apply_request sent to node, waiting for result")
+
+	var applyResult clientd.BiosApplyResultPayload
+	select {
+	case applyResult = <-applyResultCh:
+	case <-time.After(60 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for bios_apply_result from node (60s)",
+			Code:  "bios_apply_timeout",
+		})
+		return
+	case <-r.Context().Done():
+		return
+	}
+
+	if !applyResult.OK {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node reported bios apply error: " + applyResult.Error,
+			Code:  "bios_apply_error",
+		})
+		return
+	}
+
+	// Record successful apply in node_bios_profile.
+	settingsHash := fmt.Sprintf("%x", sha256.Sum256([]byte(profile.SettingsJSON)))
+	if dbErr := h.BiosDB.RecordBiosApply(r.Context(), nodeID, settingsHash); dbErr != nil {
+		// Non-fatal: settings were applied on the node; the hash record is best-effort.
+		log.Warn().Err(dbErr).Str("node_id", nodeID).Msg("clientd: RecordBiosApply failed (non-fatal)")
+	}
+
+	writeJSON(w, http.StatusOK, api.BiosApplyResponse{
+		Applied: applyResult.AppliedCount,
+		Message: "settings staged to NVRAM; reboot required for changes to take effect",
+	})
 }
 
 // ReadBiosOnNode sends a bios_read_request to a connected node and waits for

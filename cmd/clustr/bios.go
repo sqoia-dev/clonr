@@ -1,4 +1,4 @@
-// bios.go — CLI subcommands for BIOS settings management (#159).
+// bios.go — CLI subcommands for BIOS settings management (#159, Sprint 26).
 //
 // Commands:
 //
@@ -8,12 +8,12 @@
 //	clustr bios profiles delete <id>
 //	clustr bios assign <node-id> <profile-id>
 //	clustr bios detach <node-id>
-//	clustr bios apply <node-id>          -- triggers bios_only reimage
+//	clustr bios apply -n NODE [--profile PROFILE_ID]   -- post-boot apply (no reimage)
 //	clustr bios provider verify <vendor>
 //
-// The "apply" subcommand triggers a bios_only reimage: the node PXE-boots into
-// initramfs, applies the assigned BIOS profile via the vendor binary, and reboots
-// without fetching an image.
+// The "apply" subcommand pushes the assigned BIOS profile to a running node via
+// clustr-clientd.  Settings are written to NVRAM; a reboot is required for changes
+// to take effect.  The node is NOT rebooted automatically.
 package main
 
 import (
@@ -237,32 +237,58 @@ func newBiosDetachCmd() *cobra.Command {
 // ─── bios apply ───────────────────────────────────────────────────────────────
 
 func newBiosApplyCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "apply <node-id>",
-		Short: "Apply the node's assigned BIOS profile via bios_only reimage",
-		Long: `Triggers a bios_only reimage on the given node.
+	var flagProfile string
 
-The node will PXE-boot into initramfs, apply the assigned BIOS profile using
-the vendor binary (/var/lib/clustr/vendor-bios/<vendor>/<binary>), and reboot
-immediately without fetching an image.
+	cmd := &cobra.Command{
+		Use:   "apply -n NODE [--profile PROFILE_ID]",
+		Short: "Apply a BIOS profile to a running node (post-boot, no reimage)",
+		Long: `Pushes the assigned BIOS profile to a running node via clustr-clientd.
 
-Requires: the node must have a BIOS profile assigned (use 'clustr bios assign').`,
-		Args: cobra.ExactArgs(1),
+Settings are written to BIOS NVRAM immediately.  They take effect after the next
+operator-initiated reboot — the node is NOT rebooted automatically.
+
+If --profile is omitted, the node's currently assigned profile is used.
+To assign a profile first, run: clustr bios assign <node-id> <profile-id>
+
+The node must be online (clustr-clientd connected) for this command to work.
+To apply BIOS settings as part of a full reimage cycle, use:
+  clustr reimage --bios-only <node-id>`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			c := clientFromFlags()
 
-			nodeID := args[0]
-			req := api.CreateReimageRequest{BiosOnly: true}
-			var resp api.ReimageRequest
-			if err := c.PostJSON(ctx, "/api/v1/nodes/"+nodeID+"/reimage", req, &resp); err != nil {
+			nodeID, _ := cmd.Flags().GetString("node")
+			if nodeID == "" {
+				return fmt.Errorf("--node / -n is required")
+			}
+
+			// If a profile override is provided, assign it first.
+			if flagProfile != "" {
+				req := api.AssignBiosProfileRequest{ProfileID: flagProfile}
+				var resp api.NodeBiosProfileResponse
+				if err := c.PutJSON(ctx, "/api/v1/nodes/"+nodeID+"/bios-profile", req, &resp); err != nil {
+					return fmt.Errorf("bios apply: assign profile: %w", err)
+				}
+			}
+
+			var resp api.BiosApplyResponse
+			if err := c.PostJSON(ctx, "/api/v1/nodes/"+nodeID+"/bios/apply", nil, &resp); err != nil {
 				return fmt.Errorf("bios apply: %w", err)
 			}
-			fmt.Printf("BIOS-only reimage queued for node %s (request %s)\n", nodeID, resp.ID)
-			fmt.Println("The node will PXE-boot, apply BIOS settings, and reboot.")
+
+			if resp.Applied == 0 {
+				fmt.Printf("Node %s: %s\n", nodeID, resp.Message)
+			} else {
+				fmt.Printf("Node %s: %d setting(s) applied.\n", nodeID, resp.Applied)
+				fmt.Printf("  %s\n", resp.Message)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().StringP("node", "n", "", "Node ID to apply BIOS settings to (required)")
+	cmd.Flags().StringVar(&flagProfile, "profile", "", "Profile ID to assign before applying (optional; uses node's current profile if omitted)")
+	_ = cmd.MarkFlagRequired("node")
+	return cmd
 }
 
 // ─── bios provider ───────────────────────────────────��───────────────────────��

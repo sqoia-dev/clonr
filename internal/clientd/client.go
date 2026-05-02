@@ -320,6 +320,12 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "disk_capture_request":
 		go c.handleDiskCaptureRequest(msg)
 
+	case "bios_read_request":
+		go c.handleBiosReadRequest(msg)
+
+	case "bios_apply_request":
+		go c.handleBiosApplyRequest(msg)
+
 	case "stats_ack":
 		c.handleStatsAck(msg)
 
@@ -1149,6 +1155,69 @@ func (c *Client) verifyBoot(token string) {
 			Int("status", resp.StatusCode).
 			Str("url", url).
 			Msg("clientd: verify-boot: unexpected HTTP status (non-fatal)")
+	}
+}
+
+// ─── BIOS read/apply (#159 / Sprint 26) ──────────────────────────────────────
+
+// handleBiosReadRequest parses a bios_read_request server message, reads
+// current BIOS settings via the vendor provider, and sends a bios_read_result
+// back to the server.  Dispatched in a goroutine so a slow vendor binary exec
+// does not block the readLoop.
+func (c *Client) handleBiosReadRequest(msg ServerMessage) {
+	var payload BiosReadRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).
+			Msg("clientd: malformed bios_read_request payload")
+		return
+	}
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+	log.Info().Str("msg_id", msg.MsgID).Str("vendor", payload.Vendor).
+		Msg("clientd: handling bios_read_request")
+
+	send := func(m ClientMessage) error { return c.enqueueClientMessage(m) }
+	HandleBiosReadRequest(context.Background(), payload, send)
+}
+
+// handleBiosApplyRequest parses a bios_apply_request server message, writes
+// settings to BIOS NVRAM via clustr-privhelper, and sends a bios_apply_result
+// back to the server.  Dispatched in a goroutine so a slow BIOS apply does not
+// block the readLoop.  Settings take effect on the next operator-initiated reboot.
+func (c *Client) handleBiosApplyRequest(msg ServerMessage) {
+	var payload BiosApplyRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).
+			Msg("clientd: malformed bios_apply_request payload")
+		return
+	}
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+	log.Info().Str("msg_id", msg.MsgID).Str("vendor", payload.Vendor).
+		Str("profile_id", payload.ProfileID).
+		Msg("clientd: handling bios_apply_request (post-boot apply)")
+
+	send := func(m ClientMessage) error { return c.enqueueClientMessage(m) }
+	HandleBiosApplyRequest(context.Background(), payload, send)
+}
+
+// enqueueClientMessage serialises a ClientMessage and pushes it onto the send channel.
+// Returns an error only when the channel is full (dropped); the error is logged
+// by the caller (HandleBiosReadRequest / HandleBiosApplyRequest) if needed.
+func (c *Client) enqueueClientMessage(msg ClientMessage) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("clientd: marshal client message type=%s: %w", msg.Type, err)
+	}
+	select {
+	case c.send <- data:
+		return nil
+	default:
+		log.Warn().Str("type", msg.Type).Str("msg_id", msg.MsgID).
+			Msg("clientd: client message dropped — send buffer full")
+		return fmt.Errorf("clientd: send buffer full for message type=%s", msg.Type)
 	}
 }
 
