@@ -253,6 +253,36 @@ type ExecResultPayload struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// OperatorExecRequestPayload is the payload for the "operator_exec_request" server→node message.
+// Unlike exec_request (which enforces a whitelist for diagnostic commands), this message type
+// runs an arbitrary command on behalf of an authenticated admin/operator. The server sends
+// this ONLY after verifying that the requesting API key has admin or operator scope.
+// There is NO argument whitelist — the operator takes full responsibility for the command.
+//
+// Commands are still run without a shell (exec.Command, not /bin/sh -c) for safety.
+type OperatorExecRequestPayload struct {
+	// RefMsgID is the server's msg_id; echoed in the operator_exec_result reply for correlation.
+	RefMsgID string `json:"ref_msg_id"`
+	// Command is the binary to execute (must be an absolute path or a PATH-resolvable name).
+	Command string `json:"command"`
+	// Args is the argument list (no shell expansion; no shell is invoked).
+	Args []string `json:"args"`
+	// TimeoutSec is the execution timeout in seconds. 0 means use the default (60s).
+	// The server hard-caps this at 3600s (1h).
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
+// OperatorExecResultPayload is the payload for the "operator_exec_result" client→server message.
+// The node sends this after completing (or failing) an operator_exec_request.
+type OperatorExecResultPayload struct {
+	RefMsgID  string `json:"ref_msg_id"`
+	ExitCode  int    `json:"exit_code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	Truncated bool   `json:"truncated"`
+	Error     string `json:"error,omitempty"`
+}
+
 // SlurmConfigAckPayload is the payload for the "ack" message sent after a slurm_config_push.
 // It carries per-file and per-script results and the apply action result.
 // The outer ClientMessage type is "ack" and the RefMsgID identifies the push message.

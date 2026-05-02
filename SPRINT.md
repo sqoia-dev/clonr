@@ -1282,3 +1282,44 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
   Owner: Gilfoyle (or Jared if Gilfoyle unavailable).
   In: confirm a node with a Mellanox CX-5 + an LSI 9361-8i actually PXE-boots, partitions, deploys an image, and rejoins the cluster end-to-end. Document exact module load order observed. Out: full lab-validate matrix (separate sprint task).
   Depends on: #120 #121 #122 (all landed).
+
+---
+
+## Sprint 21 — Operator parallel ops, part 1 (HIGH) — "exec and console"
+
+**Started:** 2026-05-02
+**Theme:** Bring the day-2 ops surface that defines whether clustr feels like a cluster manager or a provisioner. Without `clustr exec` and `clustr console`, every operator who tries clustr concludes it's "just provisioning." This is the single biggest perceived-ceiling gap.
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` Sprint 21 section. Approved by founder 2026-05-02.
+
+### Tasks
+
+- [x] **#125 — Selector grammar and routing (HIGH, M)** — landed `2ab236c`, CI green
+  Owner: Dinesh; arch by Richard.
+  In: `internal/selector/` package with one `Resolve(*SelectorSet) []NodeID`. Selector flags: `-n NODE` (hostlist syntax — `node[01-32]`), `-g GROUP`, `--racks RACK`, `--chassis CHASSIS`, `-A` (all), `-a` (active), `--ignore-status`. Cobra-side flag wiring shared by every batch command. Out: per-rack / per-chassis resolution against the rack model — racks/chassis return empty until rack model lands; falls back gracefully.
+  Depends on: nothing. Foundation for the rest of Sprint 21.
+
+- [ ] **#126 — `clustr exec` over clientd WebSocket (HIGH, L)**
+  Owner: Dinesh; arch by Richard.
+  In: new server endpoint `POST /api/v1/exec` (SSE-streamed, one stream per target). Reuse existing `clustr-clientd` WebSocket as transport — no new SSH/port management on the operator workstation. Output formats: `inline`, `header`, `consolidate`, `realtime`, `json` (match cv-exec exactly). CLI wires through the selector grammar. Out: file-streaming (#127), pty/tty exec (#128).
+  Depends on: #125.
+
+- [ ] **#127 — `clustr cp` (HIGH, M)**
+  Owner: Dinesh.
+  In: `POST /api/v1/cp` server-side. Recursive, `--preserve` (mode/owner/timestamps), `--include-self`, parallel. Reuse same clientd WebSocket transport. Out: rsync-style delta (one-shot push only in v1).
+  Depends on: #125 #126.
+
+- [ ] **#128 — `clustr console --ipmi-sol` and `--ssh` (HIGH, M)**
+  Owner: Dinesh; arch by Richard for the SOL broker.
+  In: `WS /api/v1/console/{node_id}` brokered server-side. IPMI SOL via `ipmitool sol activate`; SSH PTY as fallback. Escape character `~.` (default), configurable via `-e`. Generalise the pattern from `internal/image/shell.go`. Out: in-browser console (lands in Sprint 24).
+  Depends on: #125. Independent of #126/#127.
+
+- [x] **#129 — `clustr ipmi sel {list,clear,head,tail,filter --level critical}` (MEDIUM, S)** — landed `b470efd`, CI green. Added `GetSEL`/`ClearSEL` to existing `ipmi.Client` + `SELHead`/`SELTail`/`SELFilter` helpers in `internal/ipmi/sel.go`.
+  Owner: Dinesh.
+  In: CLI wires to existing IPMI surface; add filter / head / tail / level on top.
+  Depends on: nothing.
+
+- [x] **#130 — `clustr health [--summary|--ping|--wait]` (MEDIUM, S)** — landed `48eb03c`, CI green. Three `TODO(#125)` markers in `cmd/clustr/health.go` for selector-flag migration once #125's `RegisterSelectorFlags` is consumed (Stream A will fold these in during #126/#127).
+  Owner: Dinesh.
+  In: aggregate per-node health summary endpoint + CLI. `--wait` polls until all targets are reachable or timeout.
+  Depends on: nothing.

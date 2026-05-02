@@ -47,7 +47,19 @@ var (
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
+	// SilenceErrors prevents cobra from printing the error string again since
+	// RunE handlers print their own messages.
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
+
 	if err := rootCmd.Execute(); err != nil {
+		// execExitError carries the max per-node exit code so the caller can
+		// distinguish between "all nodes failed with exit 2" and "unreachable".
+		var exitErr *execExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -130,6 +142,8 @@ func init() {
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newShellCmd())
 	rootCmd.AddCommand(newHealthCmd()) // #130
+	rootCmd.AddCommand(newExecCmd())   // #126
+	rootCmd.AddCommand(newCpCmd())     // #127
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.

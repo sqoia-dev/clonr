@@ -273,6 +273,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "exec_request":
 		c.handleExecRequest(msg)
 
+	case "operator_exec_request":
+		c.handleOperatorExecRequest(msg)
+
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
 			Msg("clientd: received unknown server message type (ignored)")
@@ -692,6 +695,60 @@ func (c *Client) sendExecResult(result ExecResultPayload) {
 	default:
 		log.Warn().Str("ref_msg_id", result.RefMsgID).
 			Msg("clientd: exec_result dropped — send buffer full")
+	}
+}
+
+// handleOperatorExecRequest parses an operator_exec_request server message,
+// executes the command without a whitelist check, and sends the result back as
+// an operator_exec_result client message.
+func (c *Client) handleOperatorExecRequest(msg ServerMessage) {
+	var payload OperatorExecRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).
+			Msg("clientd: malformed operator_exec_request payload")
+		c.sendOperatorExecResult(OperatorExecResultPayload{
+			RefMsgID: msg.MsgID,
+			ExitCode: -1,
+			Error:    "malformed operator_exec_request payload: " + err.Error(),
+		})
+		return
+	}
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+
+	log.Info().
+		Str("msg_id", msg.MsgID).
+		Str("command", payload.Command).
+		Strs("args", payload.Args).
+		Msg("clientd: handling operator_exec_request")
+
+	result := handleOperatorExecRequest(payload)
+	c.sendOperatorExecResult(result)
+}
+
+// sendOperatorExecResult enqueues an operator_exec_result message.
+func (c *Client) sendOperatorExecResult(result OperatorExecResultPayload) {
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal operator_exec_result payload")
+		return
+	}
+	msg := ClientMessage{
+		Type:    "operator_exec_result",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(resultPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal operator_exec_result message")
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", result.RefMsgID).
+			Msg("clientd: operator_exec_result dropped — send buffer full")
 	}
 }
 

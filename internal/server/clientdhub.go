@@ -66,6 +66,12 @@ type pendingAck struct {
 	ch chan clientd.AckPayload
 }
 
+// pendingOperatorExecResult holds a channel to receive an OperatorExecResultPayload
+// for an in-flight operator_exec_request.
+type pendingOperatorExecResult struct {
+	ch chan clientd.OperatorExecResultPayload
+}
+
 // pendingExecResult holds a channel to receive an ExecResultPayload for an
 // in-flight exec_request.
 type pendingExecResult struct {
@@ -94,6 +100,10 @@ type ClientdHub struct {
 	// execRegistry maps outbound msg_id → pendingExecResult so the HTTP handler
 	// can block until the node sends back the "exec_result" message.
 	execRegistry sync.Map
+
+	// operatorExecRegistry maps outbound msg_id → pendingOperatorExecResult so the
+	// batch exec HTTP handler can collect operator_exec_result messages per node.
+	operatorExecRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -238,6 +248,37 @@ func (h *ClientdHub) DeliverExecResult(msgID string, payload clientd.ExecResultP
 		return false
 	}
 	pe := v.(pendingExecResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+// RegisterOperatorExec creates a pending operator exec result entry for msgID and
+// returns the channel to read the OperatorExecResultPayload from. The caller must
+// call UnregisterOperatorExec(msgID) when done.
+func (h *ClientdHub) RegisterOperatorExec(msgID string) <-chan clientd.OperatorExecResultPayload {
+	ch := make(chan clientd.OperatorExecResultPayload, 1)
+	h.operatorExecRegistry.Store(msgID, pendingOperatorExecResult{ch: ch})
+	return ch
+}
+
+// UnregisterOperatorExec removes a pending operator exec result entry.
+func (h *ClientdHub) UnregisterOperatorExec(msgID string) {
+	h.operatorExecRegistry.Delete(msgID)
+}
+
+// DeliverOperatorExecResult delivers an OperatorExecResultPayload to the waiting
+// HTTP handler. Called by the WebSocket handler when it receives an
+// "operator_exec_result" message from the node. Returns true if delivered.
+func (h *ClientdHub) DeliverOperatorExecResult(msgID string, payload clientd.OperatorExecResultPayload) bool {
+	v, ok := h.operatorExecRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingOperatorExecResult)
 	select {
 	case pe.ch <- payload:
 		return true

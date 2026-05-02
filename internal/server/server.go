@@ -38,6 +38,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/reimage"
 	"github.com/sqoia-dev/clustr/internal/notifications"
 	"github.com/sqoia-dev/clustr/internal/allocation"
+	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	webui "github.com/sqoia-dev/clustr/internal/server/web"
@@ -1619,6 +1620,21 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Remote exec — run a whitelisted diagnostic command on a live node.
 			r.Post("/nodes/{id}/exec", clientdH.ExecOnNode)
+
+			// Batch operator exec (#126) — arbitrary command across a node selector,
+			// streamed as SSE. Admin/operator scope only (runs arbitrary commands on nodes).
+			execH := &handlers.ExecHandler{
+				DB:  handlers.NewExecDBAdapter(selector.NewDBAdapter(s.db)),
+				Hub: s.clientdHub,
+			}
+			r.Post("/exec", execH.HandleExec)
+
+			// Batch file copy (#127) — push files to a node selector over clientd.
+			cpH := &handlers.CpHandler{
+				DB:  handlers.NewExecDBAdapter(selector.NewDBAdapter(s.db)),
+				Hub: s.clientdHub,
+			}
+			r.Post("/cp", cpH.HandleCp)
 
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.

@@ -48,6 +48,10 @@ type ClientdHubIface interface {
 	RegisterExec(msgID string) <-chan clientd.ExecResultPayload
 	UnregisterExec(msgID string)
 	DeliverExecResult(msgID string, payload clientd.ExecResultPayload) bool
+	// OperatorExec registry — used for operator_exec_request batch fan-out.
+	RegisterOperatorExec(msgID string) <-chan clientd.OperatorExecResultPayload
+	UnregisterOperatorExec(msgID string)
+	DeliverOperatorExecResult(msgID string, payload clientd.OperatorExecResultPayload) bool
 }
 
 // ClientdHandler handles the clustr-clientd WebSocket endpoint and related REST queries.
@@ -157,6 +161,9 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 
 	case "exec_result":
 		h.handleExecResult(nodeID, msg)
+
+	case "operator_exec_result":
+		h.handleOperatorExecResult(nodeID, msg)
 
 	default:
 		log.Debug().Str("node_id", nodeID).Str("type", msg.Type).
@@ -439,6 +446,25 @@ func (h *ClientdHandler) handleExecResult(nodeID string, msg clientd.ClientMessa
 		Bool("truncated", payload.Truncated).
 		Bool("delivered", delivered).
 		Msg("clientd ws: exec_result received from node")
+}
+
+// handleOperatorExecResult processes an "operator_exec_result" message from the node,
+// delivering it to the batch ExecHandler that is waiting on the operator exec registry.
+func (h *ClientdHandler) handleOperatorExecResult(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.OperatorExecResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: malformed operator_exec_result payload")
+		return
+	}
+	delivered := h.Hub.DeliverOperatorExecResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Int("exit_code", payload.ExitCode).
+		Bool("truncated", payload.Truncated).
+		Bool("delivered", delivered).
+		Msg("clientd ws: operator_exec_result received from node")
 }
 
 // execRequest is the JSON body for POST /api/v1/nodes/{id}/exec.
