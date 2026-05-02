@@ -1636,6 +1636,15 @@ func (s *Server) buildRouter() chi.Router {
 			}
 			r.Post("/cp", cpH.HandleCp)
 
+			// Console broker (#128) — brokered server-side IPMI SOL or SSH PTY.
+			// Admin/operator scope only (full terminal access to the node).
+			// The operator connects via WebSocket; the server opens the upstream
+			// (ipmitool sol activate or SSH PTY) and pipes bidirectionally.
+			consoleH := &handlers.ConsoleHandler{
+				DB: handlers.NewConsoleDBAdapter(s.db),
+			}
+			r.Get("/console/{node_id}", consoleH.HandleConsole)
+
 			// Disk layout hierarchy — node-level overrides, group assignment,
 			// hardware-aware recommendations, and validation.
 			r.Get("/nodes/{id}/layout-recommendation", layoutH.GetLayoutRecommendation)

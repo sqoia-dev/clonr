@@ -232,6 +232,35 @@ type SlurmAdminCmdResult struct {
 	JobCount int    `json:"job_count,omitempty"` // for check_queue: number of running/pending jobs
 }
 
+// ─── Console message types (#128) ────────────────────────────────────────────
+// These message types are defined here for future use when the console broker
+// is routed through the clientd WebSocket (Sprint 24 in-browser console). In
+// the current implementation (Sprint 21) the console handler opens the upstream
+// (ipmitool SOL or SSH PTY) directly server-side; the clientd WS is not used
+// for console I/O.
+
+// ConsoleRequestPayload is the payload for the "console_request" server→node
+// message. Reserved for Sprint 24 when the in-browser console UI is added and
+// the console session is brokered through the clientd WebSocket rather than
+// a direct server→BMC/SSH connection.
+type ConsoleRequestPayload struct {
+	// SessionID is the operator-facing session identifier for correlation.
+	SessionID string `json:"session_id"`
+	// Mode is "ipmi-sol" or "ssh".
+	Mode string `json:"mode"`
+}
+
+// ConsoleDataPayload is the payload for the "console_data" message exchanged
+// during an active console session (both directions). Data is raw terminal
+// bytes — not base64-encoded because the clientd WebSocket transport handles
+// text frames; the broker transcodes as needed.
+type ConsoleDataPayload struct {
+	// SessionID correlates the data to an active console session.
+	SessionID string `json:"session_id"`
+	// Data is the raw terminal byte sequence.
+	Data string `json:"data"`
+}
+
 // ExecRequestPayload is the payload for the "exec_request" server→node message.
 // The server sends this to request execution of a whitelisted diagnostic command.
 type ExecRequestPayload struct {

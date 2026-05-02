@@ -141,9 +141,10 @@ func init() {
 	rootCmd.AddCommand(newFixEFIBootCmd())
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newShellCmd())
-	rootCmd.AddCommand(newHealthCmd()) // #130
-	rootCmd.AddCommand(newExecCmd())   // #126
-	rootCmd.AddCommand(newCpCmd())     // #127
+	rootCmd.AddCommand(newHealthCmd())  // #130
+	rootCmd.AddCommand(newExecCmd())    // #126
+	rootCmd.AddCommand(newCpCmd())      // #127
+	rootCmd.AddCommand(newConsoleCmd()) // #128
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.
