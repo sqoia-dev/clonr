@@ -46,7 +46,9 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/bios"
-	_ "github.com/sqoia-dev/clustr/internal/bios/intel" // register Intel provider
+	_ "github.com/sqoia-dev/clustr/internal/bios/dell"        // register Dell provider
+	_ "github.com/sqoia-dev/clustr/internal/bios/intel"       // register Intel provider
+	_ "github.com/sqoia-dev/clustr/internal/bios/supermicro"  // register Supermicro provider
 )
 
 // privhelperPath is the canonical path for the setuid helper binary.
@@ -130,8 +132,8 @@ func sendBiosReadResult(send func(ClientMessage) error,
 
 // HandleBiosApplyRequest processes a "bios_apply_request" message from the server.
 //
-// Post-boot apply path (Sprint 26):
-//  1. Validate vendor is in the allowlist (intel; dell/supermicro are future work).
+// Post-boot apply path:
+//  1. Validate vendor is in the allowlist (intel, dell, supermicro).
 //  2. Stage settings_json to /var/lib/clustr/bios-staging/<msg_id>.json.
 //  3. Call clustr-privhelper bios-apply <vendor> <staging-path>.
 //  4. Clean up the staging file.
@@ -146,11 +148,11 @@ func HandleBiosApplyRequest(ctx context.Context, payload BiosApplyRequestPayload
 		Str("ref_msg_id", payload.RefMsgID).
 		Msg("bios: post-boot apply request received")
 
-	// Validate vendor allowlist (intel only in this sprint; dell/supermicro are future).
+	// Validate vendor allowlist.
 	allowedVendors := map[string]bool{"intel": true, "dell": true, "supermicro": true}
 	if !allowedVendors[payload.Vendor] {
 		sendBiosApplyResult(send, payload.RefMsgID, payload.ProfileID, 0,
-			"unknown vendor "+payload.Vendor+"; supported vendors: intel")
+			"unknown vendor "+payload.Vendor+"; supported vendors: intel, dell, supermicro")
 		return
 	}
 

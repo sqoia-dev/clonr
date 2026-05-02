@@ -61,10 +61,10 @@
 //	bios-apply <vendor> <profile-blob-path>
 //	                             Apply BIOS settings from <profile-blob-path>.
 //	                             vendor must be in the allowlist. path must be a
-//	                             regular .json file under
+//	                             regular .json or .cfg file under
 //	                             /var/lib/clustr/bios-staging/ (mode 0700 root).
-//	                             Rebuilds argv internally; caller cannot inject
-//	                             flags. Audits to audit_log.
+//	                             Rebuilds argv internally per vendor; caller
+//	                             cannot inject flags. Audits to audit_log.
 //
 // # Usage
 //
@@ -838,12 +838,36 @@ func isSafeVendor(vendor string) bool {
 	return true
 }
 
+// biosReadArgvForVendor returns the argv (excluding the binary path itself)
+// for the read operation for the given vendor.
+//
+//   - intel:      syscfg /s -
+//   - dell:       racadm get BIOS.SetupConfig
+//   - supermicro: sum -c GetCurrentBiosCfg --file /tmp/clustr-bios-read-<pid>.cfg
+//     (sum writes to a file; stdout redirect does not apply)
+//
+// For supermicro the output path is fixed under /tmp so the calling provider
+// can read it.  The privhelper's stdout remains connected to the caller; sum's
+// own stdout/stderr pass through unchanged.
+func biosReadArgvForVendor(vendor string) []string {
+	switch vendor {
+	case "dell":
+		return []string{"get", "BIOS.SetupConfig"}
+	case "supermicro":
+		// sum writes the config to --file; the provider reads it after.
+		return []string{"-c", "GetCurrentBiosCfg", "--file", "/tmp/clustr-sum-bios-read.cfg"}
+	default: // intel
+		return []string{"/s", "-"}
+	}
+}
+
 // verbBiosRead reads current BIOS settings via the operator-supplied vendor
-// binary.  Prints JSON to stdout; the calling clustr-clientd process reads it.
+// binary.  Prints the output to stdout; the calling clustr-clientd process
+// reads it.
 //
 // Argv whitelist: bios-read <vendor>
 //   - vendor must match ^[a-z]+$ and be in biosVendorAllowlist
-//   - helper rebuilds argv: /path/to/syscfg /s -
+//   - helper rebuilds argv internally per vendor (no flags accepted from caller)
 func verbBiosRead(callerUID int, args []string) int {
 	if len(args) != 1 {
 		msg := "bios-read requires exactly one argument: <vendor>"
@@ -872,8 +896,8 @@ func verbBiosRead(callerUID int, args []string) int {
 	}
 
 	// Build argv internally — caller cannot inject flags.
-	// Intel SYSCFG: /s - prints all settings to stdout.
-	cmd := exec.Command(binPath, "/s", "-") //#nosec G204 -- binPath is a fixed operator-supplied path validated above; no user input
+	readArgv := biosReadArgvForVendor(vendor)
+	cmd := exec.Command(binPath, readArgv...) //#nosec G204 -- binPath is a fixed operator-supplied path validated above; readArgv is built internally from fixed literals
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -904,7 +928,7 @@ const biosStagingDir = "/var/lib/clustr/bios-staging/"
 // Argv whitelist: bios-apply <vendor> <profile-blob-path>
 //   - vendor must match ^[a-z]+$ and be in biosVendorAllowlist
 //   - profile-blob-path must be a regular .json file under biosStagingDir
-//   - helper rebuilds argv: /path/to/syscfg /r <profile-blob-path>
+//   - helper rebuilds argv internally per vendor (no flags accepted from caller)
 func verbBiosApply(callerUID int, args []string) int {
 	if len(args) != 2 {
 		msg := "bios-apply requires exactly two arguments: <vendor> <profile-blob-path>"
@@ -972,21 +996,178 @@ func verbBiosApply(callerUID int, args []string) int {
 	}
 
 	// Build argv internally — caller provided only the profile path, no flags.
-	// Intel SYSCFG: /r <profile-file> reads settings and applies them.
-	cmd := exec.Command(binPath, "/r", cleanPath) //#nosec G204 -- binPath is operator-supplied fixed path; cleanPath is validated to be under biosStagingDir and end in .json
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Vendor-specific apply argv:
+	//   intel:      syscfg /r <profile-file>
+	//   dell:       (multiple set + jobqueue invocations, see biosApplyDell)
+	//   supermicro: sum -c ChangeBiosCfg --file <profile-file>
+	exitCode := biosApplyExec(callerUID, vendor, binPath, cleanPath)
+	writeAudit(callerUID, "bios-apply", args, exitCode, "")
+	return exitCode
+}
 
-	execErr := cmd.Run()
-	exitCode := 0
-	if execErr != nil {
-		if exitErr, ok := execErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 2
+// biosApplyExec dispatches the vendor-specific apply invocation.
+// For Dell, the profile JSON must contain an array of {name, to} objects;
+// the helper issues one racadm set per entry then creates the job queue.
+func biosApplyExec(callerUID int, vendor, binPath, profilePath string) int {
+	switch vendor {
+	case "dell":
+		return biosApplyDell(callerUID, binPath, profilePath)
+	case "supermicro":
+		return biosApplySupermicro(callerUID, binPath, profilePath)
+	default: // intel
+		cmd := exec.Command(binPath, "/r", profilePath) //#nosec G204 -- binPath is operator-supplied; profilePath validated under biosStagingDir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return exitErr.ExitCode()
+			}
+			return 2
+		}
+		return 0
+	}
+}
+
+// biosApplyDell reads a JSON profile file and issues one `racadm set` per
+// entry, then runs `racadm jobqueue create BIOS.Setup.1-1` to schedule POST.
+// The JSON format expected by this function is:
+//
+//	[{"name":"BIOS.ProcSettings.LogicalProc","to":"Disabled"}, ...]
+func biosApplyDell(callerUID int, binPath, profilePath string) int {
+	data, err := os.ReadFile(profilePath) //#nosec G304 -- profilePath validated by caller to be under biosStagingDir and end in .json
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: dell: read profile: %v\n", err)
+		writeAudit(callerUID, "bios-apply-dell-read", nil, 2, err.Error())
+		return 2
+	}
+
+	// Parse the JSON array of {name, to} entries.
+	var entries []struct {
+		Name string `json:"name"`
+		To   string `json:"to"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: dell: parse profile JSON: %v\n", err)
+		return 2
+	}
+
+	for _, e := range entries {
+		cmd := exec.Command(binPath, "set", e.Name, e.To) //#nosec G204 -- binPath is operator-supplied; e.Name/e.To from validated staging JSON
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "bios-apply: dell: racadm set %s: %v\n", e.Name, err)
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return exitErr.ExitCode()
+			}
+			return 2
 		}
 	}
 
-	writeAudit(callerUID, "bios-apply", args, exitCode, "")
-	return exitCode
+	// Schedule staged settings for next POST.
+	cmd := exec.Command(binPath, "jobqueue", "create", "BIOS.Setup.1-1") //#nosec G204 -- all fixed literals
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: dell: racadm jobqueue create: %v\n", err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 2
+	}
+	return 0
+}
+
+// biosApplySupermicro reads a JSON profile file ({"Setting.Key":"Value",...}),
+// converts it to a sum 2.x INI-compatible .cfg file in /tmp, then invokes
+// `sum -c ChangeBiosCfg --file <cfg>`.  The /tmp cfg file is removed after
+// the sum invocation regardless of outcome.
+//
+// JSON key format: "Section.Key" → groups under [Section] in the cfg.
+// Keys with no '.' are written under [General].
+func biosApplySupermicro(callerUID int, binPath, profilePath string) int {
+	data, err := os.ReadFile(profilePath) //#nosec G304 -- profilePath validated by caller to be under biosStagingDir and end in .json
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: supermicro: read profile: %v\n", err)
+		return 2
+	}
+
+	// Parse the flat JSON object {"Section.Key": "Value", ...}.
+	var settings map[string]string
+	if err := json.Unmarshal(data, &settings); err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: supermicro: parse profile JSON: %v\n", err)
+		return 2
+	}
+
+	if len(settings) == 0 {
+		return 0 // nothing to apply
+	}
+
+	// Build section → key → value mapping.
+	type kvEntry struct{ key, value string }
+	sections := make(map[string][]kvEntry)
+	var sectionOrder []string
+	seenSec := make(map[string]bool)
+
+	for name, val := range settings {
+		section := "General"
+		key := name
+		if idx := strings.Index(name, "."); idx >= 0 {
+			section = name[:idx]
+			key = name[idx+1:]
+		}
+		if !seenSec[section] {
+			sectionOrder = append(sectionOrder, section)
+			seenSec[section] = true
+		}
+		sections[section] = append(sections[section], kvEntry{key, val})
+	}
+
+	// Write to a temp .cfg file in /tmp.
+	tmpFile, err := os.CreateTemp("/tmp", "clustr-sum-apply-*.cfg")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: supermicro: create tmp cfg: %v\n", err)
+		return 2
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	for _, sec := range sectionOrder {
+		if _, werr := fmt.Fprintf(tmpFile, "[%s]\n", sec); werr != nil {
+			fmt.Fprintf(os.Stderr, "bios-apply: supermicro: write cfg: %v\n", werr)
+			tmpFile.Close()
+			return 2
+		}
+		for _, e := range sections[sec] {
+			if _, werr := fmt.Fprintf(tmpFile, "%s=%s\n", e.key, e.value); werr != nil {
+				fmt.Fprintf(os.Stderr, "bios-apply: supermicro: write cfg: %v\n", werr)
+				tmpFile.Close()
+				return 2
+			}
+		}
+		if _, werr := fmt.Fprintln(tmpFile); werr != nil {
+			fmt.Fprintf(os.Stderr, "bios-apply: supermicro: write cfg: %v\n", werr)
+			tmpFile.Close()
+			return 2
+		}
+	}
+	if err := tmpFile.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: supermicro: close cfg: %v\n", err)
+		return 2
+	}
+
+	// sum -c ChangeBiosCfg --file <tmpPath>
+	cmd := exec.Command(binPath, "-c", "ChangeBiosCfg", "--file", tmpPath) //#nosec G204 -- binPath is operator-supplied; tmpPath is our /tmp file
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "bios-apply: supermicro: sum ChangeBiosCfg: %v\n", err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 2
+	}
+
+	_ = callerUID // available for audit if needed; writeAudit is called by the caller
+	return 0
 }

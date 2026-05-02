@@ -77,8 +77,70 @@ redistribution, so clustr cannot bundle it.
    sudo systemctl restart clustr-serverd
    ```
 
-Without this binary, BIOS profile features report "intel-syscfg not configured"
+Without this binary, BIOS profile features report "vendor binary not present"
 and Intel BIOS push is unavailable. All other clustr features work without it.
+
+### Optional: Dell BIOS settings push
+
+If you intend to use clustr's BIOS settings push feature on Dell PowerEdge
+nodes, you must install Dell's `racadm` utility manually. Dell's EULA prohibits
+redistribution, so clustr cannot bundle it.
+
+1. Download iDRAC Tools for Linux from Dell's support site.
+   Search for **"iDRAC Tools for Linux"** at:
+   https://www.dell.com/support/home/
+
+2. Extract the archive and locate the `racadm` binary.
+
+3. Copy it to the clustr vendor directory:
+
+   ```sh
+   sudo mkdir -p /var/lib/clustr/vendor-bios/dell
+   sudo cp racadm /var/lib/clustr/vendor-bios/dell/racadm
+   sudo chmod 0755 /var/lib/clustr/vendor-bios/dell/racadm
+   ```
+
+4. Restart the service:
+
+   ```sh
+   sudo systemctl restart clustr-serverd
+   ```
+
+Without this binary, BIOS profile features for Dell nodes report
+"vendor binary not present" and Dell BIOS push is unavailable.
+All other clustr features work without it.
+
+### Optional: Supermicro BIOS settings push
+
+If you intend to use clustr's BIOS settings push feature on Supermicro nodes,
+you must install Supermicro's `sum` utility manually. Supermicro's EULA
+prohibits redistribution, so clustr cannot bundle it. sum 2.x and 3.x are
+supported (INI-like and XML config formats, respectively). sum 1.x is not
+supported.
+
+1. Download Supermicro Update Manager (sum) from Supermicro's support site.
+   Navigate to **Solutions > Management Software > BMC / IPMI** at:
+   https://www.supermicro.com/
+
+2. Extract the archive and locate the `sum` binary for Linux.
+
+3. Copy it to the clustr vendor directory:
+
+   ```sh
+   sudo mkdir -p /var/lib/clustr/vendor-bios/supermicro
+   sudo cp sum /var/lib/clustr/vendor-bios/supermicro/sum
+   sudo chmod 0755 /var/lib/clustr/vendor-bios/supermicro/sum
+   ```
+
+4. Restart the service:
+
+   ```sh
+   sudo systemctl restart clustr-serverd
+   ```
+
+Without this binary, BIOS profile features for Supermicro nodes report
+"vendor binary not present" and Supermicro BIOS push is unavailable.
+All other clustr features work without it.
 
 ## Quick start
 
