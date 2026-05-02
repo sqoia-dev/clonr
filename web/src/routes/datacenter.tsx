@@ -17,15 +17,15 @@ import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import {
   DndContext,
-  DragEndEvent,
   DragOverlay,
-  DragStartEvent,
   PointerSensor,
   useSensor,
   useSensors,
   closestCenter,
+  useDraggable,
+  useDroppable,
 } from "@dnd-kit/core"
-import { useDraggable, useDroppable } from "@dnd-kit/core"
+import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core"
 import { CSS } from "@dnd-kit/utilities"
 import {
   Building2, Plus, Power, PowerOff, RefreshCw,
@@ -592,7 +592,7 @@ export function DatacenterPage() {
   const error = racksQuery.isError
 
   return (
-    <SectionErrorBoundary>
+    <SectionErrorBoundary section="Datacenter">
       <div className="p-6 max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">

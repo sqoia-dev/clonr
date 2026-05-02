@@ -3,8 +3,9 @@
  * two-stage-commit section (#154).
  */
 
+import * as React from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import { render, screen, fireEvent } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 // ─── Stub the api module so we don't need a real server ──────────────────────
@@ -29,8 +30,12 @@ function makeQC() {
   })
 }
 
-function Wrapper({ children }: { children: React.ReactNode }) {
-  return <QueryClientProvider client={makeQC()}>{children}</QueryClientProvider>
+// makeWrapper returns a React Query provider wrapper for tests that need it.
+export function makeWrapper() {
+  const qc = makeQC()
+  return function TestWrapper({ children }: { children: React.ReactNode }) {
+    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  }
 }
 
 // ─── PayloadDiff test ─────────────────────────────────────────────────────────

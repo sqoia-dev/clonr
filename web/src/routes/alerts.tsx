@@ -615,7 +615,7 @@ export function AlertsPage() {
   const selectedRule = rules.find(r => r.name === viewRule) ?? null
 
   return (
-    <SectionErrorBoundary>
+    <SectionErrorBoundary section="Alerts">
       <div className="p-6 max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
