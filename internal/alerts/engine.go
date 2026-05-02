@@ -44,8 +44,13 @@ type HeartbeatChecker interface {
 	GetLastSeen(ctx context.Context, nodeID string) (time.Time, bool, error)
 }
 
-// Engine is the alert rule evaluator.  Create it with New() and call Run()
+// Engine is the alert rule evaluator. Create it with New() and call Run()
 // inside a goroutine; cancel the context to stop it.
+//
+// THREAD-SAFETY: Engine is NOT safe for concurrent use. All methods assume the
+// single-Run-goroutine invariant (see Engine.Run). External callers must not
+// invoke Engine methods from other goroutines. State accessed by Engine methods
+// is reached through StateStore, which has its own thread-safety contract.
 type Engine struct {
 	rulesDir   string
 	stats      StatsQuerier

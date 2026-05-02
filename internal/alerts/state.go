@@ -17,8 +17,15 @@ const (
 	StateResolved = "resolved"
 )
 
-// Alert is the server-side representation of a fired or resolved alert.
-// This is the shape returned by GET /api/v1/alerts.
+// Alert represents a firing or resolved alert event. This is the shape
+// returned by GET /api/v1/alerts.
+//
+// THREAD-SAFETY: Alert is immutable post-construction. Callers MUST NOT mutate
+// any field, including the Labels map, after receiving an *Alert from any
+// StateStore method. Each StateStore call returns either a freshly-constructed
+// *Alert (Fire/Resolve) or a slice of Alert values built fresh from DB rows
+// (QueryFiltered/QueryActive/QueryRecent) — none of which share state with
+// callers.
 type Alert struct {
 	ID           int64             `json:"id"`
 	RuleName     string            `json:"rule_name"`
@@ -251,6 +258,12 @@ func (s *StateStore) UpdateLastValue(ctx context.Context, key alertStateKey, las
 // over without holding any lock.
 //
 // THREAD-SAFETY: acquires mu.RLock, copies values out, releases before return.
+//
+// NOTE: the returned Alert values are projected from the in-memory active-alert
+// cache, which stores only a subset of Alert fields. Labels, Severity,
+// ResolvedAt, LastValue, and threshold fields are NOT populated and will be
+// zero-valued. Use QueryFiltered/QueryActive/QueryRecent if you need full
+// Alert hydration from the DB.
 func (s *StateStore) Snapshot() []Alert {
 	s.mu.RLock()
 	out := make([]Alert, 0, len(s.active))
@@ -273,6 +286,11 @@ func (s *StateStore) Snapshot() []Alert {
 // Keep fn fast — the read lock is held for its entire duration.
 //
 // THREAD-SAFETY: holds mu.RLock for fn's duration.
+//
+// NOTE: the Alert values passed to fn are projected from the in-memory
+// active-alert cache. Labels, Severity, ResolvedAt, LastValue, and threshold
+// fields are NOT populated and will be zero-valued. Use
+// QueryFiltered/QueryActive/QueryRecent if you need full Alert hydration.
 func (s *StateStore) ForEachActive(fn func(Alert)) {
 	s.mu.RLock()
 	for _, aa := range s.active {
