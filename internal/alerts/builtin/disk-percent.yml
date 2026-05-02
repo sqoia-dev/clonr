@@ -1,0 +1,14 @@
+name: disk-percent
+description: Disk usage above 90%
+plugin: disks
+sensor: used_pct
+labels:
+  mount: ".*"
+threshold:
+  op: ">="
+  value: 90
+duration: 300s
+severity: warn
+notify:
+  webhook: true
+  email: []

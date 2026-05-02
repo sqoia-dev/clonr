@@ -1,0 +1,15 @@
+name: cluster-nodes-offline
+description: Node has not sent any heartbeat in the last 120 seconds
+# Special plugin "_meta" with sensor "node_offline" triggers the meta-rule
+# evaluator path in the engine which checks last_seen_at from node_configs
+# rather than querying node_stats.
+plugin: _meta
+sensor: node_offline
+threshold:
+  op: ">="
+  value: 1
+duration: 120s
+severity: critical
+notify:
+  webhook: true
+  email: []

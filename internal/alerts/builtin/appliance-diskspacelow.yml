@@ -1,0 +1,14 @@
+name: appliance-diskspacelow
+description: Clustr appliance /var/lib/clustr disk usage above 95%
+plugin: disks
+sensor: used_pct
+labels:
+  mount: "/var/lib/clustr"
+threshold:
+  op: ">="
+  value: 95
+duration: 300s
+severity: critical
+notify:
+  webhook: true
+  email: []

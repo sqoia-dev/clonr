@@ -1,0 +1,12 @@
+name: hw-raid-failed
+description: MegaRAID virtual disk failed (state == 2)
+plugin: megaraid
+sensor: vd_state
+threshold:
+  op: "=="
+  value: 2
+duration: 60s
+severity: critical
+notify:
+  webhook: true
+  email: []

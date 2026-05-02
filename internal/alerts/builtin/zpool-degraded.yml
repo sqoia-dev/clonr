@@ -1,0 +1,14 @@
+name: zpool-degraded
+description: ZFS pool degraded or faulted (state >= 1)
+plugin: zfs
+sensor: state
+labels:
+  pool: ".*"
+threshold:
+  op: ">="
+  value: 1
+duration: 60s
+severity: warn
+notify:
+  webhook: true
+  email: []

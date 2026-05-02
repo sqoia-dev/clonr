@@ -37,6 +37,7 @@ import (
 	proxmoxpower "github.com/sqoia-dev/clustr/internal/power/proxmox"
 	"github.com/sqoia-dev/clustr/internal/reimage"
 	"github.com/sqoia-dev/clustr/internal/notifications"
+	"github.com/sqoia-dev/clustr/internal/alerts"
 	"github.com/sqoia-dev/clustr/internal/allocation"
 	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
@@ -102,6 +103,11 @@ type Server struct {
 	// computed by the tech-trig evaluator between ticks. Used by T1 evaluation.
 	// Stored as an atomicFloat64 (see tech_trig_worker.go) to avoid locking overhead.
 	lastContentionRate atomicFloat64
+
+	// alertEngine is the #133 alert rule engine.  Initialised in buildRouter()
+	// (after the notifier is available) and started in StartBackgroundWorkers().
+	alertEngine *alerts.Engine
+	alertStore  *alerts.StateStore
 }
 
 // buildProgressAdapter adapts *BuildProgressStore to image.BuildProgressReporter.
@@ -281,6 +287,10 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// Sprint 22 #131: stats retention sweeper + Prometheus exposition cache.
 	go s.runStatsRetentionSweeper(ctx)
 	go s.runStatsPrometheusRefresher(ctx)
+	// Sprint 22 #133: alert rule engine.
+	if s.alertEngine != nil {
+		go s.alertEngine.Run(ctx)
+	}
 }
 
 // runDigestProcessor polls the notification digest queue every hour and sends
@@ -1143,6 +1153,21 @@ func (s *Server) buildRouter() chi.Router {
 		// Store on the server for use by StartBackgroundWorkers (digest processor, E4).
 		s.notifier = notifierEarly
 
+		// ─── Sprint 22 #133: alert rule engine ───────────────────────────────────────
+		{
+			alertStore, err := alerts.NewStateStore(s.db)
+			if err != nil {
+				log.Error().Err(err).Msg("alerts: failed to init state store — alert engine disabled")
+			} else {
+				alertDispatcher := &alerts.Dispatcher{
+					Webhook: s.webhookDispatcher,
+					Mailer:  mailerEarly,
+				}
+				s.alertStore = alertStore
+				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.db), s.db, alertStore, alertDispatcher)
+			}
+		}
+
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
 		// Admin can access all PI data. operator, readonly, viewer are blocked.
@@ -1630,6 +1655,12 @@ func (s *Server) buildRouter() chi.Router {
 			// Sprint 22 #131: per-node stats query.
 			statsH := &handlers.StatsHandler{DB: NewStatsDBAdapter(s.db)}
 			r.Get("/nodes/{id}/stats", statsH.GetNodeStats)
+
+			// Sprint 22 #133: alert rule engine — query active + recent alerts.
+			if s.alertStore != nil {
+				alertsH := &handlers.AlertsHandler{Store: s.alertStore}
+				r.Get("/alerts", alertsH.HandleList)
+			}
 
 			// Batch operator exec (#126) — arbitrary command across a node selector,
 			// streamed as SSE. Admin/operator scope only (runs arbitrary commands on nodes).
