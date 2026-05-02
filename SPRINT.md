@@ -1452,7 +1452,7 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
 
 ### Tasks
 
-- [ ] **#157 — UDPCast multicast for fleet reimage (HIGH, L)**
+- [x] **#157 — UDPCast multicast for fleet reimage (HIGH, L)** — 3 commits landed, CI green on `fb97dfe`. Migration `093_multicast_sessions.sql`. udp-sender + udp-receiver from EPEL `udpcast` package (GPL-2.0; same operator-install pattern as intel-syscfg — override via `CLUSTR_UDPSENDER_PATH`). Long-poll `/api/v1/multicast/sessions/{id}/wait` for node holding pattern. iPXE `reimage-fleet` MenuItem alongside `reimage-now`. Phase-sequence one-pager landed at `docs/PHASE-SEQUENCE-DEPLOY.md`. **Punted Sprint 26+:** E2E multicast smoke test under `-tags multicast_e2e` (needs real physical/VXLAN multicast network); qemu loopback multicast test infra.
   Owner: Richard scopes (2 days) → Dinesh implements.
   In: ship `udpcast` (sender + receiver) in initramfs. Server-side `internal/multicast/` scheduler with `multicast_sessions` table and a 60s batching window. New CLI flag `clustr deploy --multicast=auto|off|require`. Add an iPXE menu item for "Reimage (wait for fleet)" vs "Reimage (now)". Out: per-image bandwidth shaping (single global rate setting in v1).
   Depends on: #120 (landed).

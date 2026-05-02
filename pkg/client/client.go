@@ -527,6 +527,21 @@ func (c *Client) PostJSON(ctx context.Context, path string, body any, out any) e
 	return c.post(ctx, path, body, out)
 }
 
+// PutJSON performs a PUT to path with body as JSON and decodes the response into out.
+func (c *Client) PutJSON(ctx context.Context, path string, body any, out any) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("client: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+path, bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+	return c.do(req, out)
+}
+
 // DeleteJSON performs a DELETE to path. Returns nil on 204 No Content.
 func (c *Client) DeleteJSON(ctx context.Context, path string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)

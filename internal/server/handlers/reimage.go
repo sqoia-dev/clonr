@@ -66,24 +66,27 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if imageID == "" {
 		imageID = node.BaseImageID
 	}
-	if imageID == "" {
+	// bios_only reimages don't fetch an image — image_id is informational only.
+	if imageID == "" && !body.BiosOnly {
 		writeValidationError(w, "image_id is required (node has no base_image_id assigned)")
 		return
 	}
 
 	if !body.Force {
-		// Pre-check 1: target image must exist and be ready.
-		img, err := h.DB.GetBaseImage(r.Context(), imageID)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if img.Status != api.ImageStatusReady {
-			writeJSON(w, http.StatusConflict, api.ErrorResponse{
-				Error: fmt.Sprintf("image %q is not ready (status: %s) — use force=true to skip this check", imageID, img.Status),
-				Code:  "image_not_ready",
-			})
-			return
+		// Pre-check 1: target image must exist and be ready (skipped for bios_only).
+		if imageID != "" && !body.BiosOnly {
+			img, err := h.DB.GetBaseImage(r.Context(), imageID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			if img.Status != api.ImageStatusReady {
+				writeJSON(w, http.StatusConflict, api.ErrorResponse{
+					Error: fmt.Sprintf("image %q is not ready (status: %s) — use force=true to skip this check", imageID, img.Status),
+					Code:  "image_not_ready",
+				})
+				return
+			}
 		}
 
 		// Pre-check 2: no active (non-terminal) reimage already in flight.
@@ -131,6 +134,7 @@ func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ErrorMessage: "",
 		RequestedBy:  actor,
 		DryRun:       body.DryRun,
+		BiosOnly:     body.BiosOnly,
 		CreatedAt:    time.Now().UTC(),
 		InjectVars:   body.InjectVars, // S4-11: per-deployment variable overrides
 	}

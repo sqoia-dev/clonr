@@ -741,11 +741,17 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 	// PowerCycle — the node is here because it was told to come back for a
 	// fresh image.
 	var dryRun bool
+	var biosOnly bool
 	if nodeCfg.ReimagePending {
 		action = "deploy"
-		// Look up the active reimage request to surface dry_run to the client.
+		// Look up the active reimage request to surface dry_run and bios_only to the client.
 		if activeReq, err := h.DB.GetActiveReimageForNode(r.Context(), nodeCfg.ID); err == nil && activeReq != nil {
 			dryRun = activeReq.DryRun
+			biosOnly = activeReq.BiosOnly
+		}
+		// bios_only overrides "deploy" action — no image fetch, just BIOS apply + reboot.
+		if biosOnly {
+			action = "bios_only"
 		}
 	}
 
@@ -881,11 +887,20 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, api.RegisterResponse{
+	// Attach BIOS profile when one is assigned — the deploy agent applies it
+	// in initramfs before image fetch (or exclusively when bios_only=true).
+	resp := api.RegisterResponse{
 		NodeConfig: &nodeCfg,
 		Action:     action,
 		DryRun:     dryRun,
-	})
+		BiosOnly:   biosOnly,
+	}
+	if nbp, err := h.DB.GetNodeBiosProfile(r.Context(), nodeCfg.ID); err == nil {
+		if profile, perr := h.DB.GetBiosProfile(r.Context(), nbp.ProfileID); perr == nil {
+			resp.BiosProfile = &profile
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // DeployComplete handles POST /api/v1/nodes/:id/deploy-complete.

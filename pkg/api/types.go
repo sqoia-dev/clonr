@@ -339,6 +339,11 @@ const (
 	// and systemd all started. This is the terminal success state. ADR-0008.
 	NodeStateDeployedVerified NodeState = "deployed_verified"
 
+	// NodeStateBiosApplying: a bios_only reimage is in progress. The node is in
+	// initramfs applying BIOS settings. Transitions back to the previous state
+	// after the apply completes (or to NodeStateFailed on error).
+	NodeStateBiosApplying NodeState = "bios_applying"
+
 	// NodeStateDeployVerifyTimeout: verify-boot was not received within
 	// CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at. Indicates a likely
 	// bootloader, kernel, or network failure. Needs operator attention. ADR-0008.
@@ -1167,15 +1172,24 @@ type RegisterRequest struct {
 type RegisterResponse struct {
 	NodeConfig *NodeConfig `json:"node_config"`
 	// Action tells the client what to do next:
-	//   "deploy"  — an image has been assigned; proceed with deployment.
-	//   "wait"    — no image assigned yet; poll GET /api/v1/nodes/by-mac/:mac every 30s.
-	//   "capture" — admin wants to capture this node's image (future).
+	//   "deploy"      — an image has been assigned; proceed with deployment.
+	//   "bios_only"   — apply BIOS profile, then reboot immediately (no image fetch).
+	//   "wait"        — no image assigned yet; poll GET /api/v1/nodes/by-mac/:mac every 30s.
+	//   "capture"     — admin wants to capture this node's image (future).
 	Action string `json:"action"`
 	// DryRun, when true, instructs the deploy client to execute the full PXE
 	// boot sequence (disk selection, partitioning decisions, etc.) but skip the
 	// actual disk wipe and filesystem operations. Set when the triggering
 	// reimage request had dry_run=true.
 	DryRun bool `json:"dry_run,omitempty"`
+	// BiosProfile, when non-nil, is the BIOS profile assigned to this node.
+	// The deploy agent applies this profile in initramfs before image fetch.
+	// Nil when no profile is assigned. (#159)
+	BiosProfile *BiosProfile `json:"bios_profile,omitempty"`
+	// BiosOnly, when true, instructs the deploy agent to apply BiosProfile and
+	// then reboot without fetching an image. Set when the triggering reimage
+	// request had bios_only=true. (#159)
+	BiosOnly bool `json:"bios_only,omitempty"`
 }
 
 // ─── Factory request types ────────────────────────────────────────────────────
@@ -1398,6 +1412,10 @@ type ReimageRequest struct {
 	ErrorMessage string        `json:"error_message,omitempty"`
 	RequestedBy  string        `json:"requested_by"`
 	DryRun       bool          `json:"dry_run,omitempty"`
+	// BiosOnly, when true, means this reimage only applies BIOS settings.
+	// The node PXE-boots into initramfs, applies the assigned profile, then reboots
+	// without fetching an image. (#159)
+	BiosOnly     bool          `json:"bios_only,omitempty"`
 	CreatedAt    time.Time     `json:"created_at"`
 	// Terminal-state detail — populated on deploy-failed; nil on success or in-flight.
 	ExitCode *int   `json:"exit_code,omitempty"`
@@ -1460,6 +1478,10 @@ type CreateReimageRequest struct {
 	// the node's stored custom_vars. The merged set is delivered to the deploy
 	// agent via initramfs kernel cmdline. (S4-11)
 	InjectVars map[string]string `json:"inject_vars,omitempty"`
+	// BiosOnly, when true, triggers a BIOS-settings-only apply: the node PXE-boots
+	// into initramfs, applies the assigned BIOS profile via the vendor binary, and
+	// reboots immediately without touching the disk or fetching an image. (#159)
+	BiosOnly bool `json:"bios_only,omitempty"`
 }
 
 // ListReimagesResponse wraps the reimage history list.

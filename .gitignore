@@ -11,6 +11,7 @@
 /clustr-serverd-*
 /clustr-static
 /clustr-clientd
+/clustr-privhelper
 /initramfs-clustr.img
 *.tar.gz
 *.tar.zst

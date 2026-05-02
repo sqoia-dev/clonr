@@ -154,6 +154,7 @@ func init() {
 	rootCmd.AddCommand(newConsoleCmd()) // #128
 	rootCmd.AddCommand(newAlertsCmd())  // #134
 	rootCmd.AddCommand(newStatsCmd())   // #134
+	rootCmd.AddCommand(newBiosCmd())    // #159
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.
@@ -836,16 +837,53 @@ func runAutoDeployMode() error {
 		nodeName = regResp.NodeConfig.Hostname
 	}
 
-	// Step 3: Act on server directive.
+	// Step 3: BIOS apply (pre-image, #159).
+	//
+	// If the server returned a BiosProfile, apply it now — before image fetch.
+	// This is design decision D1: BIOS settings are applied in initramfs where
+	// we are already root and don't need a privhelper.
+	//
+	// For bios_only reimages (action == "bios_only"), we apply and reboot without
+	// proceeding to image fetch. A failure here is fatal for bios_only (the node
+	// has nothing else to do) but only a warning for normal deploys.
+	var biosApplyErr error
+	if regResp.BiosProfile != nil {
+		biosApplyErr = applyBiosProfileInInitramfs(ctx, regResp.BiosProfile, deployLog)
+		if biosApplyErr != nil && regResp.Action != "bios_only" {
+			// Non-fatal for normal deploys — continue with image.
+			deployLog.Warn().Err(biosApplyErr).Str("profile_id", regResp.BiosProfile.ID).
+				Msg("BIOS apply failed — continuing with image deployment")
+			biosApplyErr = nil // clear so we don't block below
+		}
+	}
+
+	// Step 4: Act on server directive.
 	//
 	// Deploy phase ordering (per docs/PHASE-SEQUENCE-DEPLOY.md):
 	//   1. Hardware discovery  (done above)
 	//   2. Server registration (done above)
-	//   3. BIOS apply         — TODO(#159): hook here when NodeConfig.BIOSOnly is set
+	//   3. BIOS apply         (done above when BiosProfile is set)
 	//   4. Image fetch        — unicast (below) or multicast (Sprint 25 #157 Commit 3)
 	//   5. Partition + write
 	//   6. Finalize + reboot
 	switch regResp.Action {
+	case "bios_only":
+		// BIOS was applied above; reboot immediately without fetching an image.
+		if regResp.BiosProfile == nil {
+			// Server returned bios_only but no profile — shouldn't happen, but guard it.
+			printPhase(phaseFailed, "bios_only reimage but no BIOS profile in response — aborting")
+			return fmt.Errorf("bios_only: server returned no bios_profile in response")
+		}
+		if biosApplyErr != nil {
+			printPhase(phaseFailed, "BIOS apply failed — aborting bios_only reimage")
+			printDeployError("bios_apply", biosApplyErr.Error())
+			return fmt.Errorf("bios_only: BIOS apply failed: %w", biosApplyErr)
+		}
+		printPhase(phaseDone, "BIOS settings applied — rebooting")
+		deployLog.Info().Msg("bios_only reimage complete — rebooting now")
+		rebootSystem(deployLog)
+		return nil
+
 	case "deploy":
 		// Print header now that we have node identity; image will be fetched next.
 		printDeployHeader(nodeName, "", cfg.ServerURL)

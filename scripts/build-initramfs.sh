@@ -708,6 +708,53 @@ ${transitive}"
     fi
 fi
 
+# ── Vendor BIOS binaries (#159) ──────────────────────────────────────────────
+# Operator-supplied BIOS utilities are bundled into the initramfs when present
+# on the clustr server at /var/lib/clustr/vendor-bios/<vendor>/<binary>.
+#
+# These binaries are NOT redistributed by clustr (vendor EULA restrictions).
+# The operator must supply them manually. See docs/BIOS-INTEL-SETUP.md.
+#
+# Supported vendors and expected paths on the SERVER:
+#   Intel SYSCFG:    /var/lib/clustr/vendor-bios/intel/syscfg
+#   Dell RACADM:     /var/lib/clustr/vendor-bios/dell/racadm
+#   Supermicro SUM:  /var/lib/clustr/vendor-bios/supermicro/sum
+#
+# Inside the initramfs, each binary is installed at:
+#   intel-syscfg    → /usr/local/bin/intel-syscfg
+#   racadm          → /usr/local/bin/dell-racadm
+#   sum             → /usr/local/bin/supermicro-sum
+#
+# The clustr deploy agent (cmd/clustr/bios.go) looks for binaries at the
+# /usr/local/bin/<vendor>-<tool> path; initramfsBiosVendorPaths maps vendor
+# names to these destinations.
+echo "[+] Checking for operator-supplied BIOS vendor binaries..."
+declare -A BIOS_VENDOR_BINS=(
+    [intel]="/var/lib/clustr/vendor-bios/intel/syscfg:intel-syscfg"
+    [dell]="/var/lib/clustr/vendor-bios/dell/racadm:dell-racadm"
+    [supermicro]="/var/lib/clustr/vendor-bios/supermicro/sum:supermicro-sum"
+)
+mkdir -p "$WORKDIR/usr/local/bin"
+for vendor in "${!BIOS_VENDOR_BINS[@]}"; do
+    spec="${BIOS_VENDOR_BINS[$vendor]}"
+    server_path="${spec%%:*}"
+    dest_name="${spec##*:}"
+    dest_path="$WORKDIR/usr/local/bin/${dest_name}"
+
+    # Check if the binary exists on the server (local or remote).
+    if remote_exec "test -x ${server_path} 2>/dev/null"; then
+        if remote_copy "${server_path}" "${dest_path}"; then
+            chmod 755 "${dest_path}"
+            echo "  [+] Bundled ${vendor} BIOS binary: ${server_path} → /usr/local/bin/${dest_name}"
+        else
+            echo "  [!] Found ${vendor} BIOS binary at ${server_path} but could not copy it" >&2
+        fi
+    else
+        echo "  [!] ${vendor} BIOS binary not found at ${server_path} — BIOS apply for ${vendor} disabled"
+        echo "       See docs/BIOS-INTEL-SETUP.md for installation instructions"
+    fi
+done
+
 # Create symlinks for all busybox applets we need.
 # NOTE: which, ping, reboot, sync, touch, seq are busybox applets — they must
 # be explicitly symlinked or the init script fails with "command not found".
