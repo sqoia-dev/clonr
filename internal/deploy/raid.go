@@ -8,11 +8,71 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
+
+// ─── IMSM detection (#150) ───────────────────────────────────────────────────
+
+// imsmDetection caches the per-process IMSM capability check so it is only
+// run once per deploy session, not once per RAIDSpec.
+type imsmDetection struct {
+	once      sync.Once
+	available bool
+}
+
+var imsmPlatform imsmDetection
+
+// IMSMAvailable returns true when the host has an mdadm binary that reports
+// IMSM (Intel Matrix Storage Manager / Intel Rapid Storage Technology) platform
+// support.  The result is cached for the lifetime of the process.
+//
+// Detection runs `mdadm --imsm-platform-test` and checks that:
+//   - Exit code is 0.
+//   - Stdout contains "Platform : Intel".
+//
+// This mirrors the detection described in mdadm(8) for imsm containers.
+// The function is safe for concurrent use.
+func IMSMAvailable(ctx context.Context) bool {
+	imsmPlatform.once.Do(func() {
+		imsmPlatform.available = probeIMSMPlatform(ctx)
+	})
+	return imsmPlatform.available
+}
+
+// probeIMSMPlatform runs the actual mdadm probe. Separated from IMSMAvailable
+// so tests can call it directly without touching the cached singleton.
+func probeIMSMPlatform(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "mdadm", "--imsm-platform-test")
+	out, err := cmd.Output()
+	if err != nil {
+		// Non-zero exit or mdadm not found — no IMSM support.
+		logger().Debug().Err(err).Msg("deploy/raid: mdadm --imsm-platform-test: not available")
+		return false
+	}
+	detected := strings.Contains(string(out), "Platform : Intel")
+	logger().Info().Bool("imsm_available", detected).
+		Str("mdadm_output", strings.TrimSpace(string(out))).
+		Msg("deploy/raid: IMSM platform detection result")
+	return detected
+}
+
+// ParseIMSMPlatformOutput returns true when mdadm --imsm-platform-test stdout
+// indicates an Intel IMSM-capable platform.  Exported for unit testing.
+func ParseIMSMPlatformOutput(output string) bool {
+	return strings.Contains(output, "Platform : Intel")
+}
+
+// ResetIMSMDetectionForTest resets the cached IMSM detection state.
+// Must only be called from tests.
+func ResetIMSMDetectionForTest() {
+	imsmPlatform = imsmDetection{}
+}
+
+// ─── RAID array creation ──────────────────────────────────────────────────────
 
 // CreateRAIDArrays assembles md arrays according to the DiskLayout spec.
 // It must be called before partitioning — the resulting md devices are then
@@ -27,6 +87,15 @@ func CreateRAIDArrays(ctx context.Context, layout api.DiskLayout, hw hardware.Sy
 }
 
 // createRAIDArray creates a single md array from a RAIDSpec.
+//
+// Assembly path:
+//  1. spec.ForceSoftware=true OR no IMSM support → software md RAID via mdadm --create
+//  2. IMSM platform available AND NOT ForceSoftware → IMSM container + volume path
+//
+// Mixed-controller case: if some members are on an IMSM controller and some are
+// not, we default to software RAID (conservative) and emit a warning. Detecting
+// per-device IMSM membership is not yet implemented (requires storcli or SNIA
+// SES queries); the warning prompts the operator to use ForceSoftware explicitly.
 func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemInfo) error {
 	if spec.Name == "" {
 		return fmt.Errorf("raid spec missing name")
@@ -62,7 +131,24 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 		_ = exec.CommandContext(ctx, "wipefs", "-a", m).Run()
 	}
 
-	// Build mdadm create arguments.
+	log := logger()
+
+	// Branch: IMSM hardware-RAID passthrough (#150) vs software md RAID.
+	// Conditions for IMSM path:
+	//   - spec.ForceSoftware is false (operator hasn't explicitly requested software)
+	//   - IMSMAvailable() returns true (platform detection succeeds)
+	if !spec.ForceSoftware && IMSMAvailable(ctx) {
+		log.Info().Str("device", devPath).Str("level", spec.Level).
+			Strs("members", members).Msg("creating IMSM RAID container + volume")
+		return createIMSMArray(ctx, spec, members, devPath)
+	}
+
+	if spec.ForceSoftware && IMSMAvailable(ctx) {
+		log.Info().Str("device", devPath).
+			Msg("IMSM available but force_software=true; using software md RAID")
+	}
+
+	// Software md RAID path.
 	numDevices := len(members)
 	args := []string{
 		"--create", devPath,
@@ -80,8 +166,7 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 
 	args = append(args, members...)
 
-	log := logger()
-	log.Info().Str("device", devPath).Str("level", spec.Level).Strs("members", members).Msg("creating RAID array")
+	log.Info().Str("device", devPath).Str("level", spec.Level).Strs("members", members).Msg("creating software RAID array")
 	if err := runAndLog(ctx, "mdadm", exec.CommandContext(ctx, "mdadm", args...)); err != nil {
 		return fmt.Errorf("mdadm create: %w", err)
 	}
@@ -90,6 +175,69 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 	// Wait for udev to settle so the new md device is visible.
 	_ = runCmd(ctx, "udevadm", "settle")
 
+	return nil
+}
+
+// createIMSMArray assembles a RAID array using the IMSM (Intel Matrix Storage
+// Manager) metadata format. This is a two-step process:
+//
+//  1. Create an IMSM container that spans all member devices:
+//     mdadm --create --metadata=imsm --raid-devices=N /dev/md/imsm0 [devs...]
+//
+//  2. Create the RAID volume inside the container:
+//     mdadm --create --metadata=imsm /dev/md/Volume0 -n N -l LEVEL /dev/md/imsm0
+//
+// The resulting volume (/dev/md/Volume0 or /dev/mdN after udev settle) is what
+// the rest of the deploy flow partitions and formats.
+//
+// Reference: mdadm(8), "IMSM / Intel Matrix Storage Manager" section.
+func createIMSMArray(ctx context.Context, spec api.RAIDSpec, members []string, devPath string) error {
+	log := logger()
+	n := len(members) - spec.Spare
+
+	// Step 1 — IMSM container.
+	containerDev := "/dev/md/imsm0"
+	containerArgs := []string{
+		"--create", "--metadata=imsm",
+		"--raid-devices", strconv.Itoa(n),
+		containerDev,
+	}
+	containerArgs = append(containerArgs, members...)
+
+	log.Info().Str("container", containerDev).Strs("members", members).
+		Msg("deploy/raid: creating IMSM container")
+	if err := runAndLog(ctx, "mdadm", exec.CommandContext(ctx, "mdadm", containerArgs...)); err != nil {
+		return fmt.Errorf("mdadm imsm container create: %w", err)
+	}
+
+	// Brief udev settle so the container device node appears before the volume step.
+	_ = runCmd(ctx, "udevadm", "settle")
+
+	// Step 2 — IMSM volume inside the container.
+	volumeDev := "/dev/md/Volume0"
+	volumeArgs := []string{
+		"--create", "--metadata=imsm",
+		volumeDev,
+		"-n", strconv.Itoa(n),
+		"-l", spec.Level,
+		containerDev,
+	}
+	if spec.ChunkKB > 0 {
+		volumeArgs = append(volumeArgs, "--chunk", strconv.Itoa(spec.ChunkKB)+"K")
+	}
+
+	log.Info().Str("volume", volumeDev).Str("level", spec.Level).
+		Msg("deploy/raid: creating IMSM volume")
+	if err := runAndLog(ctx, "mdadm", exec.CommandContext(ctx, "mdadm", volumeArgs...)); err != nil {
+		return fmt.Errorf("mdadm imsm volume create: %w", err)
+	}
+
+	// Final settle so the volume device node is stable before partitioning.
+	_ = runCmd(ctx, "udevadm", "settle")
+
+	log.Info().Str("device", devPath).Str("container", containerDev).
+		Str("volume", volumeDev).Str("level", spec.Level).
+		Msg("deploy/raid: IMSM array created")
 	return nil
 }
 

@@ -142,6 +142,11 @@ type RAIDSpec struct {
 	ChunkKB int `json:"chunk_kb,omitempty"`
 	// Spare is the number of hot spare devices to include in the array.
 	Spare int `json:"spare,omitempty"`
+	// ForceSoftware, when true, bypasses IMSM hardware-RAID detection and
+	// always assembles this array as a software md RAID regardless of whether
+	// an IMSM-capable controller is present. Default false: the deploy path
+	// routes to IMSM assembly when the platform supports it.
+	ForceSoftware bool `json:"force_software,omitempty"`
 }
 
 // PartitionSpec describes a single partition within a DiskLayout.
