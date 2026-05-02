@@ -317,6 +317,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "operator_exec_request":
 		c.handleOperatorExecRequest(msg)
 
+	case "disk_capture_request":
+		go c.handleDiskCaptureRequest(msg)
+
 	case "stats_ack":
 		c.handleStatsAck(msg)
 
@@ -1146,6 +1149,59 @@ func (c *Client) verifyBoot(token string) {
 			Int("status", resp.StatusCode).
 			Str("url", url).
 			Msg("clientd: verify-boot: unexpected HTTP status (non-fatal)")
+	}
+}
+
+// ─── Disk capture (#151) ──────────────────────────────────────────────────────
+
+// handleDiskCaptureRequest parses a disk_capture_request server message,
+// captures the local disk layout, and sends the result back as a
+// disk_capture_result client message.
+// Dispatched in a goroutine so a slow lsblk/mdadm run does not block the
+// readLoop and thereby the heartbeat / write path.
+func (c *Client) handleDiskCaptureRequest(msg ServerMessage) {
+	var payload DiskCaptureRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).
+			Msg("clientd: malformed disk_capture_request payload")
+		c.sendDiskCaptureResult(DiskCaptureResultPayload{
+			RefMsgID: msg.MsgID,
+			Error:    "malformed disk_capture_request payload: " + err.Error(),
+		})
+		return
+	}
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+
+	log.Info().Str("msg_id", msg.MsgID).Msg("clientd: handling disk_capture_request")
+
+	result := handleDiskCaptureRequest(payload)
+	c.sendDiskCaptureResult(result)
+}
+
+// sendDiskCaptureResult enqueues a disk_capture_result message over the WebSocket.
+func (c *Client) sendDiskCaptureResult(result DiskCaptureResultPayload) {
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal disk_capture_result payload")
+		return
+	}
+	msg := ClientMessage{
+		Type:    "disk_capture_result",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(resultPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal disk_capture_result message")
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", result.RefMsgID).
+			Msg("clientd: disk_capture_result dropped — send buffer full")
 	}
 }
 

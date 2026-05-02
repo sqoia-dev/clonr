@@ -1,0 +1,57 @@
+{
+  "blockdevices": [
+    {
+      "name": "sda",
+      "type": "disk",
+      "size": "53687091200",
+      "fstype": null,
+      "mountpoint": null,
+      "uuid": null,
+      "partuuid": null,
+      "label": null,
+      "model": "QEMU HARDDISK",
+      "serial": "QM00001",
+      "pkname": null,
+      "rm": false,
+      "ro": false,
+      "tran": "sata",
+      "vendor": "QEMU    ",
+      "children": [
+        {
+          "name": "sda1",
+          "type": "part",
+          "size": "1073741824",
+          "fstype": "vfat",
+          "mountpoint": "/boot/efi",
+          "uuid": "ABCD-1234",
+          "partuuid": "aaaaaaaa-0001-0001-0001-aaaaaaaaaaaa",
+          "label": "EFI",
+          "model": null,
+          "serial": null,
+          "pkname": "sda",
+          "rm": false,
+          "ro": false,
+          "tran": null,
+          "vendor": null
+        },
+        {
+          "name": "sda2",
+          "type": "part",
+          "size": "52613349376",
+          "fstype": "xfs",
+          "mountpoint": "/",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "partuuid": "bbbbbbbb-0002-0002-0002-bbbbbbbbbbbb",
+          "label": null,
+          "model": null,
+          "serial": null,
+          "pkname": "sda",
+          "rm": false,
+          "ro": false,
+          "tran": null,
+          "vendor": null
+        }
+      ]
+    }
+  ]
+}
