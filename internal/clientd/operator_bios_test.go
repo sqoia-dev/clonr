@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os/exec"
 	"testing"
 )
 
@@ -159,9 +158,6 @@ func TestHandleBiosApplyRequest_RefMsgIDEcho(t *testing.T) {
 // constructs the correct argv for the bios-apply verb.
 func TestPrivhelperBiosApplyCmd_ArgvShape(t *testing.T) {
 	cmd := privhelperBiosApplyCmd(context.Background(), "intel", "/var/lib/clustr/bios-staging/test-id.json")
-	if _, ok := cmd.(*exec.Cmd); !ok {
-		// cmd is already an *exec.Cmd; just verify args.
-	}
 	args := cmd.Args
 	// args[0] is the binary path; args[1..] are the arguments.
 	if len(args) != 4 {
