@@ -1412,30 +1412,75 @@ clustr v0.x continues to mature. Sprint 22 closed the "is anything broken right 
 
 ### Tasks
 
-- [ ] **#152 — Per-node Sensors + Event Log + Console tabs (MEDIUM, M)**
+- [x] **#152 — Per-node Sensors + Event Log + Console tabs (MEDIUM, M)** — landed `9ef5ae5`, CI green. New `web/src/routes/node-detail-tabs.tsx`. Sensors uses recharts sparklines + grouped sensor table (5s poll). Event Log on existing `GET /api/v1/nodes/{id}/sel` from #129 with typed-`"clear"` confirmation modal. Console uses `@xterm/xterm` + `@xterm/addon-fit` (already in package.json), reuses UX-3's `sseReconnectDelay()` for jittered auto-reconnect, caps at 8 attempts. Punted: threshold lines (backend TBD), SIGWINCH forwarding, Page Visibility integration.
   Owner: Dinesh.
   In: three new tabs on the node Sheet. Sensors uses `recharts` (~120 KB) for live values + thresholds. Event Log is a virtualized list with level filter + regex + head/tail (lands on the #129 backend). Console embeds `xterm.js` connected to the #128 SOL broker.
   Depends on: #128 #129 #131 (all landed).
 
-- [ ] **#153 — Slurm Jobs / Partitions UI (MEDIUM, M)**
+- [x] **#153 — Slurm Jobs / Partitions UI (MEDIUM, M)** — landed `3bb0e44`, CI green. **Deviation from plan:** no slurmrestd integration existed; used `squeue`/`sinfo` CLI directly (same pattern as existing `GetPartitionStatus`). slurmrestd-proxy would need JWT setup; CLI is sufficient. New routes `GET /api/v1/slurm/jobs` and `GET /api/v1/slurm/partitions` in `internal/slurm/routes.go:1665-1689`. Punted: job cancel (no backend surface), slurmrestd proxy mode, AllocatedNodes/IdleNodes when secondary sinfo unreachable from provisioning host (returns `—`).
   Owner: Dinesh.
   In: new tab on the existing `/slurm` route. Pull from `slurmrestd`. Tables only in v1. Reuse TanStack Query + the existing SSE hookup. Out: charts (no charts in v1).
   Depends on: nothing.
 
-- [ ] **#154 — Two-stage commit backend + drawer UI (MEDIUM, M)**
-  Owner: Dinesh; arch by Richard.
-  In: `pending_changes(id, kind, target, payload, created_by, created_at)` table. Endpoints `POST /api/v1/changes`, `GET /api/v1/changes`, `POST /api/v1/changes/commit`, `POST /api/v1/changes/clear`. Wire LDAP / sudoers / network handlers to *also* offer "stage" mode in addition to immediate-apply. UI: Pending Changes badge + drawer in AppShell with diff per change. Default off — preserves current behaviour. Operators opt in per surface in Settings.
-  Depends on: nothing.
+- [x] **#154 — Two-stage commit backend + drawer UI (MEDIUM, M)** — landed `79ed258` + `070e52b` + `b179a42` (CI fix-up: postJSON rename to avoid collision with sprint5_test). Migration `091_pending_changes.sql`. Stage intercepts in LDAP routes, sudoers `HandleAdd`, network routes — all clean 3-line guard pattern reading `m.StagingDB` under RLock. AppShell Pending Changes badge + drawer + Settings opt-ins. Default off; opt-in per surface preserves current behavior. CI green at `b179a42`.
 
-- [ ] **#155 — Alerts UI (MEDIUM, M)**
+- [x] **#155 — Alerts UI (MEDIUM, M)** — landed `fde8c15` + corrective `309dd34`. Migration `090_alert_silences.sql`. New `alerts.SilenceStore`, `SilencesHandler` (GET/POST/DELETE `/api/v1/alerts/silences`), `AlertRulesHandler` (GET `/api/v1/alerts/rules`). Silence check wired in `engine.go` at dispatch time. **YAML rule editor is read-only** because no PUT endpoint for rules exists — UX-9 follow-up queued.
   Owner: Dinesh.
   In: new top-level `/alerts` route. Active / Silenced / History tabs. Per-rule drill-down. In-line "Silence for 1h / 4h / 24h / forever". YAML rule editor uses `react-simple-code-editor` + `prismjs` (small) — not Monaco. Out: rule diff/preview on save (defer).
   Depends on: #133 (landed).
 
-- [ ] **#156 — Rack diagram (LOW, M)**
+- [x] **#156 — Rack diagram (LOW, M)** — landed `4b87cbb` + corrective `309dd34`. New `/datacenter` route with SVG rack component, within-rack drag-drop U-positioning, bulk power per rack. **Cross-rack drag is partial** — drop zone needs target rack_id exposed; UX-10 follow-up queued.
+
+---
+
+## Sprint 24 — SHIPPED (2026-05-02)
+
+All five tasks (#152–#156) landed. clustr now has live operator surfaces in the SPA: per-node Sensors charts + Event Log + browser Console (xterm.js); Slurm Jobs + Partitions tabs; two-stage commit drawer with Pending Changes badge; full Alerts UI with silence flow; rack diagram with drag-drop U-positioning. Backends from Sprints 21–23 are all surfaced.
+
+clustr is now a self-contained cluster manager with parity surfaces for the operator's daily questions: "which nodes are running what / is anything broken / what slurm jobs are queued / where physically is rack-X-slot-23 / what config is staged but not yet committed."
+
+---
+
+## Sprint 25 — Imaging breadth (MEDIUM) — "multicast, distros, BIOS, API spec"
+
+**Started:** 2026-05-02
+**Theme:** Larger-scope imaging features and the API hygiene work that's been accumulating. The remaining accepted IMPROVEMENTS items are bigger surface-area changes — UDPCast, Ubuntu distro driver, BIOS settings push, OpenAPI spec — that earn their place in a single sprint where all six can be designed, scoped, and shipped together. **XL sprint by scope** but every task is well-bounded; slippage on one doesn't block the others.
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` Sprint 25 section. Approved by founder 2026-05-02.
+
+**Note on numbering:** Richard's plan doc used #145–#150; renumbered to #157–#162.
+
+### Tasks
+
+- [ ] **#157 — UDPCast multicast for fleet reimage (HIGH, L)**
+  Owner: Richard scopes (2 days) → Dinesh implements.
+  In: ship `udpcast` (sender + receiver) in initramfs. Server-side `internal/multicast/` scheduler with `multicast_sessions` table and a 60s batching window. New CLI flag `clustr deploy --multicast=auto|off|require`. Add an iPXE menu item for "Reimage (wait for fleet)" vs "Reimage (now)". Out: per-image bandwidth shaping (single global rate setting in v1).
+  Depends on: #120 (landed).
+
+- [ ] **#158 — `DistroDriver` interface + Ubuntu driver (MEDIUM, M)**
   Owner: Dinesh.
-  In: new `/datacenter` route. Single SVG rack component, drag-and-drop U-positioning, bulk power per rack. Reads from #149's `racks` + `node_rack_position` tables.
-  Depends on: #149 (landed).
+  In: refactor `internal/deploy/finalize.go` around `DistroDriver { WriteSystemFiles(...), InstallBootloader(...) }`. Implement drivers `el8`, `el9`, `el10`, `ubuntu24`. Plumb through the image factory. Out: Debian, SLES.
+  Depends on: nothing.
+
+- [ ] **#159 — BIOS settings push, Intel first (MEDIUM, L)**
+  Owner: Richard scopes → Dinesh implements.
+  In: `internal/bios/` with `Provider` interface + `intel` provider wrapping `intel-syscfg`. New tables `bios_profiles(id, name, vendor, settings_json)` and `node_bios_profile(node_id, profile_id, last_applied_at)`. Deploy phase reads desired profile, diffs against current, applies via clientd → privhelper-brokered `intel-syscfg` call. Bundle Intel binary in initramfs. Out: Dell `racadm`, Supermicro `sum` (separate task once Intel ships).
+  Depends on: #120 (initramfs binary footprint).
+
+- [ ] **#160 — Per-image stateless / netboot menu entries (LOW, S)**
+  Owner: Dinesh.
+  In: `boot_entries(id, name, kind, kernel_url, initrd_url, cmdline, enabled)` table. Render extra menu items into the iPXE menu at PXE-serve time. UI: "Boot Menu" tab on Settings. Stock entries: Memtest, a Rescue boot (busybox + dropbear with operator-supplied password). Out: full stateless image lifecycle (wiped scope stays wiped — don't restore Sprint-2-era diskless work).
+  Depends on: #120 (landed).
+
+- [ ] **#161 — `Api-Version: v1` + JSON schema + OpenAPI 3.1 export (LOW, M)**
+  Owner: Dinesh.
+  In: `Api-Version: v1` response header on every API request. Generate JSON schemas from `pkg/api` types via `github.com/invopop/jsonschema`. Ship them under `/usr/share/clustr/schema/v1/` and serve at `/api/v1/schemas/`. OpenAPI 3.1 spec at `/api/v1/openapi.json`. Out: `/api/v2/...` parallel routes.
+  Depends on: nothing.
+
+- [ ] **#162 — Reproducible initramfs builder, Path A (LOW, M)**
+  Owner: Gilfoyle.
+  In: replace SSH-pull from 192.168.1.151 with a Make-driven local kernel-module extraction step. Ship a build-time builder image (CI uses it; not a runtime dep). Bit-identical output across builds. Out: Buildroot migration (Path B) — defer.
+  Depends on: #120 (landed).
   Owner: Dinesh.
   In: implement the node-side handler for `disk_capture_request` (defined by #146 in `internal/clientd/messages.go`). Run `lsblk -J` (or equivalent) on the node, parse into `api.DiskLayout`, send back as `disk_capture_result`. Without this, `POST /api/v1/disk-layouts/capture/{node_id}` returns 504. Out: alternative capture sources (sfdisk, parted) — lsblk only in v1.
   Depends on: #146 (already landed).
