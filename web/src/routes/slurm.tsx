@@ -59,6 +59,11 @@ import type {
   SlurmDepMatrixResponse,
   SlurmPushOperation,
   SlurmMungeKeyResponse,
+  // Sprint 24 #153
+  SlurmJob,
+  ListSlurmJobsResponse,
+  SlurmPartitionInfo,
+  ListSlurmPartitionsResponse,
 } from "@/lib/types"
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1836,9 +1841,469 @@ function DepMatrixSection() {
   )
 }
 
+// ─── Sprint 24 #153: Job state badge ─────────────────────────────────────────
+
+function JobStateBadge({ state }: { state: string }) {
+  const map: Record<string, string> = {
+    RUNNING:    "bg-status-healthy/10 text-status-healthy border-status-healthy/30",
+    PENDING:    "bg-status-warning/10 text-status-warning border-status-warning/30",
+    COMPLETED:  "bg-status-neutral/10 text-status-neutral border-status-neutral/30",
+    FAILED:     "bg-status-error/10 text-status-error border-status-error/30",
+    CANCELLED:  "bg-status-neutral/10 text-status-neutral border-status-neutral/30",
+    TIMEOUT:    "bg-status-error/10 text-status-error border-status-error/30",
+  }
+  return (
+    <span className={cn(
+      "inline-flex items-center rounded border px-1.5 py-0.5 text-xs font-medium",
+      map[state.toUpperCase()] ?? "bg-muted/30 text-muted-foreground border-border",
+    )}>
+      {state}
+    </span>
+  )
+}
+
+// ─── Sprint 24 #153: Jobs tab ─────────────────────────────────────────────────
+
+type SortDir = "asc" | "desc"
+
+function JobsTab() {
+  const qc = useQueryClient()
+  const [stateFilter, setStateFilter] = React.useState("all")
+  const [userFilter, setUserFilter] = React.useState("")
+  const [partitionFilter, setPartitionFilter] = React.useState("all")
+  const [page, setPage] = React.useState(0)
+  const [sortCol, setSortCol] = React.useState<keyof SlurmJob>("job_id")
+  const [sortDir, setSortDir] = React.useState<SortDir>("asc")
+  const [expandedId, setExpandedId] = React.useState<string | null>(null)
+
+  const PER_PAGE = 50
+
+  const { data, isLoading, isFetching } = useQuery<ListSlurmJobsResponse>({
+    queryKey: ["slurm-jobs"],
+    queryFn: () => apiFetch<ListSlurmJobsResponse>("/api/v1/slurm/jobs"),
+    refetchInterval: 5000,
+  })
+
+  const jobs = data?.jobs ?? []
+
+  // Derive partition list for filter dropdown.
+  const partitions = React.useMemo(() => {
+    const s = new Set(jobs.map((j) => j.partition).filter(Boolean))
+    return Array.from(s).sort()
+  }, [jobs])
+
+  // Filter.
+  const filtered = React.useMemo(() => {
+    return jobs.filter((j) => {
+      if (stateFilter !== "all" && j.state.toUpperCase() !== stateFilter.toUpperCase()) return false
+      if (userFilter && !j.user.toLowerCase().includes(userFilter.toLowerCase())) return false
+      if (partitionFilter !== "all" && j.partition !== partitionFilter) return false
+      return true
+    })
+  }, [jobs, stateFilter, userFilter, partitionFilter])
+
+  // Sort.
+  const sorted = React.useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      const av = a[sortCol] ?? ""
+      const bv = b[sortCol] ?? ""
+      const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true })
+      return sortDir === "asc" ? cmp : -cmp
+    })
+  }, [filtered, sortCol, sortDir])
+
+  // Paginate.
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PER_PAGE))
+  const pageJobs = sorted.slice(page * PER_PAGE, (page + 1) * PER_PAGE)
+
+  function toggleSort(col: keyof SlurmJob) {
+    if (sortCol === col) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"))
+    } else {
+      setSortCol(col)
+      setSortDir("asc")
+    }
+    setPage(0)
+  }
+
+  function SortIcon({ col }: { col: keyof SlurmJob }) {
+    if (sortCol !== col) return <span className="ml-1 opacity-30">↕</span>
+    return <span className="ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>
+  }
+
+  const selectCls = "h-8 rounded border border-border bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2 p-1">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-8 w-full" />
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={stateFilter}
+          onChange={(e) => { setStateFilter(e.target.value); setPage(0) }}
+          className={selectCls}
+        >
+          <option value="all">All states</option>
+          <option value="RUNNING">Running</option>
+          <option value="PENDING">Pending</option>
+          <option value="COMPLETED">Completed</option>
+          <option value="FAILED">Failed</option>
+          <option value="CANCELLED">Cancelled</option>
+        </select>
+
+        <Input
+          placeholder="Filter by user…"
+          value={userFilter}
+          onChange={(e) => { setUserFilter(e.target.value); setPage(0) }}
+          className="h-8 w-40 text-xs"
+        />
+
+        <select
+          value={partitionFilter}
+          onChange={(e) => { setPartitionFilter(e.target.value); setPage(0) }}
+          className={selectCls}
+        >
+          <option value="all">All partitions</option>
+          {partitions.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5"
+          onClick={() => qc.invalidateQueries({ queryKey: ["slurm-jobs"] })}
+          disabled={isFetching}
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", isFetching && "animate-spin")} />
+          Refresh
+        </Button>
+
+        <span className="ml-auto text-xs text-muted-foreground">
+          {filtered.length} job{filtered.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {/* Table */}
+      {pageJobs.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card px-6 py-12 text-center">
+          <p className="text-sm text-muted-foreground">
+            {jobs.length === 0
+              ? "No jobs in the queue. Slurm module may not be enabled or slurmctld is unreachable."
+              : "No jobs match the current filters."}
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/30">
+              <tr>
+                {(
+                  [
+                    { col: "job_id" as keyof SlurmJob,    label: "JobID" },
+                    { col: "name" as keyof SlurmJob,      label: "Name" },
+                    { col: "state" as keyof SlurmJob,     label: "State" },
+                    { col: "user" as keyof SlurmJob,      label: "User" },
+                    { col: "partition" as keyof SlurmJob, label: "Partition" },
+                    { col: "num_nodes" as keyof SlurmJob, label: "Nodes" },
+                    { col: "time_used" as keyof SlurmJob, label: "Time" },
+                  ] as { col: keyof SlurmJob; label: string }[]
+                ).map(({ col, label }) => (
+                  <th
+                    key={col}
+                    onClick={() => toggleSort(col)}
+                    className="cursor-pointer select-none px-3 py-2 text-left font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    {label}<SortIcon col={col} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {pageJobs.map((job) => (
+                <React.Fragment key={job.job_id}>
+                  <tr
+                    onClick={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
+                    className="cursor-pointer hover:bg-muted/20 transition-colors"
+                  >
+                    <td className="px-3 py-2 font-mono text-foreground">{job.job_id}</td>
+                    <td className="px-3 py-2 max-w-[180px] truncate text-foreground" title={job.name}>{job.name || "—"}</td>
+                    <td className="px-3 py-2"><JobStateBadge state={job.state} /></td>
+                    <td className="px-3 py-2 text-muted-foreground">{job.user || "—"}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{job.partition || "—"}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{job.num_nodes || "—"}</td>
+                    <td className="px-3 py-2 font-mono text-muted-foreground">
+                      {job.time_used || "—"}
+                      {job.time_limit && job.time_limit !== "N/A" && (
+                        <span className="text-muted-foreground/50"> / {job.time_limit}</span>
+                      )}
+                    </td>
+                  </tr>
+                  {expandedId === job.job_id && (
+                    <tr className="bg-muted/10">
+                      <td colSpan={7} className="px-3 py-3">
+                        <JobExpandedRow job={job} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center gap-2 text-xs">
+          <Button
+            variant="outline" size="sm"
+            className="h-7"
+            disabled={page === 0}
+            onClick={() => setPage((p) => p - 1)}
+          >
+            Previous
+          </Button>
+          <span className="text-muted-foreground">
+            Page {page + 1} of {totalPages}
+          </span>
+          <Button
+            variant="outline" size="sm"
+            className="h-7"
+            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Expanded job row ─────────────────────────────────────────────────────────
+
+function JobExpandedRow({ job }: { job: SlurmJob }) {
+  const nodeNames = job.node_list
+    ? job.node_list.split(",").map((n) => n.trim()).filter(Boolean)
+    : []
+
+  return (
+    <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+      <div className="space-y-1.5">
+        <div className="font-semibold text-foreground mb-1">Resources</div>
+        <Row label="CPUs" value={job.req_cpus || "—"} />
+        <Row label="Memory" value={job.req_memory || "—"} />
+        <Row label="Time limit" value={job.time_limit || "—"} />
+        {job.reason && job.state.toUpperCase() === "PENDING" && (
+          <Row label="Pending reason" value={job.reason} />
+        )}
+      </div>
+      <div className="space-y-1.5">
+        <div className="font-semibold text-foreground mb-1">Execution</div>
+        {job.command && (
+          <div>
+            <span className="text-muted-foreground">Command</span>
+            <pre className="mt-0.5 rounded bg-muted/30 px-2 py-1 font-mono text-[11px] break-all whitespace-pre-wrap">{job.command}</pre>
+          </div>
+        )}
+        {nodeNames.length > 0 && (
+          <div>
+            <span className="text-muted-foreground">Allocated nodes</span>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {nodeNames.map((n) => (
+                <span
+                  key={n}
+                  className="rounded border border-border px-1.5 py-0.5 font-mono text-[11px] text-foreground"
+                >
+                  {n}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-2">
+      <span className="w-28 shrink-0 text-muted-foreground">{label}</span>
+      <span className="font-mono text-foreground">{value}</span>
+    </div>
+  )
+}
+
+// ─── Sprint 24 #153: Partitions tab ───────────────────────────────────────────
+
+function PartitionsTab() {
+  const qc = useQueryClient()
+  const [sortCol, setSortCol] = React.useState<keyof SlurmPartitionInfo>("name")
+  const [sortDir, setSortDir] = React.useState<SortDir>("asc")
+
+  const { data, isLoading, isFetching } = useQuery<ListSlurmPartitionsResponse>({
+    queryKey: ["slurm-partitions"],
+    queryFn: () => apiFetch<ListSlurmPartitionsResponse>("/api/v1/slurm/partitions"),
+    refetchInterval: 30000,
+  })
+
+  const partitions = data?.partitions ?? []
+
+  const sorted = React.useMemo(() => {
+    return [...partitions].sort((a, b) => {
+      const av = a[sortCol]
+      const bv = b[sortCol]
+      const cmp = String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true })
+      return sortDir === "asc" ? cmp : -cmp
+    })
+  }, [partitions, sortCol, sortDir])
+
+  function toggleSort(col: keyof SlurmPartitionInfo) {
+    if (sortCol === col) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"))
+    } else {
+      setSortCol(col)
+      setSortDir("asc")
+    }
+  }
+
+  function SortIcon({ col }: { col: keyof SlurmPartitionInfo }) {
+    if (sortCol !== col) return <span className="ml-1 opacity-30">↕</span>
+    return <span className="ml-1">{sortDir === "asc" ? "↑" : "↓"}</span>
+  }
+
+  const cols: { col: keyof SlurmPartitionInfo; label: string }[] = [
+    { col: "name",            label: "Name" },
+    { col: "state",           label: "State" },
+    { col: "total_nodes",     label: "Total" },
+    { col: "allocated_nodes", label: "Allocated" },
+    { col: "idle_nodes",      label: "Idle" },
+    { col: "is_default",      label: "Default" },
+    { col: "max_time",        label: "MaxTime" },
+  ]
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2 p-1">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-8 w-full" />
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5"
+          onClick={() => qc.invalidateQueries({ queryKey: ["slurm-partitions"] })}
+          disabled={isFetching}
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", isFetching && "animate-spin")} />
+          Refresh
+        </Button>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {partitions.length} partition{partitions.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card px-6 py-12 text-center">
+          <p className="text-sm text-muted-foreground">
+            No partitions found. Slurm module may not be enabled or sinfo is unreachable.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/30">
+              <tr>
+                {cols.map(({ col, label }) => (
+                  <th
+                    key={col}
+                    onClick={() => toggleSort(col)}
+                    className="cursor-pointer select-none px-3 py-2 text-left font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    {label}<SortIcon col={col} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {sorted.map((p) => (
+                <tr key={p.name} className="hover:bg-muted/20 transition-colors">
+                  <td className="px-3 py-2 font-mono font-medium text-foreground">
+                    {p.name}
+                  </td>
+                  <td className="px-3 py-2">
+                    <PartitionStateBadge state={p.state} />
+                  </td>
+                  <td className="px-3 py-2 text-muted-foreground">{p.total_nodes}</td>
+                  <td className="px-3 py-2 text-muted-foreground">
+                    {p.allocated_nodes > 0 ? p.allocated_nodes : <span className="opacity-40">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-muted-foreground">
+                    {p.idle_nodes > 0 ? p.idle_nodes : <span className="opacity-40">—</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    {p.is_default ? (
+                      <span className="inline-flex items-center rounded border border-status-healthy/30 bg-status-healthy/10 px-1.5 py-0.5 text-[10px] font-medium text-status-healthy">
+                        default
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground/40">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-muted-foreground">{p.max_time || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PartitionStateBadge({ state }: { state: string }) {
+  const map: Record<string, string> = {
+    up:     "bg-status-healthy/10 text-status-healthy border-status-healthy/30",
+    down:   "bg-status-error/10 text-status-error border-status-error/30",
+    drain:  "bg-status-warning/10 text-status-warning border-status-warning/30",
+    drained:"bg-status-warning/10 text-status-warning border-status-warning/30",
+    inact:  "bg-status-neutral/10 text-status-neutral border-status-neutral/30",
+  }
+  const lower = state.toLowerCase()
+  return (
+    <span className={cn(
+      "inline-flex items-center rounded border px-1.5 py-0.5 text-xs font-medium",
+      map[lower] ?? "bg-muted/30 text-muted-foreground border-border",
+    )}>
+      {state}
+    </span>
+  )
+}
+
 // ─── Main Slurm page ──────────────────────────────────────────────────────────
 
 export function SlurmPage() {
+  const [tab, setTab] = React.useState("overview")
+
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div>
@@ -1851,48 +2316,75 @@ export function SlurmPage() {
         </p>
       </div>
 
-      {/* Jump links */}
-      <nav className="flex flex-wrap gap-2 text-xs">
-        {[
-          { href: "#status",   label: "Status" },
-          { href: "#configs",  label: "Configs" },
-          { href: "#roles",    label: "Roles" },
-          { href: "#scripts",  label: "Scripts" },
-          { href: "#builds",   label: "Builds" },
-          { href: "#upgrades", label: "Upgrades" },
-          { href: "#deps",     label: "Dep matrix" },
-        ].map((l) => (
-          <a
-            key={l.href}
-            href={l.href}
-            className="rounded border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-          >
-            {l.label}
-          </a>
-        ))}
-      </nav>
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList className="mb-2">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="jobs">Jobs</TabsTrigger>
+          <TabsTrigger value="partitions">Partitions</TabsTrigger>
+        </TabsList>
 
-      <SectionErrorBoundary section="Status">
-        <StatusSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Configs">
-        <ConfigsSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Roles">
-        <RolesSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Scripts">
-        <ScriptsSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Builds">
-        <BuildsSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Upgrades">
-        <UpgradesSection />
-      </SectionErrorBoundary>
-      <SectionErrorBoundary section="Dep matrix">
-        <DepMatrixSection />
-      </SectionErrorBoundary>
+        {/* Overview: existing sections */}
+        <TabsContent value="overview">
+          <div className="space-y-6">
+            {/* Jump links */}
+            <nav className="flex flex-wrap gap-2 text-xs">
+              {[
+                { href: "#status",   label: "Status" },
+                { href: "#configs",  label: "Configs" },
+                { href: "#roles",    label: "Roles" },
+                { href: "#scripts",  label: "Scripts" },
+                { href: "#builds",   label: "Builds" },
+                { href: "#upgrades", label: "Upgrades" },
+                { href: "#deps",     label: "Dep matrix" },
+              ].map((l) => (
+                <a
+                  key={l.href}
+                  href={l.href}
+                  className="rounded border border-border px-2 py-0.5 text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+                >
+                  {l.label}
+                </a>
+              ))}
+            </nav>
+
+            <SectionErrorBoundary section="Status">
+              <StatusSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Configs">
+              <ConfigsSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Roles">
+              <RolesSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Scripts">
+              <ScriptsSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Builds">
+              <BuildsSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Upgrades">
+              <UpgradesSection />
+            </SectionErrorBoundary>
+            <SectionErrorBoundary section="Dep matrix">
+              <DepMatrixSection />
+            </SectionErrorBoundary>
+          </div>
+        </TabsContent>
+
+        {/* Jobs tab */}
+        <TabsContent value="jobs">
+          <SectionErrorBoundary section="Jobs">
+            <JobsTab />
+          </SectionErrorBoundary>
+        </TabsContent>
+
+        {/* Partitions tab */}
+        <TabsContent value="partitions">
+          <SectionErrorBoundary section="Partitions">
+            <PartitionsTab />
+          </SectionErrorBoundary>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

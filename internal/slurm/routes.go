@@ -98,6 +98,10 @@ func RegisterRoutes(r chi.Router, m *Manager) {
 	r.Get("/slurm/builds/{build_id}/log-stream", m.handleBuildLogStream)
 	r.Post("/slurm/builds/{build_id}/set-active", m.handleSetActiveBuild)
 
+	// Sprint 24 #153: live job queue and partition health.
+	r.Get("/slurm/jobs", m.handleListJobs)
+	r.Get("/slurm/partitions", m.handleListPartitions)
+
 	// Dependency matrix.
 	r.Get("/slurm/deps/matrix", m.handleListDepMatrix)
 
@@ -1656,6 +1660,31 @@ func (m *Manager) handleListRepoPackages(w http.ResponseWriter, r *http.Request)
 		packages = []repoPackage{}
 	}
 	jsonResponse(w, map[string]interface{}{"packages": packages, "total": len(packages)}, http.StatusOK)
+}
+
+// ── Sprint 24 #153: Jobs + Partitions ────────────────────────────────────────
+
+// handleListJobs handles GET /api/v1/slurm/jobs.
+// Returns current squeue output as JSON. Empty slice when Slurm is disabled or
+// squeue is unavailable (slurmctld not reachable from this host).
+func (m *Manager) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	jobs, err := m.ListJobs(r.Context())
+	if err != nil {
+		jsonError(w, "failed to list jobs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"jobs": jobs, "total": len(jobs)}, http.StatusOK)
+}
+
+// handleListPartitions handles GET /api/v1/slurm/partitions.
+// Returns current sinfo partition data as JSON.
+func (m *Manager) handleListPartitions(w http.ResponseWriter, r *http.Request) {
+	partitions, err := m.ListPartitions(r.Context())
+	if err != nil {
+		jsonError(w, "failed to list partitions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"partitions": partitions, "total": len(partitions)}, http.StatusOK)
 }
 
 // parseRPMFilename extracts name, version, el_major, arch from an RPM filename.

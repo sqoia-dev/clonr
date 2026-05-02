@@ -993,6 +993,177 @@ func sinfoCommand(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, "sinfo", "--noheader", "--format=%P %a %D %A")
 }
 
+// ── Sprint 24 #153: Jobs + Partitions ────────────────────────────────────────
+
+// ListJobs calls `squeue` and returns the current job queue.
+// Returns an empty slice (not an error) when Slurm is not enabled or squeue
+// is unavailable (e.g. slurmctld not reachable from this host).
+func (m *Manager) ListJobs(ctx context.Context) ([]api.SlurmJob, error) {
+	if !m.IsEnabled() {
+		return []api.SlurmJob{}, nil
+	}
+	// squeue format: jobid|name|state|user|partition|numnodes|timeused|timelimit|command|reqcpus|minmemory|nodelist|reason
+	out, err := exec.CommandContext(ctx, "squeue",
+		"--noheader",
+		"--format=%i|%j|%T|%u|%P|%D|%M|%l|%o|%C|%m|%R|%N",
+	).Output()
+	if err != nil {
+		// squeue not installed or slurmctld unreachable — return empty, not error.
+		log.Warn().Err(err).Msg("slurm: ListJobs: squeue failed")
+		return []api.SlurmJob{}, nil
+	}
+	return parseSqueueOutput(string(out)), nil
+}
+
+// parseSqueueOutput parses lines from `squeue --noheader --format=...`.
+// Format: jobid|name|state|user|partition|numnodes|timeused|timelimit|command|reqcpus|minmemory|reason|nodelist
+func parseSqueueOutput(output string) []api.SlurmJob {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	jobs := make([]api.SlurmJob, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "|", 13)
+		for len(fields) < 13 {
+			fields = append(fields, "")
+		}
+		jobs = append(jobs, api.SlurmJob{
+			JobID:     fields[0],
+			Name:      fields[1],
+			State:     fields[2],
+			User:      fields[3],
+			Partition: fields[4],
+			NumNodes:  fields[5],
+			TimeUsed:  fields[6],
+			TimeLimit: fields[7],
+			Command:   fields[8],
+			ReqCPUs:   fields[9],
+			ReqMemory: fields[10],
+			Reason:    fields[11],
+			NodeList:  fields[12],
+		})
+	}
+	return jobs
+}
+
+// ListPartitions calls `sinfo` and returns per-partition info including node counts.
+// Uses two sinfo calls: one for base partition metadata, one to count alloc/idle nodes.
+// Returns an empty slice when Slurm is not enabled or sinfo is unavailable.
+func (m *Manager) ListPartitions(ctx context.Context) ([]api.SlurmPartitionInfo, error) {
+	if !m.IsEnabled() {
+		return []api.SlurmPartitionInfo{}, nil
+	}
+	// Primary call: %P=name(* if default), %a=state, %d=default, %l=max_time, %D=total_nodes
+	out, err := exec.CommandContext(ctx, "sinfo",
+		"--noheader",
+		"--format=%P|%a|%d|%l|%D",
+	).Output()
+	if err != nil {
+		log.Warn().Err(err).Msg("slurm: ListPartitions: sinfo failed")
+		return []api.SlurmPartitionInfo{}, nil
+	}
+	partitions := parseSinfoPartitionsOutput(string(out))
+
+	// Best-effort: enrich with per-state node counts via secondary calls.
+	if counts, err2 := sinfoNodeStateCounts(ctx); err2 == nil {
+		for i := range partitions {
+			if c, ok := counts[partitions[i].Name]; ok {
+				partitions[i].AllocatedNodes = c[0]
+				partitions[i].IdleNodes = c[1]
+			}
+		}
+	}
+	return partitions, nil
+}
+
+// parseSinfoPartitionsOutput parses `sinfo --noheader --format=%P|%a|%d|%l|%D` output.
+// Each line may appear multiple times for different node sets in the same partition;
+// we aggregate TotalNodes and take the most permissive state.
+func parseSinfoPartitionsOutput(output string) []api.SlurmPartitionInfo {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	seen := make(map[string]*api.SlurmPartitionInfo)
+	var order []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "|", 5)
+		for len(fields) < 5 {
+			fields = append(fields, "")
+		}
+		rawName := fields[0]
+		isDefault := strings.HasSuffix(rawName, "*")
+		name := strings.TrimSuffix(rawName, "*")
+		state := fields[1]
+		maxTime := fields[3]
+
+		total := 0
+		if n, err := parseInt(fields[4]); err == nil {
+			total = n
+		}
+
+		if existing, ok := seen[name]; ok {
+			existing.TotalNodes += total
+			if state == "up" {
+				existing.State = "up"
+			}
+			continue
+		}
+		p := &api.SlurmPartitionInfo{
+			Name:       name,
+			State:      state,
+			TotalNodes: total,
+			IsDefault:  isDefault,
+			MaxTime:    maxTime,
+		}
+		seen[name] = p
+		order = append(order, name)
+	}
+	result := make([]api.SlurmPartitionInfo, 0, len(order))
+	for _, n := range order {
+		result = append(result, *seen[n])
+	}
+	return result
+}
+
+// sinfoNodeStateCounts returns per-partition [allocatedCount, idleCount] by running
+// sinfo twice filtered by state. Errors are non-fatal — the caller falls back to zeros.
+func sinfoNodeStateCounts(ctx context.Context) (map[string][2]int, error) {
+	counts := make(map[string][2]int)
+	for idx, state := range []string{"alloc", "idle"} {
+		out, err := exec.CommandContext(ctx, "sinfo",
+			"--noheader",
+			"--states="+state,
+			"--format=%P|%D",
+		).Output()
+		if err != nil {
+			return counts, err
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			name := strings.TrimSuffix(parts[0], "*")
+			n, err2 := parseInt(parts[1])
+			if err2 != nil {
+				continue
+			}
+			cur := counts[name]
+			cur[idx] += n
+			counts[name] = cur
+		}
+	}
+	return counts, nil
+}
+
 // AddAutoPartition appends a minimal PartitionName entry to slurm.conf for
 // the given NodeGroup and partition name. Called by the auto-policy engine
 // (Sprint H, H2). The appended entry uses safe defaults; the operator can

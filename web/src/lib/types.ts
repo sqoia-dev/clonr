@@ -789,3 +789,41 @@ export interface SlurmMungeKeyResponse {
   status: string
   message: string
 }
+
+// ── Sprint 24 #153: Jobs + Partitions ────────────────────────────────────────
+
+export interface SlurmJob {
+  job_id: string
+  name: string
+  state: string       // RUNNING | PENDING | COMPLETED | FAILED | CANCELLED | ...
+  user: string
+  partition: string
+  num_nodes: string
+  time_used: string   // elapsed walltime D-HH:MM:SS
+  time_limit: string  // time limit D-HH:MM:SS or "UNLIMITED"
+  command: string
+  req_cpus: string
+  req_memory: string
+  node_list: string
+  reason: string      // PendingReason when PENDING
+}
+
+export interface ListSlurmJobsResponse {
+  jobs: SlurmJob[]
+  total: number
+}
+
+export interface SlurmPartitionInfo {
+  name: string
+  state: string           // up | down | drain | inact
+  total_nodes: number
+  allocated_nodes: number
+  idle_nodes: number
+  is_default: boolean
+  max_time: string        // e.g. "7-00:00:00" or "UNLIMITED"
+}
+
+export interface ListSlurmPartitionsResponse {
+  partitions: SlurmPartitionInfo[]
+  total: number
+}

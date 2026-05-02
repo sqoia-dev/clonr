@@ -1722,6 +1722,50 @@ type SlurmApplyResult struct {
 	Output   string `json:"output,omitempty"`
 }
 
+// ── Slurm jobs / partitions (Sprint 24 #153) ─────────────────────────────────
+
+// SlurmJob is a single job row returned by GET /api/v1/slurm/jobs.
+// Fields are parsed from `squeue --noheader --format=...` output.
+type SlurmJob struct {
+	JobID       string `json:"job_id"`
+	Name        string `json:"name"`
+	State       string `json:"state"`       // e.g. RUNNING, PENDING, COMPLETED, FAILED
+	User        string `json:"user"`
+	Partition   string `json:"partition"`
+	NumNodes    string `json:"num_nodes"`    // e.g. "2" or "1-4"
+	TimeUsed    string `json:"time_used"`    // elapsed walltime D-HH:MM:SS
+	TimeLimit   string `json:"time_limit"`   // D-HH:MM:SS or "UNLIMITED"
+	Command     string `json:"command"`
+	ReqCPUs     string `json:"req_cpus"`
+	ReqMemory   string `json:"req_memory"`
+	NodeList    string `json:"node_list"`    // allocated node list (NODELIST)
+	Reason      string `json:"reason"`       // PendingReason when PENDING
+}
+
+// ListSlurmJobsResponse is returned by GET /api/v1/slurm/jobs.
+type ListSlurmJobsResponse struct {
+	Jobs  []SlurmJob `json:"jobs"`
+	Total int        `json:"total"`
+}
+
+// SlurmPartitionInfo is a single partition row returned by GET /api/v1/slurm/partitions.
+// Fields are parsed from `sinfo --noheader --format=...` output.
+type SlurmPartitionInfo struct {
+	Name           string `json:"name"`
+	State          string `json:"state"`           // up|down|drain|inact
+	TotalNodes     int    `json:"total_nodes"`
+	AllocatedNodes int    `json:"allocated_nodes"`
+	IdleNodes      int    `json:"idle_nodes"`
+	IsDefault      bool   `json:"is_default"`
+	MaxTime        string `json:"max_time"`         // e.g. "7-00:00:00" or "UNLIMITED"
+}
+
+// ListSlurmPartitionsResponse is returned by GET /api/v1/slurm/partitions.
+type ListSlurmPartitionsResponse struct {
+	Partitions []SlurmPartitionInfo `json:"partitions"`
+	Total      int                  `json:"total"`
+}
+
 // ── Slurm build types (Sprint 8) ─────────────────────────────────────────────
 
 // SlurmBuild is the API representation of one Slurm build attempt.
