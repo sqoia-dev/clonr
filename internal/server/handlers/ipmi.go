@@ -16,10 +16,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/ipmi"
 	"github.com/sqoia-dev/clustr/internal/power"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // bmcTimeout caps every power management operation at 10 seconds.
@@ -48,7 +48,7 @@ type IPMIHandler struct {
 
 // PowerStatusResponse is returned by GET /api/v1/nodes/{id}/power.
 type PowerStatusResponse struct {
-	Status      string    `json:"status"`          // "on", "off", or "unknown"
+	Status      string    `json:"status"` // "on", "off", or "unknown"
 	LastChecked time.Time `json:"last_checked"`
 	Error       string    `json:"error,omitempty"` // set when the provider was unreachable
 }
@@ -320,6 +320,141 @@ func (h *IPMIHandler) doPowerAction(
 		Action:      action,
 		NodeID:      nodeID,
 		LastChecked: time.Now().UTC(),
+	})
+}
+
+// ─── GET /api/v1/nodes/{id}/sel ──────────────────────────────────────────────
+
+// SELResponse is returned by GET /api/v1/nodes/{id}/sel.
+type SELResponse struct {
+	NodeID      string          `json:"node_id"`
+	Entries     []ipmi.SELEntry `json:"entries"`
+	LastChecked time.Time       `json:"last_checked"`
+}
+
+// GetSEL handles GET /api/v1/nodes/{id}/sel.
+// Returns System Event Log entries for the node's BMC.
+// Supports ?level=info|warn|critical, ?head=N, ?tail=N query params.
+func (h *IPMIHandler) GetSEL(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	cfg, err := h.DB.GetNodeConfig(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var bmcHost, bmcUser, bmcPass string
+	if cfg.PowerProvider != nil && cfg.PowerProvider.Type == "ipmi" {
+		bmcHost = cfg.PowerProvider.Fields["host"]
+		bmcUser = cfg.PowerProvider.Fields["username"]
+		bmcPass = cfg.PowerProvider.Fields["password"]
+	} else if cfg.BMC != nil && cfg.BMC.IPAddress != "" {
+		bmcHost = cfg.BMC.IPAddress
+		bmcUser = cfg.BMC.Username
+		bmcPass = cfg.BMC.Password
+	}
+
+	if bmcHost == "" {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Error: "no IPMI/BMC config for this node",
+			Code:  "power_not_configured",
+		})
+		return
+	}
+
+	client := &ipmi.Client{Host: bmcHost, Username: bmcUser, Password: bmcPass}
+	ctx, cancel := context.WithTimeout(r.Context(), bmcTimeout)
+	defer cancel()
+
+	entries, err := client.GetSEL(ctx)
+	if err != nil {
+		log.Warn().Str("node_id", nodeID).Str("bmc_host", bmcHost).
+			Err(err).Msg("ipmi: SEL read failed")
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: fmt.Sprintf("SEL read failed: %v", err),
+			Code:  "power_error",
+		})
+		return
+	}
+
+	// Apply level filter.
+	if level := r.URL.Query().Get("level"); level != "" {
+		entries = ipmi.SELFilter(entries, level)
+	}
+
+	// Apply head/tail slicing (mutually exclusive; head takes precedence).
+	if headStr := r.URL.Query().Get("head"); headStr != "" {
+		var n int
+		if _, err := fmt.Sscanf(headStr, "%d", &n); err == nil && n > 0 {
+			entries = ipmi.SELHead(entries, n)
+		}
+	} else if tailStr := r.URL.Query().Get("tail"); tailStr != "" {
+		var n int
+		if _, err := fmt.Sscanf(tailStr, "%d", &n); err == nil && n > 0 {
+			entries = ipmi.SELTail(entries, n)
+		}
+	}
+
+	if entries == nil {
+		entries = []ipmi.SELEntry{}
+	}
+	writeJSON(w, http.StatusOK, SELResponse{
+		NodeID:      nodeID,
+		Entries:     entries,
+		LastChecked: time.Now().UTC(),
+	})
+}
+
+// ClearSEL handles POST /api/v1/nodes/{id}/sel/clear.
+// Erases all SEL entries on the node's BMC. Requires group-scoped operator access.
+func (h *IPMIHandler) ClearSEL(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	cfg, err := h.DB.GetNodeConfig(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var bmcHost, bmcUser, bmcPass string
+	if cfg.PowerProvider != nil && cfg.PowerProvider.Type == "ipmi" {
+		bmcHost = cfg.PowerProvider.Fields["host"]
+		bmcUser = cfg.PowerProvider.Fields["username"]
+		bmcPass = cfg.PowerProvider.Fields["password"]
+	} else if cfg.BMC != nil && cfg.BMC.IPAddress != "" {
+		bmcHost = cfg.BMC.IPAddress
+		bmcUser = cfg.BMC.Username
+		bmcPass = cfg.BMC.Password
+	}
+
+	if bmcHost == "" {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+			Error: "no IPMI/BMC config for this node",
+			Code:  "power_not_configured",
+		})
+		return
+	}
+
+	client := &ipmi.Client{Host: bmcHost, Username: bmcUser, Password: bmcPass}
+	ctx, cancel := context.WithTimeout(r.Context(), bmcTimeout)
+	defer cancel()
+
+	if err := client.ClearSEL(ctx); err != nil {
+		log.Error().Str("node_id", nodeID).Str("bmc_host", bmcHost).
+			Err(err).Msg("ipmi: SEL clear failed")
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: fmt.Sprintf("SEL clear failed: %v", err),
+			Code:  "power_error",
+		})
+		return
+	}
+
+	log.Info().Str("node_id", nodeID).Str("bmc_host", bmcHost).Msg("ipmi: SEL cleared")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"node_id":    nodeID,
+		"cleared":    true,
+		"cleared_at": time.Now().UTC(),
 	})
 }
 

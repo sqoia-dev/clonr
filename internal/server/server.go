@@ -1020,6 +1020,7 @@ func (s *Server) buildRouter() chi.Router {
 	progress := &handlers.ProgressHandler{Store: s.progress}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
 	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}
+	nodeHealthH := &handlers.NodeHealthHandler{DB: s.db, Hub: s.clientdHub}
 	reimageH := &handlers.ReimageHandler{
 		DB:           s.db,
 		Orchestrator: s.reimageOrchestrator,
@@ -1494,6 +1495,8 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Health — liveness probe (existing).
 			r.Get("/health", health.ServeHTTP)
+			// #130: Cluster-wide node health summary (reachability + heartbeat).
+			r.Get("/cluster/health", nodeHealthH.GetClusterHealth)
 
 			// Bundles — read-only; exposes built-in slurm bundle metadata compiled
 			// into the binary via -ldflags.
@@ -1666,6 +1669,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/pxe", ipmiH.SetBootPXE)
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/power/disk", ipmiH.SetBootDisk)
 			r.Get("/nodes/{id}/sensors", ipmiH.GetSensors)
+			// #129: SEL read and clear.
+			r.Get("/nodes/{id}/sel", ipmiH.GetSEL)
+			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/sel/clear", ipmiH.ClearSEL)
+			// #130: Per-node health summary.
+			r.Get("/nodes/{id}/health", nodeHealthH.GetNodeHealth)
 			// CFG-3: BMC config update (admin-only, typed confirm required).
 			r.With(requireRole("admin")).Patch("/nodes/{id}/bmc", ipmiH.PatchBMC)
 			// CFG-4: BMC connection test.

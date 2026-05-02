@@ -118,6 +118,7 @@ func init() {
 		newIPMIPXECmd(),
 		newIPMISensorsCmd(),
 		newIPMITestBootFlipDirectCmd(),
+		newIPMISELCmd(), // #129
 	)
 	rootCmd.AddCommand(ipmiCmd)
 
@@ -128,6 +129,7 @@ func init() {
 	rootCmd.AddCommand(newFixEFIBootCmd())
 	rootCmd.AddCommand(newLogsCmd())
 	rootCmd.AddCommand(newShellCmd())
+	rootCmd.AddCommand(newHealthCmd()) // #130
 }
 
 // clientFromFlags builds an API client resolving server/token from flags then env.
