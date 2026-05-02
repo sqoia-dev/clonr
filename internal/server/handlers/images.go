@@ -489,6 +489,63 @@ func (h *ImagesHandler) PutDiskLayout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, layout)
 }
 
+// PutInstallInstructions handles PUT /api/v1/images/:id/install-instructions (#147).
+// Body: {"instructions": [{opcode, target, payload}, ...]}
+// Replaces the entire install_instructions array atomically. Validates each
+// instruction opcode before writing. Archived images cannot be modified.
+func (h *ImagesHandler) PutInstallInstructions(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req struct {
+		Instructions []api.InstallInstruction `json:"instructions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	// Validate all instructions before touching the DB.
+	validOpcodes := map[string]bool{"modify": true, "overwrite": true, "script": true}
+	for i, instr := range req.Instructions {
+		if !validOpcodes[instr.Opcode] {
+			writeValidationError(w, fmt.Sprintf("instruction[%d]: opcode %q is not valid (must be modify, overwrite, or script)", i, instr.Opcode))
+			return
+		}
+		if instr.Target == "" {
+			writeValidationError(w, fmt.Sprintf("instruction[%d]: target is required", i))
+			return
+		}
+	}
+
+	// Confirm image exists and is mutable.
+	img, err := h.DB.GetBaseImage(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if img.Status == api.ImageStatusArchived {
+		writeValidationError(w, "cannot modify an archived image")
+		return
+	}
+
+	if err := h.DB.UpdateInstallInstructions(r.Context(), id, req.Instructions); err != nil {
+		log.Error().Err(err).Msg("update install instructions")
+		writeError(w, err)
+		return
+	}
+
+	img, err = h.DB.GetBaseImage(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if h.ImageEvents != nil {
+		imgCopy := img
+		h.ImageEvents.Publish(api.ImageEvent{Kind: api.ImageEventUpdated, Image: &imgCopy, ID: img.ID})
+	}
+	writeJSON(w, http.StatusOK, img)
+}
+
 // defaultBlobMaxBytes is the default upload size cap (50 GiB).
 // Override via CLUSTR_BLOB_MAX_SIZE (bytes).
 const defaultBlobMaxBytes = 50 * 1024 * 1024 * 1024 // 50 GiB

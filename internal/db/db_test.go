@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 func openTestDB(t *testing.T) *db.DB {
@@ -201,6 +201,110 @@ func TestBaseImage_BlobPath(t *testing.T) {
 	path, _ = d.GetBlobPath(ctx, img.ID)
 	if path != "/var/lib/clustr/images/"+img.ID+".blob" {
 		t.Errorf("blob path: got %q", path)
+	}
+}
+
+// ─── InstallInstructions tests (#147) ────────────────────────────────────────
+
+// TestBaseImage_InstallInstructions_RoundTrip verifies that a BaseImage created
+// with InstallInstructions round-trips through the DB intact, and that
+// UpdateInstallInstructions replaces the list atomically.
+func TestBaseImage_InstallInstructions_RoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	img := makeImage(uuid.New().String())
+	img.InstallInstructions = []api.InstallInstruction{
+		{Opcode: "overwrite", Target: "/etc/motd", Payload: "Welcome"},
+		{Opcode: "modify", Target: "/etc/sysctl.conf", Payload: `{"find": "x", "replace": "y"}`},
+		{Opcode: "script", Target: "", Payload: "#!/bin/sh\necho hello"},
+	}
+
+	if err := d.CreateBaseImage(ctx, img); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := d.GetBaseImage(ctx, img.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+
+	if len(got.InstallInstructions) != 3 {
+		t.Fatalf("instructions count: got %d want 3", len(got.InstallInstructions))
+	}
+	for i, want := range img.InstallInstructions {
+		if got.InstallInstructions[i].Opcode != want.Opcode {
+			t.Errorf("[%d] opcode: got %q want %q", i, got.InstallInstructions[i].Opcode, want.Opcode)
+		}
+		if got.InstallInstructions[i].Target != want.Target {
+			t.Errorf("[%d] target: got %q want %q", i, got.InstallInstructions[i].Target, want.Target)
+		}
+		if got.InstallInstructions[i].Payload != want.Payload {
+			t.Errorf("[%d] payload: got %q want %q", i, got.InstallInstructions[i].Payload, want.Payload)
+		}
+	}
+
+	// Update to a single instruction and verify.
+	updated := []api.InstallInstruction{
+		{Opcode: "overwrite", Target: "/etc/clustr-marker", Payload: "updated"},
+	}
+	if err := d.UpdateInstallInstructions(ctx, img.ID, updated); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got2, err := d.GetBaseImage(ctx, img.ID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if len(got2.InstallInstructions) != 1 {
+		t.Fatalf("after update count: got %d want 1", len(got2.InstallInstructions))
+	}
+	if got2.InstallInstructions[0].Payload != "updated" {
+		t.Errorf("after update payload: got %q want %q", got2.InstallInstructions[0].Payload, "updated")
+	}
+}
+
+// TestBaseImage_InstallInstructions_EmptyRoundTrip verifies that an image with
+// no install instructions deserialises cleanly from the default '[]' column value.
+func TestBaseImage_InstallInstructions_EmptyRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// makeImage does not set InstallInstructions, so it uses the DB default.
+	img := makeImage(uuid.New().String())
+	if err := d.CreateBaseImage(ctx, img); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got, err := d.GetBaseImage(ctx, img.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Nil or empty slice is acceptable for an image with no instructions.
+	if len(got.InstallInstructions) != 0 {
+		t.Errorf("expected 0 instructions, got %d", len(got.InstallInstructions))
+	}
+}
+
+// TestBaseImage_InstallInstructions_UpdateToEmpty verifies that clearing
+// instructions via UpdateInstallInstructions(nil) round-trips as empty.
+func TestBaseImage_InstallInstructions_UpdateToEmpty(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	img := makeImage(uuid.New().String())
+	img.InstallInstructions = []api.InstallInstruction{
+		{Opcode: "overwrite", Target: "/etc/f", Payload: "x"},
+	}
+	_ = d.CreateBaseImage(ctx, img)
+
+	if err := d.UpdateInstallInstructions(ctx, img.ID, nil); err != nil {
+		t.Fatalf("update to nil: %v", err)
+	}
+
+	got, _ := d.GetBaseImage(ctx, img.ID)
+	if len(got.InstallInstructions) != 0 {
+		t.Errorf("expected 0 instructions after clear, got %d", len(got.InstallInstructions))
 	}
 }
 

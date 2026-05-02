@@ -15,9 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/chroot"
-	"github.com/sqoia-dev/clustr/pkg/client"
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/deploy"
 	"github.com/sqoia-dev/clustr/internal/hardware"
@@ -25,6 +23,8 @@ import (
 	"github.com/sqoia-dev/clustr/internal/ipmi"
 	"github.com/sqoia-dev/clustr/internal/power"
 	poweripm "github.com/sqoia-dev/clustr/internal/power/ipmi"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/client"
 )
 
 // ANSI colour codes used by the log viewer.
@@ -680,6 +680,10 @@ PXE-booted nodes running from initramfs.`,
 			if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 				bs.SetClientdBinPath(cfg.ClientdBinPath)
 			}
+			// Wire per-image install instructions into the deployer.
+			if is, ok := deployer.(deploy.InstallInstructionsSetter); ok {
+				is.SetInstallInstructions(img.InstallInstructions)
+			}
 			// Switch the console callback label from "Deploying" to "Finalizing"
 			// now that we are entering the finalize phase. Progress is already set.
 			if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
@@ -1160,6 +1164,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	// Wire clustr-clientd binary path so injectClientd can copy it into rootfs.
 	if bs, ok := deployer.(deploy.ClientdBinPathSetter); ok {
 		bs.SetClientdBinPath(cfg.ClientdBinPath)
+	}
+	// Wire per-image install instructions into the deployer.
+	if is, ok := deployer.(deploy.InstallInstructionsSetter); ok {
+		is.SetInstallInstructions(img.InstallInstructions)
 	}
 	// Switch the console callback label from "Deploying" to "Finalizing"
 	// now that we are entering the finalize phase. Progress is already set.

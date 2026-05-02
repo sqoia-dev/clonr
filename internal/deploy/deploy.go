@@ -15,8 +15,8 @@ import (
 	"sync"
 
 	"github.com/rs/zerolog"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // pkgLogger is the package-level zerolog logger used by deploy helpers.
@@ -238,6 +238,15 @@ type ClientdInjector interface {
 // Finalize. Empty path triggers auto-detection (see findClientdBin).
 type ClientdBinPathSetter interface {
 	SetClientdBinPath(p string)
+}
+
+// InstallInstructionsSetter is an optional interface implemented by Deployers
+// that support per-image install instructions. Callers check for this interface
+// via type assertion and call SetInstallInstructions before Finalize. Instructions
+// are applied inside the deployed rootfs during the in-chroot phase, after
+// applyNodeConfig and before bootloader installation.
+type InstallInstructionsSetter interface {
+	SetInstallInstructions(instrs []api.InstallInstruction)
 }
 
 // runCmd executes a command and streams its output through the package logger.

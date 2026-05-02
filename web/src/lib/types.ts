@@ -72,6 +72,14 @@ export function nodeState(n: NodeConfig): NodeState {
 
 export type ImageStatus = "building" | "ready" | "error" | "archived" | "interrupted"
 
+export type InstallInstructionOpcode = "modify" | "overwrite" | "script"
+
+export interface InstallInstruction {
+  opcode: InstallInstructionOpcode
+  target: string
+  payload: string
+}
+
 export interface BaseImage {
   id: string
   name: string
@@ -89,6 +97,7 @@ export interface BaseImage {
   error_message?: string
   build_method?: string
   built_for_roles?: string[]
+  install_instructions?: InstallInstruction[]
   created_at: string
   finalized_at?: string
 }

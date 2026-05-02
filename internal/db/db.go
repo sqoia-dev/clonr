@@ -271,6 +271,15 @@ func (db *DB) CreateBaseImage(ctx context.Context, img api.BaseImage) error {
 		return fmt.Errorf("db: marshal built_for_roles: %w", err)
 	}
 
+	instrs := img.InstallInstructions
+	if instrs == nil {
+		instrs = []api.InstallInstruction{}
+	}
+	instrsJSON, err := json.Marshal(instrs)
+	if err != nil {
+		return fmt.Errorf("db: marshal install_instructions: %w", err)
+	}
+
 	firmware := string(img.Firmware)
 	if firmware == "" {
 		firmware = "uefi"
@@ -280,8 +289,8 @@ func (db *DB) CreateBaseImage(ctx context.Context, img api.BaseImage) error {
 		INSERT INTO base_images
 			(id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
 			 blob_path, disk_layout, tags, source_url, notes, error_message,
-			 built_for_roles, build_method, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 built_for_roles, build_method, install_instructions, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		img.ID, img.Name, img.Version, img.OS, img.Arch,
 		string(img.Status), string(img.Format), firmware,
@@ -289,6 +298,7 @@ func (db *DB) CreateBaseImage(ctx context.Context, img api.BaseImage) error {
 		string(diskLayout), string(tags),
 		img.SourceURL, img.Notes, img.ErrorMessage,
 		string(builtForRolesJSON), img.BuildMethod,
+		string(instrsJSON),
 		img.CreatedAt.Unix(),
 	)
 	if err != nil {
@@ -302,7 +312,7 @@ func (db *DB) GetBaseImage(ctx context.Context, id string) (api.BaseImage, error
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
 		       blob_path, disk_layout, tags, source_url, notes, error_message,
-		       built_for_roles, build_method, created_at, finalized_at
+		       built_for_roles, build_method, install_instructions, created_at, finalized_at
 		FROM base_images WHERE id = ?
 	`, id)
 
@@ -340,7 +350,7 @@ func (db *DB) ListBaseImages(ctx context.Context, status, tag string) ([]api.Bas
 	baseQ := `
 		SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
 		       blob_path, disk_layout, tags, source_url, notes, error_message,
-		       built_for_roles, build_method, created_at, finalized_at
+		       built_for_roles, build_method, install_instructions, created_at, finalized_at
 		FROM base_images`
 
 	args := []any{}
@@ -493,6 +503,22 @@ func (db *DB) UpdateDiskLayout(ctx context.Context, id string, layout api.DiskLa
 	res, err := db.sql.ExecContext(ctx, `UPDATE base_images SET disk_layout = ? WHERE id = ?`, string(data), id)
 	if err != nil {
 		return fmt.Errorf("db: update disk layout: %w", err)
+	}
+	return requireOneRow(res, "base_images", id)
+}
+
+// UpdateInstallInstructions replaces the install_instructions JSON for a BaseImage.
+func (db *DB) UpdateInstallInstructions(ctx context.Context, id string, instrs []api.InstallInstruction) error {
+	if instrs == nil {
+		instrs = []api.InstallInstruction{}
+	}
+	data, err := json.Marshal(instrs)
+	if err != nil {
+		return fmt.Errorf("db: marshal install_instructions: %w", err)
+	}
+	res, err := db.sql.ExecContext(ctx, `UPDATE base_images SET install_instructions = ? WHERE id = ?`, string(data), id)
+	if err != nil {
+		return fmt.Errorf("db: update install instructions: %w", err)
 	}
 	return requireOneRow(res, "base_images", id)
 }
@@ -751,7 +777,9 @@ func nullableString(s string) interface{} {
 // nodeConfigCols is the canonical SELECT column list for node_configs.
 // Update this constant whenever columns are added or removed.
 // ADR-0008: deploy_completed_preboot_at, deploy_verified_booted_at,
-//           deploy_verify_timeout_at, and last_seen_at added in migration 022.
+//
+//	deploy_verify_timeout_at, and last_seen_at added in migration 022.
+//
 // Migration 026: detected_firmware added.
 // Migration 039: bmc_config_encrypted, power_provider_encrypted added (S1-16).
 // Migration 041: tags column (renamed from groups).
@@ -1548,16 +1576,17 @@ type scanner interface {
 
 func scanBaseImage(s scanner) (api.BaseImage, error) {
 	var (
-		img                api.BaseImage
-		status             string
-		format             string
-		firmware           string
-		diskLayoutJSON     string
-		tagsJSON           string
-		builtForRolesJSON  string
-		createdAtUnix      int64
-		finalizedAtUnix    sql.NullInt64
-		blobPath           string // scanned but not exposed in API type
+		img                     api.BaseImage
+		status                  string
+		format                  string
+		firmware                string
+		diskLayoutJSON          string
+		tagsJSON                string
+		builtForRolesJSON       string
+		installInstructionsJSON string
+		createdAtUnix           int64
+		finalizedAtUnix         sql.NullInt64
+		blobPath                string // scanned but not exposed in API type
 	)
 
 	err := s.Scan(
@@ -1567,6 +1596,7 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 		&diskLayoutJSON, &tagsJSON,
 		&img.SourceURL, &img.Notes, &img.ErrorMessage,
 		&builtForRolesJSON, &img.BuildMethod,
+		&installInstructionsJSON,
 		&createdAtUnix, &finalizedAtUnix,
 	)
 	if err == sql.ErrNoRows {
@@ -1603,31 +1633,37 @@ func scanBaseImage(s scanner) (api.BaseImage, error) {
 			img.BuiltForRoles = nil
 		}
 	}
+	if installInstructionsJSON != "" && installInstructionsJSON != "null" && installInstructionsJSON != "[]" {
+		if err := json.Unmarshal([]byte(installInstructionsJSON), &img.InstallInstructions); err != nil {
+			// Non-fatal: old rows may have malformed JSON; leave the field nil.
+			img.InstallInstructions = nil
+		}
+	}
 
 	return img, nil
 }
 
 func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	var (
-		cfg                         api.NodeConfig
-		hostnameAuto                int
-		interfacesJSON              string
-		sshKeysJSON                 string
-		groupsJSON                  string
-		customVarsJSON              string
-		baseImageID                 sql.NullString
-		hwProfileJSON               string
-		bmcConfigJSON               string
-		ibConfigJSON                string
-		powerProviderJSON           string
-		reimagePending              int
-		lastDeployFailedAtVal       sql.NullInt64
-		createdAtUnix               int64
-		updatedAtUnix               int64
+		cfg                   api.NodeConfig
+		hostnameAuto          int
+		interfacesJSON        string
+		sshKeysJSON           string
+		groupsJSON            string
+		customVarsJSON        string
+		baseImageID           sql.NullString
+		hwProfileJSON         string
+		bmcConfigJSON         string
+		ibConfigJSON          string
+		powerProviderJSON     string
+		reimagePending        int
+		lastDeployFailedAtVal sql.NullInt64
+		createdAtUnix         int64
+		updatedAtUnix         int64
 		// S6-6 (migration 048): group_id from subquery or join; still nullable.
-		groupID                     sql.NullString
-		diskLayoutOverrideJSON      string
-		extraMountsJSON             string
+		groupID                sql.NullString
+		diskLayoutOverrideJSON string
+		extraMountsJSON        string
 		// ADR-0008: two-phase deploy verification columns (migration 022).
 		deployCompletedPrebootAtVal sql.NullInt64
 		deployVerifiedBootedAtVal   sql.NullInt64
@@ -2026,14 +2062,14 @@ func (db *DB) PurgeLogsPerNodeCap(ctx context.Context, maxRowsPerNode int64) (in
 
 // LogPurgeSummaryRow is one row in node_logs_summary.
 type LogPurgeSummaryRow struct {
-	ID             string
-	PurgedAt       time.Time
-	TTLRows        int64
-	CapRows        int64
-	TotalRows      int64
-	RetentionSecs  int64
-	MaxRowsCap     int64
-	NodeCount      int64
+	ID            string
+	PurgedAt      time.Time
+	TTLRows       int64
+	CapRows       int64
+	TotalRows     int64
+	RetentionSecs int64
+	MaxRowsCap    int64
+	NodeCount     int64
 }
 
 // RecordLogPurgeSummary appends a purge event to node_logs_summary.
@@ -2178,10 +2214,10 @@ func (db *DB) SetNodeGroupExpiration(ctx context.Context, groupID string, expire
 // along with their expiration_warning_sent JSON array. Used by the daily
 // expiration scanner to determine which warnings to send.
 type NodeGroupExpiration struct {
-	GroupID              string
-	GroupName            string
-	ExpiresAt            time.Time
-	WarningSentDays      []int // thresholds already emailed (e.g. [30, 14])
+	GroupID         string
+	GroupName       string
+	ExpiresAt       time.Time
+	WarningSentDays []int // thresholds already emailed (e.g. [30, 14])
 }
 
 func (db *DB) ListGroupsWithExpiration(ctx context.Context) ([]NodeGroupExpiration, error) {
@@ -2586,19 +2622,19 @@ func scanNodeGroupFull(s scanner) (api.NodeGroup, error) {
 
 // GroupReimageJob is a row in group_reimage_jobs.
 type GroupReimageJob struct {
-	ID                 string    `json:"id"`
-	GroupID            string    `json:"group_id"`
-	ImageID            string    `json:"image_id"`
-	Concurrency        int       `json:"concurrency"`
-	PauseOnFailurePct  int       `json:"pause_on_failure_pct"`
-	Status             string    `json:"status"`
-	TotalNodes         int       `json:"total_nodes"`
-	TriggeredNodes     int       `json:"triggered_nodes"`
-	SucceededNodes     int       `json:"succeeded_nodes"`
-	FailedNodes        int       `json:"failed_nodes"`
-	ErrorMessage       string    `json:"error_message,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	GroupID           string    `json:"group_id"`
+	ImageID           string    `json:"image_id"`
+	Concurrency       int       `json:"concurrency"`
+	PauseOnFailurePct int       `json:"pause_on_failure_pct"`
+	Status            string    `json:"status"`
+	TotalNodes        int       `json:"total_nodes"`
+	TriggeredNodes    int       `json:"triggered_nodes"`
+	SucceededNodes    int       `json:"succeeded_nodes"`
+	FailedNodes       int       `json:"failed_nodes"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // CreateGroupReimageJob inserts a new group reimage job.
@@ -2705,7 +2741,7 @@ func (db *DB) ListResumableImages(ctx context.Context) ([]api.BaseImage, error) 
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT id, name, version, os, arch, status, format, firmware, size_bytes, checksum,
 		       blob_path, disk_layout, tags, source_url, notes, error_message,
-		       built_for_roles, build_method, created_at, finalized_at
+		       built_for_roles, build_method, install_instructions, created_at, finalized_at
 		FROM base_images WHERE resumable = 1 ORDER BY created_at DESC
 	`)
 	if err != nil {

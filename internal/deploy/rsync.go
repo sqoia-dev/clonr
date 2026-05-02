@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
 	"golang.org/x/sys/unix"
 )
 
@@ -82,6 +82,17 @@ type FilesystemDeployer struct {
 	// printPhaseUpdate("Finalizing", msg) on the PXE node's stderr.
 	// Leave nil to skip.
 	ConsoleCallback func(string)
+
+	// InstallInstructions is the ordered list of per-image filesystem mutations
+	// to apply after applyNodeConfig and before bootloader installation. Set via
+	// SetInstallInstructions before Finalize. Nil/empty means no-op.
+	InstallInstructions []api.InstallInstruction
+}
+
+// SetInstallInstructions implements InstallInstructionsSetter. Call before
+// Finalize to apply per-image install instructions during the in-chroot phase.
+func (d *FilesystemDeployer) SetInstallInstructions(instrs []api.InstallInstruction) {
+	d.InstallInstructions = instrs
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -204,10 +215,10 @@ func (d *FilesystemDeployer) Deploy(ctx context.Context, opts DeployOpts, progre
 	// happen while we are busy with local disk operations. The body is buffered
 	// via an os.Pipe (64KB kernel buffer) so the server can push data ahead of us.
 	type blobResult struct {
-		resp             *http.Response
-		totalBytes       int64
-		serverChecksum   string // X-Clustr-Blob-SHA256 response header, if present
-		err              error
+		resp           *http.Response
+		totalBytes     int64
+		serverChecksum string // X-Clustr-Blob-SHA256 response header, if present
+		err            error
 	}
 	blobCh := make(chan blobResult, 1)
 
@@ -654,7 +665,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 	logPhase("In-chroot reconfigure")
 	reportStep("Applying node identity to target filesystem (hostname, network, users)")
-	if err := inChrootReconfigure(ctx, cfg, mountRoot); err != nil {
+	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions); err != nil {
 		return err
 	}
 
@@ -2400,9 +2411,9 @@ func (p *progressReader) Read(b []byte) (int, error) {
 // context is already cancelled. Call stopWatchdog() in a defer after io.Copy
 // to prevent a goroutine leak.
 type throughputWatchdogReader struct {
-	r             io.Reader
-	bytesRead     atomic.Int64
-	stopWatchdog  context.CancelFunc
+	r            io.Reader
+	bytesRead    atomic.Int64
+	stopWatchdog context.CancelFunc
 }
 
 // newThroughputWatchdog wraps r with a stall watchdog. minBytesPerSec is the

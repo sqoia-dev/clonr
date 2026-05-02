@@ -2,7 +2,7 @@ import * as React from "react"
 import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, Plus, Trash2, AlertTriangle, Upload, Link, Layers, Terminal, FolderOpen, HardDrive } from "lucide-react"
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown, Copy, Check, Plus, Trash2, AlertTriangle, Upload, Link, Layers, Terminal, FolderOpen, HardDrive, Pencil } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -21,10 +21,16 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
 import { StatusDot } from "@/components/StatusDot"
 import { apiFetch } from "@/lib/api"
-import type { BaseImage, Bundle, ImageEvent, ListBundlesResponse, ListImagesResponse, ListLocalFilesResponse, ListRepoPackagesResponse, LocalFileInfo, RepoPackage } from "@/lib/types"
+import type { BaseImage, Bundle, ImageEvent, InstallInstruction, InstallInstructionOpcode, ListBundlesResponse, ListImagesResponse, ListLocalFilesResponse, ListRepoPackagesResponse, LocalFileInfo, RepoPackage } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useSSE } from "@/hooks/use-sse"
 import { toast } from "@/hooks/use-toast"
@@ -1041,6 +1047,71 @@ function ImageSheet({ image, onClose, relativeTime }: { image: BaseImage; onClos
   const [deleteError, setDeleteError] = React.useState("")
   const [shellOpen, setShellOpen] = React.useState(false)
 
+  // Install Instructions edit state (#147)
+  const [instrDialogOpen, setInstrDialogOpen] = React.useState(false)
+  const [instrList, setInstrList] = React.useState<InstallInstruction[]>(image.install_instructions ?? [])
+  const [instrEditIdx, setInstrEditIdx] = React.useState<number | null>(null)
+  const [instrForm, setInstrForm] = React.useState<InstallInstruction>({ opcode: "overwrite", target: "", payload: "" })
+  const [instrSaveError, setInstrSaveError] = React.useState("")
+
+  const instrMutation = useMutation({
+    mutationFn: (instructions: InstallInstruction[]) =>
+      apiFetch<BaseImage>(`/api/v1/images/${image.id}/install-instructions`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instructions }),
+      }),
+    onSuccess: (updated) => {
+      qc.invalidateQueries({ queryKey: ["images"] })
+      setInstrList(updated.install_instructions ?? [])
+      setInstrDialogOpen(false)
+      setInstrEditIdx(null)
+      setInstrSaveError("")
+      toast({ title: "Install instructions saved" })
+    },
+    onError: (err) => {
+      setInstrSaveError(String(err))
+    },
+  })
+
+  function openAddInstr() {
+    setInstrForm({ opcode: "overwrite", target: "", payload: "" })
+    setInstrEditIdx(null)
+    setInstrDialogOpen(true)
+    setInstrSaveError("")
+  }
+
+  function openEditInstr(idx: number) {
+    setInstrForm({ ...instrList[idx] })
+    setInstrEditIdx(idx)
+    setInstrDialogOpen(true)
+    setInstrSaveError("")
+  }
+
+  function saveInstr() {
+    if (!instrForm.target.trim()) {
+      setInstrSaveError("Target path is required")
+      return
+    }
+    const updated = instrEditIdx === null
+      ? [...instrList, instrForm]
+      : instrList.map((it, i) => i === instrEditIdx ? instrForm : it)
+    instrMutation.mutate(updated)
+  }
+
+  function removeInstr(idx: number) {
+    const updated = instrList.filter((_, i) => i !== idx)
+    instrMutation.mutate(updated)
+  }
+
+  function moveInstr(idx: number, dir: -1 | 1) {
+    const updated = [...instrList]
+    const swap = idx + dir
+    if (swap < 0 || swap >= updated.length) return
+    ;[updated[idx], updated[swap]] = [updated[swap], updated[idx]]
+    instrMutation.mutate(updated)
+  }
+
   function copySHA() {
     navigator.clipboard.writeText(image.checksum).then(() => {
       setCopiedSha(true)
@@ -1144,6 +1215,105 @@ function ImageSheet({ image, onClose, relativeTime }: { image: BaseImage; onClos
               <p className="text-sm text-muted-foreground">{image.notes}</p>
             </Section>
           )}
+
+          {/* #147: Install Instructions section */}
+          {image.status !== "archived" && (
+            <Section title="Install Instructions">
+              {instrList.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No instructions configured.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {instrList.map((instr, i) => (
+                    <div key={i} className="flex items-start gap-2 rounded border border-border bg-muted/30 px-2 py-1.5 text-xs">
+                      <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">{instr.opcode}</span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground" title={instr.target}>{instr.target}</span>
+                      <span className="shrink-0 truncate max-w-[120px] text-muted-foreground/60" title={instr.payload}>{instr.payload.slice(0, 40)}{instr.payload.length > 40 ? "…" : ""}</span>
+                      <div className="flex shrink-0 gap-0.5">
+                        <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => moveInstr(i, -1)} disabled={i === 0 || instrMutation.isPending}>
+                          <ChevronUp className="h-3 w-3" />
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => moveInstr(i, 1)} disabled={i === instrList.length - 1 || instrMutation.isPending}>
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => openEditInstr(i)} disabled={instrMutation.isPending}>
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-5 w-5 text-destructive" onClick={() => removeInstr(i)} disabled={instrMutation.isPending}>
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Button variant="outline" size="sm" className="mt-2 w-full" onClick={openAddInstr} disabled={instrMutation.isPending}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Add instruction
+              </Button>
+            </Section>
+          )}
+
+          {/* #147: Edit instruction dialog */}
+          <Dialog open={instrDialogOpen} onOpenChange={(v) => { if (!v) setInstrDialogOpen(false) }}>
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>{instrEditIdx === null ? "Add instruction" : "Edit instruction"}</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-2">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Opcode</label>
+                  <div className="flex gap-3">
+                    {(["overwrite", "modify", "script"] as InstallInstructionOpcode[]).map((op) => (
+                      <label key={op} className="flex items-center gap-1.5 cursor-pointer text-sm">
+                        <input
+                          type="radio"
+                          name="opcode"
+                          value={op}
+                          checked={instrForm.opcode === op}
+                          onChange={() => setInstrForm((f) => ({ ...f, opcode: op }))}
+                        />
+                        <span className="font-mono text-xs">{op}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Target path</label>
+                  <Input
+                    className="font-mono text-xs"
+                    placeholder="/etc/sysctl.conf"
+                    value={instrForm.target}
+                    onChange={(e) => setInstrForm((f) => ({ ...f, target: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                    {instrForm.opcode === "modify" ? 'Payload (JSON: {"find": "<regex>", "replace": "<string>"})' : instrForm.opcode === "script" ? "Script (POSIX shell)" : "Payload (file content)"}
+                  </label>
+                  <textarea
+                    className={cn(
+                      "w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 font-mono text-xs resize-y",
+                      instrForm.opcode === "script" ? "min-h-[160px]" : "min-h-[80px]"
+                    )}
+                    placeholder={instrForm.opcode === "modify" ? '{"find": "^kernel.panic.*", "replace": "kernel.panic = 10"}' : instrForm.opcode === "script" ? "#!/bin/sh\necho 'hello from chroot'" : "File content here..."}
+                    value={instrForm.payload}
+                    onChange={(e) => setInstrForm((f) => ({ ...f, payload: e.target.value }))}
+                  />
+                </div>
+                {instrSaveError && <p className="text-xs text-destructive">{instrSaveError}</p>}
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    className="flex-1"
+                    onClick={saveInstr}
+                    disabled={instrMutation.isPending}
+                  >
+                    {instrMutation.isPending ? "Saving…" : "Save"}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setInstrDialogOpen(false)}>Cancel</Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
 
           {image.error_message && (
             <Section title="Error">

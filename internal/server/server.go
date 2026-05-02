@@ -1554,7 +1554,6 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/images/{id}/status", images.GetImageStatus)
 			r.Get("/images/{id}/disklayout", images.GetDiskLayout)
 			r.Put("/images/{id}/disklayout", images.PutDiskLayout)
-			r.Put("/images/{id}/install-instructions", images.PutInstallInstructions)
 			r.Post("/images/{id}/blob", images.UploadBlob)
 			r.Get("/images/{id}/metadata", images.GetImageMetadata)
 			r.Put("/images/{id}/tags", images.UpdateImageTags)

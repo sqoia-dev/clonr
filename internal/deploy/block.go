@@ -12,8 +12,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/hardware"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // BlockDeployer deploys a raw block image directly to a disk.
@@ -49,6 +49,11 @@ type BlockDeployer struct {
 	// Empty means auto-detect via findClientdBin (searches alongside os.Args[0],
 	// /opt/clustr/bin/, and /usr/local/bin/).
 	ClientdBinPath string
+
+	// InstallInstructions is the ordered list of per-image filesystem mutations
+	// to apply after applyNodeConfig and before any post-write checks. Set via
+	// SetInstallInstructions before Finalize. Nil/empty means no-op.
+	InstallInstructions []api.InstallInstruction
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -72,6 +77,12 @@ func (d *BlockDeployer) SetClientdURL(clientdURL string) {
 // deployed rootfs. Call before Finalize. Empty means auto-detect.
 func (d *BlockDeployer) SetClientdBinPath(p string) {
 	d.ClientdBinPath = p
+}
+
+// SetInstallInstructions implements InstallInstructionsSetter. Call before
+// Finalize to apply per-image install instructions during the in-chroot phase.
+func (d *BlockDeployer) SetInstallInstructions(instrs []api.InstallInstruction) {
+	d.InstallInstructions = instrs
 }
 
 // Preflight validates that a suitable target disk exists and resolves its path.
@@ -430,7 +441,7 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		_ = exec.Command("umount", mountRoot).Run()
 	}()
 
-	if err := inChrootReconfigure(ctx, cfg, mountRoot); err != nil {
+	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions); err != nil {
 		return err
 	}
 
