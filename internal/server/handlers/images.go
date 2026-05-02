@@ -1205,13 +1205,13 @@ func (h *ImagesHandler) FromURL(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	img := api.BaseImage{
-		ID:          uuid.New().String(),
-		Name:        name,
-		Status:      api.ImageStatusBuilding,
-		Format:      api.ImageFormatBlock,
-		SourceURL:   req.URL,
-		Tags:        []string{},
-		CreatedAt:   now,
+		ID:        uuid.New().String(),
+		Name:      name,
+		Status:    api.ImageStatusBuilding,
+		Format:    api.ImageFormatBlock,
+		SourceURL: req.URL,
+		Tags:      []string{},
+		CreatedAt: now,
 	}
 
 	if err := h.DB.CreateBaseImage(r.Context(), img); err != nil {
@@ -1398,10 +1398,17 @@ func (h *ImagesHandler) StreamImageEvents(w http.ResponseWriter, r *http.Request
 	flusher.Flush()
 
 	ctx := r.Context()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, open := <-ch:
 			if !open {
 				return

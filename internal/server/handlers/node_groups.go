@@ -9,9 +9,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/reimage"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // allowedRoles is the set of accepted role values for node groups.
@@ -253,7 +253,7 @@ func (h *NodeGroupsHandler) AddGroupMembers(w http.ResponseWriter, r *http.Reque
 
 // RemoveGroupMember handles DELETE /api/v1/node-groups/:id/members/:node_id.
 func (h *NodeGroupsHandler) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
-	id     := chi.URLParam(r, "id")
+	id := chi.URLParam(r, "id")
 	nodeID := chi.URLParam(r, "node_id")
 
 	if err := h.DB.RemoveGroupMember(r.Context(), id, nodeID); err != nil {
@@ -616,10 +616,17 @@ func (h *NodeGroupsHandler) StreamGroupReimageEvents(w http.ResponseWriter, r *h
 	flusher.Flush()
 
 	ctx := r.Context()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, open := <-ch:
 			if !open {
 				return

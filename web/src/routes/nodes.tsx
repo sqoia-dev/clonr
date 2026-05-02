@@ -29,6 +29,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { StatusDot } from "@/components/StatusDot"
 import { useConnection } from "@/contexts/connection"
 import { apiFetch, sseUrl } from "@/lib/api"
+import { sseReconnectDelay } from "@/lib/sse-backoff"
 import { toast } from "@/hooks/use-toast"
 import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride } from "@/lib/types"
 import { nodeState, NODE_PROVIDERS } from "@/lib/types"
@@ -584,12 +585,14 @@ export function NodesPage() {
   React.useEffect(() => {
     let es: EventSource | null = null
     let reconnectTimer: ReturnType<typeof setTimeout>
+    let attempt = 0
 
     function connect() {
       const url = sseUrl(`/api/v1/logs/stream?component=node-heartbeat`)
       es = new EventSource(url, { withCredentials: true })
 
       es.onopen = () => {
+        attempt = 0
         setStatus("connected")
       }
 
@@ -598,9 +601,10 @@ export function NodesPage() {
       }
 
       es.onerror = () => {
+        attempt++
         setStatus("reconnecting")
         es?.close()
-        reconnectTimer = setTimeout(connect, 5000)
+        reconnectTimer = setTimeout(connect, sseReconnectDelay(attempt))
       }
     }
 

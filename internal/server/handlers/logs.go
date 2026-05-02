@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // nodeRateLimiter enforces a per-node request rate limit using a token-bucket
@@ -64,15 +64,15 @@ type LogsHubIface interface {
 
 // LogsHandler handles all /api/v1/logs routes.
 type LogsHandler struct {
-	DB         *db.DB
-	Broker     LogBroker
+	DB     *db.DB
+	Broker LogBroker
 	// Hub is optional. When set, StreamLogs tracks node-journal SSE subscribers
 	// and drives log_pull_start / log_pull_stop on the connected node.
-	Hub        LogsHubIface
+	Hub LogsHubIface
 	// ServerCtx is a server-lifetime context used for DB writes so that a
 	// client disconnect (r.Context() cancellation) does not abort an in-flight
 	// SQLite transaction and silently drop a log batch.
-	ServerCtx  context.Context
+	ServerCtx context.Context
 
 	// ingestLimiter enforces a per-node rate limit on POST /api/v1/logs.
 	// Lazily initialized on first use (100 req/s default).
@@ -274,11 +274,18 @@ func (h *LogsHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			// Client disconnected — cancel() in defer handles cleanup.
 			return
+		case <-ticker.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case entry, open := <-ch:
 			if !open {
 				return

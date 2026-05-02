@@ -108,10 +108,17 @@ func (h *ProgressHandler) StreamProgress(w http.ResponseWriter, r *http.Request)
 	flusher.Flush()
 
 	ctx := r.Context()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case entry, open := <-ch:
 			if !open {
 				return

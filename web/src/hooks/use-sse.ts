@@ -1,5 +1,6 @@
 import * as React from "react"
 import { sseUrl } from "@/lib/api"
+import { sseReconnectDelay } from "@/lib/sse-backoff"
 
 export type SSEStatus = "connected" | "reconnecting" | "disconnected"
 
@@ -37,6 +38,7 @@ export function useSSE<T>({
     let es: EventSource | null = null
     let reconnectTimer: ReturnType<typeof setTimeout>
     let destroyed = false
+    let attempt = 0
 
     function connect() {
       if (destroyed) return
@@ -44,6 +46,7 @@ export function useSSE<T>({
       es = new EventSource(url, { withCredentials: true })
 
       es.onopen = () => {
+        attempt = 0
         onStatusRef.current?.("connected")
       }
 
@@ -58,10 +61,11 @@ export function useSSE<T>({
 
       es.onerror = () => {
         if (destroyed) return
+        attempt++
         onStatusRef.current?.("reconnecting")
         es?.close()
         es = null
-        reconnectTimer = setTimeout(connect, 5000)
+        reconnectTimer = setTimeout(connect, sseReconnectDelay(attempt))
       }
     }
 
