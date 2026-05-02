@@ -814,6 +814,14 @@ func runAutoDeployMode() error {
 	}
 
 	// Step 3: Act on server directive.
+	//
+	// Deploy phase ordering (per docs/PHASE-SEQUENCE-DEPLOY.md):
+	//   1. Hardware discovery  (done above)
+	//   2. Server registration (done above)
+	//   3. BIOS apply         — TODO(#159): hook here when NodeConfig.BIOSOnly is set
+	//   4. Image fetch        — unicast (below) or multicast (Sprint 25 #157 Commit 3)
+	//   5. Partition + write
+	//   6. Finalize + reboot
 	switch regResp.Action {
 	case "deploy":
 		// Print header now that we have node identity; image will be fetched next.
