@@ -28,6 +28,7 @@ type ClientdDBIface interface {
 	UpdateLastSeen(ctx context.Context, nodeID string) error
 	InsertLogBatch(ctx context.Context, entries []api.LogEntry) error
 	GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error)
+	InsertStatsBatch(ctx context.Context, rows []db.NodeStatRow) error
 }
 
 // ClientdHubIface is the hub operations needed by the handler.
@@ -164,6 +165,9 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 
 	case "operator_exec_result":
 		h.handleOperatorExecResult(nodeID, msg)
+
+	case "stats_batch":
+		h.handleStatsBatch(ctx, nodeID, msg)
 
 	default:
 		log.Debug().Str("node_id", nodeID).Str("type", msg.Type).
@@ -467,6 +471,85 @@ func (h *ClientdHandler) handleOperatorExecResult(nodeID string, msg clientd.Cli
 		Msg("clientd ws: operator_exec_result received from node")
 }
 
+// handleStatsBatch persists a stats_batch message from a node and sends a
+// stats_ack back to indicate acceptance. Uses the server-lifetime context so
+// a node disconnect doesn't abort the in-flight SQLite transaction.
+func (h *ClientdHandler) handleStatsBatch(ctx context.Context, nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.StatsBatchPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("clientd ws: malformed stats_batch payload")
+		h.sendStatsAck(nodeID, msg.MsgID, payload.BatchID, false, "malformed payload: "+err.Error())
+		return
+	}
+
+	if len(payload.Samples) == 0 {
+		h.sendStatsAck(nodeID, msg.MsgID, payload.BatchID, true, "")
+		return
+	}
+
+	// Convert to DB rows.
+	rows := make([]db.NodeStatRow, 0, len(payload.Samples))
+	for _, s := range payload.Samples {
+		rows = append(rows, db.NodeStatRow{
+			NodeID: nodeID,
+			Plugin: payload.Plugin,
+			Sensor: s.Sensor,
+			Value:  s.Value,
+			Unit:   s.Unit,
+			Labels: s.Labels,
+			TS:     s.TS,
+		})
+	}
+
+	// Use server-lifetime context so disconnect doesn't abort the transaction.
+	writeCtx := h.ServerCtx
+	if writeCtx == nil {
+		writeCtx = ctx
+	}
+
+	if err := h.DB.InsertStatsBatch(writeCtx, rows); err != nil {
+		log.Error().Err(err).
+			Str("node_id", nodeID).
+			Str("plugin", payload.Plugin).
+			Str("batch_id", payload.BatchID).
+			Int("samples", len(payload.Samples)).
+			Msg("clientd ws: InsertStatsBatch failed")
+		h.sendStatsAck(nodeID, msg.MsgID, payload.BatchID, false, "db insert failed")
+		return
+	}
+
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("plugin", payload.Plugin).
+		Str("batch_id", payload.BatchID).
+		Int("samples", len(payload.Samples)).
+		Msg("clientd ws: stats_batch persisted")
+
+	h.sendStatsAck(nodeID, msg.MsgID, payload.BatchID, true, "")
+}
+
+// sendStatsAck sends a "stats_ack" ServerMessage back to the node.
+func (h *ClientdHandler) sendStatsAck(nodeID, refMsgID, batchID string, accepted bool, errMsg string) {
+	payload, err := json.Marshal(clientd.StatsAckPayload{
+		BatchID:  batchID,
+		Accepted: accepted,
+		Error:    errMsg,
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("clientd ws: failed to marshal stats_ack")
+		return
+	}
+
+	serverMsg := clientd.ServerMessage{
+		Type:    "stats_ack",
+		MsgID:   refMsgID,
+		Payload: json.RawMessage(payload),
+	}
+	if err := h.Hub.Send(nodeID, serverMsg); err != nil {
+		log.Debug().Err(err).Str("node_id", nodeID).Msg("clientd ws: failed to send stats_ack (node may have disconnected)")
+	}
+}
+
 // execRequest is the JSON body for POST /api/v1/nodes/{id}/exec.
 type execRequest struct {
 	Command string   `json:"command"`
@@ -576,11 +659,11 @@ func (h *ClientdHandler) HandleSudoersPush(w http.ResponseWriter, r *http.Reques
 		Msg("clientd: sudoers push complete")
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":           okCount == len(nodeIDs),
-		"node_count":   len(nodeIDs),
+		"ok":            okCount == len(nodeIDs),
+		"node_count":    len(nodeIDs),
 		"success_count": okCount,
 		"failure_count": len(nodeIDs) - okCount,
-		"results":      results,
+		"results":       results,
 	})
 }
 

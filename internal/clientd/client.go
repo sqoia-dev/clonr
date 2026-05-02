@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/clientd/stats"
 )
 
 const (
@@ -39,13 +40,26 @@ type Client struct {
 	send chan []byte
 
 	// journalMu guards the active JournalStreamer.
-	journalMu      sync.Mutex
+	journalMu       sync.Mutex
 	journalStreamer *JournalStreamer
 
 	// nodeMAC is read from the token file path context; populated lazily.
 	// For journal entries we need a MAC address to stamp on each LogEntry.
 	// We derive it from /etc/clustr/node-mac if present, falling back to empty string.
 	nodeMAC string
+
+	// statsRegistry is the stats plugin registry. Non-nil when stats collection
+	// is enabled (i.e. always — the registry is built in New()).
+	statsRegistry *stats.Registry
+
+	// statsBuffer holds batches that could not be sent due to WS disconnection.
+	// Drained on reconnect before the ticker fires again.
+	statsBuffer *stats.Buffer
+
+	// statsAcked tracks batch IDs that have been acknowledged by the server.
+	// Protected by statsAckedMu.
+	statsAckedMu sync.Mutex
+	statsAcked   map[string]bool
 }
 
 // New creates a Client. serverURL is the full ws:// or wss:// URL for the
@@ -73,13 +87,27 @@ func New(serverURL, tokenPath, version string) (*Client, error) {
 		nodeMAC = strings.TrimSpace(string(data))
 	}
 
+	reg := stats.NewRegistry()
+	reg.Register(stats.NewCPUPlugin())
+	reg.Register(stats.NewMemoryPlugin())
+	reg.Register(stats.NewDisksPlugin())
+	reg.Register(stats.NewMDPlugin())
+	reg.Register(stats.NewNetPlugin())
+	reg.Register(stats.NewSystemPlugin())
+	reg.Register(stats.NewNVMePlugin())
+	reg.Register(stats.NewInfiniBandPlugin())
+	reg.Register(stats.NewFirmwarePlugin())
+
 	return &Client{
-		serverURL: serverURL,
-		tokenPath: tokenPath,
-		nodeID:    nodeID,
-		version:   version,
-		send:      make(chan []byte, 64),
-		nodeMAC:   nodeMAC,
+		serverURL:     serverURL,
+		tokenPath:     tokenPath,
+		nodeID:        nodeID,
+		version:       version,
+		send:          make(chan []byte, 64),
+		nodeMAC:       nodeMAC,
+		statsRegistry: reg,
+		statsBuffer:   stats.NewBuffer(0), // uses defaultBufferCapacity
+		statsAcked:    make(map[string]bool),
 	}, nil
 }
 
@@ -184,6 +212,15 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("clientd: send hello: %w", err)
 	}
 
+	// Drain any buffered stats batches accumulated during the previous disconnect.
+	// Do this before starting the registry so the drain happens in connection order.
+	go c.drainStatsBuffer()
+
+	// Stats collection loop — runs for the lifetime of this connection.
+	go c.statsRegistry.Run(connCtx, func(plugin string, samples []stats.Sample) {
+		c.sendStatsBatch(plugin, samples)
+	})
+
 	// Write loop runs in the foreground, draining c.send and the heartbeat ticker.
 	writeErr := c.writeLoop(connCtx, conn)
 
@@ -275,6 +312,9 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 
 	case "operator_exec_request":
 		c.handleOperatorExecRequest(msg)
+
+	case "stats_ack":
+		c.handleStatsAck(msg)
 
 	default:
 		log.Debug().Str("type", msg.Type).Str("msg_id", msg.MsgID).
@@ -908,7 +948,6 @@ func (c *Client) stopJournalStreamer() {
 	}
 }
 
-
 // writeLoop sends messages from the c.send channel and fires the heartbeat ticker.
 // Returns when ctx is cancelled or a write fails.
 func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn) error {
@@ -1104,6 +1143,110 @@ func (c *Client) verifyBoot(token string) {
 			Str("url", url).
 			Msg("clientd: verify-boot: unexpected HTTP status (non-fatal)")
 	}
+}
+
+// ─── Stats (#131) ─────────────────────────────────────────────────────────────
+
+// sendStatsBatch converts a stats.Plugin Collect result into a stats_batch
+// ClientMessage and either sends it immediately or buffers it when the send
+// channel is full (WS pressure) or when the connection is down.
+func (c *Client) sendStatsBatch(plugin string, samples []stats.Sample) {
+	batchID := uuid.New().String()
+
+	// Convert stats.Sample → StatsSample (cross-package boundary).
+	ss := make([]StatsSample, len(samples))
+	for i, s := range samples {
+		ss[i] = StatsSample{
+			Sensor: s.Sensor,
+			Value:  s.Value,
+			Unit:   s.Unit,
+			Labels: s.Labels,
+			TS:     s.TS,
+		}
+	}
+
+	payload, err := json.Marshal(StatsBatchPayload{
+		BatchID:     batchID,
+		NodeID:      c.nodeID,
+		Plugin:      plugin,
+		Samples:     ss,
+		TSCollected: time.Now().UTC(),
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("plugin", plugin).Msg("clientd: failed to marshal stats_batch")
+		return
+	}
+
+	msg := ClientMessage{
+		Type:    "stats_batch",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(payload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Str("plugin", plugin).Msg("clientd: failed to marshal stats_batch message")
+		return
+	}
+
+	select {
+	case c.send <- data:
+		log.Debug().Str("plugin", plugin).Str("batch_id", batchID).
+			Int("samples", len(samples)).Msg("clientd: stats_batch sent")
+	default:
+		// Send channel full — buffer the batch for retry on reconnect.
+		c.statsBuffer.Push(stats.Batch{
+			BatchID:     batchID,
+			Plugin:      plugin,
+			Samples:     convertToStatsBatch(samples),
+			TSCollected: time.Now().UTC(),
+		})
+		log.Debug().Str("plugin", plugin).Str("batch_id", batchID).
+			Msg("clientd: stats_batch buffered (send channel full)")
+	}
+}
+
+// drainStatsBuffer sends all buffered stats batches after a reconnect.
+// Called once per connection, before the stats registry starts a new tick cycle.
+func (c *Client) drainStatsBuffer() {
+	batches := c.statsBuffer.DrainAll()
+	if len(batches) == 0 {
+		return
+	}
+	log.Info().Int("count", len(batches)).Msg("clientd: draining buffered stats batches after reconnect")
+	for _, b := range batches {
+		// Convert back to stats.Sample for the send path.
+		c.sendStatsBatch(b.Plugin, convertFromStatsBatch(b.Samples))
+	}
+}
+
+// handleStatsAck processes a "stats_ack" message from the server.
+// On acceptance the node records the batch_id so it is not re-queued.
+func (c *Client) handleStatsAck(msg ServerMessage) {
+	var payload StatsAckPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Msg("clientd: malformed stats_ack payload")
+		return
+	}
+	if payload.Accepted {
+		c.statsAckedMu.Lock()
+		c.statsAcked[payload.BatchID] = true
+		c.statsAckedMu.Unlock()
+		log.Debug().Str("batch_id", payload.BatchID).Msg("clientd: stats_batch acknowledged by server")
+	} else {
+		log.Warn().Str("batch_id", payload.BatchID).Str("error", payload.Error).
+			Msg("clientd: stats_batch rejected by server")
+	}
+}
+
+// convertToStatsBatch converts []stats.Sample → []stats.Sample (identical type;
+// exists to satisfy the buffer's Batch.Samples field which uses the stats package type).
+func convertToStatsBatch(samples []stats.Sample) []stats.Sample {
+	return samples
+}
+
+// convertFromStatsBatch converts []stats.Sample back to []stats.Sample for resend.
+func convertFromStatsBatch(samples []stats.Sample) []stats.Sample {
+	return samples
 }
 
 // extractNodeID parses the node ID from the WebSocket URL path.

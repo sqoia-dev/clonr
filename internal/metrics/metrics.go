@@ -2,14 +2,15 @@
 //
 // Registered metrics:
 //
-//   clustr_active_deploys              gauge    — nodes currently in reimage/deploy state
-//   clustr_deploy_total{status}        counter  — cumulative completed reimages by terminal status
-//   clustr_api_requests_total{endpoint,status,method}  counter — HTTP requests
-//   clustr_db_size_bytes               gauge    — SQLite database file size
-//   clustr_image_disk_bytes            gauge    — total bytes used by image blobs
-//   clustr_node_count{state}           gauge    — node count bucketed by lifecycle state
-//   clustr_flipback_failures_total     counter  — verify-boot flip-back failures (S4-9)
-//   clustr_webhook_deliveries_total{event,status}  counter — outbound webhook deliveries
+//	clustr_active_deploys              gauge    — nodes currently in reimage/deploy state
+//	clustr_deploy_total{status}        counter  — cumulative completed reimages by terminal status
+//	clustr_api_requests_total{endpoint,status,method}  counter — HTTP requests
+//	clustr_db_size_bytes               gauge    — SQLite database file size
+//	clustr_image_disk_bytes            gauge    — total bytes used by image blobs
+//	clustr_node_count{state}           gauge    — node count bucketed by lifecycle state
+//	clustr_flipback_failures_total     counter  — verify-boot flip-back failures (S4-9)
+//	clustr_webhook_deliveries_total{event,status}  counter — outbound webhook deliveries
+//	clustr_node_metric{node,plugin,sensor}  gauge — most-recent on-node stat per series (#131)
 package metrics
 
 import (
@@ -65,6 +66,14 @@ var (
 		Name: "clustr_webhook_deliveries_total",
 		Help: "Total outbound webhook delivery attempts by event type and delivery status.",
 	}, []string{"event", "status"})
+
+	// NodeMetric is the most-recent on-node stat per (node, plugin, sensor).
+	// Updated on a 5-second refresh cycle from an in-memory cache backed by node_stats.
+	// Labels: node = node hostname or UUID, plugin = plugin name, sensor = sensor name.
+	NodeMetric = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "clustr_node_metric",
+		Help: "Most recent on-node stat value per (node, plugin, sensor). Source: clustr-clientd stats collection (#131).",
+	}, []string{"node", "plugin", "sensor"})
 
 	// TechTrigFired is a gauge (0 or 1) per TECH-TRIG signal (Sprint M, v1.11.0).
 	// Labels: name = trigger name (t1_postgresql, t2_framework, t3_multitenant, t4_log_archive).

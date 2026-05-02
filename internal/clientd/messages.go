@@ -2,7 +2,53 @@
 // for the clustr-clientd daemon.
 package clientd
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
+
+// ─── Stats message types (#131) ──────────────────────────────────────────────
+
+// StatsSample mirrors stats.Sample for cross-package serialisation.
+// It is defined here (in the clientd package) so the server can import it
+// without creating an import cycle through internal/clientd/stats.
+type StatsSample struct {
+	Sensor string            `json:"sensor"`
+	Value  float64           `json:"value"`
+	Unit   string            `json:"unit,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
+	TS     time.Time         `json:"ts"`
+}
+
+// StatsBatchPayload is the payload for the "stats_batch" node→server message.
+// A single stats_batch carries all samples from one plugin for one collection tick.
+// The server stores samples idempotently keyed on (batch_id); the node may
+// re-send unacknowledged batches with the same batch_id on reconnect.
+type StatsBatchPayload struct {
+	// BatchID is a client-generated UUID for idempotent server-side ingestion.
+	BatchID string `json:"batch_id"`
+	// NodeID is the node's UUID, used by the server for DB writes.
+	NodeID string `json:"node_id"`
+	// Plugin is the plugin name (e.g. "cpu", "memory").
+	Plugin string `json:"plugin"`
+	// Samples are the measurements from this collection cycle.
+	Samples []StatsSample `json:"samples"`
+	// TSCollected is the wall-clock time when the batch was produced on the node.
+	TSCollected time.Time `json:"ts_collected"`
+}
+
+// StatsAckPayload is the payload for the "stats_ack" server→node message.
+// The server sends this after ingesting (or rejecting) a stats_batch.
+// When Accepted is true, the node may discard the buffered batch.
+// When Accepted is false, the node should retry on the next reconnect.
+type StatsAckPayload struct {
+	// BatchID echoes the batch_id from the corresponding stats_batch message.
+	BatchID string `json:"batch_id"`
+	// Accepted is true when the server successfully persisted the batch.
+	Accepted bool `json:"accepted"`
+	// Error is a human-readable rejection reason (only set when Accepted is false).
+	Error string `json:"error,omitempty"`
+}
 
 // ClientMessage is sent from node to server over the clientd WebSocket.
 type ClientMessage struct {
@@ -29,16 +75,16 @@ type HelloPayload struct {
 
 // HeartbeatPayload is the payload for the "heartbeat" message sent every 60s.
 type HeartbeatPayload struct {
-	UptimeSeconds  float64       `json:"uptime_seconds"`
-	Load1          float64       `json:"load_1"`
-	Load5          float64       `json:"load_5"`
-	Load15         float64       `json:"load_15"`
-	MemTotalKB     int64         `json:"mem_total_kb"`
-	MemAvailKB     int64         `json:"mem_avail_kb"`
-	DiskUsage      []DiskUsage   `json:"disk_usage"`
+	UptimeSeconds  float64         `json:"uptime_seconds"`
+	Load1          float64         `json:"load_1"`
+	Load5          float64         `json:"load_5"`
+	Load15         float64         `json:"load_15"`
+	MemTotalKB     int64           `json:"mem_total_kb"`
+	MemAvailKB     int64           `json:"mem_avail_kb"`
+	DiskUsage      []DiskUsage     `json:"disk_usage"`
 	Services       []ServiceStatus `json:"services"`
-	KernelVersion  string        `json:"kernel_version"`
-	ClientdVersion string        `json:"clientd_version"`
+	KernelVersion  string          `json:"kernel_version"`
+	ClientdVersion string          `json:"clientd_version"`
 }
 
 // DiskUsage describes filesystem utilization for a single mount point.
@@ -345,4 +391,3 @@ type SlurmFileApplyResult struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 }
-

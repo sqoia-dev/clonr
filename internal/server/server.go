@@ -278,6 +278,9 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	go s.runAutoPolicyFinalizer(ctx)
 	// M1: TECH-TRIG signal evaluator — 10-minute tick (Sprint M, v1.11.0).
 	go s.runTechTrigEvaluator(ctx)
+	// Sprint 22 #131: stats retention sweeper + Prometheus exposition cache.
+	go s.runStatsRetentionSweeper(ctx)
+	go s.runStatsPrometheusRefresher(ctx)
 }
 
 // runDigestProcessor polls the notification digest queue every hour and sends
@@ -1623,6 +1626,10 @@ func (s *Server) buildRouter() chi.Router {
 
 			// Remote exec — run a whitelisted diagnostic command on a live node.
 			r.Post("/nodes/{id}/exec", clientdH.ExecOnNode)
+
+			// Sprint 22 #131: per-node stats query.
+			statsH := &handlers.StatsHandler{DB: NewStatsDBAdapter(s.db)}
+			r.Get("/nodes/{id}/stats", statsH.GetNodeStats)
 
 			// Batch operator exec (#126) — arbitrary command across a node selector,
 			// streamed as SSE. Admin/operator scope only (runs arbitrary commands on nodes).
