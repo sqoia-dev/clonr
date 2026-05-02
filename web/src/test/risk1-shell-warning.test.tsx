@@ -8,7 +8,6 @@
  *  - sessionStorage key is set after acceptance (via the exported helpers).
  */
 
-import * as React from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
 
