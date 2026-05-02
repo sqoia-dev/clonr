@@ -1332,22 +1332,83 @@ The munge row on cloner has `uid=10003` (mis-allocated, Sprint 13 #96). After th
 
 ### Tasks
 
-- [ ] **#131 — Stats collector folded into `clustr-clientd` (HIGH, L)**
+- [x] **#131 — Stats collector folded into `clustr-clientd` (HIGH, L)** — landed `1e556a3`, CI corrective `5649520` (Go 1.25 concurrent-map-write in legacy `cpTestHub`/`execTestHub` exposed by stricter runtime), green at `5649520`. Migration `085_node_stats.sql`. `stats_batch` (node→server) / `stats_ack` (server→node) clientd messages. Idempotent re-delivery via `INSERT OR IGNORE` on PK `(node_id, plugin, sensor, ts)`. Ring buffer 90 (5 min × 9 plugins).
   Owner: Dinesh; arch by Richard.
   In: new `internal/clientd/stats/` subpackage with plugin pattern (`Plugin` interface: `Name()`, `Collect(ctx) []Sample`). Plugin set v1: `cpu`, `memory`, `disks`, `md`, `net`, `system`, `nvme`, `infiniband` (link state + counters via `ibstat`), `firmware`. Push samples over the existing clientd WebSocket. New server table `node_stats(node_id, plugin, sensor, value, ts)` + retention sweeper (default 7d). New endpoint `GET /api/v1/nodes/{id}/stats?plugin=&since=`. Prometheus exposition extended to include per-node series. Out: GPU plugins (#132).
   Depends on: #120 (real-hardware initramfs — same kernel module assumptions on running nodes).
 
-- [ ] **#132 — GPU + RAID + ZFS + NTP plugins (HIGH, M)**
+- [x] **#132 — GPU + RAID + ZFS + NTP plugins (HIGH, M)** — landed `48e15cd`, CI green. Plugin count now 13 (9 + 4: nvidia, megaraid, zfs, ntp). All four optional; absent binary → zero samples, no error. No privhelper needed (clustr-clientd runs as root on managed nodes; privhelper boundary is server-side only).
   Owner: Dinesh.
   In: `nvidia` (via `nvidia-smi -q -x`), `megaraid` (via `storcli`), `zfs` (`zpool status -p`), `ntp` (`chronyc tracking`). Plugins are optional — if the binary isn't present, the plugin reports "not configured" cleanly and stays out of the metric series. Out: rocm (defer until a customer with AMD GPUs).
   Depends on: #131.
 
-- [ ] **#133 — Alert rule engine + YAML rules (HIGH, M)**
+- [x] **#133 — Alert rule engine + YAML rules (HIGH, M)** — landed `064d46d`, CI green. Migration `086_alerts.sql`. All 8 default rules ship (`disk-percent`, `infiniband-down`, `hw-raid-degraded`, `hw-raid-failed`, `sw-raid-degraded`, `zpool-degraded`, `cluster-mces-errors`, `cluster-nodes-offline`, `appliance-diskspacelow`). Meta-rule `cluster-nodes-offline` uses `plugin: _meta, sensor: node_offline` against `node_configs.last_seen_at`. `delta` operator for MCE counter punted to Sprint 23. **NOTE: latent thread-safety risk in `StateStore.active` flagged by Richard's audit — fix-up tasks #135 + #136 + #137 inserted before #134.**
   Owner: Dinesh; arch by Richard.
   In: `internal/alerts/` package. YAML rules under `/etc/clustr/rules.d/*.yml` (mode 0640 root:clustr). Default rule set shipped: `disk-percent`, `infiniband-down`, `hw-raid-degraded`, `sw-raid-degraded`, `zpool-degraded`, `cluster-mces-errors`, `cluster-nodes-offline`, `appliance-diskspacelow`. Rules evaluate on a 60s tick. Routes through the existing webhook dispatcher and SMTP notifier — no new delivery infrastructure. New endpoint `GET /api/v1/alerts` (active + history). Out: silence-with-expiry (Sprint 24 UI).
   Depends on: #131.
 
-- [ ] **#134 — `clustr alerts` + `clustr stats` CLI (MEDIUM, S)**
+- [x] **#134 — `clustr alerts` + `clustr stats` CLI (MEDIUM, S)** — landed `bd48352`, CI green. Server-side `GET /api/v1/alerts` extended with `rule=` filter (the other filters `state`/`severity`/`node` already existed from #133). `clustr stats -n` uses `selector.RegisterSelectorFlags` and enforces single-node by routing through `GET /api/v1/cluster/health` and erroring if the selector resolves to !=1 node. Punted Sprint 23+: real-time follow `-f`, sparkline graphs, multi-node aggregation.
+
+---
+
+## Sprint 22 — SHIPPED (2026-05-02)
+
+All four primary tasks (#131, #132, #133, #134) green plus three thread-safety fix-ups (#135, #136, #137 GO). UX side-quest while shipping: UX-1 navigation cleanup, UX-2 DELETE 204 handling, UX-3 server SSE keepalive + jittered reconnect backoff. Three follow-ups queued for Sprint 23+: UX-4 connection-health provider, UX-5 Alert.Labels deep-copy, UX-6 SMTP off the engine tick loop, UX-7 Engine THREAD-SAFETY godoc, UX-8 audit short-lived SSE handlers.
+
+clustr now answers "is anything broken right now?" inside the product without external tooling. Stats collection across 13 plugins, alert engine with 8 default rules, CLI surface for both. Web alert/stats UI is Sprint 24.
+
+---
+
+## Sprint 23 — Imaging maturity (MEDIUM) — "disk layouts, instructions, in-chroot reconfigure"
+
+**Started:** 2026-05-02
+**Theme:** Image-system features that operators expect once they've stopped fighting PXE. With Sprint 20 the deploy works on real hardware; Sprint 23 is the "now what" — separate disk layouts as a first-class object, give operators a small DSL to customise images without rebuilding, and close the "first boot is useless for 30s-3m" window via in-chroot reconfigure.
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` Sprint 23 section. Approved by founder 2026-05-02.
+
+**Note on numbering:** Richard's plan doc used #135–#139 for these, but those IDs were claimed by the Sprint 22 thread-safety fix-ups in flight. Renumbered to #146–#150 for these Sprint 23 tasks.
+
+### Tasks
+
+- [ ] **#146 — Disk layout as a first-class object (MEDIUM, M)**
+  Owner: Richard scopes → Dinesh implements.
+  In: new migration `disk_layouts(id, name, source_node_id, captured_at, layout_json)`, endpoints `POST /api/v1/disk-layouts/capture/{node_id}`, `GET /api/v1/disk-layouts`, `PUT /api/v1/disk-layouts/{id}`. New foreign keys `node_groups.disk_layout_id` (default for the group) and per-node override on `nodes.disk_layout_id`. Deploy precedence: explicit layout > group default > recommendation. Out: layout DSL editor (operators paste layout JSON in v1).
+  Depends on: nothing.
+
+- [ ] **#147 — Per-image install instructions DSL (MEDIUM, S)**
   Owner: Dinesh.
-  In: `clustr alerts -L | -S | -R` and `clustr stats -n NODE -s REGEX` shapes match cv-alerts / cv-stats. Out: silence/ack flow (waits on UI in Sprint 24).
-  Depends on: #131 #133.
+  In: extend `BaseImage` with `install_instructions []InstallInstruction`. `InstallInstruction = { opcode: "modify"|"overwrite"|"script", target: string, payload: string }`. Deploy agent runs them in order inside the chroot after extract, before bootloader install. UI: "Install Instructions" tab on the image edit drawer. Out: opcode beyond the three.
+  Depends on: #146 (deploy plan touches both).
+
+- [ ] **#148 — In-chroot reconfigure pass (MEDIUM, M)**
+  Owner: Dinesh.
+  In: factor `internal/clientd/configapply.go` so the file-writing logic targets an arbitrary root. New deploy phase `inChrootReconfigure` against `/mnt/target` before unmount. Closes the "online but useless" first-boot window. Out: full plugin parity with cv-reconfigure (we apply only what clientd already applies).
+  Depends on: nothing.
+
+- [ ] **#149 — Rack model + `--racks` selector wiring (LOW, S)**
+  Owner: Dinesh.
+  In: migrations `racks(id, name, height_u)` and `node_rack_position(node_id, rack_id, slot_u, height_u)`. Selector grammar (#125) starts resolving `--racks` against the model. Out: rack diagram UI (lands in Sprint 24).
+  Depends on: nothing.
+
+- [ ] **#150 — IMSM / hardware RAID passthrough (LOW, S)**
+  Owner: Dinesh.
+  In: `mdadm --imsm-platform-test` detection in `internal/deploy/raid.go`; branch the assembly path. Add a qemu-IMSM emulated test. Out: full vendor RAID coverage (megaraid CLI is bundled but not the deploy path in v1).
+  Depends on: #120 (already landed).
+
+### Thread-safety fix-ups (inserted 2026-05-02 from Richard's Go 1.25 audit)
+
+- [x] **#135 — Add RWMutex + accessors to `alerts.StateStore.active` (HIGH, S)** — landed `23de7a6`. `internal/alerts -race` clean (1.033s). Both `engine.go` sites use `ActiveKeys()`. `Snapshot()` and `ForEachActive()` wired and tested for #134. Subtle `Resolve` and `UpdateLastValue` lock ordering tightened. Deadlock-isolation test passed first try.
+  Owner: Dinesh.
+  In: `sync.RWMutex` protecting `active` map; introduce `ActiveKeys()` / `ForEachActive(fn)` / `Snapshot()` accessors that take a snapshot under RLock; convert `engine.go:395` and `engine.go:489` to use the accessor instead of ranging `e.store.active` directly. Acceptance: `go test ./internal/alerts/... -race` passes; `engine.go` has zero direct `e.store.active` references outside StateStore methods.
+  Depends on: #133. Blocks #134.
+
+- [x] **#136 — Enable `-race` in CI for `internal/alerts` + `internal/server` (MEDIUM, S)** — landed `9d9351d` + timeout-bump `70424c2` (5m → 10m needed for server tests under -race overhead). `internal/server -race` clean at 7m59s; no panics surfaced.
+  Owner: Gilfoyle.
+  In: update `.github/workflows/ci.yml` test job to add a second `go test` invocation with `-race` scoped to `./internal/alerts/...` and `./internal/server/...`. Full `./... -race` blows runner memory per standing rule — accept the scoped form. Acceptance: CI green on a known-good SHA with the new `-race` step.
+  Depends on: nothing (parallel with #135).
+
+- [x] **#137 — Concurrency review of `alerts/dispatch.go` + #134 CLI (MEDIUM, S)** — Part-A complete 2026-05-02. **Verdict: GO** on `dispatch.go`. Three follow-ups queued:
+  - UX-5 (#142, MEDIUM) — verify `StateStore.Snapshot()` deep-copies `Alert.Labels` so future server/CLI consumers can't race the engine tick mutating that map
+  - UX-6 (#143, MEDIUM) — move `d.Mailer.Send` out of the engine tick loop (currently a slow MX server stalls all rule evaluation)
+  - UX-7 (#144, LOW) — `THREAD-SAFETY` godoc on `alerts.Engine` struct itself (single-goroutine invariant currently undocumented)
+  Part-B (#134 PR review) pending #134 CI green.
