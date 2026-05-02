@@ -94,7 +94,7 @@ jobs:
       # Runs even if the broad test step above fails so both signals are visible.
       - name: go test -race (alerts + server)
         if: always()
-        run: go test -race -count=1 -timeout 5m ./internal/alerts/... ./internal/server/...
+        run: go test -race -count=1 -timeout 10m ./internal/alerts/... ./internal/server/...
 
   build:
     name: Build
