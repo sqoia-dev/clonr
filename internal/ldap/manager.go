@@ -85,6 +85,11 @@ type Manager struct {
 	// hub is the optional clientd hub for fanout pushes. Set after construction
 	// via SetHub(). When nil, fanout operations are skipped (dev/test mode).
 	hub LDAPHubIface
+
+	// StagingDB is an optional staging interface. When set, mutation handlers
+	// honour ?stage=true requests by writing to pending_changes instead of the
+	// LDAP directory. Wired in from server.go via SetStagingDB().
+	StagingDB StagingIface
 }
 
 // SetHub wires the clientd hub into the LDAP manager so Enable() can fanout
@@ -94,6 +99,15 @@ func (m *Manager) SetHub(hub LDAPHubIface) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hub = hub
+}
+
+// SetStagingDB wires the staging DB into the LDAP manager.
+// When set, mutation handlers honour ?stage=true requests by writing to
+// pending_changes instead of applying immediately.
+func (m *Manager) SetStagingDB(s StagingIface) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.StagingDB = s
 }
 
 // New creates a new LDAP Manager. Call StartBackgroundWorkers to start health checks.

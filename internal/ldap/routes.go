@@ -197,6 +197,17 @@ func (m *Manager) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	// Two-stage commit intercept (#154): if ?stage=true, write to pending_changes
+	// instead of applying immediately. Default off — existing behaviour unchanged.
+	m.mu.RLock()
+	stagingDB := m.StagingDB
+	m.mu.RUnlock()
+	if stagingDB != nil {
+		if tryStageLDAP(w, r, stagingDB, "ldap_user", "new", "") {
+			return
+		}
+	}
+
 	var req CreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -325,6 +336,16 @@ func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
+	// Two-stage commit intercept (#154).
+	m.mu.RLock()
+	stagingDB := m.StagingDB
+	m.mu.RUnlock()
+	if stagingDB != nil {
+		if tryStageLDAP(w, r, stagingDB, "ldap_user", uid, "") {
+			return
+		}
+	}
+
 	var req UpdateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -364,6 +385,15 @@ func (m *Manager) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 // Supplementary group changes are expressed via add_groups/remove_groups on the group entries.
 func (m *Manager) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "uid")
+	// Two-stage commit intercept (#154).
+	m.mu.RLock()
+	stagingDB := m.StagingDB
+	m.mu.RUnlock()
+	if stagingDB != nil {
+		if tryStageLDAP(w, r, stagingDB, "ldap_user", uid, "") {
+			return
+		}
+	}
 
 	var body struct {
 		UpdateUserRequest

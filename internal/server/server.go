@@ -104,6 +104,9 @@ type Server struct {
 	// Stored as an atomicFloat64 (see tech_trig_worker.go) to avoid locking overhead.
 	lastContentionRate atomicFloat64
 
+	// alertSilences is the Sprint 24 #155 silence store.  Initialised alongside alertStore.
+	alertSilences *alerts.SilenceStore
+
 	// alertEngine is the #133 alert rule engine.  Initialised in buildRouter()
 	// (after the notifier is available) and started in StartBackgroundWorkers().
 	alertEngine *alerts.Engine
@@ -173,6 +176,9 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	// Wire the hub into the LDAP manager so Enable() can fanout CA cert +
 	// sssd.conf pushes to enrolled nodes after a CA rotation (#109/#110).
 	ldapMgr.SetHub(hub)
+	// Wire staging DB into LDAP and network managers for two-stage commit (#154).
+	ldapMgr.SetStagingDB(database)
+	networkMgr.SetStagingDB(database)
 
 	groupReimageEvents := NewGroupReimageEventStore()
 	reimageOrch.Events = groupReimageEvents
@@ -1163,8 +1169,10 @@ func (s *Server) buildRouter() chi.Router {
 					Webhook: s.webhookDispatcher,
 					Mailer:  mailerEarly,
 				}
+				silenceStore := alerts.NewSilenceStore(s.db)
 				s.alertStore = alertStore
-				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.db), s.db, alertStore, alertDispatcher)
+				s.alertSilences = silenceStore
+				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.db), s.db, alertStore, silenceStore, alertDispatcher)
 			}
 		}
 
@@ -1631,6 +1639,7 @@ func (s *Server) buildRouter() chi.Router {
 				DB:           s.db,
 				Audit:        s.audit,
 				GetActorInfo: getActorInfo,
+				StagingDB:    s.db,
 			}
 			r.Get("/nodes/{id}/sudoers", nodeSudoersH.HandleList)
 			r.With(requireRole("admin")).Post("/nodes/{id}/sudoers", nodeSudoersH.HandleAdd)
@@ -1661,6 +1670,20 @@ func (s *Server) buildRouter() chi.Router {
 			if s.alertStore != nil {
 				alertsH := &handlers.AlertsHandler{Store: s.alertStore}
 				r.Get("/alerts", alertsH.HandleList)
+
+				// Sprint 24 #155: alert silences CRUD.
+				if s.alertSilences != nil {
+					silH := &handlers.SilencesHandler{Store: s.alertSilences}
+					r.Get("/alerts/silences", silH.HandleList)
+					r.Post("/alerts/silences", silH.HandleCreate)
+					r.Delete("/alerts/silences/{id}", silH.HandleDelete)
+				}
+
+				// Sprint 24 #155: alert rules listing (engine-loaded rules).
+				if s.alertEngine != nil {
+					rulesH := &handlers.AlertRulesHandler{Engine: s.alertEngine}
+					r.Get("/alerts/rules", rulesH.HandleList)
+				}
 			}
 
 			// Batch operator exec (#126) — arbitrary command across a node selector,
@@ -1839,6 +1862,17 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Get("/admin/tech-triggers/history", techTrigH.HandleHistory)
 			r.With(requireRole("admin")).Post("/admin/tech-triggers/{name}/reset", techTrigH.HandleReset)
 			r.With(requireRole("admin")).Post("/admin/tech-triggers/{name}/signal", techTrigH.HandleSignal)
+
+			// Sprint 24 #154: two-stage commit pending-changes API.
+			changesH := s.buildChangesHandler(getActorInfo)
+			// Count is readable by any authenticated role (badge poll).
+			r.Get("/changes/count", changesH.HandleCount)
+			r.Get("/changes/mode", changesH.HandleGetMode)
+			r.With(requireRole("admin")).Get("/changes", changesH.HandleList)
+			r.With(requireRole("admin")).Post("/changes", changesH.HandleStage)
+			r.With(requireRole("admin")).Post("/changes/commit", changesH.HandleCommit)
+			r.With(requireRole("admin")).Post("/changes/clear", changesH.HandleClear)
+			r.With(requireRole("admin")).Put("/changes/mode/{surface}", changesH.HandleSetMode)
 		})
 	})
 
@@ -1918,6 +1952,77 @@ func (s *Server) buildPortalHandler() *portalhandler.Handler {
 		return out, nil
 	}
 
+	return h
+}
+
+// buildChangesHandler constructs the two-stage commit ChangesHandler (#154)
+// with kind-specific CommitFns wired to the real immediate-apply code paths.
+func (s *Server) buildChangesHandler(getActorInfo func(r *http.Request) (string, string)) *handlers.ChangesHandler {
+	h := &handlers.ChangesHandler{
+		DB:           s.db,
+		Audit:        s.audit,
+		GetActorInfo: getActorInfo,
+		CommitFns: map[string]handlers.ChangesCommitFn{
+			// ldap_user: replay the payload by calling the LDAP manager's write bind.
+			"ldap_user": func(ctx context.Context, c db.PendingChange) error {
+				var req ldapmodule.CreateUserRequest
+				if err := json.Unmarshal([]byte(c.Payload), &req); err != nil {
+					return fmt.Errorf("ldap_user commit: decode payload: %w", err)
+				}
+				if req.UID == "" {
+					return fmt.Errorf("ldap_user commit: uid is required in payload")
+				}
+				dit, err := s.ldapMgr.WriteBind(ctx)
+				if err != nil {
+					return fmt.Errorf("ldap_user commit: write bind: %w", err)
+				}
+				if err := dit.CreateUser(req); err != nil {
+					return fmt.Errorf("ldap_user commit: create user: %w", err)
+				}
+				return nil
+			},
+			// sudoers_rule: replay the payload by adding a sudoer to the node.
+			"sudoers_rule": func(ctx context.Context, c db.PendingChange) error {
+				var req struct {
+					UserIdentifier string `json:"user_identifier"`
+					Source         string `json:"source"`
+					Commands       string `json:"commands"`
+				}
+				if err := json.Unmarshal([]byte(c.Payload), &req); err != nil {
+					return fmt.Errorf("sudoers_rule commit: decode payload: %w", err)
+				}
+				if req.UserIdentifier == "" {
+					return fmt.Errorf("sudoers_rule commit: user_identifier required in payload")
+				}
+				if req.Source == "" {
+					req.Source = "local"
+				}
+				if req.Commands == "" {
+					req.Commands = "ALL"
+				}
+				sudoer := db.NodeSudoer{
+					NodeID:         c.Target,
+					UserIdentifier: req.UserIdentifier,
+					Source:         req.Source,
+					Commands:       req.Commands,
+				}
+				return s.db.NodeSudoersAdd(ctx, sudoer)
+			},
+			// node_network: replay a network profile create or update.
+			"node_network": func(ctx context.Context, c db.PendingChange) error {
+				var p api.NetworkProfile
+				if err := json.Unmarshal([]byte(c.Payload), &p); err != nil {
+					return fmt.Errorf("node_network commit: decode payload: %w", err)
+				}
+				if c.Target == "new_profile" {
+					_, err := s.networkMgr.CreateProfile(ctx, p)
+					return err
+				}
+				_, err := s.networkMgr.UpdateProfile(ctx, c.Target, p)
+				return err
+			},
+		},
+	}
 	return h
 }
 

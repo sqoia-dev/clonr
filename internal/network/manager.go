@@ -50,11 +50,19 @@ var ErrProfileInUse = errors.New("profile_in_use")
 // Manager owns DB access for the network module. Safe for concurrent use.
 type Manager struct {
 	db *db.DB
+	// StagingDB is optional. When set, mutation handlers honour ?stage=true
+	// by writing to pending_changes instead of applying immediately (#154).
+	StagingDB StagingIface
 }
 
 // New creates a new Manager.
 func New(database *db.DB) *Manager {
 	return &Manager{db: database}
+}
+
+// SetStagingDB wires the staging DB into the network manager.
+func (m *Manager) SetStagingDB(s StagingIface) {
+	m.StagingDB = s
 }
 
 // ─── Switch CRUD ──────────────────────────────────────────────────────────────

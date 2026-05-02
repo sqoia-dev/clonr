@@ -182,6 +182,13 @@ func (m *Manager) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
+	// Two-stage commit intercept (#154).
+	if m.StagingDB != nil {
+		if tryStageNetwork(w, r, m.StagingDB, "node_network", "new_profile", "") {
+			return
+		}
+	}
+
 	var p api.NetworkProfile
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -202,6 +209,13 @@ func (m *Manager) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	// Two-stage commit intercept (#154).
+	if m.StagingDB != nil {
+		if tryStageNetwork(w, r, m.StagingDB, "node_network", id, "") {
+			return
+		}
+	}
+
 	var p api.NetworkProfile
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)

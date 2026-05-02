@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users } from "lucide-react"
+import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users, GitCommit } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -41,6 +41,7 @@ export function SettingsPage() {
       <LocalUsersSection />
       <ServerConfigSection />
       <GPGKeysSection />
+      <TwoStageCommitSection />
 
       {/* SET-5: Logout */}
       <section className="border-t border-border pt-8">
@@ -773,6 +774,108 @@ function GPGKeysSection() {
               )}
             </div>
           ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ─── Two-stage commit section (#154) ─────────────────────────────────────────
+
+const STAGE_SURFACES: { key: string; label: string; description: string }[] = [
+  {
+    key: "ldap_user",
+    label: "Stage LDAP user changes by default",
+    description: "CREATE / UPDATE / PATCH /api/v1/ldap/users/* will write to the pending queue instead of the directory.",
+  },
+  {
+    key: "sudoers_rule",
+    label: "Stage sudoers rule changes by default",
+    description: "POST /api/v1/nodes/{id}/sudoers will queue instead of applying immediately.",
+  },
+  {
+    key: "node_network",
+    label: "Stage network changes by default",
+    description: "POST/PUT /api/v1/network/profiles will queue instead of applying immediately.",
+  },
+]
+
+function TwoStageCommitSection() {
+  const qc = useQueryClient()
+
+  const { data, isLoading } = useQuery<{ mode: Record<string, boolean> }>({
+    queryKey: ["stage-mode"],
+    queryFn: () => apiFetch("/api/v1/changes/mode"),
+    staleTime: 30000,
+  })
+
+  const setModeMutation = useMutation({
+    mutationFn: ({ surface, enabled }: { surface: string; enabled: boolean }) =>
+      apiFetch(`/api/v1/changes/mode/${surface}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      }),
+    onSuccess: (_res, { surface, enabled }) => {
+      qc.setQueryData<{ mode: Record<string, boolean> }>(["stage-mode"], (old) =>
+        old ? { mode: { ...old.mode, [surface]: enabled } } : old
+      )
+      toast({ title: `${surface} stage mode ${enabled ? "enabled" : "disabled"}` })
+    },
+    onError: (err) =>
+      toast({ variant: "destructive", title: "Failed to update stage mode", description: String(err) }),
+  })
+
+  const flags = data?.mode ?? {}
+
+  return (
+    <section id="two-stage-commit" className="border-t border-border pt-8">
+      <h2 className="text-sm font-medium mb-1 flex items-center gap-2">
+        <GitCommit className="h-4 w-4" /> Two-stage commit
+      </h2>
+      <p className="text-xs text-muted-foreground mb-4">
+        When enabled for a surface, mutations will write to the pending-changes queue instead of
+        applying immediately. Use the Pending Changes drawer (top bar) to commit or discard.
+      </p>
+
+      {isLoading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {STAGE_SURFACES.map(({ key, label, description }) => {
+            const enabled = flags[key] ?? false
+            return (
+              <div
+                key={key}
+                className="flex items-start justify-between gap-4 rounded-md border border-border bg-card px-4 py-3"
+              >
+                <div className="space-y-0.5 min-w-0">
+                  <p className="text-sm font-medium">{label}</p>
+                  <p className="text-xs text-muted-foreground">{description}</p>
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={enabled}
+                  onClick={() => setModeMutation.mutate({ surface: key, enabled: !enabled })}
+                  disabled={setModeMutation.isPending}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+                    enabled ? "bg-primary" : "bg-input"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform",
+                      enabled ? "translate-x-4" : "translate-x-0"
+                    )}
+                  />
+                </button>
+              </div>
+            )
+          })}
         </div>
       )}
     </section>

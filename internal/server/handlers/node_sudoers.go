@@ -8,11 +8,15 @@ package handlers
 // POST   /api/v1/nodes/{id}/sudoers/sync      — sync sudoers to node (no-op for now)
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
 )
@@ -22,6 +26,14 @@ type NodeSudoersHandler struct {
 	DB           *db.DB
 	Audit        *db.AuditService
 	GetActorInfo func(r *http.Request) (id, label string)
+	// StagingDB is optional. When set, HandleAdd honours ?stage=true by writing
+	// to pending_changes instead of applying immediately (#154).
+	StagingDB StagingIface
+}
+
+// StagingIface is the DB subset required for staging operations in this package.
+type StagingIface interface {
+	PendingChangesInsert(ctx context.Context, c db.PendingChange) error
 }
 
 type nodeSudoerRequest struct {
@@ -48,6 +60,40 @@ func (h *NodeSudoersHandler) HandleList(w http.ResponseWriter, r *http.Request) 
 // HandleAdd handles POST /api/v1/nodes/{id}/sudoers.
 func (h *NodeSudoersHandler) HandleAdd(w http.ResponseWriter, r *http.Request) {
 	nodeID := chi.URLParam(r, "id")
+
+	// Two-stage commit intercept (#154).
+	if h.StagingDB != nil && isSudoersStageRequest(r) {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read body failed"})
+			return
+		}
+		actorID := ""
+		if h.GetActorInfo != nil {
+			actorID, _ = h.GetActorInfo(r)
+		}
+		payload := string(bodyBytes)
+		if !isJSONBytes(bodyBytes) {
+			payload = "{}"
+		}
+		c := db.PendingChange{
+			ID:        uuid.New().String(),
+			Kind:      "sudoers_rule",
+			Target:    nodeID,
+			Payload:   payload,
+			CreatedBy: actorID,
+			CreatedAt: time.Now().Unix(),
+		}
+		if insertErr := h.StagingDB.PendingChangesInsert(r.Context(), c); insertErr != nil {
+			log.Error().Err(insertErr).Msg("node_sudoers: stage insert failed")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "staging insert failed"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"staged": true, "id": c.ID, "kind": c.Kind, "target": nodeID,
+		})
+		return
+	}
 
 	var req nodeSudoerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -141,4 +187,15 @@ func (h *NodeSudoersHandler) HandleSync(w http.ResponseWriter, r *http.Request) 
 		"count":   len(sudoers),
 		"message": "Sudoers will be applied on next deploy. Live push via clientd available in a future release.",
 	})
+}
+
+// ─── staging helpers ──────────────────────────────────────────────────────────
+
+func isSudoersStageRequest(r *http.Request) bool {
+	return r.URL.Query().Get("stage") == "true" || r.Header.Get("X-Clustr-Stage") == "1"
+}
+
+func isJSONBytes(b []byte) bool {
+	var v interface{}
+	return json.Unmarshal(b, &v) == nil
 }
