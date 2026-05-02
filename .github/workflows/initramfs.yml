@@ -29,11 +29,6 @@ on:
 # Reproducibility: two back-to-back builds are compared by SHA256.  A mismatch
 # fails the job before the artifact is attached to the release.
 
-env:
-  # Must match packaging/initramfs-builder/Dockerfile ARG KERNEL_VERSION
-  # and Makefile INITRAMFS_KERNEL_VERSION.
-  KERNEL_VERSION: "5.14.0-503.40.1.el9_5.x86_64"
-
 jobs:
   # ─── CI gate ─────────────────────────────────────────────────────────────────
   ci:
@@ -54,8 +49,12 @@ jobs:
 
     # Run the job inside the builder image so /modules is already populated.
     # The image is pushed by initramfs-builder.yml; pulled here as a cache.
+    # IMPORTANT: container.image cannot reference env.* — kernel version is
+    # hardcoded here.  Must match packaging/initramfs-builder/Dockerfile ARG
+    # KERNEL_VERSION and Makefile INITRAMFS_KERNEL_VERSION.
+    # Update all three locations together when the kernel pin changes.
     container:
-      image: ghcr.io/sqoia-dev/initramfs-builder:${{ env.KERNEL_VERSION }}
+      image: ghcr.io/sqoia-dev/initramfs-builder:5.14.0-503.40.1.el9_5.x86_64
       # modules: pre-populated at /modules inside the image; no volume mount needed.
       options: --user root
 
