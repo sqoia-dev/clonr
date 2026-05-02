@@ -49,21 +49,21 @@ describe("useSession", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({ has_admin: true }),
-          text: () => Promise.resolve(""),
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ has_admin: true })),
         })
       }
       if (url.includes("/auth/me")) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({
             sub: "user-1",
             role: "admin",
             expires_at: "2026-12-31T00:00:00Z",
             assigned_groups: [],
-          }),
-          text: () => Promise.resolve(""),
+          })),
         })
       }
       return Promise.reject(new Error("unexpected fetch: " + url))
@@ -82,15 +82,14 @@ describe("useSession", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({ has_admin: true }),
-          text: () => Promise.resolve(""),
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ has_admin: true })),
         })
       }
       if (url.includes("/auth/me")) {
         return Promise.resolve({
           ok: false,
           status: 401,
-          json: () => Promise.resolve({ error: "no session", code: "unauthorized" }),
           text: () => Promise.resolve('{"error":"no session"}'),
         })
       }
@@ -110,8 +109,8 @@ describe("useSession", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({ has_admin: false }),
-          text: () => Promise.resolve(""),
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ has_admin: false })),
         })
       }
       return Promise.reject(new Error("unexpected fetch: " + url))
@@ -131,21 +130,21 @@ describe("useSession", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({ has_admin: true }),
-          text: () => Promise.resolve(""),
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ has_admin: true })),
         })
       }
       if (url.includes("/auth/me")) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: () => Promise.resolve({
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({
             sub: "user-1",
             role: "admin",
             expires_at: "2026-12-31T00:00:00Z",
             assigned_groups: [],
-          }),
-          text: () => Promise.resolve(""),
+          })),
         })
       }
       return Promise.reject(new Error("unexpected fetch: " + url))

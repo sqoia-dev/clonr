@@ -330,8 +330,8 @@ describe("image-from-URL mutation flow (TEST-S5-1)", () => {
       Promise.resolve({
         ok: true,
         status: 202,
-        json: () => Promise.resolve({ image_id: "img-abc123", status: "building" }),
-        text: () => Promise.resolve(""),
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ image_id: "img-abc123", status: "building" })),
       })
     )
     vi.stubGlobal("fetch", mockFetch)
