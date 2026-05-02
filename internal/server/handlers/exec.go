@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/clientd"
 	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/pkg/api"
@@ -84,6 +83,16 @@ type execNodeResult struct {
 	Hostname string `json:"hostname"`
 	ExitCode int    `json:"exit_code"`
 	Error    string `json:"error,omitempty"`
+}
+
+// execFanResult is the per-node result collected by HandleExec's goroutine fan-out.
+// It is a package-level type so that streamResults and streamConsolidate can
+// reference it as a channel element type.
+type execFanResult struct {
+	nodeID   string
+	hostname string
+	payload  clientd.OperatorExecResultPayload
+	err      error // node not connected or send failed
 }
 
 // HandleExec handles POST /api/v1/exec.
@@ -181,19 +190,12 @@ func (h *ExecHandler) HandleExec(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	// Fan out to connected nodes.
-	type nodeExecResult struct {
-		nodeID   string
-		hostname string
-		payload  clientd.OperatorExecResultPayload
-		err      error // node not connected or send failed
-	}
-
 	args := req.Args
 	if args == nil {
 		args = []string{}
 	}
 
-	results := make(chan nodeExecResult, len(nodeIDs))
+	results := make(chan execFanResult, len(nodeIDs))
 
 	var wg sync.WaitGroup
 	for _, nid := range nodeIDs {
@@ -208,7 +210,7 @@ func (h *ExecHandler) HandleExec(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 
 			if !h.Hub.IsConnected(nid) {
-				results <- nodeExecResult{
+				results <- execFanResult{
 					nodeID:   nid,
 					hostname: hostname,
 					err:      fmt.Errorf("node not connected (clustr-clientd offline)"),
@@ -234,7 +236,7 @@ func (h *ExecHandler) HandleExec(w http.ResponseWriter, r *http.Request) {
 			defer h.Hub.UnregisterOperatorExec(msgID)
 
 			if err := h.Hub.Send(nid, serverMsg); err != nil {
-				results <- nodeExecResult{
+				results <- execFanResult{
 					nodeID:   nid,
 					hostname: hostname,
 					err:      fmt.Errorf("send failed: %w", err),
@@ -248,19 +250,19 @@ func (h *ExecHandler) HandleExec(w http.ResponseWriter, r *http.Request) {
 			deadline := time.Duration(timeoutSec+5) * time.Second
 			select {
 			case res := <-ch:
-				results <- nodeExecResult{
+				results <- execFanResult{
 					nodeID:   nid,
 					hostname: hostname,
 					payload:  res,
 				}
 			case <-time.After(deadline):
-				results <- nodeExecResult{
+				results <- execFanResult{
 					nodeID:   nid,
 					hostname: hostname,
 					err:      fmt.Errorf("timed out waiting for result (%ds)", timeoutSec+5),
 				}
 			case <-r.Context().Done():
-				results <- nodeExecResult{
+				results <- execFanResult{
 					nodeID:   nid,
 					hostname: hostname,
 					err:      fmt.Errorf("client disconnected"),
@@ -294,7 +296,7 @@ func sseWrite(w io.Writer, flusher http.Flusher, data string) {
 
 // streamResults streams results as they arrive for inline / header / realtime / json formats.
 func (h *ExecHandler) streamResults(w http.ResponseWriter, flusher http.Flusher,
-	results <-chan nodeExecResult, format string) {
+	results <-chan execFanResult, format string) {
 
 	var summary execSummaryEvent
 	summary.Type = "summary"
@@ -401,7 +403,7 @@ func (h *ExecHandler) streamResults(w http.ResponseWriter, flusher http.Flusher,
 // streamConsolidate collects all results then groups nodes with identical output,
 // printing each group's output once with the node list before it.
 func (h *ExecHandler) streamConsolidate(w http.ResponseWriter, flusher http.Flusher,
-	results <-chan nodeExecResult, total int) {
+	results <-chan execFanResult, total int) {
 
 	type groupKey struct {
 		stdout    string
@@ -414,7 +416,7 @@ func (h *ExecHandler) streamConsolidate(w http.ResponseWriter, flusher http.Flus
 		nodes []string // hostnames
 	}
 
-	var collected []nodeExecResult
+	var collected []execFanResult
 	for res := range results {
 		collected = append(collected, res)
 	}
