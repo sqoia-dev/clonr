@@ -16,6 +16,10 @@
 #     smoke signal without the hardware dependency.
 #   - Docker is required (matches the Docker Compose install path operators follow).
 #
+# Required tools: bash 4+, curl, jq 1.6+, docker
+# Compatible with RHEL/Rocky/Ubuntu. jq replaces grep -oP for portable JSON parsing.
+# Install jq: dnf install jq  (RHEL/Rocky)  or  apt install jq  (Debian/Ubuntu)
+#
 # Time budget: under 5 minutes wall-clock.
 #
 # Usage:
@@ -24,6 +28,9 @@
 #   SMOKE_TIMEOUT=120 bash ...          # override server ready timeout (default: 60s)
 
 set -euo pipefail
+
+# Dependency check: jq is required for portable JSON parsing.
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required. Install: dnf install jq  (RHEL/Rocky)  or  apt install jq  (Debian/Ubuntu)" >&2; exit 1; }
 
 SMOKE_IMAGE="${SMOKE_IMAGE:-clustr-serverd:smoke}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
@@ -125,7 +132,9 @@ log "node $SMOKE_MAC present in node list"
 # state means: no base_image_id, no deploy history.  Assert base_image_id is absent
 # or empty, which is equivalent to NodeStateRegistered.
 # The total should be 1 — exactly our smoke node, no extras.
-NODE_COUNT=$(printf '%s' "$NODES_RESP" | grep -oP '"total":\K[0-9]+' || echo "0")
+# jq is used here instead of grep -oP: grep -oP requires PCRE-enabled GNU grep and
+# fails on Alpine, BusyBox, and BSD. jq is portable and already required by this script.
+NODE_COUNT=$(printf '%s' "$NODES_RESP" | jq -r '.total // 0')
 if [ "$NODE_COUNT" != "1" ]; then
     fail "expected 1 node in /api/v1/nodes, got $NODE_COUNT"
 fi

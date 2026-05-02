@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # lab-validate.sh — Proxmox lab validation gate for clustr pre-release
 #
+# Required tools: bash 4+, curl, jq 1.6+, ssh, scp, python3 (initramfs job polling only)
+# Compatible with RHEL/Rocky/Ubuntu.
+# Install jq: dnf install jq  (RHEL/Rocky)  or  apt install jq  (Debian/Ubuntu)
+#
 # What this does:
 #   1. Deploys the current HEAD of clustr-serverd to 192.168.1.151
 #   2. Rebuilds initramfs via the clustr API
@@ -29,6 +33,9 @@
 #   BOOT_TIMEOUT         — seconds to wait for login prompt per VM (default: 300)
 
 set -euo pipefail
+
+# Dependency check: jq is required for portable JSON parsing.
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required. Install: dnf install jq  (RHEL/Rocky)  or  apt install jq  (Debian/Ubuntu)" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -144,9 +151,12 @@ fi
 # ---------------------------------------------------------------------------
 log "Step 3: Reimaging VMs ${VM_IDS[*]} concurrently"
 
-# Get the first available image ID
+# Get the first available image ID.
+# GET /api/v1/images returns {"images":[...],"total":N} — traverse .images[0].id,
+# not the root array. Using jq for portable, schema-correct parsing (python3 was
+# indexing the root object as an array, which silently returned empty on any runner).
 IMAGE_ID=$(clustr_api GET /api/v1/images 2>/dev/null \
-    | python3 -c "import sys,json; imgs=json.load(sys.stdin); print(imgs[0]['id'] if imgs else '')" 2>/dev/null || echo "")
+    | jq -r '.images[0].id // empty' 2>/dev/null || echo "")
 [[ -n "$IMAGE_ID" ]] || die "No images available in clustr — cannot reimage"
 log "Using image ID: $IMAGE_ID"
 
@@ -167,10 +177,14 @@ reimage_vm() {
     ssh_proxmox "qm set ${vmid} --boot order=net0;scsi0 2>/dev/null; qm stop ${vmid} --skiplock 2>/dev/null; sleep 2; qm start ${vmid}" >> "$deploy_log" 2>&1 \
         || { log "VM${vmid}: failed to power cycle"; return 1; }
 
-    # Get node ID by hostname/MAC lookup from clustr API (best effort)
+    # Get node ID by hostname/MAC lookup from clustr API (best effort).
+    # GET /api/v1/nodes returns {"nodes":[...],"total":N} — must traverse .nodes[],
+    # not the root object. python3 was iterating the root object (keys), not the array.
     local node_id
     node_id=$(clustr_api GET /api/v1/nodes 2>/dev/null \
-        | python3 -c "import sys,json; nodes=json.load(sys.stdin); n=[x for x in nodes if x.get('vm_id')==${vmid} or 'node-0${vmid}' in x.get('hostname','')]; print(n[0]['id'] if n else '')" 2>/dev/null || echo "")
+        | jq -r --argjson vmid "${vmid}" \
+            '.nodes[] | select((.vm_id == $vmid) or (.hostname | test("node-0\($vmid)";"i"))) | .id' \
+            2>/dev/null | head -1 || echo "")
     if [[ -n "$node_id" ]]; then
         # Trigger deploy via API
         clustr_api POST "/api/v1/nodes/${node_id}/deploy" \
