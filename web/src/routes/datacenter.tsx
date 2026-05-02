@@ -490,8 +490,8 @@ function RackTile({
   rack,
   nodes,
   onNodeClick,
-  onPositionChange,
-  onNewPlacement,
+  onPositionChange: _onPositionChange,
+  onNewPlacement: _onNewPlacement,
   onResize,
 }: {
   rack: Rack
@@ -502,7 +502,7 @@ function RackTile({
   onResize: (nodeId: string, rackId: string, newHeightU: number) => void
 }) {
   const [powerModal, setPowerModal] = React.useState<PowerAction | null>(null)
-  const { onSlotPaste, allRackPositions } = React.useContext(DragContext)
+  const { onSlotPaste } = React.useContext(DragContext)
   const positions = rack.positions ?? []
 
   // Build a set of all occupied U slots for overlap detection in resize popovers
