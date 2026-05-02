@@ -16,6 +16,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -308,9 +309,13 @@ func (h *BiosHandler) VerifyProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Probe by calling SupportedSettings which returns nil,nil when binary is absent.
-	_, serr := provider.SupportedSettings(r.Context())
-	available := serr == nil
+	// Probe binary availability by calling ReadCurrent with a background context.
+	// ReadCurrent returns ErrBinaryMissing when the operator has not placed the
+	// vendor binary at its expected path — that's the canonical availability check.
+	// Any other error (e.g. syscfg failing on this server host) is treated as
+	// available=true since the binary is present even if it fails outside initramfs.
+	_, readErr := provider.ReadCurrent(r.Context())
+	available := !errors.Is(readErr, bios.ErrBinaryMissing)
 
 	// Resolve expected path for Intel (only registered vendor in v1).
 	binPath := "/var/lib/clustr/vendor-bios/" + vendor + "/syscfg"
