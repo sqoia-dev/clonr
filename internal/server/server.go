@@ -1648,6 +1648,7 @@ func (s *Server) buildRouter() chi.Router {
 			// nodes/connected must be before nodes/{id} to avoid chi match ambiguity.
 			r.Get("/nodes/by-mac/{mac}", nodes.GetNodeByMAC)
 			r.Get("/nodes/connected", clientdH.GetConnectedNodes)
+			r.Get("/nodes/unassigned", nodes.ListUnassignedNodes)
 			r.Get("/nodes", nodes.ListNodes)
 			r.Post("/nodes", nodes.CreateNode)
 			// Sprint 4 BULK-1: batch create endpoint (must be before /{id}).

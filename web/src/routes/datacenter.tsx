@@ -1,8 +1,9 @@
 /**
- * datacenter.tsx — Sprint 24 #156 Rack diagram surface.
+ * datacenter.tsx — Sprint 24 #156 + UX-10 partial.
  *
  * Layout:
  *   - Header: [+ Add rack] button, rack-name tabs
+ *   - Left sidebar: unassigned nodes panel (nodes with no rack assignment)
  *   - Per-rack: visual rack diagram (HTML/CSS divs), drag-and-drop U-slot positioning
  *   - Node blocks: hostname + status pill, click → node sheet (via clustr:open-node event)
  *   - Bulk power per rack: Power off all / Power on all / Reboot all (confirmation modal)
@@ -12,6 +13,9 @@
  * a rack diagram. Each 1U is a fixed-height div row; occupied slots get a node block
  * that spans height_u rows. This is spec-compliant (visual SVG) but implemented as
  * accessible HTML so dnd-kit refs work cleanly.
+ *
+ * UX-10 (partial): unassigned sidebar + height-U selector + drop-zone validation
+ *   + resize (Approach A popover). Cross-rack drag still queued.
  */
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
@@ -29,7 +33,7 @@ import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core"
 import { CSS } from "@dnd-kit/utilities"
 import {
   Building2, Plus, Power, PowerOff, RefreshCw,
-  Loader2, XCircle, AlertTriangle, Server,
+  Loader2, XCircle, AlertTriangle, Server, Pencil, Check, X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -72,10 +76,40 @@ interface ListNodesResponse {
   nodes: NodeHealth[]
 }
 
+// Lightweight unassigned node stub from GET /api/v1/nodes/unassigned
+interface UnassignedNodeStub {
+  id: string
+  hostname: string
+  status: string
+}
+
+interface ListUnassignedNodesResponse {
+  nodes: UnassignedNodeStub[]
+  total: number
+}
+
+// Drag data shapes
+interface InRackDragData {
+  nodeId: string
+  rackId: string
+  slotU: number
+  heightU: number
+  fromUnassigned: false
+}
+
+interface UnassignedDragData {
+  nodeId: string
+  heightU: number
+  fromUnassigned: true
+}
+
+type DragData = InRackDragData | UnassignedDragData
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SLOT_HEIGHT_PX = 24   // px per 1U
 const RACK_WIDTH_PX  = 280  // px wide
+const HEIGHT_U_PRESETS = [1, 2, 4, 8]
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
 
@@ -95,23 +129,39 @@ function statusDot(status: string) {
   )
 }
 
-// ─── Draggable node block ─────────────────────────────────────────────────────
+// ─── Draggable node block (already placed in rack) ────────────────────────────
 
 function NodeBlock({
   pos,
   hostname,
   status,
+  rackHeightU,
+  occupiedSlots,
+  onResize,
   onClick,
 }: {
   pos: NodeRackPosition
   hostname: string
   status: string
+  rackHeightU: number
+  occupiedSlots: Set<number>
+  onResize: (nodeId: string, newHeightU: number) => void
   onClick: () => void
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `node-${pos.node_id}`,
-    data: { nodeId: pos.node_id, rackId: pos.rack_id, slotU: pos.slot_u, heightU: pos.height_u },
+    data: {
+      nodeId: pos.node_id,
+      rackId: pos.rack_id,
+      slotU: pos.slot_u,
+      heightU: pos.height_u,
+      fromUnassigned: false,
+    } satisfies InRackDragData,
   })
+
+  // Resize popover state
+  const [resizing, setResizing] = React.useState(false)
+  const [newHeightInput, setNewHeightInput] = React.useState(String(pos.height_u))
 
   const style: React.CSSProperties = {
     transform: CSS.Translate.toString(transform ?? null),
@@ -121,6 +171,27 @@ function NodeBlock({
     cursor: "grab",
     touchAction: "none",
     userSelect: "none",
+    position: "relative",
+  }
+
+  function handleResizeSave() {
+    const val = parseInt(newHeightInput, 10)
+    if (!val || val < 1) return
+    // Validate: fits in rack from current slot_u
+    const topSlot = pos.slot_u + val - 1
+    if (topSlot > rackHeightU) {
+      toast({ title: "Cannot resize", description: `Node would extend beyond rack top (U${rackHeightU})`, variant: "destructive" })
+      return
+    }
+    // Check overlap: all slots [slot_u, slot_u+val-1] must be either this node or empty
+    for (let u = pos.slot_u; u <= topSlot; u++) {
+      if (occupiedSlots.has(u) && u > pos.slot_u + pos.height_u - 1) {
+        toast({ title: "Cannot resize", description: `Slot U${u} is occupied by another node`, variant: "destructive" })
+        return
+      }
+    }
+    setResizing(false)
+    onResize(pos.node_id, val)
   }
 
   return (
@@ -129,14 +200,111 @@ function NodeBlock({
       style={style}
       {...listeners}
       {...attributes}
-      onClick={onClick}
       role="button"
       tabIndex={0}
       aria-label={`Node ${hostname} at U${pos.slot_u}`}
       className="flex items-center gap-2 rounded border border-border bg-secondary px-2 text-xs font-mono hover:bg-secondary/70 focus:outline-none focus:ring-1 focus:ring-accent"
     >
       {statusDot(status)}
-      <span className="truncate">{hostname}</span>
+      <span className="truncate flex-1" onClick={(e) => { e.stopPropagation(); onClick() }}>{hostname}</span>
+      <span className="text-muted-foreground shrink-0">{pos.height_u}U</span>
+      {/* Edit-U button — stops propagation so it doesn't trigger drag */}
+      <button
+        className="shrink-0 rounded p-0.5 hover:bg-accent/40 focus:outline-none"
+        title="Resize"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation()
+          setNewHeightInput(String(pos.height_u))
+          setResizing(true)
+        }}
+      >
+        <Pencil className="h-2.5 w-2.5 text-muted-foreground" />
+      </button>
+
+      {/* Resize popover — rendered inline, positioned absolute relative to block */}
+      {resizing && (
+        <div
+          className="absolute z-50 top-full left-0 mt-1 bg-popover border border-border rounded shadow-md p-2 flex items-center gap-1.5"
+          style={{ minWidth: 160 }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="text-[10px] text-muted-foreground shrink-0">Height (U):</span>
+          <Input
+            type="number"
+            min={1}
+            max={rackHeightU}
+            value={newHeightInput}
+            onChange={e => setNewHeightInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleResizeSave(); if (e.key === "Escape") setResizing(false) }}
+            className="h-6 w-14 text-xs px-1 font-mono"
+            autoFocus
+          />
+          <button className="rounded p-0.5 hover:bg-accent/40" onClick={handleResizeSave} title="Save"><Check className="h-3 w-3 text-green-500" /></button>
+          <button className="rounded p-0.5 hover:bg-accent/40" onClick={() => setResizing(false)} title="Cancel"><X className="h-3 w-3 text-muted-foreground" /></button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Draggable unassigned node row ────────────────────────────────────────────
+
+function UnassignedNodeRow({ node }: { node: UnassignedNodeStub }) {
+  const [heightU, setHeightU] = React.useState(1)
+
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `unassigned-${node.id}`,
+    data: {
+      nodeId: node.id,
+      heightU,
+      fromUnassigned: true,
+    } satisfies UnassignedDragData,
+  })
+
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform ?? null),
+    opacity: isDragging ? 0.4 : 1,
+    touchAction: "none",
+    userSelect: "none",
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center gap-2 rounded border border-border bg-secondary/50 px-2 py-1 text-xs font-mono cursor-grab hover:bg-secondary/80"
+    >
+      {/* Drag handle area — covers the icon + hostname */}
+      <div
+        className="flex items-center gap-1.5 flex-1 min-w-0"
+        {...listeners}
+        {...attributes}
+      >
+        {statusDot(node.status)}
+        <span className="truncate">{node.hostname}</span>
+      </div>
+      {/* Height-U selector — stops drag propagation */}
+      <div
+        className="flex items-center gap-0.5 shrink-0"
+        onPointerDown={e => e.stopPropagation()}
+      >
+        {HEIGHT_U_PRESETS.map(u => (
+          <button
+            key={u}
+            onClick={e => { e.stopPropagation(); setHeightU(u) }}
+            className={cn(
+              "rounded px-1 py-0.5 text-[10px] leading-none border transition-colors",
+              heightU === u
+                ? "bg-accent text-accent-foreground border-accent"
+                : "border-border text-muted-foreground hover:bg-accent/30"
+            )}
+          >
+            {u}U
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -168,43 +336,105 @@ function RackDiagram({
   nodes,
   onNodeClick,
   onPositionChange,
+  onNewPlacement,
+  onResize,
 }: {
   rack: Rack
   nodes: Map<string, NodeHealth>
   onNodeClick: (nodeId: string) => void
-  onPositionChange: (nodeId: string, newRackId: string, newSlotU: number) => void
+  onPositionChange: (nodeId: string, newRackId: string, newSlotU: number, heightU: number) => void
+  onNewPlacement: (nodeId: string, rackId: string, slotU: number, heightU: number) => void
+  onResize: (nodeId: string, rackId: string, newHeightU: number) => void
 }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
-  const [activeNodeId, setActiveNodeId] = React.useState<string | null>(null)
+  const [activeDrag, setActiveDrag] = React.useState<DragData | null>(null)
 
   function handleDragStart(e: DragStartEvent) {
-    const data = e.active.data.current as { nodeId: string } | undefined
-    setActiveNodeId(data?.nodeId ?? null)
+    setActiveDrag((e.active.data.current as DragData) ?? null)
   }
 
   function handleDragEnd(e: DragEndEvent) {
-    setActiveNodeId(null)
+    setActiveDrag(null)
     const { active, over } = e
     if (!over) return
+
     const overData = over.data.current as { rackId: string; slotU: number } | undefined
     if (!overData) return
-    const activeData = active.data.current as { nodeId: string; slotU: number } | undefined
-    if (!activeData) return
-    if (overData.rackId === rack.id && overData.slotU === activeData.slotU) return
-    onPositionChange(activeData.nodeId, overData.rackId, overData.slotU)
-  }
 
-  const positions = rack.positions ?? []
-  // Build a map of slotU → position for quick lookup.
-  const slotMap = new Map<number, NodeRackPosition>()
-  for (const pos of positions) {
-    for (let i = 0; i < pos.height_u; i++) {
-      slotMap.set(pos.slot_u + i, pos)
+    const activeData = active.data.current as DragData | undefined
+    if (!activeData) return
+
+    const targetRackId = overData.rackId
+    const targetSlotU = overData.slotU
+    const dragHeightU = activeData.heightU
+
+    // Build occupied slots set excluding the dragged node itself
+    const positions = rack.positions ?? []
+    const occupiedByOthers = new Set<number>()
+    for (const pos of positions) {
+      if (pos.node_id === activeData.nodeId) continue
+      for (let i = 0; i < pos.height_u; i++) {
+        occupiedByOthers.add(pos.slot_u + i)
+      }
+    }
+
+    // Validate: fits within rack
+    const topSlot = targetSlotU + dragHeightU - 1
+    if (topSlot > rack.height_u) {
+      toast({
+        title: "Cannot place node",
+        description: `Node would extend beyond rack top (U${rack.height_u})`,
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate: no overlap with other nodes
+    const conflictSlots: number[] = []
+    for (let u = targetSlotU; u <= topSlot; u++) {
+      if (occupiedByOthers.has(u)) {
+        conflictSlots.push(u)
+      }
+    }
+    if (conflictSlots.length > 0) {
+      // Find conflicting node hostname for the toast
+      const conflictPos = positions.find(p =>
+        p.node_id !== activeData.nodeId &&
+        conflictSlots.some(u => u >= p.slot_u && u < p.slot_u + p.height_u)
+      )
+      const conflictName = conflictPos
+        ? (nodes.get(conflictPos.node_id)?.hostname ?? conflictPos.node_id.slice(0, 8))
+        : "another node"
+      const slotRange = conflictSlots.length === 1
+        ? `U${conflictSlots[0]}`
+        : `U${conflictSlots[0]}-U${conflictSlots[conflictSlots.length - 1]}`
+      toast({
+        title: "Cannot place node",
+        description: `Slots ${slotRange} already occupied by ${conflictName}`,
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (activeData.fromUnassigned) {
+      // New placement from sidebar
+      onNewPlacement(activeData.nodeId, targetRackId, targetSlotU, dragHeightU)
+    } else {
+      // Move within rack (or cross-rack — groundwork laid, cross-rack multi-tile UI is UX-10 pending)
+      if (targetRackId === rack.id && targetSlotU === activeData.slotU) return
+      onPositionChange(activeData.nodeId, targetRackId, targetSlotU, dragHeightU)
     }
   }
 
-  // Rack slots: 1-indexed from bottom. Top of diagram = highest U number.
-  const totalHeight = rack.height_u * SLOT_HEIGHT_PX
+  const positions = rack.positions ?? []
+
+  // Build a set of all occupied U slots for overlap detection in resize popovers
+  const allOccupied = new Set<number>()
+  for (const pos of positions) {
+    for (let i = 0; i < pos.height_u; i++) {
+      allOccupied.add(pos.slot_u + i)
+    }
+  }
 
   // Pre-compute unique node blocks (one per node, placed at the node's top slot).
   const nodeBlocks = positions.map(pos => {
@@ -225,7 +455,7 @@ function RackDiagram({
       {/* Rack chassis */}
       <div
         className="relative border-2 border-border rounded-md bg-card overflow-hidden"
-        style={{ width: RACK_WIDTH_PX, height: totalHeight }}
+        style={{ width: RACK_WIDTH_PX, height: rack.height_u * SLOT_HEIGHT_PX }}
         role="img"
         aria-label={`Rack ${rack.name}`}
       >
@@ -268,6 +498,9 @@ function RackDiagram({
               pos={pos}
               hostname={node?.hostname ?? pos.node_id.slice(0, 8)}
               status={node?.status ?? "offline"}
+              rackHeightU={rack.height_u}
+              occupiedSlots={allOccupied}
+              onResize={(nodeId, newHeightU) => onResize(nodeId, rack.id, newHeightU)}
               onClick={() => onNodeClick(pos.node_id)}
             />
           </div>
@@ -276,13 +509,13 @@ function RackDiagram({
 
       {/* Drag overlay */}
       <DragOverlay>
-        {activeNodeId && (
+        {activeDrag && (
           <div
             className="rounded border border-accent bg-secondary/90 px-3 text-xs font-mono shadow-lg"
-            style={{ height: SLOT_HEIGHT_PX - 2, display: "flex", alignItems: "center" }}
+            style={{ height: activeDrag.heightU * SLOT_HEIGHT_PX - 2, display: "flex", alignItems: "center" }}
           >
-            <Server className="h-3 w-3 mr-2" />
-            Moving…
+            <Server className="h-3 w-3 mr-2 shrink-0" />
+            {activeDrag.heightU}U
           </div>
         )}
       </DragOverlay>
@@ -468,13 +701,14 @@ function RackPanel({ rack, nodes }: { rack: Rack; nodes: Map<string, NodeHealth>
   const qc = useQueryClient()
 
   const setPositionMut = useMutation({
-    mutationFn: ({ nodeId, rackId, slotU }: { nodeId: string; rackId: string; slotU: number }) =>
+    mutationFn: ({ nodeId, rackId, slotU, heightU }: { nodeId: string; rackId: string; slotU: number; heightU: number }) =>
       apiFetch(`/api/v1/racks/${rackId}/positions/${nodeId}`, {
         method: "PUT",
-        body: JSON.stringify({ slot_u: slotU, height_u: 1 }),
+        body: JSON.stringify({ slot_u: slotU, height_u: heightU }),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["racks"] })
+      qc.invalidateQueries({ queryKey: ["nodes-unassigned"] })
     },
     onError: (e: Error) => {
       toast({ title: "Failed to move node", description: e.message, variant: "destructive" })
@@ -528,15 +762,23 @@ function RackPanel({ rack, nodes }: { rack: Rack; nodes: Map<string, NodeHealth>
           onNodeClick={(nodeId) => {
             window.dispatchEvent(new CustomEvent("clustr:open-node", { detail: { nodeId } }))
           }}
-          onPositionChange={(nodeId, newRackId, newSlotU) => {
-            setPositionMut.mutate({ nodeId, rackId: newRackId, slotU: newSlotU })
+          onPositionChange={(nodeId, newRackId, newSlotU, heightU) => {
+            setPositionMut.mutate({ nodeId, rackId: newRackId, slotU: newSlotU, heightU })
+          }}
+          onNewPlacement={(nodeId, rackId, slotU, heightU) => {
+            setPositionMut.mutate({ nodeId, rackId, slotU, heightU })
+          }}
+          onResize={(nodeId, rackId, newHeightU) => {
+            const pos = positions.find(p => p.node_id === nodeId)
+            if (!pos) return
+            setPositionMut.mutate({ nodeId, rackId, slotU: pos.slot_u, heightU: newHeightU })
           }}
         />
       </div>
 
       <p className="text-xs text-muted-foreground">
         {positions.length} node{positions.length !== 1 ? "s" : ""} / {rack.height_u}U total.
-        Drag blocks to reposition within the rack.
+        Drag blocks to reposition. Drag from the sidebar to place new nodes.
       </p>
 
       {/* Bulk power modal */}
@@ -548,6 +790,44 @@ function RackPanel({ rack, nodes }: { rack: Rack; nodes: Map<string, NodeHealth>
           nodes={nodes}
           onClose={() => setPowerModal(null)}
         />
+      )}
+    </div>
+  )
+}
+
+// ─── Unassigned nodes sidebar ─────────────────────────────────────────────────
+
+function UnassignedSidebar() {
+  const query = useQuery<ListUnassignedNodesResponse>({
+    queryKey: ["nodes-unassigned"],
+    queryFn: () => apiFetch<ListUnassignedNodesResponse>("/api/v1/nodes/unassigned"),
+    refetchInterval: 15_000,
+  })
+
+  const nodes = query.data?.nodes ?? []
+
+  return (
+    <div className="w-64 shrink-0 border-r border-border pr-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Unassigned nodes</p>
+        {query.isFetching && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+      </div>
+
+      {query.isPending ? (
+        <div className="space-y-1">
+          {[1, 2, 3].map(i => <Skeleton key={i} className="h-7 w-full" />)}
+        </div>
+      ) : query.isError ? (
+        <p className="text-xs text-destructive">Failed to load</p>
+      ) : nodes.length === 0 ? (
+        <p className="text-xs text-muted-foreground italic">All nodes are assigned to a rack.</p>
+      ) : (
+        <div className="space-y-1 max-h-[calc(100vh-200px)] overflow-y-auto">
+          <p className="text-[10px] text-muted-foreground">Select U-size then drag onto a rack slot.</p>
+          {nodes.map(n => (
+            <UnassignedNodeRow key={n.id} node={n} />
+          ))}
+        </div>
       )}
     </div>
   )
@@ -633,27 +913,35 @@ export function DatacenterPage() {
             </Button>
           </div>
         ) : (
-          <Tabs
-            value={activeRack ?? racks[0]?.id}
-            onValueChange={setActiveRack}
-          >
-            <TabsList className="mb-4 flex flex-wrap h-auto gap-1">
-              {racks.map(rack => (
-                <TabsTrigger key={rack.id} value={rack.id} className="text-xs">
-                  {rack.name}
-                  <span className="ml-1.5 text-muted-foreground">
-                    ({(rack.positions?.length ?? 0)}/{rack.height_u}U)
-                  </span>
-                </TabsTrigger>
-              ))}
-            </TabsList>
+          <div className="flex gap-6">
+            {/* Unassigned nodes sidebar */}
+            <UnassignedSidebar />
 
-            {racks.map(rack => (
-              <TabsContent key={rack.id} value={rack.id}>
-                <RackPanel rack={rack} nodes={nodeMap} />
-              </TabsContent>
-            ))}
-          </Tabs>
+            {/* Rack tabs */}
+            <div className="flex-1 min-w-0">
+              <Tabs
+                value={activeRack ?? racks[0]?.id}
+                onValueChange={setActiveRack}
+              >
+                <TabsList className="mb-4 flex flex-wrap h-auto gap-1">
+                  {racks.map(rack => (
+                    <TabsTrigger key={rack.id} value={rack.id} className="text-xs">
+                      {rack.name}
+                      <span className="ml-1.5 text-muted-foreground">
+                        ({(rack.positions?.length ?? 0)}/{rack.height_u}U)
+                      </span>
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+
+                {racks.map(rack => (
+                  <TabsContent key={rack.id} value={rack.id}>
+                    <RackPanel rack={rack} nodes={nodeMap} />
+                  </TabsContent>
+                ))}
+              </Tabs>
+            </div>
+          </div>
         )}
 
         {addRackOpen && (

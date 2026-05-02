@@ -1327,6 +1327,22 @@ func (h *NodesHandler) BatchCreateNodes(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
+// ListUnassignedNodes handles GET /api/v1/nodes/unassigned.
+// Returns lightweight stubs for all nodes with no node_rack_position row.
+// Used by the datacenter page unassigned-nodes sidebar.
+func (h *NodesHandler) ListUnassignedNodes(w http.ResponseWriter, r *http.Request) {
+	stubs, err := h.DB.ListUnassignedNodes(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("list unassigned nodes")
+		writeError(w, err)
+		return
+	}
+	if stubs == nil {
+		stubs = []api.UnassignedNodeStub{}
+	}
+	writeJSON(w, http.StatusOK, api.ListUnassignedNodesResponse{Nodes: stubs, Total: len(stubs)})
+}
+
 // ─── Sprint 15 #99: LDAP readiness helpers ───────────────────────────────────
 
 // isSSSDConnected returns true when the sssd_status string from the verify-boot

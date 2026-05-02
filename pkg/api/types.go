@@ -1002,6 +1002,20 @@ type ListRacksResponse struct {
 	Total int    `json:"total"`
 }
 
+// UnassignedNodeStub is a lightweight node descriptor for nodes with no rack
+// assignment. Returned by GET /api/v1/nodes/unassigned.
+type UnassignedNodeStub struct {
+	ID       string `json:"id"`
+	Hostname string `json:"hostname"`
+	Status   string `json:"status"`
+}
+
+// ListUnassignedNodesResponse is returned by GET /api/v1/nodes/unassigned.
+type ListUnassignedNodesResponse struct {
+	Nodes []UnassignedNodeStub `json:"nodes"`
+	Total int                  `json:"total"`
+}
+
 // --- Response types ---
 
 // ErrorResponse is the standard error envelope returned on 4xx/5xx.

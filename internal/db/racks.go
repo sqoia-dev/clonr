@@ -181,6 +181,34 @@ func (db *DB) ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([
 	return ids, rows.Err()
 }
 
+// ListUnassignedNodes returns lightweight node stubs (id + hostname + status) for
+// all nodes that have no row in node_rack_position.
+// Used by the datacenter page sidebar.
+func (db *DB) ListUnassignedNodes(ctx context.Context) ([]api.UnassignedNodeStub, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT nc.id, nc.hostname, nc.status
+		FROM node_configs nc
+		WHERE NOT EXISTS (
+			SELECT 1 FROM node_rack_position nrp WHERE nrp.node_id = nc.id
+		)
+		ORDER BY nc.hostname ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list unassigned nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var stubs []api.UnassignedNodeStub
+	for rows.Next() {
+		var s api.UnassignedNodeStub
+		if err := rows.Scan(&s.ID, &s.Hostname, &s.Status); err != nil {
+			return nil, fmt.Errorf("db: scan unassigned node: %w", err)
+		}
+		stubs = append(stubs, s)
+	}
+	return stubs, rows.Err()
+}
+
 // ─── scan helpers ─────────────────────────────────────────────────────────────
 
 type rackScanner interface {
