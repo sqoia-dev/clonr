@@ -1463,7 +1463,41 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
   Depends on: nothing.
   Landed: commit 1 `718e41d` (refactor, CI green), commit 2 `9b65c5f` (ubuntu24 driver + 12 tests). `Distro{Family,Major}` with filesystem-marker detection (debian_version, redhat-release, os-release). EL9 fallback when markers absent. ubuntu24 WriteSystemFiles writes cloud-init disable + netplan YAML; InstallBootloader uses grub-install (Ubuntu binary). No new NodeConfig fields needed — distro detected from deployed rootfs at finalize time.
 
-- [ ] **#159 — BIOS settings push, Intel first (MEDIUM, L)**
+- [x] **#159 — BIOS settings push, Intel first (MEDIUM, L)** — 3 commits landed (`7a06715` + `be14b97` + `4fae2aa` + schema fix `ce360b1`), CI green. Migrations 094 (`bios_profiles` + `node_bios_profile`) and 095 (`reimage_requests.bios_only` column). Provider interface + Intel stub + Diff/apply pipeline + initramfs binary detection + `bios_only` reimage flag + CLI + fake-syscfg test fixture. privhelper verbs `bios-read` / `bios-apply` with strict argv allowlist (vendor regex `^[a-z]+$`, settings staged at `/var/lib/clustr/bios-staging/*.json`, no path traversal, regular-file check via `os.Lstat`). 5 new clientd message types: `bios_read_request`/`_result`, `bios_apply_request`/`_result`, `bios_drift`. Apply runs in initramfs pre-boot per Richard's D1; post-boot apply via `HandleBiosApplyRequest` is wired but returns clear error in v1. Coordinated cleanly with #157 on `scripts/build-initramfs.sh` (sequential blocks). **Punted Sprint 26+:** post-boot BIOS apply, Dell RACADM + Supermicro SUM providers, `NodeStateBiosApplying` surfaced from `NodeConfig.State()`, `bios_e2e` integration test, `clustr bios profiles update` CLI.
+
+---
+
+## Sprint 25 — SHIPPED (2026-05-02)
+
+All six tasks (#157–#162) landed. The complete CLUSTERVISOR-GAP-SPRINT plan from Richard's review is now shipped end-to-end.
+
+clustr now has: UDPCast multicast fleet reimage with per-receiver unicast fallback; `DistroDriver` interface with el8/el9/el10/ubuntu24 implementations and netplan-based Ubuntu provisioning; BIOS settings push (Intel first via `intel-syscfg`, Provider interface ready for Dell/Supermicro); per-image stateless/netboot menu entries (Memtest + Rescue); `Api-Version: v1` + JSON schemas for 46 API types + OpenAPI 3.1 export with CI diff-check; reproducible initramfs builder via Docker image with bit-identical SHA256-verified output.
+
+### v0.x release-prep bootstrap checklist (carried forward)
+
+These four operator-install bootstraps are required before the next tagged release:
+1. **Trigger `initramfs-builder.yml` workflow once** (manual `workflow_dispatch`) so the builder image lands in `ghcr.io/sqoia-dev/initramfs-builder` (#162)
+2. **Install `udpcast` package** from EPEL on the clustr-serverd host for udp-sender; nodes pick up udp-receiver from initramfs (#157)
+3. **Drop `intel-syscfg` at `/var/lib/clustr/vendor-bios/intel/syscfg`** if BIOS push is desired (operator-supplied per Intel EULA) (#159)
+4. **Drop a Memtest binary at `BootDir/extra/memtest`** if Memtest boot menu entry should work (#160)
+
+### Sprint 26+ backlog (carried forward from Sprint 25 punts)
+
+Imaging:
+- Full grub2-install migration into `InstallBootloader` (entry point exists; rsync.go still calls direct)
+- Ubuntu EFI bootloader path (currently BIOS-only); Ubuntu 22.04/20.04 drivers; Debian, SLES drivers
+- Dell `racadm` and Supermicro `sum` BIOS providers (framework ready, just Intel in v1)
+- Post-boot BIOS apply (currently initramfs pre-boot only)
+- `NodeStateBiosApplying` surfaced from `NodeConfig.State()`
+- E2E multicast smoke test (`-tags multicast_e2e`); qemu loopback multicast test infra
+- `bios_e2e` integration test
+- `clustr bios profiles update` CLI subcommand
+
+UI/UX (from Sprint 24 punts):
+- UX-9 — PUT endpoint for alert rule editing (YAML editor in #155 currently read-only)
+- UX-10 — cross-rack drag in `/datacenter` view (backend ready; frontend partial)
+
+Plus the architectural follow-ups Richard noted: clientd message-type registry envelope refactor (~10 message types now), `internal/vendorbins/` package once second BIOS vendor lands.
   Owner: Richard scopes → Dinesh implements.
   In: `internal/bios/` with `Provider` interface + `intel` provider wrapping `intel-syscfg`. New tables `bios_profiles(id, name, vendor, settings_json)` and `node_bios_profile(node_id, profile_id, last_applied_at)`. Deploy phase reads desired profile, diffs against current, applies via clientd → privhelper-brokered `intel-syscfg` call. Bundle Intel binary in initramfs. Out: Dell `racadm`, Supermicro `sum` (separate task once Intel ships).
   Depends on: #120 (initramfs binary footprint).
