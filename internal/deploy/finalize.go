@@ -133,6 +133,47 @@ ACTION=="remove", ENV{ID_PATH}!="?*", RUN+="/usr/sbin/mdadm -If $devnode"
 LABEL="md_inc_end"
 `
 
+// writeDistroSystemFiles detects the OS family in the deployed rootfs and
+// calls the matching DistroDriver.WriteSystemFiles to write distro-specific
+// network configuration (and any other distro-specific bootstrap files).
+//
+// When the distro cannot be detected, or when no driver is registered for the
+// detected distro, the function falls back to EL9 behaviour (NetworkManager
+// keyfiles). This preserves backwards compatibility for existing Rocky Linux 9
+// nodes where the initramfs deploy context may not yet have all detection
+// marker files populated.
+func writeDistroSystemFiles(mountRoot string, cfg api.NodeConfig) error {
+	log := logger()
+
+	distro, err := detectDistro(mountRoot)
+	if err != nil {
+		log.Warn().Err(err).Str("root", mountRoot).
+			Msg("finalize: distro detection failed — falling back to EL9 network config")
+		distro = Distro{Family: "el", Major: 9}
+	}
+
+	drv, err := driverFor(distro)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("family", distro.Family).Int("major", distro.Major).
+			Msg("finalize: no DistroDriver found — falling back to EL9 network config")
+		drv, _ = driverFor(Distro{Family: "el", Major: 9})
+		if drv == nil {
+			// Should never happen: el9 driver is always registered via init().
+			// Defensive: fall back to the raw NM helpers.
+			if err2 := writeNetworkConfig(mountRoot, cfg.Interfaces); err2 != nil {
+				return fmt.Errorf("writeDistroSystemFiles: fallback NM config: %w", err2)
+			}
+			_ = writeClustrDHCPProfile(mountRoot)
+			return nil
+		}
+	}
+
+	log.Info().Str("family", distro.Family).Int("major", distro.Major).
+		Msg("finalize: writing distro-specific system files")
+	return drv.WriteSystemFiles(mountRoot, cfg)
+}
+
 // applyNodeConfig writes all node-specific identity into the deployed filesystem
 // rooted at mountRoot. This function is called by both FilesystemDeployer and
 // BlockDeployer after the image is on disk.
@@ -167,26 +208,17 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 		}
 	}
 
-	log.Info().Int("interfaces", len(cfg.Interfaces)).Msg("finalize: writing NetworkManager connection profiles")
-	if err := writeNetworkConfig(mountRoot, cfg.Interfaces); err != nil {
-		return fmt.Errorf("finalize: network: %w", err)
+	// Detect the distro and dispatch to the appropriate DistroDriver for
+	// network configuration and any distro-specific identity files.
+	// On detection failure we fall through to the EL9 driver (backwards compat
+	// for deploy hosts that do not yet have the marker files in the target rootfs).
+	log.Info().Int("interfaces", len(cfg.Interfaces)).Msg("finalize: writing distro-specific network configuration")
+	if err := writeDistroSystemFiles(mountRoot, cfg); err != nil {
+		return fmt.Errorf("finalize: distro system files: %w", err)
 	}
 	for _, iface := range cfg.Interfaces {
 		log.Info().Str("interface", iface.Name).Str("ip", iface.IPAddress).
-			Msgf("finalize: wrote /etc/NetworkManager/system-connections/%s.nmconnection", iface.Name)
-	}
-
-	// Inject a high-priority DHCP fallback profile so clustr-verify-boot.service
-	// has network connectivity to phone home even when the node has static NM
-	// profiles that may not cover the interface that comes up first after reboot.
-	// autoconnect-priority=100 ensures this profile wins over the static config
-	// if needed; it is intentionally generic (no interface-name pinning) so it
-	// works on any hardware with any NIC naming scheme.
-	if err := writeClustrDHCPProfile(mountRoot); err != nil {
-		// Non-fatal: static NM profiles may still provide connectivity.
-		log.Warn().Err(err).Msg("WARNING finalize: could not write clustr-dhcp NM profile (non-fatal)")
-	} else {
-		log.Info().Msg("finalize: wrote clustr-dhcp NetworkManager DHCP fallback profile")
+			Msg("finalize: wrote network configuration for interface")
 	}
 
 	if len(cfg.SSHKeys) > 0 {
