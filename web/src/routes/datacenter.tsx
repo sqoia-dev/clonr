@@ -490,15 +490,11 @@ function RackTile({
   rack,
   nodes,
   onNodeClick,
-  onPositionChange: _onPositionChange,
-  onNewPlacement: _onNewPlacement,
   onResize,
 }: {
   rack: Rack
   nodes: Map<string, NodeHealth>
   onNodeClick: (nodeId: string) => void
-  onPositionChange: (nodeId: string, newRackId: string, newSlotU: number, heightU: number) => void
-  onNewPlacement: (nodeId: string, rackId: string, slotU: number, heightU: number) => void
   onResize: (nodeId: string, rackId: string, newHeightU: number) => void
 }) {
   const [powerModal, setPowerModal] = React.useState<PowerAction | null>(null)
@@ -1107,12 +1103,6 @@ export function DatacenterPage() {
                         nodes={nodeMap}
                         onNodeClick={(nodeId) => {
                           window.dispatchEvent(new CustomEvent("clustr:open-node", { detail: { nodeId } }))
-                        }}
-                        onPositionChange={(nodeId, newRackId, newSlotU, heightU) => {
-                          setPositionMut.mutate({ nodeId, rackId: newRackId, slotU: newSlotU, heightU })
-                        }}
-                        onNewPlacement={(nodeId, rackId, slotU, heightU) => {
-                          setPositionMut.mutate({ nodeId, rackId, slotU, heightU })
                         }}
                         onResize={(nodeId, rackId, newHeightU) => {
                           const pos = (rack.positions ?? []).find(p => p.node_id === nodeId)
