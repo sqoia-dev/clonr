@@ -26,6 +26,12 @@
 //	                             clustr-internal-repo only. The --repo flag
 //	                             restricts dnf to that repo so only signed clustr
 //	                             RPMs are installed.
+//	rule-write <name> <src-file>
+//	                             Atomically write a YAML alert rule file from
+//	                             <src-file> (a temp file) to
+//	                             /etc/clustr/rules.d/<name>.yml. name must match
+//	                             ^[a-zA-Z0-9._-]+$, must not contain slashes.
+//	                             File is created as root:clustr mode 0640.
 //	repo-push <src-file> <dst-file>
 //	                             Copy a signed RPM from <src-file> to a path
 //	                             under /var/lib/clustr/repo/clustr-internal-repo/.
@@ -219,7 +225,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, rule-write, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply\n")
 		os.Exit(1)
 	}
 
@@ -237,6 +243,8 @@ func main() {
 		exitCode = verbDnfInstall(callerUID, verbArgs)
 	case "dnf-upgrade":
 		exitCode = verbDnfUpgrade(callerUID, verbArgs)
+	case "rule-write":
+		exitCode = verbRuleWrite(callerUID, verbArgs)
 	case "repo-push":
 		exitCode = verbRepoPush(callerUID, verbArgs)
 	case "repo-refresh":
@@ -628,6 +636,129 @@ func verbDnfUpgrade(callerUID int, args []string) int {
 
 	writeAudit(callerUID, "dnf-upgrade", args, exitCode, "")
 	return exitCode
+}
+
+// ─── rule-write ───────────────────────────────────────────────────────────────
+
+// rulesDir is the directory where alert rule YAML files are stored.
+const rulesDir = "/etc/clustr/rules.d/"
+
+// isSafeRuleName returns true when name contains only characters that are safe
+// as a filename base and cannot escape the rules directory via path traversal.
+// Allowed: [a-zA-Z0-9._-] — no slashes, no dots-only sequences.
+func isSafeRuleName(name string) bool {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	for _, c := range name {
+		ok := (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '-' || c == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// verbRuleWrite atomically writes a YAML alert rule file to rulesDir.
+//
+// Argv: rule-write <name> <src-file>
+//   - name: validated against isSafeRuleName; destination is rulesDir/<name>.yml
+//   - src-file: path to a temp file containing the YAML content written by
+//     clustr-serverd; must be an absolute path under /tmp
+//
+// The destination file is written as root:clustr mode 0640, atomically via
+// a temp file + rename so a partial write never corrupts a live rule.
+func verbRuleWrite(callerUID int, args []string) int {
+	if len(args) != 2 {
+		msg := "rule-write requires exactly two arguments: <name> <src-file>"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 1, msg)
+		return 1
+	}
+
+	name, srcPath := args[0], args[1]
+
+	// Validate rule name.
+	if !isSafeRuleName(name) {
+		msg := fmt.Sprintf("rule-write: name %q contains disallowed characters or path separators", name)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 1, msg)
+		return 1
+	}
+
+	// Validate src-file: must be absolute and under /tmp.
+	if !strings.HasPrefix(srcPath, "/") {
+		msg := "rule-write: src-file must be an absolute path"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 1, msg)
+		return 1
+	}
+	cleanSrc := filepath.Clean(srcPath)
+	if !strings.HasPrefix(cleanSrc, "/tmp/") {
+		msg := "rule-write: src-file must be under /tmp/"
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 1, msg)
+		return 1
+	}
+
+	// Ensure the rules directory exists.
+	if err := os.MkdirAll(rulesDir, 0750); err != nil {
+		msg := fmt.Sprintf("rule-write: mkdir rules dir: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+
+	// Read the source content.
+	content, err := os.ReadFile(cleanSrc) //#nosec G304 -- cleanSrc validated to be under /tmp above
+	if err != nil {
+		msg := fmt.Sprintf("rule-write: read src: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+
+	dst := filepath.Join(rulesDir, name+".yml")
+
+	// Write atomically: write to a temp file in the same directory, then rename.
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640) //#nosec G304 -- dst is constructed from validated name under rulesDir
+	if err != nil {
+		msg := fmt.Sprintf("rule-write: create tmp: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+
+	if _, err := out.Write(content); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		msg := fmt.Sprintf("rule-write: write: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		msg := fmt.Sprintf("rule-write: close tmp: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		msg := fmt.Sprintf("rule-write: rename: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "rule-write", args, 2, msg)
+		return 2
+	}
+
+	writeAudit(callerUID, "rule-write", args, 0, "")
+	return 0
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

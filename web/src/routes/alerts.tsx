@@ -6,8 +6,8 @@
  *   Silenced — active alerts with an associated silence
  *   History  — resolved alerts in last 24h (default), date range picker
  *
- * Per-rule drill-down: modal with rule detail + read-only YAML editor (react-simple-code-editor + prismjs).
- * Rule edit endpoint does not exist — editor is read-only; follow-up queued for Sprint 25.
+ * Per-rule drill-down: modal with rule detail + editable YAML editor (react-simple-code-editor + prismjs).
+ * UX-9: PUT /api/v1/alerts/rules/{name} wired to Save button.
  */
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
@@ -15,7 +15,7 @@ import { formatDistanceToNow, format } from "date-fns"
 import {
   Bell, CheckCircle2, XCircle, AlertCircle, Info,
   VolumeX, Eye, RefreshCw, Loader2, X,
-  ChevronDown, Filter,
+  ChevronDown, Filter, Save,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -218,7 +218,26 @@ function SilenceButton({ ruleName, nodeId, onDone }: { ruleName: string; nodeId:
 // ─── Rule drill-down modal ────────────────────────────────────────────────────
 
 function RuleModal({ rule, onClose }: { rule: Rule; onClose: () => void }) {
-  const yaml = ruleToYaml(rule)
+  const qc = useQueryClient()
+  const [yamlValue, setYamlValue] = React.useState(() => ruleToYaml(rule))
+  const isDirty = yamlValue !== ruleToYaml(rule)
+
+  const saveMut = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/alerts/rules/${encodeURIComponent(rule.name)}`, {
+        method: "PUT",
+        body: JSON.stringify({ yaml: yamlValue }),
+      }),
+    onSuccess: () => {
+      toast({ title: "Rule saved" })
+      qc.invalidateQueries({ queryKey: ["alert-rules"] })
+      onClose()
+    },
+    onError: (e: Error) => {
+      toast({ title: "Save failed", description: e.message, variant: "destructive" })
+    },
+  })
+
   return (
     <Dialog open onOpenChange={v => !v && onClose()}>
       <DialogContent className="max-w-2xl">
@@ -263,20 +282,34 @@ function RuleModal({ rule, onClose }: { rule: Rule; onClose: () => void }) {
             </div>
           </div>
           <div>
-            <p className="text-xs text-muted-foreground mb-1">Rule YAML (read-only)</p>
+            <p className="text-xs text-muted-foreground mb-1">Rule YAML</p>
             <div className="rounded-md border border-border bg-muted p-3 overflow-auto max-h-64 font-mono text-xs">
               <Editor
-                value={yaml}
-                onValueChange={() => {/* read-only */}}
+                value={yamlValue}
+                onValueChange={setYamlValue}
                 highlight={code => Prism.highlight(code, Prism.languages.yaml, "yaml")}
                 padding={0}
-                readOnly
                 style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 12, lineHeight: 1.6 }}
               />
             </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              Rule editing not available — edit YAML files in /etc/clustr/rules.d/ directly.
-            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={onClose} disabled={saveMut.isPending}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              className="gap-1.5"
+              onClick={() => saveMut.mutate()}
+              disabled={!isDirty || saveMut.isPending}
+            >
+              {saveMut.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              Save
+            </Button>
           </div>
         </div>
       </DialogContent>

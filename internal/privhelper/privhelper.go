@@ -11,6 +11,7 @@ package privhelper
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -144,6 +145,39 @@ func BiosApply(ctx context.Context, vendor, profilePath string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("privhelper: bios-apply %s: %w\noutput: %s", vendor, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// RuleWrite atomically writes content to /etc/clustr/rules.d/{name}.yml via the
+// clustr-privhelper rule-write verb. name must match ^[a-zA-Z0-9._-]+$ and
+// must not contain path separators. The helper creates the file as root:clustr
+// 0640, overwriting any existing file of the same name.
+//
+// content is passed through a temp file in /tmp so argv stays bounded; the
+// helper reads it, validates the destination, and moves it into place.
+func RuleWrite(ctx context.Context, name string, content []byte) error {
+	// Write content to a temp file so we can pass it as a path argument.
+	// The helper reads from this path and the original file is removed after.
+	tmp, err := os.CreateTemp("", "clustr-rule-*.yml")
+	if err != nil {
+		return fmt.Errorf("privhelper: rule-write: create tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("privhelper: rule-write: write tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("privhelper: rule-write: close tmp: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, helperPath, "rule-write", name, tmpPath) //#nosec G204 -- name validated by helper; tmpPath is a /tmp path we created
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("privhelper: rule-write %s: %w\noutput: %s", name, err, strings.TrimRight(string(out), "\n"))
 	}
 	return nil
 }
