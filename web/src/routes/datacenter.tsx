@@ -1,21 +1,32 @@
 /**
- * datacenter.tsx — Sprint 24 #156 + UX-10 partial.
+ * datacenter.tsx — UX-10b: multi-rack tile layout + shared DndContext for cross-rack drag.
  *
  * Layout:
- *   - Header: [+ Add rack] button, rack-name tabs
+ *   - Header: [+ Add rack] button
  *   - Left sidebar: unassigned nodes panel (nodes with no rack assignment)
- *   - Per-rack: visual rack diagram (HTML/CSS divs), drag-and-drop U-slot positioning
- *   - Node blocks: hostname + status pill, click → node sheet (via clustr:open-node event)
- *   - Bulk power per rack: Power off all / Power on all / Reboot all (confirmation modal)
+ *   - Tile row: all racks rendered side-by-side in a horizontally scrollable flex container
+ *   - Single DndContext wraps sidebar + all rack tiles so cross-rack drag works
  *
- * DnD: @dnd-kit/core for drag-and-drop between/within racks.
- * SVG spec says single SVG component — we use a "rack column" of divs that looks like
- * a rack diagram. Each 1U is a fixed-height div row; occupied slots get a node block
- * that spans height_u rows. This is spec-compliant (visual SVG) but implemented as
- * accessible HTML so dnd-kit refs work cleanly.
+ * DnD: @dnd-kit/core — single shared DndContext.
+ * Drop targets self-identify as { rackId, slotU } so handleDragEnd knows the destination.
  *
- * UX-10 (partial): unassigned sidebar + height-U selector + drop-zone validation
- *   + resize (Approach A popover). Cross-rack drag still queued.
+ * handleDragEnd three-way dispatch:
+ *   1. fromUnassigned → new placement in target rack
+ *   2. srcRackId !== dstRackId → cross-rack move (PUT to dstRackId)
+ *   3. same rack, different slot → within-rack reposition
+ *
+ * Visual cues:
+ *   - During drag: dragged height-U tracked in activeDrag context; SlotDropZone dims if
+ *     the slot cannot fit the node (occupied or would overflow rack top).
+ *   - DragOverlay follows cursor showing node label + U-size.
+ *
+ * Keyboard accessibility (Cmd-X / Cmd-V cut-paste):
+ *   - Focus a node block → Cmd-X marks it as "cut"
+ *   - Focus a slot drop zone → Cmd-V fires the same logic as drag-drop
+ *
+ * Empty states:
+ *   - Zero racks: "Create your first rack" CTA.
+ *   - Racks exist but no nodes placed: "No nodes assigned yet — drag from the sidebar."
  */
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
@@ -33,11 +44,10 @@ import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core"
 import { CSS } from "@dnd-kit/utilities"
 import {
   Building2, Plus, Power, PowerOff, RefreshCw,
-  Loader2, XCircle, AlertTriangle, Server, Pencil, Check, X,
+  Loader2, XCircle, AlertTriangle, Server, Pencil, Check, X, Scissors,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
 import { apiFetch } from "@/lib/api"
@@ -101,9 +111,19 @@ interface UnassignedDragData {
   nodeId: string
   heightU: number
   fromUnassigned: true
+  rackId?: never
+  slotU?: never
 }
 
 type DragData = InRackDragData | UnassignedDragData
+
+// Cut-state for keyboard cut-paste accessibility
+interface CutState {
+  nodeId: string
+  srcRackId: string
+  slotU: number
+  heightU: number
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -129,6 +149,24 @@ function statusDot(status: string) {
   )
 }
 
+// ─── Shared drag context (passed via React context) ───────────────────────────
+
+interface DragCtx {
+  activeDrag: DragData | null
+  cutState: CutState | null
+  setCutState: (s: CutState | null) => void
+  onSlotPaste: (rackId: string, slotU: number, rackHeightU: number, rackPositions: NodeRackPosition[]) => void
+  allRackPositions: Map<string, NodeRackPosition[]>
+}
+
+const DragContext = React.createContext<DragCtx>({
+  activeDrag: null,
+  cutState: null,
+  setCutState: () => {},
+  onSlotPaste: () => {},
+  allRackPositions: new Map(),
+})
+
 // ─── Draggable node block (already placed in rack) ────────────────────────────
 
 function NodeBlock({
@@ -148,6 +186,9 @@ function NodeBlock({
   onResize: (nodeId: string, newHeightU: number) => void
   onClick: () => void
 }) {
+  const { activeDrag, cutState, setCutState } = React.useContext(DragContext)
+  const isCut = cutState?.nodeId === pos.node_id
+
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `node-${pos.node_id}`,
     data: {
@@ -194,6 +235,23 @@ function NodeBlock({
     onResize(pos.node_id, val)
   }
 
+  // Keyboard handler: Cmd-X marks this node as "cut"
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "x") {
+      e.preventDefault()
+      setCutState({
+        nodeId: pos.node_id,
+        srcRackId: pos.rack_id,
+        slotU: pos.slot_u,
+        heightU: pos.height_u,
+      })
+      toast({ title: `Cut: ${hostname}`, description: "Focus a slot and press Cmd-V to place" })
+    }
+  }
+
+  // Show highlighted border if this node is the active drag or cut target
+  const isActiveInDrag = activeDrag && !activeDrag.fromUnassigned && (activeDrag as InRackDragData).nodeId === pos.node_id
+
   return (
     <div
       ref={setNodeRef}
@@ -203,11 +261,18 @@ function NodeBlock({
       role="button"
       tabIndex={0}
       aria-label={`Node ${hostname} at U${pos.slot_u}`}
-      className="flex items-center gap-2 rounded border border-border bg-secondary px-2 text-xs font-mono hover:bg-secondary/70 focus:outline-none focus:ring-1 focus:ring-accent"
+      onKeyDown={handleKeyDown}
+      className={cn(
+        "flex items-center gap-2 rounded border bg-secondary px-2 text-xs font-mono hover:bg-secondary/70 focus:outline-none focus:ring-1 focus:ring-accent",
+        isCut ? "border-amber-400 ring-1 ring-amber-400/60" : "border-border",
+        isActiveInDrag && "opacity-40",
+      )}
     >
       {statusDot(status)}
       <span className="truncate flex-1" onClick={(e) => { e.stopPropagation(); onClick() }}>{hostname}</span>
       <span className="text-muted-foreground shrink-0">{pos.height_u}U</span>
+      {/* Cut indicator */}
+      {isCut && <Scissors className="h-2.5 w-2.5 text-amber-400 shrink-0" />}
       {/* Edit-U button — stops propagation so it doesn't trigger drag */}
       <button
         className="shrink-0 rounded p-0.5 hover:bg-accent/40 focus:outline-none"
@@ -311,27 +376,117 @@ function UnassignedNodeRow({ node }: { node: UnassignedNodeStub }) {
 
 // ─── Droppable slot ───────────────────────────────────────────────────────────
 
-function SlotDropZone({ rackId, slotU }: { rackId: string; slotU: number }) {
+function SlotDropZone({
+  rackId,
+  slotU,
+  rackHeightU,
+  occupiedByOthers,
+  onPaste,
+}: {
+  rackId: string
+  slotU: number
+  rackHeightU: number
+  occupiedByOthers: Set<number>
+  onPaste: (rackId: string, slotU: number) => void
+}) {
+  const { activeDrag, cutState } = React.useContext(DragContext)
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${rackId}-${slotU}`,
     data: { rackId, slotU },
   })
 
+  // Determine if this slot can accept the active drag
+  const dragHeightU = activeDrag?.heightU ?? cutState?.heightU ?? 0
+  let canAccept = false
+  if (dragHeightU > 0) {
+    const topSlot = slotU + dragHeightU - 1
+    if (topSlot <= rackHeightU) {
+      canAccept = true
+      for (let u = slotU; u <= topSlot; u++) {
+        if (occupiedByOthers.has(u)) {
+          canAccept = false
+          break
+        }
+      }
+    }
+  }
+
+  const isDraggingOrCutting = activeDrag !== null || cutState !== null
+
+  // Keyboard handler: Cmd-V pastes cut node here
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "v" && cutState) {
+      e.preventDefault()
+      onPaste(rackId, slotU)
+    }
+  }
+
   return (
     <div
       ref={setNodeRef}
+      tabIndex={cutState ? 0 : -1}
+      role={cutState ? "button" : undefined}
+      aria-label={cutState ? `Paste to U${slotU}` : undefined}
+      onKeyDown={handleKeyDown}
       style={{ height: SLOT_HEIGHT_PX }}
       className={cn(
-        "w-full border-b border-border/30 transition-colors",
-        isOver && "bg-accent/20"
+        "w-full border-b border-border/30 transition-colors focus:outline-none",
+        isOver && canAccept && "bg-accent/30",
+        isOver && !canAccept && "bg-destructive/20",
+        isDraggingOrCutting && !canAccept && !isOver && "opacity-30",
+        isDraggingOrCutting && canAccept && !isOver && "bg-accent/8",
+        cutState && canAccept && "focus:ring-1 focus:ring-accent",
       )}
     />
   )
 }
 
-// ─── Rack diagram ─────────────────────────────────────────────────────────────
+// ─── Slot fit validation (reusable by drag + keyboard paste) ──────────────────
 
-function RackDiagram({
+function validateDrop(params: {
+  targetRackId: string
+  targetSlotU: number
+  dragHeightU: number
+  sourceNodeId: string
+  allRackPositions: Map<string, NodeRackPosition[]>
+  racks: Rack[]
+}): { ok: true } | { ok: false; reason: string } {
+  const { targetRackId, targetSlotU, dragHeightU, sourceNodeId, allRackPositions, racks } = params
+  const rack = racks.find(r => r.id === targetRackId)
+  if (!rack) return { ok: false, reason: "Rack not found" }
+
+  const topSlot = targetSlotU + dragHeightU - 1
+  if (topSlot > rack.height_u) {
+    return {
+      ok: false,
+      reason: `Rack ${rack.name} only has ${rack.height_u}U total — node would extend to U${topSlot}`,
+    }
+  }
+
+  const positions = allRackPositions.get(targetRackId) ?? []
+  const conflictSlots: number[] = []
+  for (const pos of positions) {
+    if (pos.node_id === sourceNodeId) continue
+    for (let i = 0; i < pos.height_u; i++) {
+      const u = pos.slot_u + i
+      if (u >= targetSlotU && u <= topSlot) {
+        conflictSlots.push(u)
+      }
+    }
+  }
+  if (conflictSlots.length > 0) {
+    const slotRange = conflictSlots.length === 1
+      ? `U${conflictSlots[0]}`
+      : `U${conflictSlots[0]}-U${conflictSlots[conflictSlots.length - 1]}`
+    return { ok: false, reason: `Slots ${slotRange} already occupied` }
+  }
+
+  return { ok: true }
+}
+
+// ─── Rack tile ────────────────────────────────────────────────────────────────
+
+function RackTile({
   rack,
   nodes,
   onNodeClick,
@@ -346,86 +501,8 @@ function RackDiagram({
   onNewPlacement: (nodeId: string, rackId: string, slotU: number, heightU: number) => void
   onResize: (nodeId: string, rackId: string, newHeightU: number) => void
 }) {
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
-  const [activeDrag, setActiveDrag] = React.useState<DragData | null>(null)
-
-  function handleDragStart(e: DragStartEvent) {
-    setActiveDrag((e.active.data.current as DragData) ?? null)
-  }
-
-  function handleDragEnd(e: DragEndEvent) {
-    setActiveDrag(null)
-    const { active, over } = e
-    if (!over) return
-
-    const overData = over.data.current as { rackId: string; slotU: number } | undefined
-    if (!overData) return
-
-    const activeData = active.data.current as DragData | undefined
-    if (!activeData) return
-
-    const targetRackId = overData.rackId
-    const targetSlotU = overData.slotU
-    const dragHeightU = activeData.heightU
-
-    // Build occupied slots set excluding the dragged node itself
-    const positions = rack.positions ?? []
-    const occupiedByOthers = new Set<number>()
-    for (const pos of positions) {
-      if (pos.node_id === activeData.nodeId) continue
-      for (let i = 0; i < pos.height_u; i++) {
-        occupiedByOthers.add(pos.slot_u + i)
-      }
-    }
-
-    // Validate: fits within rack
-    const topSlot = targetSlotU + dragHeightU - 1
-    if (topSlot > rack.height_u) {
-      toast({
-        title: "Cannot place node",
-        description: `Node would extend beyond rack top (U${rack.height_u})`,
-        variant: "destructive",
-      })
-      return
-    }
-
-    // Validate: no overlap with other nodes
-    const conflictSlots: number[] = []
-    for (let u = targetSlotU; u <= topSlot; u++) {
-      if (occupiedByOthers.has(u)) {
-        conflictSlots.push(u)
-      }
-    }
-    if (conflictSlots.length > 0) {
-      // Find conflicting node hostname for the toast
-      const conflictPos = positions.find(p =>
-        p.node_id !== activeData.nodeId &&
-        conflictSlots.some(u => u >= p.slot_u && u < p.slot_u + p.height_u)
-      )
-      const conflictName = conflictPos
-        ? (nodes.get(conflictPos.node_id)?.hostname ?? conflictPos.node_id.slice(0, 8))
-        : "another node"
-      const slotRange = conflictSlots.length === 1
-        ? `U${conflictSlots[0]}`
-        : `U${conflictSlots[0]}-U${conflictSlots[conflictSlots.length - 1]}`
-      toast({
-        title: "Cannot place node",
-        description: `Slots ${slotRange} already occupied by ${conflictName}`,
-        variant: "destructive",
-      })
-      return
-    }
-
-    if (activeData.fromUnassigned) {
-      // New placement from sidebar
-      onNewPlacement(activeData.nodeId, targetRackId, targetSlotU, dragHeightU)
-    } else {
-      // Move within rack (or cross-rack — groundwork laid, cross-rack multi-tile UI is UX-10 pending)
-      if (targetRackId === rack.id && targetSlotU === activeData.slotU) return
-      onPositionChange(activeData.nodeId, targetRackId, targetSlotU, dragHeightU)
-    }
-  }
-
+  const [powerModal, setPowerModal] = React.useState<PowerAction | null>(null)
+  const { onSlotPaste, allRackPositions } = React.useContext(DragContext)
   const positions = rack.positions ?? []
 
   // Build a set of all occupied U slots for overlap detection in resize popovers
@@ -445,13 +522,61 @@ function RackDiagram({
     return { pos, node, rowIndex }
   })
 
+  const hasNodes = positions.length > 0
+
   return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
+    <div
+      className="shrink-0 flex flex-col gap-3"
+      style={{ width: RACK_WIDTH_PX + 20 }}
     >
+      {/* Rack header */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Building2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <span className="text-sm font-medium truncate">{rack.name}</span>
+          <span className="text-xs text-muted-foreground shrink-0">
+            ({positions.length}/{rack.height_u}U)
+          </span>
+        </div>
+      </div>
+
+      {/* Bulk power controls */}
+      <div className="flex items-center gap-1 flex-wrap">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 text-[10px] gap-1 px-2"
+          onClick={() => setPowerModal("on")}
+          disabled={!hasNodes}
+          title="Power on all"
+        >
+          <Power className="h-2.5 w-2.5 text-green-500" />
+          On
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 text-[10px] gap-1 px-2"
+          onClick={() => setPowerModal("off")}
+          disabled={!hasNodes}
+          title="Power off all"
+        >
+          <PowerOff className="h-2.5 w-2.5 text-red-500" />
+          Off
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-6 text-[10px] gap-1 px-2"
+          onClick={() => setPowerModal("cycle")}
+          disabled={!hasNodes}
+          title="Reboot all"
+        >
+          <RefreshCw className="h-2.5 w-2.5" />
+          Reboot
+        </Button>
+      </div>
+
       {/* Rack chassis */}
       <div
         className="relative border-2 border-border rounded-md bg-card overflow-hidden"
@@ -459,9 +584,27 @@ function RackDiagram({
         role="img"
         aria-label={`Rack ${rack.name}`}
       >
+        {/* Empty rack hint */}
+        {!hasNodes && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+            <p className="text-[10px] text-muted-foreground/50 text-center px-4">
+              No nodes assigned yet<br />Drag from the sidebar
+            </p>
+          </div>
+        )}
+
         {/* U labels + drop zones */}
         {Array.from({ length: rack.height_u }, (_, i) => {
           const uNum = rack.height_u - i  // U1 at bottom, highest U at top
+
+          // Build occupiedByOthers for each slot's drop zone (excluding any node starting at this slot,
+          // since the drop zone just needs to know if another node owns THIS particular u-slot)
+          const occupiedByOthers = new Set<number>()
+          for (const pos of positions) {
+            for (let j = 0; j < pos.height_u; j++) {
+              occupiedByOthers.add(pos.slot_u + j)
+            }
+          }
 
           return (
             <div
@@ -475,7 +618,13 @@ function RackDiagram({
               </span>
               {/* Drop zone for this slot */}
               <div className="flex-1 relative" style={{ height: SLOT_HEIGHT_PX }}>
-                <SlotDropZone rackId={rack.id} slotU={uNum} />
+                <SlotDropZone
+                  rackId={rack.id}
+                  slotU={uNum}
+                  rackHeightU={rack.height_u}
+                  occupiedByOthers={occupiedByOthers}
+                  onPaste={(rId, sU) => onSlotPaste(rId, sU, rack.height_u, positions)}
+                />
               </div>
             </div>
           )
@@ -507,19 +656,22 @@ function RackDiagram({
         ))}
       </div>
 
-      {/* Drag overlay */}
-      <DragOverlay>
-        {activeDrag && (
-          <div
-            className="rounded border border-accent bg-secondary/90 px-3 text-xs font-mono shadow-lg"
-            style={{ height: activeDrag.heightU * SLOT_HEIGHT_PX - 2, display: "flex", alignItems: "center" }}
-          >
-            <Server className="h-3 w-3 mr-2 shrink-0" />
-            {activeDrag.heightU}U
-          </div>
-        )}
-      </DragOverlay>
-    </DndContext>
+      {/* Bulk power modal */}
+      {powerModal && (
+        <BulkPowerModal
+          rack={rack}
+          action={powerModal}
+          positions={positions}
+          nodes={nodes}
+          onClose={() => setPowerModal(null)}
+        />
+      )}
+
+      {/* Keyboard hint */}
+      <p className="text-[9px] text-muted-foreground">
+        Cmd-X to cut a node · Cmd-V on a focused slot to paste
+      </p>
+    </div>
   )
 }
 
@@ -694,107 +846,6 @@ function AddRackModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   )
 }
 
-// ─── Per-rack panel ───────────────────────────────────────────────────────────
-
-function RackPanel({ rack, nodes }: { rack: Rack; nodes: Map<string, NodeHealth> }) {
-  const [powerModal, setPowerModal] = React.useState<PowerAction | null>(null)
-  const qc = useQueryClient()
-
-  const setPositionMut = useMutation({
-    mutationFn: ({ nodeId, rackId, slotU, heightU }: { nodeId: string; rackId: string; slotU: number; heightU: number }) =>
-      apiFetch(`/api/v1/racks/${rackId}/positions/${nodeId}`, {
-        method: "PUT",
-        body: JSON.stringify({ slot_u: slotU, height_u: heightU }),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["racks"] })
-      qc.invalidateQueries({ queryKey: ["nodes-unassigned"] })
-    },
-    onError: (e: Error) => {
-      toast({ title: "Failed to move node", description: e.message, variant: "destructive" })
-    },
-  })
-
-  const positions = rack.positions ?? []
-
-  return (
-    <div className="space-y-4">
-      {/* Bulk power controls */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs text-muted-foreground">Bulk power:</span>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setPowerModal("on")}
-          disabled={positions.length === 0}
-        >
-          <Power className="h-3 w-3 text-green-500" />
-          Power on all
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setPowerModal("off")}
-          disabled={positions.length === 0}
-        >
-          <PowerOff className="h-3 w-3 text-red-500" />
-          Power off all
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs gap-1"
-          onClick={() => setPowerModal("cycle")}
-          disabled={positions.length === 0}
-        >
-          <RefreshCw className="h-3 w-3" />
-          Reboot all
-        </Button>
-      </div>
-
-      {/* Rack diagram */}
-      <div className="overflow-auto">
-        <RackDiagram
-          rack={rack}
-          nodes={nodes}
-          onNodeClick={(nodeId) => {
-            window.dispatchEvent(new CustomEvent("clustr:open-node", { detail: { nodeId } }))
-          }}
-          onPositionChange={(nodeId, newRackId, newSlotU, heightU) => {
-            setPositionMut.mutate({ nodeId, rackId: newRackId, slotU: newSlotU, heightU })
-          }}
-          onNewPlacement={(nodeId, rackId, slotU, heightU) => {
-            setPositionMut.mutate({ nodeId, rackId, slotU, heightU })
-          }}
-          onResize={(nodeId, rackId, newHeightU) => {
-            const pos = positions.find(p => p.node_id === nodeId)
-            if (!pos) return
-            setPositionMut.mutate({ nodeId, rackId, slotU: pos.slot_u, heightU: newHeightU })
-          }}
-        />
-      </div>
-
-      <p className="text-xs text-muted-foreground">
-        {positions.length} node{positions.length !== 1 ? "s" : ""} / {rack.height_u}U total.
-        Drag blocks to reposition. Drag from the sidebar to place new nodes.
-      </p>
-
-      {/* Bulk power modal */}
-      {powerModal && (
-        <BulkPowerModal
-          rack={rack}
-          action={powerModal}
-          positions={positions}
-          nodes={nodes}
-          onClose={() => setPowerModal(null)}
-        />
-      )}
-    </div>
-  )
-}
-
 // ─── Unassigned nodes sidebar ─────────────────────────────────────────────────
 
 function UnassignedSidebar() {
@@ -848,7 +899,8 @@ function UnassignedSidebar() {
 
 export function DatacenterPage() {
   const [addRackOpen, setAddRackOpen] = React.useState(false)
-  const [activeRack, setActiveRack] = React.useState<string | null>(null)
+  const [activeDrag, setActiveDrag] = React.useState<DragData | null>(null)
+  const [cutState, setCutState] = React.useState<CutState | null>(null)
 
   const racksQuery = useQuery<ListRacksResponse>({
     queryKey: ["racks"],
@@ -862,6 +914,8 @@ export function DatacenterPage() {
     refetchInterval: 15_000,
   })
 
+  const qc = useQueryClient()
+
   const racks = racksQuery.data?.racks ?? []
 
   const nodeMap = React.useMemo(() => {
@@ -872,24 +926,131 @@ export function DatacenterPage() {
     return m
   }, [nodesQuery.data])
 
-  // Auto-select first rack on load.
-  React.useEffect(() => {
-    if (racks.length > 0 && !activeRack) {
-      setActiveRack(racks[0].id)
+  // Build a flat map of rackId → positions for cross-rack validation
+  const allRackPositions = React.useMemo(() => {
+    const m = new Map<string, NodeRackPosition[]>()
+    for (const rack of racks) {
+      m.set(rack.id, rack.positions ?? [])
     }
-  }, [racks, activeRack])
+    return m
+  }, [racks])
+
+  const setPositionMut = useMutation({
+    mutationFn: ({ nodeId, rackId, slotU, heightU }: { nodeId: string; rackId: string; slotU: number; heightU: number }) =>
+      apiFetch(`/api/v1/racks/${rackId}/positions/${nodeId}`, {
+        method: "PUT",
+        body: JSON.stringify({ slot_u: slotU, height_u: heightU }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["racks"] })
+      qc.invalidateQueries({ queryKey: ["nodes-unassigned"] })
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to move node", description: e.message, variant: "destructive" })
+    },
+  })
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  function handleDragStart(e: DragStartEvent) {
+    setActiveDrag((e.active.data.current as DragData) ?? null)
+    // Clear any cut state when a new drag starts
+    setCutState(null)
+  }
+
+  function handleDragEnd(e: DragEndEvent) {
+    setActiveDrag(null)
+    const { active, over } = e
+    if (!over) return
+
+    const overData = over.data.current as { rackId: string; slotU: number } | undefined
+    if (!overData) return
+
+    const activeData = active.data.current as DragData | undefined
+    if (!activeData) return
+
+    const dstRackId = overData.rackId
+    const dstSlotU = overData.slotU
+    const dragHeightU = activeData.heightU
+    const srcRackId = activeData.fromUnassigned ? null : (activeData as InRackDragData).rackId
+
+    // Validate using shared logic
+    const check = validateDrop({
+      targetRackId: dstRackId,
+      targetSlotU: dstSlotU,
+      dragHeightU,
+      sourceNodeId: activeData.nodeId,
+      allRackPositions,
+      racks,
+    })
+    if (!check.ok) {
+      toast({ title: "Cannot place node", description: check.reason, variant: "destructive" })
+      return
+    }
+
+    if (activeData.fromUnassigned) {
+      // 1. New placement from unassigned sidebar
+      setPositionMut.mutate({ nodeId: activeData.nodeId, rackId: dstRackId, slotU: dstSlotU, heightU: dragHeightU })
+    } else if (srcRackId !== dstRackId) {
+      // 2. Cross-rack move — PUT to the destination rack (server removes from old rack, inserts in new)
+      setPositionMut.mutate({ nodeId: activeData.nodeId, rackId: dstRackId, slotU: dstSlotU, heightU: dragHeightU })
+    } else {
+      // 3. Within-rack repositioning
+      if (dstSlotU === (activeData as InRackDragData).slotU) return  // no-op same slot
+      setPositionMut.mutate({ nodeId: activeData.nodeId, rackId: dstRackId, slotU: dstSlotU, heightU: dragHeightU })
+    }
+  }
+
+  // Keyboard paste handler: fires when a slot zone receives Cmd-V while cutState is set
+  function handleSlotPaste(dstRackId: string, dstSlotU: number, _rackHeightU: number, _rackPositions: NodeRackPosition[]) {
+    if (!cutState) return
+
+    const check = validateDrop({
+      targetRackId: dstRackId,
+      targetSlotU: dstSlotU,
+      dragHeightU: cutState.heightU,
+      sourceNodeId: cutState.nodeId,
+      allRackPositions,
+      racks,
+    })
+    if (!check.ok) {
+      toast({ title: "Cannot place node", description: check.reason, variant: "destructive" })
+      return
+    }
+
+    setPositionMut.mutate({
+      nodeId: cutState.nodeId,
+      rackId: dstRackId,
+      slotU: dstSlotU,
+      heightU: cutState.heightU,
+    })
+    setCutState(null)
+  }
+
+  const dragCtxValue: DragCtx = {
+    activeDrag,
+    cutState,
+    setCutState,
+    onSlotPaste: handleSlotPaste,
+    allRackPositions,
+  }
 
   const loading = racksQuery.isPending
   const error = racksQuery.isError
 
   return (
     <SectionErrorBoundary section="Datacenter">
-      <div className="p-6 max-w-7xl mx-auto">
+      <div className="p-6 max-w-[1600px] mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <Building2 className="h-5 w-5 text-muted-foreground" />
             <h1 className="text-lg font-semibold">Datacenter</h1>
+            {racks.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {racks.length} rack{racks.length !== 1 ? "s" : ""}
+              </span>
+            )}
           </div>
           <Button
             size="sm"
@@ -911,7 +1072,7 @@ export function DatacenterPage() {
             <p className="text-sm">Failed to load racks.</p>
           </div>
         ) : racks.length === 0 ? (
-          /* Empty state */
+          /* Empty state — zero racks */
           <div className="flex flex-col items-center py-24 text-muted-foreground gap-4">
             <Building2 className="h-16 w-16 opacity-15" />
             <p className="text-lg font-medium text-foreground">No racks defined</p>
@@ -924,44 +1085,66 @@ export function DatacenterPage() {
             </Button>
           </div>
         ) : (
-          <div className="flex gap-6">
-            {/* Unassigned nodes sidebar */}
-            <UnassignedSidebar />
+          /* Multi-rack tile layout — single DndContext spans sidebar + all tiles */
+          <DragContext.Provider value={dragCtxValue}>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
+              <div className="flex gap-6">
+                {/* Unassigned nodes sidebar */}
+                <UnassignedSidebar />
 
-            {/* Rack tabs */}
-            <div className="flex-1 min-w-0">
-              <Tabs
-                value={activeRack ?? racks[0]?.id}
-                onValueChange={setActiveRack}
-              >
-                <TabsList className="mb-4 flex flex-wrap h-auto gap-1">
-                  {racks.map(rack => (
-                    <TabsTrigger key={rack.id} value={rack.id} className="text-xs">
-                      {rack.name}
-                      <span className="ml-1.5 text-muted-foreground">
-                        ({(rack.positions?.length ?? 0)}/{rack.height_u}U)
-                      </span>
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
+                {/* Rack tiles — horizontally scrollable */}
+                <div className="flex-1 min-w-0 overflow-x-auto pb-4">
+                  <div className="flex gap-6 min-w-max">
+                    {racks.map((rack) => (
+                      <RackTile
+                        key={rack.id}
+                        rack={rack}
+                        nodes={nodeMap}
+                        onNodeClick={(nodeId) => {
+                          window.dispatchEvent(new CustomEvent("clustr:open-node", { detail: { nodeId } }))
+                        }}
+                        onPositionChange={(nodeId, newRackId, newSlotU, heightU) => {
+                          setPositionMut.mutate({ nodeId, rackId: newRackId, slotU: newSlotU, heightU })
+                        }}
+                        onNewPlacement={(nodeId, rackId, slotU, heightU) => {
+                          setPositionMut.mutate({ nodeId, rackId, slotU, heightU })
+                        }}
+                        onResize={(nodeId, rackId, newHeightU) => {
+                          const pos = (rack.positions ?? []).find(p => p.node_id === nodeId)
+                          if (!pos) return
+                          setPositionMut.mutate({ nodeId, rackId, slotU: pos.slot_u, heightU: newHeightU })
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
 
-                {racks.map(rack => (
-                  <TabsContent key={rack.id} value={rack.id}>
-                    <RackPanel rack={rack} nodes={nodeMap} />
-                  </TabsContent>
-                ))}
-              </Tabs>
-            </div>
-          </div>
+              {/* Drag overlay — follows cursor */}
+              <DragOverlay>
+                {activeDrag && (
+                  <div
+                    className="rounded border border-accent bg-secondary/90 px-3 text-xs font-mono shadow-lg"
+                    style={{ height: activeDrag.heightU * SLOT_HEIGHT_PX - 2, display: "flex", alignItems: "center" }}
+                  >
+                    <Server className="h-3 w-3 mr-2 shrink-0" />
+                    {activeDrag.heightU}U
+                  </div>
+                )}
+              </DragOverlay>
+            </DndContext>
+          </DragContext.Provider>
         )}
 
         {addRackOpen && (
           <AddRackModal
             onClose={() => setAddRackOpen(false)}
-            onCreated={(rack) => {
-              setActiveRack(rack.id)
-              setAddRackOpen(false)
-            }}
+            onCreated={() => setAddRackOpen(false)}
           />
         )}
       </div>
