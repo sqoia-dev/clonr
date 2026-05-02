@@ -1370,30 +1370,75 @@ clustr now answers "is anything broken right now?" inside the product without ex
 
 ### Tasks
 
-- [ ] **#146 — Disk layout as a first-class object (MEDIUM, M)**
+- [x] **#146 — Disk layout as a first-class object (MEDIUM, M)** — landed `f0066f0`, CI green. Migration `087_disk_layouts.sql`. `layout_json` reuses `api.DiskLayout` (`pkg/api/types.go:95`). Deploy precedence resolver `resolveDiskLayoutFromCatalog()` in `internal/server/handlers/layout.go:22`: per-node `disk_layout_id` (source `layout_catalog:node`) > group default (source `layout_catalog:group`) > existing inline-override / image-default fallback. **#151 (clientd-side capture handler) is REQUIRED to make capture actually work — currently returns 504.**
   Owner: Richard scopes → Dinesh implements.
   In: new migration `disk_layouts(id, name, source_node_id, captured_at, layout_json)`, endpoints `POST /api/v1/disk-layouts/capture/{node_id}`, `GET /api/v1/disk-layouts`, `PUT /api/v1/disk-layouts/{id}`. New foreign keys `node_groups.disk_layout_id` (default for the group) and per-node override on `nodes.disk_layout_id`. Deploy precedence: explicit layout > group default > recommendation. Out: layout DSL editor (operators paste layout JSON in v1).
   Depends on: nothing.
 
-- [ ] **#147 — Per-image install instructions DSL (MEDIUM, S)**
+- [x] **#147 — Per-image install instructions DSL (MEDIUM, S)** — landed `63578d1` (with bulk at `4b1ac73`), CI green. Migration `088_install_instructions.sql`. `modify` opcode uses JSON `{find, replace}` regex-based (chosen over unified diff for simpler validation + capture-group support). Hook in `inchroot.go:48` after `applyNodeConfig()`; both `FilesystemDeployer.Finalize` and `BlockDeployer.Finalize` call through.
   Owner: Dinesh.
   In: extend `BaseImage` with `install_instructions []InstallInstruction`. `InstallInstruction = { opcode: "modify"|"overwrite"|"script", target: string, payload: string }`. Deploy agent runs them in order inside the chroot after extract, before bootloader install. UI: "Install Instructions" tab on the image edit drawer. Out: opcode beyond the three.
   Depends on: #146 (deploy plan touches both).
 
-- [ ] **#148 — In-chroot reconfigure pass (MEDIUM, M)**
+- [x] **#148 — In-chroot reconfigure pass (MEDIUM, M)** — landed `8b1fac5`, CI green. `ConfigApplier` refactored with `rootDir`-prefixed `path()`. New `internal/deploy/inchroot.go` wired into both `FilesystemDeployer.Finalize` (rsync.go:655) and `BlockDeployer.Finalize` (block.go:433) — post-extraction, pre-unmount. Broken-window for first-boot identity effectively zero for hostname, network, hosts, SSH, LDAP, sudoers, slurm. First-boot clientd apply remains as safety net for configs that change between deploy and boot (e.g., CA rotation) and for live-push-only targets (chrony, ntp, resolv, clustr-internal-repo).
   Owner: Dinesh.
   In: factor `internal/clientd/configapply.go` so the file-writing logic targets an arbitrary root. New deploy phase `inChrootReconfigure` against `/mnt/target` before unmount. Closes the "online but useless" first-boot window. Out: full plugin parity with cv-reconfigure (we apply only what clientd already applies).
   Depends on: nothing.
 
-- [ ] **#149 — Rack model + `--racks` selector wiring (LOW, S)**
+- [x] **#149 — Rack model + `--racks` selector wiring (LOW, S)** — landed `ba130d3` (with corrective `4b1ac73` reverting an accidentally-staged install-instructions route stowaway), CI green. Migration `089_racks.sql`. `--racks` wired at `internal/selector/selector.go:218-233` via `db.ListNodeIDsByRackNames(ctx, names)` joining `node_rack_position → racks`. `SelectorDB`, `DBAdapter`, `ExecDBIface`, and `NodeHealthDBIface` all extended consistently.
+
+- [x] **#150 — IMSM / hardware RAID passthrough (LOW, S)** — landed `33999aa`, CI green. Qemu-IMSM integration test deferred to hardware lab (`-tags imsm` build tag); `ParseIMSMPlatformOutput` unit tests serve as CI signal. Mixed-controller detection (some devices on IMSM, some not) deferred — operator workaround is `force_software: true`. Punted to Sprint 25+.
+
+- [x] **#151 — Clientd-side disk capture handler (HIGH, S) — completes #146** — landed `d712678`, CI green. lsblk-based layout capture; mdadm enrichment best-effort (skips quietly on permission failure); no privhelper or new sudoers entries. Bonus catch from integration test: `lsblkSize` handles both old (JSON number) and new (JSON string) lsblk output formats.
+
+---
+
+## Sprint 23 — SHIPPED (2026-05-02)
+
+All six tasks (#146 disk layout, #147 install instructions DSL, #148 in-chroot reconfigure, #149 rack model, #150 IMSM RAID, #151 clientd capture handler) landed green. Plus UX-7 thread-safety docs (#144). Operators can now define disk layouts as first-class objects, customise images via three-opcode DSL inside the chroot phase, get identity-correct first-boot, model their racks for selector resolution, and (when on Intel Matrix Storage Manager hardware) get IMSM passthrough at deploy time.
+
+clustr v0.x continues to mature. Sprint 22 closed the "is anything broken right now?" gap; Sprint 23 closed the "now what" gap operators hit after PXE works.
+
+---
+
+## Sprint 24 — Web UI catch-up (MEDIUM) — "expose what we've built"
+
+**Started:** 2026-05-02
+**Theme:** Surface Sprints 21–23 backends in the React SPA. Almost entirely frontend work — the backends already exist; this sprint exposes them to operators who don't reach for the CLI.
+
+**Source plan:** `docs/CLUSTERVISOR-GAP-SPRINT.md` Sprint 24 section. Approved by founder 2026-05-02.
+
+**Note on numbering:** Richard's plan doc used #140–#144 for these; renumbered to #152–#156 to avoid collision with the in-flight task IDs.
+
+### Tasks
+
+- [ ] **#152 — Per-node Sensors + Event Log + Console tabs (MEDIUM, M)**
   Owner: Dinesh.
-  In: migrations `racks(id, name, height_u)` and `node_rack_position(node_id, rack_id, slot_u, height_u)`. Selector grammar (#125) starts resolving `--racks` against the model. Out: rack diagram UI (lands in Sprint 24).
+  In: three new tabs on the node Sheet. Sensors uses `recharts` (~120 KB) for live values + thresholds. Event Log is a virtualized list with level filter + regex + head/tail (lands on the #129 backend). Console embeds `xterm.js` connected to the #128 SOL broker.
+  Depends on: #128 #129 #131 (all landed).
+
+- [ ] **#153 — Slurm Jobs / Partitions UI (MEDIUM, M)**
+  Owner: Dinesh.
+  In: new tab on the existing `/slurm` route. Pull from `slurmrestd`. Tables only in v1. Reuse TanStack Query + the existing SSE hookup. Out: charts (no charts in v1).
   Depends on: nothing.
 
-- [ ] **#150 — IMSM / hardware RAID passthrough (LOW, S)**
+- [ ] **#154 — Two-stage commit backend + drawer UI (MEDIUM, M)**
+  Owner: Dinesh; arch by Richard.
+  In: `pending_changes(id, kind, target, payload, created_by, created_at)` table. Endpoints `POST /api/v1/changes`, `GET /api/v1/changes`, `POST /api/v1/changes/commit`, `POST /api/v1/changes/clear`. Wire LDAP / sudoers / network handlers to *also* offer "stage" mode in addition to immediate-apply. UI: Pending Changes badge + drawer in AppShell with diff per change. Default off — preserves current behaviour. Operators opt in per surface in Settings.
+  Depends on: nothing.
+
+- [ ] **#155 — Alerts UI (MEDIUM, M)**
   Owner: Dinesh.
-  In: `mdadm --imsm-platform-test` detection in `internal/deploy/raid.go`; branch the assembly path. Add a qemu-IMSM emulated test. Out: full vendor RAID coverage (megaraid CLI is bundled but not the deploy path in v1).
-  Depends on: #120 (already landed).
+  In: new top-level `/alerts` route. Active / Silenced / History tabs. Per-rule drill-down. In-line "Silence for 1h / 4h / 24h / forever". YAML rule editor uses `react-simple-code-editor` + `prismjs` (small) — not Monaco. Out: rule diff/preview on save (defer).
+  Depends on: #133 (landed).
+
+- [ ] **#156 — Rack diagram (LOW, M)**
+  Owner: Dinesh.
+  In: new `/datacenter` route. Single SVG rack component, drag-and-drop U-positioning, bulk power per rack. Reads from #149's `racks` + `node_rack_position` tables.
+  Depends on: #149 (landed).
+  Owner: Dinesh.
+  In: implement the node-side handler for `disk_capture_request` (defined by #146 in `internal/clientd/messages.go`). Run `lsblk -J` (or equivalent) on the node, parse into `api.DiskLayout`, send back as `disk_capture_result`. Without this, `POST /api/v1/disk-layouts/capture/{node_id}` returns 504. Out: alternative capture sources (sfdisk, parted) — lsblk only in v1.
+  Depends on: #146 (already landed).
 
 ### Thread-safety fix-ups (inserted 2026-05-02 from Richard's Go 1.25 audit)
 
