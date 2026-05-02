@@ -1157,6 +1157,10 @@ type RegisterRequest struct {
 	// deploy agent: "uefi" or "bios". Populated from hardware.DetectFirmware().
 	// Empty string means unknown (legacy clients that predate this field).
 	DetectedFirmware string `json:"detected_firmware,omitempty"`
+	// MulticastMode is the value of --multicast from the deploy agent (#157).
+	// Accepted values: "auto" (default), "off", "require".
+	// Empty string is treated as "auto" by the server for backward compatibility.
+	MulticastMode string `json:"multicast_mode,omitempty"`
 }
 
 // RegisterResponse is the response body for POST /api/v1/nodes/register.

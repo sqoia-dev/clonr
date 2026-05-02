@@ -749,10 +749,16 @@ func (h *NodesHandler) RegisterNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Effective multicast mode (empty = "auto" for backward compat with pre-#157 clients).
+	multicastMode := req.MulticastMode
+	if multicastMode == "" {
+		multicastMode = "auto"
+	}
 	log.Info().Str("mac", primaryMAC).Str("hostname", nodeCfg.Hostname).
 		Bool("hostname_auto", nodeCfg.HostnameAuto).
 		Bool("reimage_pending", nodeCfg.ReimagePending).
 		Bool("dry_run", dryRun).
+		Str("multicast_mode", multicastMode).
 		Str("action", action).Msg("node registered")
 
 	// Pre-merge group extra mounts so the deploy client's ExtraMounts is complete.

@@ -1070,10 +1070,12 @@ func (s *Server) buildRouter() chi.Router {
 	}
 
 	// Sprint 25 #157 — UDPCast multicast fleet-reimage scheduler.
-	// The sender stub is wired in Commit 1; sender.Run is wired in Commit 2.
+	// sender.Run is wired here; the udp-sender binary is operator-installed
+	// (dnf install udpcast) at /usr/bin/udp-sender (or CLUSTR_UDPSENDER_PATH).
+	realSender := multicast.NewSender()
 	s.multicastScheduler = multicast.NewScheduler(
 		s.db,
-		multicast.StubSender, // TODO(#157 commit 2): replace with sender.Run
+		multicast.MakeBlobSenderFunc(s.db, realSender),
 		serverURL,
 	)
 	if err := s.multicastScheduler.Start(context.Background()); err != nil {

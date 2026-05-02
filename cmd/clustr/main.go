@@ -42,6 +42,10 @@ var version = "dev"
 var (
 	flagServer string
 	flagToken  string
+	// flagMulticastMode is the package-level value of --multicast, set by
+	// newDeployCmd and read by runAutoDeployMode so the initramfs auto-deploy
+	// path can participate in multicast sessions (#157).
+	flagMulticastMode string
 )
 
 func main() {
@@ -435,6 +439,9 @@ With --auto: discovers hardware, registers with the server, and waits for an
 admin to assign a base image before proceeding with deployment. Intended for
 PXE-booted nodes running from initramfs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateMulticastFlag(flagMulticastMode); err != nil {
+				return err
+			}
 			// --auto mode: register with server, wait for image assignment, then deploy.
 			if flagAuto {
 				return runAutoDeployMode()
@@ -739,8 +746,20 @@ PXE-booted nodes running from initramfs.`,
 		"Skip image checksum verification (deploy even if the sha256 does not match)")
 	cmd.Flags().StringVar(&flagTimeout, "timeout", "30m",
 		"Maximum time allowed for the entire deployment (env: CLUSTR_DEPLOY_TIMEOUT, e.g. 30m, 1h)")
+	cmd.Flags().StringVar(&flagMulticastMode, "multicast", "auto",
+		"Multicast mode: auto (default), off (force unicast), or require (error if multicast unavailable)")
 
 	return cmd
+}
+
+// validateMulticastFlag returns an error when flagMulticast is not a recognized value.
+func validateMulticastFlag(val string) error {
+	switch val {
+	case "auto", "off", "require":
+		return nil
+	default:
+		return fmt.Errorf("--multicast must be auto, off, or require; got %q", val)
+	}
 }
 
 // runAutoDeployMode implements deploy --auto.
@@ -793,6 +812,7 @@ func runAutoDeployMode() error {
 	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{
 		HardwareProfile:  hwJSON,
 		DetectedFirmware: hw.Firmware,
+		MulticastMode:    flagMulticastMode,
 	})
 	if err != nil {
 		printPhase(phaseFailed, "Registration")
