@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/fstab-entry",
+  "$ref": "#/$defs/FstabEntry",
+  "$defs": {
+    "FstabEntry": {
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "mount_point": {
+          "type": "string"
+        },
+        "fs_type": {
+          "type": "string"
+        },
+        "options": {
+          "type": "string"
+        },
+        "dump": {
+          "type": "integer"
+        },
+        "pass": {
+          "type": "integer"
+        },
+        "auto_mkdir": {
+          "type": "boolean"
+        },
+        "comment": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source",
+        "mount_point",
+        "fs_type",
+        "options",
+        "dump",
+        "pass",
+        "auto_mkdir"
+      ]
+    }
+  }
+}

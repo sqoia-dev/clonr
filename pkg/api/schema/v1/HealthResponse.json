@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/health-response",
+  "$ref": "#/$defs/HealthResponse",
+  "$defs": {
+    "HealthResponse": {
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "build_time": {
+          "type": "string"
+        },
+        "flip_back_failures": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "status"
+      ]
+    }
+  }
+}

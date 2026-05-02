@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/interface-config",
+  "$ref": "#/$defs/InterfaceConfig",
+  "$defs": {
+    "InterfaceConfig": {
+      "properties": {
+        "mac_address": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ip_address": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "dns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "bond": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "mac_address",
+        "name",
+        "ip_address"
+      ]
+    }
+  }
+}

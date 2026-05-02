@@ -1,0 +1,934 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/register-response",
+  "$ref": "#/$defs/RegisterResponse",
+  "$defs": {
+    "BMCNodeConfig": {
+      "properties": {
+        "ip_address": {
+          "type": "string"
+        },
+        "netmask": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "ip_address",
+        "netmask",
+        "gateway",
+        "username",
+        "password"
+      ]
+    },
+    "BondConfig": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "bond_name": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "vlan_id": {
+          "type": "integer"
+        },
+        "ip_method": {
+          "type": "string"
+        },
+        "ip_cidr": {
+          "type": "string"
+        },
+        "lacp_rate": {
+          "type": "string"
+        },
+        "xmit_hash_policy": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/BondMember"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "profile_id",
+        "bond_name",
+        "mode",
+        "mtu",
+        "vlan_id",
+        "ip_method",
+        "sort_order",
+        "members",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BondMember": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bond_id": {
+          "type": "string"
+        },
+        "match_mac": {
+          "type": "string"
+        },
+        "match_name": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "bond_id",
+        "sort_order"
+      ]
+    },
+    "Bootloader": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "target"
+      ]
+    },
+    "DiskLayout": {
+      "properties": {
+        "raid_arrays": {
+          "items": {
+            "$ref": "#/$defs/RAIDSpec"
+          },
+          "type": "array"
+        },
+        "zfs_pools": {
+          "items": {
+            "$ref": "#/$defs/ZFSPool"
+          },
+          "type": "array"
+        },
+        "partitions": {
+          "items": {
+            "$ref": "#/$defs/PartitionSpec"
+          },
+          "type": "array"
+        },
+        "bootloader": {
+          "$ref": "#/$defs/Bootloader"
+        },
+        "target_device": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "partitions",
+        "bootloader"
+      ]
+    },
+    "FstabEntry": {
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "mount_point": {
+          "type": "string"
+        },
+        "fs_type": {
+          "type": "string"
+        },
+        "options": {
+          "type": "string"
+        },
+        "dump": {
+          "type": "integer"
+        },
+        "pass": {
+          "type": "integer"
+        },
+        "auto_mkdir": {
+          "type": "boolean"
+        },
+        "comment": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source",
+        "mount_point",
+        "fs_type",
+        "options",
+        "dump",
+        "pass",
+        "auto_mkdir"
+      ]
+    },
+    "HostEntry": {
+      "properties": {
+        "ip": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "fqdn": {
+          "type": "string"
+        },
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "ip",
+        "hostname"
+      ]
+    },
+    "IBInterfaceConfig": {
+      "properties": {
+        "device_name": {
+          "type": "string"
+        },
+        "pkeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ipoib_mode": {
+          "type": "string"
+        },
+        "ip_address": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "device_name",
+        "pkeys",
+        "ipoib_mode"
+      ]
+    },
+    "IBProfile": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "ipoib_mode": {
+          "type": "string"
+        },
+        "ipoib_mtu": {
+          "type": "integer"
+        },
+        "ip_method": {
+          "type": "string"
+        },
+        "pkeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "device_match": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "profile_id",
+        "ipoib_mode",
+        "ipoib_mtu",
+        "ip_method",
+        "pkeys",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "InterfaceConfig": {
+      "properties": {
+        "mac_address": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ip_address": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "dns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "bond": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "mac_address",
+        "name",
+        "ip_address"
+      ]
+    },
+    "LDAPNodeConfig": {
+      "properties": {
+        "server_uri": {
+          "type": "string"
+        },
+        "base_dn": {
+          "type": "string"
+        },
+        "service_bind_dn": {
+          "type": "string"
+        },
+        "service_bind_passwd": {
+          "type": "string"
+        },
+        "ca_cert_pem": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "server_uri",
+        "base_dn",
+        "service_bind_dn",
+        "service_bind_passwd",
+        "ca_cert_pem"
+      ]
+    },
+    "NetworkNodeConfig": {
+      "properties": {
+        "bonds": {
+          "items": {
+            "$ref": "#/$defs/BondConfig"
+          },
+          "type": "array"
+        },
+        "ib": {
+          "$ref": "#/$defs/IBProfile"
+        },
+        "opensm_conf": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "NodeConfig": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "hostname_auto": {
+          "type": "boolean"
+        },
+        "fqdn": {
+          "type": "string"
+        },
+        "primary_mac": {
+          "type": "string"
+        },
+        "interfaces": {
+          "items": {
+            "$ref": "#/$defs/InterfaceConfig"
+          },
+          "type": "array"
+        },
+        "ssh_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kernel_args": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "custom_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "base_image_id": {
+          "type": "string"
+        },
+        "bmc": {
+          "$ref": "#/$defs/BMCNodeConfig"
+        },
+        "ib_config": {
+          "items": {
+            "$ref": "#/$defs/IBInterfaceConfig"
+          },
+          "type": "array"
+        },
+        "power_provider": {
+          "$ref": "#/$defs/PowerProviderConfig"
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "disk_layout_override": {
+          "$ref": "#/$defs/DiskLayout"
+        },
+        "ldap_config": {
+          "$ref": "#/$defs/LDAPNodeConfig"
+        },
+        "system_accounts": {
+          "$ref": "#/$defs/SystemAccountsNodeConfig"
+        },
+        "network_config": {
+          "$ref": "#/$defs/NetworkNodeConfig"
+        },
+        "slurm_config": {
+          "$ref": "#/$defs/SlurmNodeConfig"
+        },
+        "sudoers_config": {
+          "$ref": "#/$defs/SudoersNodeConfig"
+        },
+        "cluster_hosts": {
+          "items": {
+            "$ref": "#/$defs/HostEntry"
+          },
+          "type": "array"
+        },
+        "extra_mounts": {
+          "items": {
+            "$ref": "#/$defs/FstabEntry"
+          },
+          "type": "array"
+        },
+        "verify_timeout_override": {
+          "type": "integer"
+        },
+        "reimage_pending": {
+          "type": "boolean"
+        },
+        "last_deploy_failed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deploy_completed_preboot_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deploy_verified_booted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deploy_verify_timeout_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "hardware_profile": true,
+        "detected_firmware": {
+          "type": "string"
+        },
+        "ldap_ready": {
+          "type": "boolean"
+        },
+        "ldap_ready_detail": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "hostname",
+        "hostname_auto",
+        "fqdn",
+        "primary_mac",
+        "interfaces",
+        "ssh_keys",
+        "kernel_args",
+        "tags",
+        "groups",
+        "custom_vars",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "PartitionSpec": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "filesystem": {
+          "type": "string"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "min_bytes": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "label",
+        "size_bytes",
+        "filesystem",
+        "mountpoint",
+        "flags",
+        "min_bytes"
+      ]
+    },
+    "PowerProviderConfig": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "fields"
+      ]
+    },
+    "RAIDSpec": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "chunk_kb": {
+          "type": "integer"
+        },
+        "spare": {
+          "type": "integer"
+        },
+        "force_software": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "level",
+        "members"
+      ]
+    },
+    "RegisterResponse": {
+      "properties": {
+        "node_config": {
+          "$ref": "#/$defs/NodeConfig"
+        },
+        "action": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_config",
+        "action"
+      ]
+    },
+    "SlurmConfigFile": {
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "file_mode": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "filename",
+        "path",
+        "content",
+        "checksum",
+        "file_mode",
+        "owner",
+        "version"
+      ]
+    },
+    "SlurmNodeConfig": {
+      "properties": {
+        "cluster_name": {
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "configs": {
+          "items": {
+            "$ref": "#/$defs/SlurmConfigFile"
+          },
+          "type": "array"
+        },
+        "scripts": {
+          "items": {
+            "$ref": "#/$defs/SlurmScriptFile"
+          },
+          "type": "array"
+        },
+        "slurm_repo_url": {
+          "type": "string"
+        },
+        "munge_key": {
+          "type": "string"
+        },
+        "gpg_key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "cluster_name",
+        "configs"
+      ]
+    },
+    "SlurmScriptFile": {
+      "properties": {
+        "script_type": {
+          "type": "string"
+        },
+        "dest_path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "script_type",
+        "dest_path",
+        "content",
+        "checksum",
+        "version"
+      ]
+    },
+    "SudoersNodeConfig": {
+      "properties": {
+        "group_cn": {
+          "type": "string"
+        },
+        "no_passwd": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "group_cn",
+        "no_passwd"
+      ]
+    },
+    "SystemAccount": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "integer"
+        },
+        "primary_gid": {
+          "type": "integer"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "home_dir": {
+          "type": "string"
+        },
+        "create_home": {
+          "type": "boolean"
+        },
+        "system_account": {
+          "type": "boolean"
+        },
+        "comment": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "username",
+        "uid",
+        "primary_gid",
+        "shell",
+        "home_dir",
+        "create_home",
+        "system_account",
+        "comment",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "SystemAccountsNodeConfig": {
+      "properties": {
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/SystemGroup"
+          },
+          "type": "array"
+        },
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/SystemAccount"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "groups",
+        "accounts"
+      ]
+    },
+    "SystemGroup": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "gid": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "gid",
+        "description",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ZFSPool": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "vdev_type": {
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "properties": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "vdev_type",
+        "members",
+        "mountpoint"
+      ]
+    }
+  }
+}

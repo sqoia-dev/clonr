@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/dhcp-lease",
+  "$ref": "#/$defs/DHCPLease",
+  "$defs": {
+    "DHCPLease": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "mac": {
+          "type": "string"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "deploy_state": {
+          "type": "string"
+        },
+        "last_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "first_seen_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id",
+        "hostname",
+        "mac",
+        "ip",
+        "deploy_state",
+        "first_seen_at"
+      ]
+    }
+  }
+}

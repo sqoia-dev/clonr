@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/boot-entry",
+  "$ref": "#/$defs/BootEntry",
+  "$defs": {
+    "BootEntry": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "kernel_url": {
+          "type": "string"
+        },
+        "initrd_url": {
+          "type": "string"
+        },
+        "cmdline": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "kernel_url",
+        "enabled",
+        "created_at",
+        "updated_at"
+      ]
+    }
+  }
+}

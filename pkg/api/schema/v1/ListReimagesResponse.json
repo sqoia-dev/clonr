@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/list-reimages-response",
+  "$ref": "#/$defs/ListReimagesResponse",
+  "$defs": {
+    "ListReimagesResponse": {
+      "properties": {
+        "requests": {
+          "items": {
+            "$ref": "#/$defs/ReimageRequest"
+          },
+          "type": "array"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "requests",
+        "total"
+      ]
+    },
+    "ReimageRequest": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "image_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "scheduled_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "triggered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "requested_by": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "exit_name": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "inject_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "node_id",
+        "image_id",
+        "status",
+        "requested_by",
+        "created_at"
+      ]
+    }
+  }
+}

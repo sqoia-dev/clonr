@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bundle",
+  "$ref": "#/$defs/Bundle",
+  "$defs": {
+    "Bundle": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "slurm_version": {
+          "type": "string"
+        },
+        "bundle_version": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "slurm_version",
+        "bundle_version",
+        "sha256",
+        "kind",
+        "source"
+      ]
+    }
+  }
+}

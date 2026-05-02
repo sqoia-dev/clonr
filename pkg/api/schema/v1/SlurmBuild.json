@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/slurm-build",
+  "$ref": "#/$defs/SlurmBuild",
+  "$defs": {
+    "SlurmBuild": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "configure_flags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "artifact_path": {
+          "type": "string"
+        },
+        "artifact_checksum": {
+          "type": "string"
+        },
+        "artifact_size_bytes": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "completed_at": {
+          "type": "integer"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "is_active": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "arch",
+        "status",
+        "started_at",
+        "is_active"
+      ]
+    }
+  }
+}

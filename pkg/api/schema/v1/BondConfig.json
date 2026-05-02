@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bond-config",
+  "$ref": "#/$defs/BondConfig",
+  "$defs": {
+    "BondConfig": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "bond_name": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "vlan_id": {
+          "type": "integer"
+        },
+        "ip_method": {
+          "type": "string"
+        },
+        "ip_cidr": {
+          "type": "string"
+        },
+        "lacp_rate": {
+          "type": "string"
+        },
+        "xmit_hash_policy": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/BondMember"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "profile_id",
+        "bond_name",
+        "mode",
+        "mtu",
+        "vlan_id",
+        "ip_method",
+        "sort_order",
+        "members",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BondMember": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bond_id": {
+          "type": "string"
+        },
+        "match_mac": {
+          "type": "string"
+        },
+        "match_name": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "bond_id",
+        "sort_order"
+      ]
+    }
+  }
+}

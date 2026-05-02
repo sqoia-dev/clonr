@@ -173,6 +173,15 @@ contents:
       owner: root
       group: root
 
+  # JSON Schema + OpenAPI 3.1 files (#161) — served by clustr-serverd and
+  # also available on-disk at /usr/share/clustr/schema/v1/ for third-party tooling.
+  - src: pkg/api/schema/v1/*.json
+    dst: /usr/share/clustr/schema/v1/
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
 scripts:
   # post-install: create system user, fix ownership, daemon-reload
   postinstall: scripts/pkg-postinstall.sh

@@ -86,6 +86,13 @@ jobs:
       - name: go test
         run: go test ./... -v -count=1 -timeout 300s
 
+      # Schema diff-check (#161): regenerate and fail if committed schemas are stale.
+      - name: Check schemas are up-to-date
+        run: |
+          go run ./cmd/generate-schemas --output-dir pkg/api/schema/v1
+          git diff --exit-code pkg/api/schema/ || \
+            (echo "ERROR: Committed schemas are stale. Run 'make schemas' and commit the result." && exit 1)
+
       # Race detector scoped to the two packages with the highest goroutine
       # fan-out: internal/alerts (Engine + StateStore, goroutine-per-tick) and
       # internal/server (Hub types, HTTP/WS handler fan-out).  Full ./... -race

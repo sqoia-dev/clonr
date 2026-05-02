@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/slurm-config-file",
+  "$ref": "#/$defs/SlurmConfigFile",
+  "$defs": {
+    "SlurmConfigFile": {
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "file_mode": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "filename",
+        "path",
+        "content",
+        "checksum",
+        "file_mode",
+        "owner",
+        "version"
+      ]
+    }
+  }
+}

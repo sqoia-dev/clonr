@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/node-rack-position",
+  "$ref": "#/$defs/NodeRackPosition",
+  "$defs": {
+    "NodeRackPosition": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "rack_id": {
+          "type": "string"
+        },
+        "slot_u": {
+          "type": "integer"
+        },
+        "height_u": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id",
+        "rack_id",
+        "slot_u",
+        "height_u"
+      ]
+    }
+  }
+}

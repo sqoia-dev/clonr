@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/list-gpg-keys-response",
+  "$ref": "#/$defs/ListGPGKeysResponse",
+  "$defs": {
+    "GPGKey": {
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "armored_key": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "owner",
+        "source",
+        "created_at"
+      ]
+    },
+    "ListGPGKeysResponse": {
+      "properties": {
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/GPGKey"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "keys"
+      ]
+    }
+  }
+}

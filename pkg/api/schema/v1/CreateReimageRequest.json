@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/create-reimage-request",
+  "$ref": "#/$defs/CreateReimageRequest",
+  "$defs": {
+    "CreateReimageRequest": {
+      "properties": {
+        "image_id": {
+          "type": "string"
+        },
+        "scheduled_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "inject_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  }
+}

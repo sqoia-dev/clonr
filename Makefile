@@ -38,7 +38,7 @@ INITRAMFS_BUILDER_IMAGE ?= ghcr.io/sqoia-dev/initramfs-builder:$(INITRAMFS_KERNE
 #            make -C /clustr initramfs MODULES_PATH=/modules
 MODULES_PATH ?=
 
-.PHONY: all client server clientd privhelper static clean test web initramfs initramfs-verify
+.PHONY: all client server clientd privhelper static clean test web initramfs initramfs-verify schemas
 
 all: web client server clientd privhelper
 
@@ -68,6 +68,12 @@ static:
 
 test:
 	go test ./... -v
+
+# schemas regenerates JSON Schema + OpenAPI 3.1 files from pkg/api types.
+# CI runs this and fails if the committed schemas differ from the generated ones:
+#   make schemas && git diff --exit-code pkg/api/schema/
+schemas:
+	go run ./cmd/generate-schemas --output-dir pkg/api/schema/v1
 
 clean:
 	rm -rf bin/

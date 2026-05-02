@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/rack",
+  "$ref": "#/$defs/Rack",
+  "$defs": {
+    "NodeRackPosition": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "rack_id": {
+          "type": "string"
+        },
+        "slot_u": {
+          "type": "integer"
+        },
+        "height_u": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id",
+        "rack_id",
+        "slot_u",
+        "height_u"
+      ]
+    },
+    "Rack": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "height_u": {
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "positions": {
+          "items": {
+            "$ref": "#/$defs/NodeRackPosition"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "height_u",
+        "created_at",
+        "updated_at"
+      ]
+    }
+  }
+}

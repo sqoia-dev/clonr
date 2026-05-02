@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/partition-spec",
+  "$ref": "#/$defs/PartitionSpec",
+  "$defs": {
+    "PartitionSpec": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "filesystem": {
+          "type": "string"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "min_bytes": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "label",
+        "size_bytes",
+        "filesystem",
+        "mountpoint",
+        "flags",
+        "min_bytes"
+      ]
+    }
+  }
+}
