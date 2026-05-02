@@ -3,8 +3,91 @@
 import * as React from "react"
 import { Terminal as TerminalIcon, X, Loader2, AlertTriangle, Copy, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { apiFetch, wsUrl } from "@/lib/api"
 import type { BaseImage } from "@/lib/types"
+
+// RISK-1(a): session-scoped acceptance key. Once an operator accepts the
+// mutation warning within a browser session, we don't prompt again until
+// the tab is closed or refreshed. sessionStorage is intentional — we want
+// to re-prompt after a full reload so the warning is not silently skipped.
+const SHELL_WARNING_ACCEPTED_KEY = "clustr:shell_mutation_warning_accepted"
+
+function shellWarningAccepted(): boolean {
+  try {
+    return sessionStorage.getItem(SHELL_WARNING_ACCEPTED_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function setShellWarningAccepted() {
+  try {
+    sessionStorage.setItem(SHELL_WARNING_ACCEPTED_KEY, "1")
+  } catch {
+    // sessionStorage unavailable (private browsing edge case) — proceed anyway
+  }
+}
+
+// ShellMutationWarningModal renders the confirmation dialog shown before
+// opening a shell session. The modal is skipped if the operator already
+// accepted during the current browser session.
+interface ShellMutationWarningModalProps {
+  imageName: string
+  onConfirm: () => void
+  onCancel: () => void
+}
+
+export function ShellMutationWarningModal({ imageName, onConfirm, onCancel }: ShellMutationWarningModalProps) {
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onCancel() }}>
+      <DialogContent className="sm:max-w-lg" data-testid="shell-mutation-warning-modal">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-amber-400">
+            <AlertTriangle className="h-5 w-5 shrink-0" />
+            Shell session — base image will be modified
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Interactive shell sessions on a base image currently write directly into
+            the image&apos;s root filesystem. Any changes you make will be reflected in
+            all future deployments using <strong className="text-foreground">{imageName}</strong> until
+            the image is rebuilt or recaptured.
+          </p>
+          <p>
+            Once you close the shell, the image&apos;s checksum is invalidated to flag
+            that mutation occurred. Overlay isolation (read-only base + RW overlay)
+            is on the roadmap but not yet implemented.
+          </p>
+        </div>
+        <div className="flex gap-2 pt-2">
+          <Button
+            variant="outline"
+            className="flex-1 border-amber-500/40 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300"
+            onClick={onConfirm}
+            data-testid="shell-warning-confirm-btn"
+          >
+            Open shell anyway
+          </Button>
+          <Button
+            variant="ghost"
+            className="flex-1"
+            onClick={onCancel}
+            data-testid="shell-warning-cancel-btn"
+          >
+            Cancel
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 interface ImageShellProps {
   image: BaseImage
@@ -12,8 +95,9 @@ interface ImageShellProps {
 }
 
 // wsMsg mirrors the server's wsMsg struct.
+// RISK-1(a): "warning" is the initial frame sent by the server before PTY data.
 interface WsMsg {
-  type: "data" | "resize" | "ping" | "error"
+  type: "data" | "resize" | "ping" | "error" | "warning"
   data?: string
   cols?: number
   rows?: number
@@ -26,7 +110,31 @@ interface ShellDepError {
   remediation: string
 }
 
+// ImageShell is the public entry point. It shows a mutation-warning modal
+// before mounting the terminal. Once the operator accepts (persisted in
+// sessionStorage for the lifetime of the tab), the terminal mounts directly.
 export function ImageShell({ image, onClose }: ImageShellProps) {
+  const [warningAccepted, setWarningAccepted] = React.useState(() => shellWarningAccepted())
+
+  if (!warningAccepted) {
+    return (
+      <ShellMutationWarningModal
+        imageName={image.name}
+        onConfirm={() => {
+          setShellWarningAccepted()
+          setWarningAccepted(true)
+        }}
+        onCancel={onClose}
+      />
+    )
+  }
+
+  return <ImageShellTerminal image={image} onClose={onClose} />
+}
+
+// ImageShellTerminal is the xterm.js PTY component. It is only mounted after
+// the operator has accepted the mutation warning.
+function ImageShellTerminal({ image, onClose }: ImageShellProps) {
   const containerRef = React.useRef<HTMLDivElement>(null)
   const termRef = React.useRef<import("@xterm/xterm").Terminal | null>(null)
   const fitRef = React.useRef<import("@xterm/addon-fit").FitAddon | null>(null)
@@ -110,6 +218,12 @@ export function ImageShell({ image, onClose }: ImageShellProps) {
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as WsMsg
+          if (msg.type === "warning") {
+            // RISK-1(a): server sends a warning frame before PTY data.
+            // The operator already accepted the modal — silently drop this
+            // frame; it exists for non-browser API consumers (CLI, scripts).
+            return
+          }
           if (msg.type === "data" && msg.data) {
             term.write(msg.data)
           } else if (msg.type === "error" && msg.data) {

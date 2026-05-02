@@ -215,7 +215,7 @@ Sprint 1 shipped with API-key-paste login. That's wrong UX for an end-user web a
 - [x] **SET-2** Section: API Keys — list, create (modal-free; inline form), revoke (inline destructive confirm with typed key label)
 - [x] **SET-3** Section: Server Config — read-only view of current config (server hostname, network, ports, version)
 - [x] **SET-4** Section: GPG Keys — list installed keys, fingerprints, add new (paste public key block)
-- [x] **SET-5** Logout button at bottom of Settings (clears `localStorage`, redirects to `/login`)
+- [x] **SET-5** Logout button at bottom of Settings (calls `POST /api/v1/auth/logout`, then flips in-memory session state to `unauthed`; no `localStorage` involvement — auth state is cookie-based since AUTH0-2)
 
 #### Reimage flow (the killer action)
 

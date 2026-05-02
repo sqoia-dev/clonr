@@ -1374,10 +1374,19 @@ type ListImageRolesResponse struct {
 
 // ShellSessionResponse is returned when a session is opened.
 type ShellSessionResponse struct {
-	SessionID string `json:"session_id"`
-	ImageID   string `json:"image_id"`
-	RootDir   string `json:"root_dir"`
+	SessionID       string `json:"session_id"`
+	ImageID         string `json:"image_id"`
+	RootDir         string `json:"root_dir"`
+	Warning         string `json:"warning"`
+	WarningSeverity string `json:"warning_severity"`
 }
+
+// ShellMutationWarning is the canonical warning text included in every
+// ShellSessionResponse and in the initial WebSocket warning frame.
+// It is exported so tests can assert on the exact string.
+const ShellMutationWarning = "EXPERIMENTAL: shell sessions can mutate the base image rootfs. " +
+	"Image checksum will be invalidated on session close. " +
+	"Overlay isolation (read-only base + RW overlay) is planned but not yet implemented."
 
 // ExecRequest is the body for POST /api/v1/images/:id/shell-session/:sid/exec.
 type ExecRequest struct {

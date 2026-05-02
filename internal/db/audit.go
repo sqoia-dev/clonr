@@ -72,7 +72,15 @@ const (
 	AuditActionNodeBootDisk         = "node.power.boot_disk"
 	AuditActionNodeBMCUpdated       = "node.bmc.updated"
 	AuditActionImageCaptured        = "image.captured"
+	// AuditActionImageShellOpen is recorded when POST /api/v1/images/:id/shell-session
+	// succeeds (REST phase). It carries severity=warning and note="base image mutation possible".
+	// RISK-1(a): part of the mutation-warning audit trail.
+	AuditActionImageShellOpen       = "image.shell.open"
 	AuditActionImageShellStart      = "image.shell.started"
+	// AuditActionImageShellClose is recorded when the WebSocket session ends.
+	// It carries mutated=true/false based on whether the tar-sha256 sidecar existed
+	// at close time (indicating the checksum was invalidated by the session).
+	AuditActionImageShellClose      = "image.shell.close"
 	AuditActionImageShellEnd        = "image.shell.ended"
 	AuditActionImageShellDepMissing = "image.shell.dep_missing"
 

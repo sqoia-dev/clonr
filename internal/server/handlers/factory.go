@@ -364,6 +364,8 @@ func (h *FactoryHandler) Capture(w http.ResponseWriter, r *http.Request) {
 
 // OpenShellSession handles POST /api/v1/images/:id/shell-session
 // Creates and enters a chroot session for the specified image.
+// RISK-1(a): The response always includes a mutation warning so API consumers
+// (CLI tools, scripts) receive the same advisory as the web UI.
 func (h *FactoryHandler) OpenShellSession(w http.ResponseWriter, r *http.Request) {
 	imageID := chi.URLParam(r, "id")
 
@@ -374,10 +376,29 @@ func (h *FactoryHandler) OpenShellSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Audit: shell session opened (REST phase — before WebSocket upgrade).
+	var actorID, actorLabel string
+	if h.GetActorInfo != nil {
+		actorID, actorLabel = h.GetActorInfo(r)
+	}
+	if h.Audit != nil {
+		h.Audit.Record(r.Context(), actorID, actorLabel,
+			db.AuditActionImageShellOpen, "image", imageID,
+			r.RemoteAddr, nil,
+			map[string]any{
+				"session_id": sess.ID,
+				"severity":   "warning",
+				"note":       "base image mutation possible",
+			},
+		)
+	}
+
 	writeJSON(w, http.StatusCreated, api.ShellSessionResponse{
-		SessionID: sess.ID,
-		ImageID:   sess.ImageID,
-		RootDir:   sess.RootDir,
+		SessionID:       sess.ID,
+		ImageID:         sess.ImageID,
+		RootDir:         sess.RootDir,
+		Warning:         api.ShellMutationWarning,
+		WarningSeverity: "high",
 	})
 }
 
