@@ -1,7 +1,6 @@
 package dell
 
 import (
-	"context"
 	"errors"
 	"testing"
 

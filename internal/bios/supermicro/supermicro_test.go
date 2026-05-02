@@ -1,7 +1,6 @@
 package supermicro
 
 import (
-	"context"
 	"errors"
 	"testing"
 
