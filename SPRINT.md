@@ -1457,22 +1457,23 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
   In: ship `udpcast` (sender + receiver) in initramfs. Server-side `internal/multicast/` scheduler with `multicast_sessions` table and a 60s batching window. New CLI flag `clustr deploy --multicast=auto|off|require`. Add an iPXE menu item for "Reimage (wait for fleet)" vs "Reimage (now)". Out: per-image bandwidth shaping (single global rate setting in v1).
   Depends on: #120 (landed).
 
-- [ ] **#158 — `DistroDriver` interface + Ubuntu driver (MEDIUM, M)**
+- [x] **#158 — `DistroDriver` interface + Ubuntu driver (MEDIUM, M)**
   Owner: Dinesh.
   In: refactor `internal/deploy/finalize.go` around `DistroDriver { WriteSystemFiles(...), InstallBootloader(...) }`. Implement drivers `el8`, `el9`, `el10`, `ubuntu24`. Plumb through the image factory. Out: Debian, SLES.
   Depends on: nothing.
+  Landed: commit 1 `718e41d` (refactor, CI green), commit 2 `9b65c5f` (ubuntu24 driver + 12 tests). `Distro{Family,Major}` with filesystem-marker detection (debian_version, redhat-release, os-release). EL9 fallback when markers absent. ubuntu24 WriteSystemFiles writes cloud-init disable + netplan YAML; InstallBootloader uses grub-install (Ubuntu binary). No new NodeConfig fields needed — distro detected from deployed rootfs at finalize time.
 
 - [ ] **#159 — BIOS settings push, Intel first (MEDIUM, L)**
   Owner: Richard scopes → Dinesh implements.
   In: `internal/bios/` with `Provider` interface + `intel` provider wrapping `intel-syscfg`. New tables `bios_profiles(id, name, vendor, settings_json)` and `node_bios_profile(node_id, profile_id, last_applied_at)`. Deploy phase reads desired profile, diffs against current, applies via clientd → privhelper-brokered `intel-syscfg` call. Bundle Intel binary in initramfs. Out: Dell `racadm`, Supermicro `sum` (separate task once Intel ships).
   Depends on: #120 (initramfs binary footprint).
 
-- [ ] **#160 — Per-image stateless / netboot menu entries (LOW, S)**
+- [x] **#160 — Per-image stateless / netboot menu entries (LOW, S)** — landed `c84c62d`, CI green. Migration `092_boot_entries.sql` with stock entries Memtest (placeholder kernel_url `/api/v1/boot/extra/memtest`; operator drops binary in `BootDir/extra/memtest`) and Rescue Shell (`enabled=0` by default). iPXE BIOS+UEFI templates extended with `{{range .ExtraEntries}}` blocks. New routes `GET /api/v1/boot/rescue.cpio.gz` and `GET /api/v1/boot/extra/memtest`. Settings → Boot Menu tab with table + add/edit/delete.
   Owner: Dinesh.
   In: `boot_entries(id, name, kind, kernel_url, initrd_url, cmdline, enabled)` table. Render extra menu items into the iPXE menu at PXE-serve time. UI: "Boot Menu" tab on Settings. Stock entries: Memtest, a Rescue boot (busybox + dropbear with operator-supplied password). Out: full stateless image lifecycle (wiped scope stays wiped — don't restore Sprint-2-era diskless work).
   Depends on: #120 (landed).
 
-- [ ] **#161 — `Api-Version: v1` + JSON schema + OpenAPI 3.1 export (LOW, M)**
+- [x] **#161 — `Api-Version: v1` + JSON schema + OpenAPI 3.1 export (LOW, M)** — landed `61c04cd`, CI green. `Api-Version: v1` header was already in place at `internal/server/middleware.go:749` — no duplication. 46 types generated → 47 schema files (46 + openapi.json), 436 KB total in `pkg/api/schema/v1/`. **CI diff-check** in Test job: `make schemas && git diff --exit-code pkg/api/schema/` fails build on stale schemas — quality-forcing function. Schemas embedded via `pkg/api/schema.go`, served at `/api/v1/schemas/{type}` and `/api/v1/openapi.json` (public, no auth). RPM packaging copies to `/usr/share/clustr/schema/v1/`.
   Owner: Dinesh.
   In: `Api-Version: v1` response header on every API request. Generate JSON schemas from `pkg/api` types via `github.com/invopop/jsonschema`. Ship them under `/usr/share/clustr/schema/v1/` and serve at `/api/v1/schemas/`. OpenAPI 3.1 spec at `/api/v1/openapi.json`. Out: `/api/v2/...` parallel routes.
   Depends on: nothing.
@@ -1481,6 +1482,7 @@ clustr is now a self-contained cluster manager with parity surfaces for the oper
   Owner: Gilfoyle.
   In: replace SSH-pull from 192.168.1.151 with a Make-driven local kernel-module extraction step. Ship a build-time builder image (CI uses it; not a runtime dep). Bit-identical output across builds. Out: Buildroot migration (Path B) — defer.
   Landed: `packaging/initramfs-builder/Dockerfile` (Rocky 9 + pinned kernel RPMs + /modules); `make initramfs MODULES_PATH=` + `make initramfs-verify`; `--reproducible` cpio + `-n` gzip + sorted manifest; `.github/workflows/initramfs-builder.yml` (workflow_dispatch, build+push); `initramfs.yml` updated to run inside builder container (no SSH dep). SSH-pull path kept as dev-cloner fallback.
+  **Bootstrap note:** before next v0.x tag, someone must manually trigger `initramfs-builder.yml` once to push the builder image to GHCR; `initramfs.yml` will fail at `docker pull` on tag push until then.
   Depends on: #120 (landed).
   Owner: Dinesh.
   In: implement the node-side handler for `disk_capture_request` (defined by #146 in `internal/clientd/messages.go`). Run `lsblk -J` (or equivalent) on the node, parse into `api.DiskLayout`, send back as `disk_capture_result`. Without this, `POST /api/v1/disk-layouts/capture/{node_id}` returns 504. Out: alternative capture sources (sfdisk, parted) — lsblk only in v1.
