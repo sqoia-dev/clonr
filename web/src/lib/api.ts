@@ -33,7 +33,19 @@ export async function apiFetch<T>(
     const text = await res.text().catch(() => "")
     throw new Error(`${res.status}: ${text}`)
   }
-  return res.json() as Promise<T>
+  // 204 No Content — by spec the body is absent; never call .json()/.text().
+  if (res.status === 204) return undefined as T
+  // Explicit empty body declared by server.
+  if (res.headers.get("Content-Length") === "0") return undefined as T
+  // Read as text first so we can handle an empty body without a SyntaxError,
+  // and emit a descriptive error when the server sends non-JSON unexpectedly.
+  const text = await res.text()
+  if (text === "") return undefined as T
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(`apiFetch: server returned non-JSON body for ${path}: ${text.slice(0, 200)}`)
+  }
 }
 
 export function sseUrl(path: string): string {

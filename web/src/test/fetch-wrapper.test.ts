@@ -58,8 +58,8 @@ describe("apiFetch — 401 handling", () => {
       Promise.resolve({
         ok: true,
         status: 200,
-        json: () => Promise.resolve(payload),
-        text: () => Promise.resolve(""),
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify(payload)),
       })
     ))
 
@@ -72,8 +72,8 @@ describe("apiFetch — 401 handling", () => {
       Promise.resolve({
         ok: true,
         status: 200,
-        json: () => Promise.resolve({}),
-        text: () => Promise.resolve(""),
+        headers: { get: () => null },
+        text: () => Promise.resolve("{}"),
       })
     )
     vi.stubGlobal("fetch", mockFetch)
@@ -84,6 +84,73 @@ describe("apiFetch — 401 handling", () => {
       expect.any(String),
       expect.objectContaining({ credentials: "include" })
     )
+  })
+
+  it("should return undefined for 204 No Content", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 204,
+        headers: { get: () => null },
+      })
+    ))
+
+    const result = await apiFetch("/api/v1/images/abc")
+    expect(result).toBeUndefined()
+  })
+
+  it("should return undefined when Content-Length is 0", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: (h: string) => (h === "Content-Length" ? "0" : null) },
+      })
+    ))
+
+    const result = await apiFetch("/api/v1/images/abc")
+    expect(result).toBeUndefined()
+  })
+
+  it("should return undefined for 200 with empty body", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: () => Promise.resolve(""),
+      })
+    ))
+
+    const result = await apiFetch("/api/v1/images/abc")
+    expect(result).toBeUndefined()
+  })
+
+  it("should throw a descriptive error for non-JSON body", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: () => Promise.resolve("<html>Bad Gateway</html>"),
+      })
+    ))
+
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow(
+      "apiFetch: server returned non-JSON body for /api/v1/nodes"
+    )
+  })
+
+  it("should throw with status text on 500", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("internal server error"),
+      })
+    ))
+
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("500: internal server error")
   })
 })
 
