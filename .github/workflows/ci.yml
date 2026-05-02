@@ -86,6 +86,16 @@ jobs:
       - name: go test
         run: go test ./... -v -count=1 -timeout 300s
 
+      # Race detector scoped to the two packages with the highest goroutine
+      # fan-out: internal/alerts (Engine + StateStore, goroutine-per-tick) and
+      # internal/server (Hub types, HTTP/WS handler fan-out).  Full ./... -race
+      # blows the runner's memory budget — scope is intentionally narrow.
+      # Expand this list as the runner capacity allows (one-line change here).
+      # Runs even if the broad test step above fails so both signals are visible.
+      - name: go test -race (alerts + server)
+        if: always()
+        run: go test -race -count=1 -timeout 5m ./internal/alerts/... ./internal/server/...
+
   build:
     name: Build
     runs-on: ubuntu-latest
