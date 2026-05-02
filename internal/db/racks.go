@@ -184,9 +184,32 @@ func (db *DB) ListNodeIDsByRackNames(ctx context.Context, rackNames []string) ([
 // ListUnassignedNodes returns lightweight node stubs (id + hostname + status) for
 // all nodes that have no row in node_rack_position.
 // Used by the datacenter page sidebar.
+//
+// Status is derived via the same CASE logic as NodeConfig.State() because
+// node_configs has no stored status column — it is always computed from
+// lifecycle timestamp columns.
 func (db *DB) ListUnassignedNodes(ctx context.Context) ([]api.UnassignedNodeStub, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT nc.id, nc.hostname, nc.status
+		SELECT
+			nc.id,
+			nc.hostname,
+			CASE
+				WHEN nc.reimage_pending = 1
+					THEN 'reimage_pending'
+				WHEN nc.last_deploy_failed_at IS NOT NULL
+					AND (nc.deploy_completed_preboot_at IS NULL
+						 OR nc.last_deploy_failed_at > nc.deploy_completed_preboot_at)
+					THEN 'failed'
+				WHEN nc.deploy_verified_booted_at IS NOT NULL
+					THEN 'deployed_verified'
+				WHEN nc.deploy_verify_timeout_at IS NOT NULL
+					THEN 'deploy_verify_timeout'
+				WHEN nc.deploy_completed_preboot_at IS NOT NULL
+					THEN 'deployed_preboot'
+				WHEN nc.base_image_id IS NOT NULL
+					THEN 'configured'
+				ELSE 'registered'
+			END AS status
 		FROM node_configs nc
 		WHERE NOT EXISTS (
 			SELECT 1 FROM node_rack_position nrp WHERE nrp.node_id = nc.id

@@ -818,7 +818,18 @@ function UnassignedSidebar() {
           {[1, 2, 3].map(i => <Skeleton key={i} className="h-7 w-full" />)}
         </div>
       ) : query.isError ? (
-        <p className="text-xs text-destructive">Failed to load</p>
+        <div className="space-y-1">
+          <p className="text-xs text-destructive">Failed to load unassigned nodes</p>
+          <p className="text-[10px] text-muted-foreground font-mono break-all">
+            {query.error instanceof Error ? query.error.message : String(query.error)}
+          </p>
+          <button
+            onClick={() => query.refetch()}
+            className="text-[10px] text-muted-foreground underline hover:text-foreground"
+          >
+            Retry
+          </button>
+        </div>
       ) : nodes.length === 0 ? (
         <p className="text-xs text-muted-foreground italic">All nodes are assigned to a rack.</p>
       ) : (
