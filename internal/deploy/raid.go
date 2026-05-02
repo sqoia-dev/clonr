@@ -72,6 +72,96 @@ func ResetIMSMDetectionForTest() {
 	imsmPlatform = imsmDetection{}
 }
 
+// ─── Per-device IMSM membership detection (Sprint 26 #mixed-controller) ──────
+
+// DeviceIMSMResult records whether a single RAID member device is under an
+// IMSM (Intel Matrix Storage Manager) controller.
+type DeviceIMSMResult struct {
+	// Dev is the absolute device path, e.g. "/dev/sda".
+	Dev string
+	// OnIMSM is true when mdadm --imsm-platform-test --container reports exit 0
+	// for this device, indicating it is visible to an IMSM-capable controller.
+	OnIMSM bool
+}
+
+// imsmDeviceRunner is the function used to probe a single device for IMSM
+// membership. It receives the context and absolute device path and returns
+// (stdout, exit_code, error). The default implementation calls mdadm directly;
+// tests replace it with a mock via setIMSMDeviceRunnerForTest.
+var imsmDeviceRunner func(ctx context.Context, devPath string) (string, int, error) = defaultIMSMDeviceRunner
+
+func defaultIMSMDeviceRunner(ctx context.Context, devPath string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "mdadm", "--imsm-platform-test", "--container="+devPath)
+	out, err := cmd.Output()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	return string(out), exitCode, err
+}
+
+// setIMSMDeviceRunnerForTest replaces the device runner for the duration of a
+// test. Returns a restore function. Must only be called from tests.
+func setIMSMDeviceRunnerForTest(fn func(ctx context.Context, devPath string) (string, int, error)) func() {
+	old := imsmDeviceRunner
+	imsmDeviceRunner = fn
+	return func() { imsmDeviceRunner = old }
+}
+
+// ParseIMSMContainerOutput returns true when mdadm --imsm-platform-test
+// --container output and exit code indicate the device is under an IMSM
+// controller. Exit code 0 is the authoritative signal; the output check is
+// belt-and-suspenders for mdadm builds that always exit 0.
+//
+// Exported for unit testing.
+func ParseIMSMContainerOutput(output string, exitCode int) bool {
+	if exitCode != 0 {
+		return false
+	}
+	// mdadm exits 0 for IMSM-capable devices. Some builds also print a
+	// "Platform : Intel" line; accept either form.
+	return true
+}
+
+// classifyMemberIMSM probes each resolved member device path and returns a
+// slice of DeviceIMSMResult in the same order as members. Errors from the
+// mdadm probe are treated as "not on IMSM" and logged as warnings.
+func classifyMemberIMSM(ctx context.Context, members []string) []DeviceIMSMResult {
+	results := make([]DeviceIMSMResult, len(members))
+	log := logger()
+	for i, dev := range members {
+		out, code, err := imsmDeviceRunner(ctx, dev)
+		onIMSM := ParseIMSMContainerOutput(out, code)
+		if err != nil && code == -1 {
+			// mdadm binary not found or exec failure — log and treat as software.
+			log.Warn().Str("device", dev).Err(err).
+				Msg("deploy/raid: mdadm --imsm-platform-test --container exec failed; treating device as non-IMSM")
+		} else {
+			log.Debug().Str("device", dev).Bool("on_imsm", onIMSM).Int("exit_code", code).
+				Msg("deploy/raid: per-device IMSM membership probe")
+		}
+		results[i] = DeviceIMSMResult{Dev: dev, OnIMSM: onIMSM}
+	}
+	return results
+}
+
+// imsmControllerSplit partitions a DeviceIMSMResult slice into two slices:
+// imsmDevs (OnIMSM=true) and softwareDevs (OnIMSM=false).
+func imsmControllerSplit(results []DeviceIMSMResult) (imsmDevs, softwareDevs []string) {
+	for _, r := range results {
+		if r.OnIMSM {
+			imsmDevs = append(imsmDevs, r.Dev)
+		} else {
+			softwareDevs = append(softwareDevs, r.Dev)
+		}
+	}
+	return
+}
+
 // ─── RAID array creation ──────────────────────────────────────────────────────
 
 // CreateRAIDArrays assembles md arrays according to the DiskLayout spec.
@@ -93,9 +183,8 @@ func CreateRAIDArrays(ctx context.Context, layout api.DiskLayout, hw hardware.Sy
 //  2. IMSM platform available AND NOT ForceSoftware → IMSM container + volume path
 //
 // Mixed-controller case: if some members are on an IMSM controller and some are
-// not, we default to software RAID (conservative) and emit a warning. Detecting
-// per-device IMSM membership is not yet implemented (requires storcli or SNIA
-// SES queries); the warning prompts the operator to use ForceSoftware explicitly.
+// not, classifyMemberIMSM detects the split and the function defaults to software
+// RAID for the entire array, emitting three WARN log lines to guide the operator.
 func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemInfo) error {
 	if spec.Name == "" {
 		return fmt.Errorf("raid spec missing name")
@@ -134,18 +223,50 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 	log := logger()
 
 	// Branch: IMSM hardware-RAID passthrough (#150) vs software md RAID.
-	// Conditions for IMSM path:
-	//   - spec.ForceSoftware is false (operator hasn't explicitly requested software)
-	//   - IMSMAvailable() returns true (platform detection succeeds)
-	if !spec.ForceSoftware && IMSMAvailable(ctx) {
-		log.Info().Str("device", devPath).Str("level", spec.Level).
-			Strs("members", members).Msg("creating IMSM RAID container + volume")
-		return createIMSMArray(ctx, spec, members, devPath)
-	}
+	//
+	// Priority order:
+	//  1. spec.ForceSoftware=true → always software, skip all IMSM detection.
+	//  2. Platform IMSM not available → software.
+	//  3. Per-device classification:
+	//     a. All devices on IMSM controllers → IMSM path.
+	//     b. Mixed (some IMSM, some not) → warn + software for entire array.
+	//     c. All devices on software controllers → software path.
+	if spec.ForceSoftware {
+		if IMSMAvailable(ctx) {
+			log.Info().Str("device", devPath).
+				Msg("IMSM available but force_software=true; using software md RAID")
+		}
+		// Fall through to software RAID path below.
+	} else if IMSMAvailable(ctx) {
+		// Platform supports IMSM. Probe each member device to detect mixed controllers.
+		deviceResults := classifyMemberIMSM(ctx, members)
+		imsmDevs, softwareDevs := imsmControllerSplit(deviceResults)
 
-	if spec.ForceSoftware && IMSMAvailable(ctx) {
-		log.Info().Str("device", devPath).
-			Msg("IMSM available but force_software=true; using software md RAID")
+		switch {
+		case len(softwareDevs) == 0:
+			// All members are on IMSM controllers — use IMSM passthrough.
+			log.Info().Str("device", devPath).Str("level", spec.Level).
+				Strs("members", members).Msg("deploy/raid: all members on IMSM controllers — creating IMSM RAID container + volume")
+			return createIMSMArray(ctx, spec, members, devPath)
+
+		case len(imsmDevs) == 0:
+			// No members on IMSM — fall through to software RAID.
+			log.Info().Str("device", devPath).
+				Msg("deploy/raid: no members on IMSM controllers; using software md RAID")
+
+		default:
+			// Mixed controllers — warn and fall back to software RAID for the whole array.
+			log.Warn().
+				Str("device", devPath).
+				Strs("imsm_devices", imsmDevs).
+				Strs("software_devices", softwareDevs).
+				Msgf("deploy/raid: WARN: mixed RAID controllers detected (IMSM: %s; software: %s)",
+					strings.Join(imsmDevs, ", "), strings.Join(softwareDevs, ", "))
+			log.Warn().Str("device", devPath).
+				Msg("deploy/raid: WARN: defaulting to software RAID for the entire array")
+			log.Warn().Str("device", devPath).
+				Msg("deploy/raid: WARN: to use IMSM passthrough, exclude software-controller devices from this RAID config")
+		}
 	}
 
 	// Software md RAID path.
