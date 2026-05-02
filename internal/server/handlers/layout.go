@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,57 @@ import (
 // LayoutHandler handles layout recommendation, validation, and override endpoints.
 type LayoutHandler struct {
 	DB *db.DB
+}
+
+// diskLayoutCatalogResolver is the minimal interface needed by
+// resolveDiskLayoutFromCatalog.  Satisfied by *db.DB and by test fakes.
+type diskLayoutCatalogResolver interface {
+	GetNodeDiskLayoutID(ctx context.Context, nodeID string) (string, error)
+	GetGroupDiskLayoutID(ctx context.Context, groupID string) (string, error)
+	GetDiskLayout(ctx context.Context, id string) (api.StoredDiskLayout, error)
+}
+
+// resolveDiskLayoutFromCatalog implements the #146 disk_layout_id precedence:
+//
+//  1. node.disk_layout_id (per-node FK override) — highest
+//  2. node_groups.disk_layout_id (group FK default)
+//  3. Returns (zero, false) when neither level has a matching record — caller
+//     must fall back to the existing inline-override / image-default path.
+//
+// A missing record for a non-empty FK is treated as a miss (warning logged);
+// the caller falls back rather than returning an error so a stale FK doesn't
+// take a node offline.
+func resolveDiskLayoutFromCatalog(
+	ctx context.Context,
+	r diskLayoutCatalogResolver,
+	nodeID, groupID string,
+) (layout api.DiskLayout, source string, ok bool) {
+	// Level 1: per-node FK.
+	nodeDiskLayoutID, _ := r.GetNodeDiskLayoutID(ctx, nodeID)
+	if nodeDiskLayoutID != "" {
+		stored, err := r.GetDiskLayout(ctx, nodeDiskLayoutID)
+		if err == nil {
+			return stored.Layout, "layout_catalog:node", true
+		}
+		log.Warn().Err(err).Str("node_id", nodeID).Str("disk_layout_id", nodeDiskLayoutID).
+			Msg("effective-layout: node disk_layout_id resolves to missing record — falling back")
+	}
+
+	// Level 2: group FK.
+	if groupID != "" {
+		groupDiskLayoutID, _ := r.GetGroupDiskLayoutID(ctx, groupID)
+		if groupDiskLayoutID != "" {
+			stored, err := r.GetDiskLayout(ctx, groupDiskLayoutID)
+			if err == nil {
+				return stored.Layout, "layout_catalog:group", true
+			}
+			log.Warn().Err(err).Str("node_id", nodeID).Str("group_id", groupID).
+				Str("disk_layout_id", groupDiskLayoutID).
+				Msg("effective-layout: group disk_layout_id resolves to missing record — falling back")
+		}
+	}
+
+	return api.DiskLayout{}, "", false
 }
 
 // GetLayoutRecommendation handles GET /api/v1/nodes/:id/layout-recommendation.
@@ -130,7 +182,14 @@ func (h *LayoutHandler) getStorageLayoutRecommendation(w http.ResponseWriter, r 
 
 // GetEffectiveLayout handles GET /api/v1/nodes/:id/effective-layout.
 // Returns the resolved DiskLayout that will be used for the next deployment,
-// including the source level (node / group / image).
+// including the source level (node / group / image / layout_catalog).
+//
+// Precedence (highest → lowest):
+//  1. node.disk_layout_id         — named layout record (per-node override)
+//  2. node_groups.disk_layout_id  — named layout record (group default)
+//  3. node.DiskLayoutOverride     — inline JSON override on the node
+//  4. node_group.DiskLayoutOverride — inline JSON override on the group
+//  5. BaseImage.DiskLayout        — image default
 func (h *LayoutHandler) GetEffectiveLayout(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -156,14 +215,21 @@ func (h *LayoutHandler) GetEffectiveLayout(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	effective := node.EffectiveLayout(img, group)
-	source := node.EffectiveLayoutSource(img, group)
+	// ── Precedence levels 1 & 2: named disk layout from the catalog ──────────
+	effective, source, catalogHit := resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID)
+
+	// ── Precedence levels 3-5: existing inline / image-default path ───────────
+	if !catalogHit {
+		// Neither catalog level matched — use existing inline/image logic.
+		effective = node.EffectiveLayout(img, group)
+		source = node.EffectiveLayoutSource(img, group)
+	}
 
 	// Auto-correct layout when:
 	//   - The node reported its firmware type at registration (DetectedFirmware set).
 	//   - The layout came from the image default (no operator override).
 	//   - The image's firmware type doesn't match the node's actual firmware.
-	// Operator overrides (node-level or group-level) are always respected as-is.
+	// Operator overrides (node-level, group-level, or catalog) are always respected as-is.
 	if node.DetectedFirmware != "" && source == "image" && img != nil {
 		effective = layout.AutoCorrectForFirmware(effective, string(img.Firmware), node.DetectedFirmware, node.ID, node.Hostname)
 	}

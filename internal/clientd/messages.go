@@ -278,6 +278,29 @@ type SlurmAdminCmdResult struct {
 	JobCount int    `json:"job_count,omitempty"` // for check_queue: number of running/pending jobs
 }
 
+// ─── Disk layout capture message types (#146) ────────────────────────────────
+
+// DiskCaptureRequestPayload is the payload for the "disk_capture_request"
+// server→node message.  The server sends this when an operator calls
+// POST /api/v1/disk-layouts/capture/{node_id}.  The node replies with
+// "disk_capture_result" carrying the serialised api.DiskLayout JSON.
+type DiskCaptureRequestPayload struct {
+	// RefMsgID is the server's msg_id; echoed in the disk_capture_result reply.
+	RefMsgID string `json:"ref_msg_id"`
+}
+
+// DiskCaptureResultPayload is the payload for the "disk_capture_result"
+// node→server message.
+type DiskCaptureResultPayload struct {
+	// RefMsgID echoes the msg_id from the corresponding disk_capture_request.
+	RefMsgID string `json:"ref_msg_id"`
+	// LayoutJSON is the JSON-serialised api.DiskLayout captured on the node.
+	// Empty when Error is set.
+	LayoutJSON string `json:"layout_json,omitempty"`
+	// Error is a human-readable failure description; empty on success.
+	Error string `json:"error,omitempty"`
+}
+
 // ─── Console message types (#128) ────────────────────────────────────────────
 // These message types are defined here for future use when the console broker
 // is routed through the clientd WebSocket (Sprint 24 in-browser console). In

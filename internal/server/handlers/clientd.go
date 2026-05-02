@@ -53,6 +53,10 @@ type ClientdHubIface interface {
 	RegisterOperatorExec(msgID string) <-chan clientd.OperatorExecResultPayload
 	UnregisterOperatorExec(msgID string)
 	DeliverOperatorExecResult(msgID string, payload clientd.OperatorExecResultPayload) bool
+	// DiskCapture registry — used for disk_capture_request round-trips (#146).
+	RegisterDiskCapture(msgID string) <-chan clientd.DiskCaptureResultPayload
+	UnregisterDiskCapture(msgID string)
+	DeliverDiskCaptureResult(msgID string, payload clientd.DiskCaptureResultPayload) bool
 }
 
 // ClientdHandler handles the clustr-clientd WebSocket endpoint and related REST queries.
@@ -165,6 +169,9 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 
 	case "operator_exec_result":
 		h.handleOperatorExecResult(nodeID, msg)
+
+	case "disk_capture_result":
+		h.handleDiskCaptureResult(nodeID, msg)
 
 	case "stats_batch":
 		h.handleStatsBatch(ctx, nodeID, msg)
@@ -469,6 +476,23 @@ func (h *ClientdHandler) handleOperatorExecResult(nodeID string, msg clientd.Cli
 		Bool("truncated", payload.Truncated).
 		Bool("delivered", delivered).
 		Msg("clientd ws: operator_exec_result received from node")
+}
+
+// handleDiskCaptureResult processes a "disk_capture_result" message from the
+// node and delivers it to the waiting CaptureDiskLayout HTTP handler.
+func (h *ClientdHandler) handleDiskCaptureResult(nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.DiskCaptureResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("clientd ws: malformed disk_capture_result payload")
+		return
+	}
+	delivered := h.Hub.DeliverDiskCaptureResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Bool("delivered", delivered).
+		Str("error", payload.Error).
+		Msg("clientd ws: disk_capture_result received from node")
 }
 
 // handleStatsBatch persists a stats_batch message from a node and sends a

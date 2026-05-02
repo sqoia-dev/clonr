@@ -908,6 +908,33 @@ type EffectiveMountsResponse struct {
 	GroupID string                `json:"group_id,omitempty"`
 }
 
+// ─── Disk layout catalog (#146) ──────────────────────────────────────────────
+
+// StoredDiskLayout is a named, reusable disk layout record from the disk_layouts
+// table.  It can be assigned to a node group (group default) or to an individual
+// node (per-node override).  The Layout field carries the full partition/FS/RAID
+// spec; it is stored as JSON in the DB column layout_json.
+//
+// Precedence during deploy (highest → lowest):
+//   1. node.disk_layout_id          — per-node override
+//   2. node_groups.disk_layout_id   — group default
+//   3. existing inline override / image default
+type StoredDiskLayout struct {
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	SourceNodeID string     `json:"source_node_id,omitempty"` // nil for hand-authored
+	CapturedAt   time.Time  `json:"captured_at"`
+	Layout       DiskLayout `json:"layout"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// ListDiskLayoutsResponse is returned by GET /api/v1/disk-layouts.
+type ListDiskLayoutsResponse struct {
+	Layouts []StoredDiskLayout `json:"layouts"`
+	Total   int                `json:"total"`
+}
+
 // --- Response types ---
 
 // ErrorResponse is the standard error envelope returned on 4xx/5xx.

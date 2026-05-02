@@ -104,6 +104,10 @@ type ClientdHub struct {
 	// operatorExecRegistry maps outbound msg_id → pendingOperatorExecResult so the
 	// batch exec HTTP handler can collect operator_exec_result messages per node.
 	operatorExecRegistry sync.Map
+
+	// diskCaptureRegistry maps outbound msg_id → pendingDiskCaptureResult so the
+	// capture HTTP handler can block until the node replies with disk_capture_result.
+	diskCaptureRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -279,6 +283,43 @@ func (h *ClientdHub) DeliverOperatorExecResult(msgID string, payload clientd.Ope
 		return false
 	}
 	pe := v.(pendingOperatorExecResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+// pendingDiskCaptureResult holds a channel to receive a DiskCaptureResultPayload
+// for an in-flight disk_capture_request.
+type pendingDiskCaptureResult struct {
+	ch chan clientd.DiskCaptureResultPayload
+}
+
+// RegisterDiskCapture creates a pending disk capture result entry for msgID and
+// returns the channel to read the DiskCaptureResultPayload from.  The caller
+// must call UnregisterDiskCapture(msgID) when done.
+func (h *ClientdHub) RegisterDiskCapture(msgID string) <-chan clientd.DiskCaptureResultPayload {
+	ch := make(chan clientd.DiskCaptureResultPayload, 1)
+	h.diskCaptureRegistry.Store(msgID, pendingDiskCaptureResult{ch: ch})
+	return ch
+}
+
+// UnregisterDiskCapture removes a pending disk capture result entry.
+func (h *ClientdHub) UnregisterDiskCapture(msgID string) {
+	h.diskCaptureRegistry.Delete(msgID)
+}
+
+// DeliverDiskCaptureResult delivers a DiskCaptureResultPayload to the waiting
+// HTTP handler.  Called by the WebSocket handler when it receives a
+// "disk_capture_result" message from the node.  Returns true if delivered.
+func (h *ClientdHub) DeliverDiskCaptureResult(msgID string, payload clientd.DiskCaptureResultPayload) bool {
+	v, ok := h.diskCaptureRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingDiskCaptureResult)
 	select {
 	case pe.ch <- payload:
 		return true

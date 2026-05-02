@@ -1695,6 +1695,18 @@ func (s *Server) buildRouter() chi.Router {
 			r.Put("/nodes/{id}/group", layoutH.AssignNodeGroup)
 			r.Get("/nodes/{id}/effective-mounts", layoutH.GetEffectiveMounts)
 
+			// Disk layout catalog (#146) — named, reusable layouts that can be
+			// assigned to node groups (default) or individual nodes (override).
+			diskLayoutsH := &handlers.DiskLayoutsHandler{
+				DB:  s.db,
+				Hub: s.clientdHub,
+			}
+			r.Post("/disk-layouts/capture/{node_id}", diskLayoutsH.CaptureLayout)
+			r.Get("/disk-layouts", diskLayoutsH.ListLayouts)
+			r.Get("/disk-layouts/{id}", diskLayoutsH.GetLayout)
+			r.Put("/disk-layouts/{id}", diskLayoutsH.UpdateLayout)
+			r.Delete("/disk-layouts/{id}", diskLayoutsH.DeleteLayout)
+
 			// Node groups — named sets of nodes sharing a disk layout override.
 			r.Get("/node-groups", nodeGroups.ListNodeGroups)
 			r.Post("/node-groups", nodeGroups.CreateNodeGroup)
