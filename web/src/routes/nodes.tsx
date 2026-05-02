@@ -4,8 +4,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal,
 } from "lucide-react"
+import { SensorsTab, EventLogTab, ConsoleTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -1040,6 +1041,8 @@ interface NodeSheetProps {
 // ─── NodeSheet ────────────────────────────────────────────────────────────────
 // Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
 
+type NodeDetailTab = "overview" | "sensors" | "eventlog" | "console"
+
 function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete }: NodeSheetProps) {
   const qc = useQueryClient()
   const state = nodeState(node)
@@ -1052,6 +1055,8 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
   const [editError, setEditError] = React.useState("")
   // TAG-3/5: inline tag add
   const [tagInput, setTagInput] = React.useState("")
+  // #152: per-node detail tabs
+  const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
 
   const isController = node.tags?.includes("controller")
   const editRemovesController = isController && !editTags.includes("controller")
@@ -1190,78 +1195,116 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
               </div>
             </div>
           ) : (
-            <>
-          <Section title="Identity">
-            <Row label="ID" value={node.id} mono />
-            <Row label="Hostname" value={node.hostname} />
-            <Row label="FQDN" value={node.fqdn || "—"} />
-            <Row label="MAC" value={node.primary_mac} mono />
-            <Row label="Firmware" value={node.detected_firmware || "—"} />
-            <Row label="Provider" value={NODE_PROVIDERS.find((p) => p.value === (node.provider ?? ""))?.label ?? "—"} />
-          </Section>
+            /* ── #152: tabbed detail view ── */
+            <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v as NodeDetailTab)}>
+              <TabsList className="w-full">
+                <TabsTrigger value="overview" className="flex-1 text-xs gap-1">
+                  <Cpu className="h-3 w-3" />
+                  Overview
+                </TabsTrigger>
+                <TabsTrigger value="sensors" className="flex-1 text-xs gap-1">
+                  <Activity className="h-3 w-3" />
+                  Sensors
+                </TabsTrigger>
+                <TabsTrigger value="eventlog" className="flex-1 text-xs gap-1">
+                  <BookOpen className="h-3 w-3" />
+                  Event Log
+                </TabsTrigger>
+                <TabsTrigger value="console" className="flex-1 text-xs gap-1">
+                  <Terminal className="h-3 w-3" />
+                  Console
+                </TabsTrigger>
+              </TabsList>
 
-          <Section title="Deployment">
-            <Row label="Image" value={node.base_image_id || "—"} mono />
-            <Row label="State" value={state} />
-            <Row label="Last seen" value={relativeTime(node.last_seen_at ?? node.deploy_verified_booted_at)} />
-            <Row label="Deploy complete" value={relativeTime(node.deploy_completed_preboot_at)} />
-            <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
-          </Section>
+              {/* ── Overview tab (existing content) ── */}
+              <TabsContent value="overview" className="mt-4 space-y-4">
+                <Section title="Identity">
+                  <Row label="ID" value={node.id} mono />
+                  <Row label="Hostname" value={node.hostname} />
+                  <Row label="FQDN" value={node.fqdn || "—"} />
+                  <Row label="MAC" value={node.primary_mac} mono />
+                  <Row label="Firmware" value={node.detected_firmware || "—"} />
+                  <Row label="Provider" value={NODE_PROVIDERS.find((p) => p.value === (node.provider ?? ""))?.label ?? "—"} />
+                </Section>
 
-          {/* TAG-5: tag display + inline add in view mode */}
-          <Section title="Tags">
-            <div className="flex flex-wrap gap-1.5">
-              {(node.tags ?? []).map((t) => (
-                <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
-                  {t}
-                </span>
-              ))}
-              {(node.tags ?? []).length === 0 && (
-                <span className="text-xs text-muted-foreground">No tags</span>
-              )}
-            </div>
-            <div className="flex gap-2 mt-2">
-              <Input
-                placeholder="add tag…"
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault()
-                    const trimmed = tagInput.trim()
-                    if (!trimmed) return
-                    const newTags = [...(node.tags ?? []).filter((t) => t !== trimmed), trimmed]
-                    apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
-                      method: "PATCH",
-                      body: JSON.stringify({ tags: newTags }),
-                    }).then(() => {
-                      qc.invalidateQueries({ queryKey: ["nodes"] })
-                      setTagInput("")
-                      toast({ title: "Tag added", description: trimmed })
-                    }).catch((err) => toast({ variant: "destructive", title: "Failed to add tag", description: String(err) }))
-                  }
-                }}
-                className="text-xs flex-1 h-7"
-              />
-              <Tag className="h-3.5 w-3.5 mt-1.5 text-muted-foreground" />
-            </div>
-          </Section>
+                <Section title="Deployment">
+                  <Row label="Image" value={node.base_image_id || "—"} mono />
+                  <Row label="State" value={state} />
+                  <Row label="Last seen" value={relativeTime(node.last_seen_at ?? node.deploy_verified_booted_at)} />
+                  <Row label="Deploy complete" value={relativeTime(node.deploy_completed_preboot_at)} />
+                  <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
+                </Section>
 
-          {advanced && (
-            <Section title="Advanced">
-              <Row label="Group" value={node.group_id || "—"} mono />
-              <Row label="Created" value={relativeTime(node.created_at)} />
-              <Row label="Updated" value={relativeTime(node.updated_at)} />
-            </Section>
-          )}
+                {/* TAG-5: tag display + inline add in view mode */}
+                <Section title="Tags">
+                  <div className="flex flex-wrap gap-1.5">
+                    {(node.tags ?? []).map((t) => (
+                      <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
+                        {t}
+                      </span>
+                    ))}
+                    {(node.tags ?? []).length === 0 && (
+                      <span className="text-xs text-muted-foreground">No tags</span>
+                    )}
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <Input
+                      placeholder="add tag…"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          const trimmed = tagInput.trim()
+                          if (!trimmed) return
+                          const newTags = [...(node.tags ?? []).filter((t) => t !== trimmed), trimmed]
+                          apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+                            method: "PATCH",
+                            body: JSON.stringify({ tags: newTags }),
+                          }).then(() => {
+                            qc.invalidateQueries({ queryKey: ["nodes"] })
+                            setTagInput("")
+                            toast({ title: "Tag added", description: trimmed })
+                          }).catch((err) => toast({ variant: "destructive", title: "Failed to add tag", description: String(err) }))
+                        }
+                      }}
+                      className="text-xs flex-1 h-7"
+                    />
+                    <Tag className="h-3.5 w-3.5 mt-1.5 text-muted-foreground" />
+                  </div>
+                </Section>
 
-          <HardwareSection node={node} />
-          <SudoersSection node={node} />
-          <SlurmNodeSection node={node} />
-          <ReimageFlow node={node} autoExpand={autoReimage} />
-          <CaptureNodeFlow node={node} />
-          <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
-            </>
+                {advanced && (
+                  <Section title="Advanced">
+                    <Row label="Group" value={node.group_id || "—"} mono />
+                    <Row label="Created" value={relativeTime(node.created_at)} />
+                    <Row label="Updated" value={relativeTime(node.updated_at)} />
+                  </Section>
+                )}
+
+                <HardwareSection node={node} />
+                <SudoersSection node={node} />
+                <SlurmNodeSection node={node} />
+                <ReimageFlow node={node} autoExpand={autoReimage} />
+                <CaptureNodeFlow node={node} />
+                <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
+              </TabsContent>
+
+              {/* ── Sensors tab ── */}
+              <TabsContent value="sensors" className="mt-2">
+                <SensorsTab nodeId={node.id} />
+              </TabsContent>
+
+              {/* ── Event Log tab ── */}
+              <TabsContent value="eventlog" className="mt-2">
+                <EventLogTab nodeId={node.id} />
+              </TabsContent>
+
+              {/* ── Console tab ── */}
+              <TabsContent value="console" className="mt-2">
+                <ConsoleTab nodeId={node.id} />
+              </TabsContent>
+            </Tabs>
           )}
         </div>
       </SheetContent>
