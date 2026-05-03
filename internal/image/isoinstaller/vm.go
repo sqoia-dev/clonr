@@ -38,7 +38,7 @@ type BuildOptions struct {
 	CPUs int
 
 	// Timeout is the maximum wall-clock time allowed for the full install.
-	// Default: 30 minutes. Hard-kills the QEMU process on expiry.
+	// Default: 60 minutes. Hard-kills the QEMU process on expiry.
 	Timeout time.Duration
 
 	// WorkDir is a directory where temporary files (blank disk, seed ISO,
@@ -137,7 +137,7 @@ const (
 	defaultDiskSizeGB = 20
 	defaultMemoryMB   = 4096
 	defaultCPUs       = 2
-	defaultTimeout    = 30 * time.Minute
+	defaultTimeout    = 60 * time.Minute
 )
 
 // systemdRunAvailable is detected once at package init time and used to decide
