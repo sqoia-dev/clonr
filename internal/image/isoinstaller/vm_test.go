@@ -185,6 +185,78 @@ func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
+// ── buildQEMUArgs virtio-rng ──────────────────────────────────────────────────
+
+func TestBuildQEMUArgs_VirtioRNG(t *testing.T) {
+	opts := BuildOptions{
+		DiskSizeGB: 20,
+		MemoryMB:   4096,
+		CPUs:       2,
+		Firmware:   "bios",
+		WorkDir:    t.TempDir(),
+	}
+	args, err := buildQEMUArgs(opts, "/tmp/disk.raw", "/tmp/seed.iso", "/tmp/serial.log", "/tmp/qmp.sock", nil)
+	if err != nil {
+		t.Fatalf("buildQEMUArgs returned unexpected error: %v", err)
+	}
+
+	foundObject := false
+	foundDevice := false
+	for i, a := range args {
+		if a == "-object" && i+1 < len(args) && args[i+1] == "rng-random,filename=/dev/urandom,id=rng0" {
+			foundObject = true
+		}
+		if a == "-device" && i+1 < len(args) && args[i+1] == "virtio-rng-pci,rng=rng0" {
+			foundDevice = true
+		}
+	}
+	if !foundObject {
+		t.Error("expected -object rng-random,filename=/dev/urandom,id=rng0 in QEMU args")
+	}
+	if !foundDevice {
+		t.Error("expected -device virtio-rng-pci,rng=rng0 in QEMU args")
+	}
+}
+
+// ── defaultMemoryMB ───────────────────────────────────────────────────────────
+
+func TestDefaultMemoryMB_Is4096(t *testing.T) {
+	if defaultMemoryMB != 4096 {
+		t.Errorf("expected defaultMemoryMB=4096, got %d", defaultMemoryMB)
+	}
+}
+
+// ── buildQEMUArgs default memory applied via applyDefaults ───────────────────
+
+func TestBuildQEMUArgs_DefaultMemory4096(t *testing.T) {
+	// MemoryMB left at zero → applyDefaults fills it with defaultMemoryMB (4096).
+	opts := BuildOptions{
+		DiskSizeGB: 20,
+		CPUs:       2,
+		Firmware:   "bios",
+		WorkDir:    t.TempDir(),
+	}
+	applyDefaults(&opts)
+	if opts.MemoryMB != 4096 {
+		t.Errorf("expected MemoryMB=4096 after applyDefaults, got %d", opts.MemoryMB)
+	}
+
+	args, err := buildQEMUArgs(opts, "/tmp/disk.raw", "/tmp/seed.iso", "/tmp/serial.log", "/tmp/qmp.sock", nil)
+	if err != nil {
+		t.Fatalf("buildQEMUArgs returned unexpected error: %v", err)
+	}
+
+	for i, a := range args {
+		if a == "-m" && i+1 < len(args) {
+			if args[i+1] != "4096" {
+				t.Errorf("expected -m 4096, got -m %s", args[i+1])
+			}
+			return
+		}
+	}
+	t.Error("-m arg not found in QEMU args")
+}
+
 // ── scanDmesgForOOM ───────────────────────────────────────────────────────────
 
 func TestScanDmesgForOOM_NoError(t *testing.T) {

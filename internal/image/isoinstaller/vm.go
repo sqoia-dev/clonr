@@ -135,7 +135,7 @@ type BuildResult struct {
 // defaults applied when callers leave fields at zero.
 const (
 	defaultDiskSizeGB = 20
-	defaultMemoryMB   = 2048
+	defaultMemoryMB   = 4096
 	defaultCPUs       = 2
 	defaultTimeout    = 30 * time.Minute
 )
@@ -758,6 +758,13 @@ func buildQEMUArgs(opts BuildOptions, rawDiskPath, seedISOPath, serialLogPath, q
 		// Networking: user-mode NAT so the installer can reach package mirrors.
 		"-netdev", "user,id=net0",
 		"-device", "virtio-net-pci,netdev=net0",
+
+		// Entropy source: virtio-rng feeds the guest kernel's entropy pool from
+		// the host's /dev/urandom. Without this, early-boot getrandom() calls
+		// (journald, systemd-random-seed, etc.) block until the pool is seeded,
+		// which can stall the guest for several minutes before Anaconda starts.
+		"-object", "rng-random,filename=/dev/urandom,id=rng0",
+		"-device", "virtio-rng-pci,rng=rng0",
 
 		// No display — serial console only.
 		"-nographic",
