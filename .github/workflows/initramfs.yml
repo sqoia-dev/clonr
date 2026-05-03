@@ -54,7 +54,9 @@ jobs:
         run: |
           # busybox is in EPEL, not BaseOS/AppStream — enable it first.
           dnf install -y epel-release
-          dnf install -y --setopt=install_weak_deps=False \
+          # curl conflicts with curl-minimal which is pre-installed in the
+          # rockylinux:9 container image; --allowerasing lets dnf swap it.
+          dnf install -y --setopt=install_weak_deps=False --allowerasing \
             kernel-modules \
             kernel-modules-extra \
             cpio \
