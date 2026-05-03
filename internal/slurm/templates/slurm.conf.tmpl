@@ -1,0 +1,40 @@
+# clustr-managed slurm.conf — {{.ClusterName}}
+# Generated: {{.Timestamp}}
+# DO NOT EDIT MANUALLY — managed by clustr-serverd Slurm module.
+
+ClusterName={{.ClusterName}}
+SlurmctldHost={{.ControllerHostname}}
+
+# pmix is not bundled — use none (serial jobs and pmi2 jobs work without pmix).
+# Change to pmix only if slurm-libpmix and pmix-libs are in the bundle.
+MpiDefault=none
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup,task/affinity
+
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmdPidFile=/var/run/slurmd.pid
+SlurmdSpoolDir=/var/spool/slurmd
+StateSaveLocation=/var/spool/slurmctld
+
+SlurmUser=slurm
+AuthType=auth/munge
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+
+AccountingStorageType=accounting_storage/slurmdbd
+JobAcctGatherType=jobacct_gather/cgroup
+
+ReturnToService=2
+SlurmctldTimeout=120
+SlurmdTimeout=300
+InactiveLimit=0
+MinJobAge=300
+MaxJobCount=50000
+
+{{- range .Nodes}}
+NodeName={{.NodeName}} CPUs={{.CPUCount}} Sockets={{.Sockets}} CoresPerSocket={{.CoresPerSocket}} ThreadsPerCore={{.ThreadsPerCore}} RealMemory={{.RealMemoryMB}} State=UNKNOWN{{if .GRESParam}} Gres={{.GRESParam}}{{end}}
+{{- end}}
+
+PartitionName=batch Nodes=ALL Default=YES MaxTime=INFINITE State=UP

@@ -1,0 +1,14 @@
+Your compute allocation has been auto-provisioned.
+
+Project:        {{.ProjectName}}
+NodeGroup:      {{.NodeGroupName}} (ID: {{.NodeGroupID}})
+Slurm partition: {{.SlurmPartitionName}}
+Created:        {{.CreatedAt}}
+
+You have 24 hours to undo this allocation if needed.
+Undo deadline:  {{.UndoDeadline}}
+
+To undo, visit your PI portal and click "Undo auto-setup" on the project,
+or contact your system administrator.
+
+— clustr

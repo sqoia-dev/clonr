@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/update-bios-profile-request",
+  "$ref": "#/$defs/UpdateBiosProfileRequest",
+  "$defs": {
+    "UpdateBiosProfileRequest": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "settings_json": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,565 @@
+// Package handlers — reimage.go implements the reimage workflow API endpoints.
+//
+// Routes (all under /api/v1, bearer-auth required):
+//
+//	POST   /nodes/{id}/reimage      — queue or immediately trigger a reimage
+//	GET    /nodes/{id}/reimage      — list reimage history for a node
+//	GET    /reimage/{id}            — get a single reimage request by ID
+//	DELETE /reimage/{id}            — cancel a pending scheduled reimage
+//	POST   /reimage/{id}/retry      — retry a failed reimage
+//	GET    /reimages                — list all reimage records (admin, filterable)
+package handlers
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/metrics"
+	"github.com/sqoia-dev/clustr/internal/reimage"
+	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/reconcile"
+)
+
+
+// ReimageHandler handles all /api/v1/nodes/{id}/reimage and /api/v1/reimage routes.
+type ReimageHandler struct {
+	DB           *db.DB
+	Orchestrator *reimage.Orchestrator
+	Audit        *db.AuditService
+	// GetActorLabel returns a human-readable label for the authenticated caller
+	// (e.g. "user:<id>" or "key:<label>"). Used for RequestedBy audit attribution.
+	GetActorLabel func(r *http.Request) string
+	// GetActorInfo returns (actorID, actorLabel) for audit records.
+	GetActorInfo func(r *http.Request) (id, label string)
+	// ImageReconciler, when non-nil, is called as a pre-deploy guard (#248).
+	// If the reconcile result is quarantined or blob_missing, the reimage is
+	// rejected with HTTP 409 before any work is done. Uses a 1h cache TTL so
+	// back-to-back reimages of the same image pay the hash cost once per hour.
+	// When nil, the guard is skipped (e.g. in tests that don't need it).
+	ImageReconciler ImageReconcilerIface
+}
+
+// ─── POST /api/v1/nodes/{id}/reimage ─────────────────────────────────────────
+
+// Create handles a new reimage request.
+// Immediate reimages (scheduled_at == nil) are triggered synchronously and
+// return 200 with the resulting request record.
+// Scheduled reimages return 202 Accepted with the request record.
+func (h *ReimageHandler) Create(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	var body api.CreateReimageRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	// Load and validate the node.
+	node, err := h.DB.GetNodeConfig(r.Context(), nodeID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Resolve the target image ID — either explicit in the request or from the
+	// node's current base_image_id.
+	imageID := body.ImageID
+	if imageID == "" {
+		imageID = node.BaseImageID
+	}
+	// bios_only reimages don't fetch an image — image_id is informational only.
+	if imageID == "" && !body.BiosOnly {
+		writeValidationError(w, "image_id is required (node has no base_image_id assigned)")
+		return
+	}
+
+	// Reject initramfs-role images unconditionally (force does not bypass this).
+	// Initramfs images are boot-time infrastructure and must never be used as
+	// a deployable target image.
+	if imageID != "" && !body.BiosOnly {
+		img, err := h.DB.GetBaseImage(r.Context(), imageID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if img.BuildMethod == "initramfs" {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+				Error: "image is an initramfs build artifact and cannot be used as a deployable target image",
+				Code:  "initramfs_not_deployable",
+			})
+			return
+		}
+	}
+
+	if !body.Force {
+		// Pre-check 1: target image must exist and be ready (skipped for bios_only).
+		if imageID != "" && !body.BiosOnly {
+			img, err := h.DB.GetBaseImage(r.Context(), imageID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			if img.Status != api.ImageStatusReady {
+				writeJSON(w, http.StatusConflict, api.ErrorResponse{
+					Error: fmt.Sprintf("image %q is not ready (status: %s) — use force=true to skip this check", imageID, img.Status),
+					Code:  "image_not_ready",
+				})
+				return
+			}
+
+			// Pre-check 1b: reconcile guard (#248) — verify the on-disk blob is
+			// consistent with the DB record before we commit to a deploy that could
+			// fail mid-transfer with a confusing checksum error. Uses a 1h cache so
+			// back-to-back reimages of the same image pay the hash cost once.
+			if h.ImageReconciler != nil {
+				result, reconcileErr := h.ImageReconciler.ReconcileImage(r.Context(), imageID, reconcile.Opts{
+					CacheTTL:         reconcileDeployGuardTTL(),
+					FailOnQuarantine: true,
+				})
+				if reconcileErr != nil {
+					log.Warn().Err(reconcileErr).
+						Str("image_id", imageID).
+						Str("outcome", string(result.Outcome)).
+						Msg("reimage: pre-deploy guard rejected image")
+					writeJSON(w, http.StatusConflict, api.ErrorResponse{
+						Error: fmt.Sprintf("image %q is not deployable (status: %s): %s — POST /api/v1/images/%s/reconcile for details",
+							imageID, result.NewStatus, result.ErrorDetail, imageID),
+						Code: "image_not_deployable",
+					})
+					return
+				}
+			}
+		}
+
+		// Pre-check 2: no active (non-terminal) reimage already in flight.
+		active, err := h.DB.GetActiveReimageForNode(r.Context(), nodeID)
+		if err != nil {
+			log.Error().Err(err).Str("node_id", nodeID).Msg("reimage create: check active")
+			writeError(w, err)
+			return
+		}
+		if active != nil {
+			writeJSON(w, http.StatusConflict, api.ErrorResponse{
+				Error: fmt.Sprintf("node already has an active reimage request %q (status: %s) — cancel it first or use force=true", active.ID, active.Status),
+				Code:  "reimage_active",
+			})
+			return
+		}
+
+		// GAP-15: Pre-check 3 — node must have at least one SSH key configured.
+		// Reimaging a node with no SSH keys produces an inaccessible node: the
+		// deployed OS has no authorized_keys so no one can log in. The operator
+		// should set ssh_keys on the node before triggering a reimage.
+		if len(node.SSHKeys) == 0 {
+			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
+				Error: "node has no SSH keys configured — reimaging will produce an inaccessible node. Set ssh_keys first or pass force=true to override",
+				Code:  "no_ssh_keys",
+			})
+			return
+		}
+	}
+
+	// Build and persist the request record.
+	actor := "api"
+	if h.GetActorLabel != nil {
+		if label := h.GetActorLabel(r); label != "" {
+			actor = label
+		}
+	}
+	status := api.ReimageStatusPending
+	req := api.ReimageRequest{
+		ID:           uuid.New().String(),
+		NodeID:       nodeID,
+		ImageID:      imageID,
+		Status:       status,
+		ScheduledAt:  body.ScheduledAt,
+		ErrorMessage: "",
+		RequestedBy:  actor,
+		DryRun:       body.DryRun,
+		BiosOnly:     body.BiosOnly,
+		CreatedAt:    time.Now().UTC(),
+		InjectVars:   body.InjectVars, // S4-11: per-deployment variable overrides
+	}
+
+	if err := h.DB.CreateReimageRequest(r.Context(), req); err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage create: db insert")
+		writeError(w, err)
+		return
+	}
+
+	log.Info().
+		Str("req_id", req.ID).
+		Str("node_id", nodeID).
+		Str("image_id", imageID).
+		Bool("dry_run", req.DryRun).
+		Bool("scheduled", req.ScheduledAt != nil).
+		Msg("reimage request created")
+
+	// Scheduled reimage — return 202 and let the scheduler goroutine fire it.
+	if body.ScheduledAt != nil {
+		writeJSON(w, http.StatusAccepted, req)
+		return
+	}
+
+	// Immediate reimage — trigger synchronously.
+	if err := h.Orchestrator.Trigger(r.Context(), req.ID); err != nil {
+		log.Error().Err(err).Str("req_id", req.ID).Msg("reimage create: trigger failed")
+		// Reload the request so the caller sees the "failed" status.
+		updated, dbErr := h.DB.GetReimageRequest(r.Context(), req.ID)
+		if dbErr == nil {
+			writeJSON(w, http.StatusBadGateway, updated)
+		} else {
+			writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+				Error: fmt.Sprintf("reimage trigger failed: %v", err),
+				Code:  "reimage_trigger_failed",
+			})
+		}
+		return
+	}
+
+	// Reload to pick up triggered_at and updated status.
+	final, err := h.DB.GetReimageRequest(r.Context(), req.ID)
+	if err != nil {
+		final = req // best effort
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeReimage, "node", nodeID,
+			r.RemoteAddr, nil, map[string]interface{}{
+				"reimage_id": req.ID,
+				"image_id":   imageID,
+				"scheduled":  body.ScheduledAt != nil,
+				"dry_run":    req.DryRun,
+			})
+	}
+
+	writeJSON(w, http.StatusOK, final)
+}
+
+// ─── GET /api/v1/nodes/{id}/reimage ──────────────────────────────────────────
+
+// ListForNode handles GET /api/v1/nodes/{id}/reimage.
+func (h *ReimageHandler) ListForNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	// Confirm node exists.
+	if _, err := h.DB.GetNodeConfig(r.Context(), nodeID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	reqs, err := h.DB.ListReimageRequests(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage list")
+		writeError(w, err)
+		return
+	}
+	if reqs == nil {
+		reqs = []api.ReimageRequest{}
+	}
+	writeJSON(w, http.StatusOK, api.ListReimagesResponse{Requests: reqs, Total: len(reqs)})
+}
+
+// ─── GET /api/v1/reimage/{id} ─────────────────────────────────────────────────
+
+// Get handles GET /api/v1/reimage/{id}.
+func (h *ReimageHandler) Get(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	req, err := h.DB.GetReimageRequest(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, req)
+}
+
+// ─── DELETE /api/v1/reimage/{id} ─────────────────────────────────────────────
+
+// Cancel handles DELETE /api/v1/reimage/{id}.
+// Cancels any request that is not already in a terminal status (complete, failed, canceled).
+func (h *ReimageHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	req, err := h.DB.GetReimageRequest(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	// Only terminal statuses cannot be canceled.
+	switch req.Status {
+	case api.ReimageStatusComplete, api.ReimageStatusFailed, api.ReimageStatusCanceled:
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: fmt.Sprintf("cannot cancel reimage in terminal status %q", req.Status),
+			Code:  "not_cancelable",
+		})
+		return
+	}
+
+	msg := "canceled by operator"
+	if req.Status == api.ReimageStatusInProgress || req.Status == api.ReimageStatusTriggered {
+		msg = fmt.Sprintf("canceled by operator (was in %s state)", req.Status)
+	}
+
+	if err := h.DB.UpdateReimageRequestStatus(r.Context(), id, api.ReimageStatusCanceled, msg); err != nil {
+		log.Error().Err(err).Str("req_id", id).Msg("reimage cancel")
+		writeError(w, err)
+		return
+	}
+
+	// Also clear the node's reimage_pending flag so future PXE boots route to disk.
+	// Non-fatal — log on error but still report success.
+	if err := h.DB.SetReimagePending(r.Context(), req.NodeID, false); err != nil {
+		log.Warn().Err(err).Str("node_id", req.NodeID).Msg("reimage cancel: clear reimage_pending failed")
+	}
+
+	metrics.DeployTotal.WithLabelValues("canceled").Inc()
+	log.Info().Str("req_id", id).Str("node_id", req.NodeID).Str("prev_status", string(req.Status)).
+		Msg("reimage request canceled")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// CancelAllActive handles POST /api/v1/reimage/cancel-all-active.
+// Cancels every reimage request in a non-terminal status (pending, running, triggered).
+// Useful when nodes are powered off mid-deploy and the DB state is stuck,
+// blocking other operations like initramfs rebuild.
+func (h *ReimageHandler) CancelAllActive(w http.ResponseWriter, r *http.Request) {
+	count, err := h.DB.CancelAllActiveReimages(r.Context(), "bulk canceled by operator")
+	if err != nil {
+		log.Error().Err(err).Msg("reimage cancel-all-active")
+		writeError(w, err)
+		return
+	}
+	log.Info().Int("count", count).Msg("reimage requests bulk canceled")
+	writeJSON(w, http.StatusOK, map[string]int{"canceled": count})
+}
+
+// ─── POST /api/v1/reimage/{id}/retry ─────────────────────────────────────────
+
+// Retry handles POST /api/v1/reimage/{id}/retry.
+// Creates a new reimage request cloned from the failed one and triggers it
+// immediately. Only requests in "failed" status can be retried.
+func (h *ReimageHandler) Retry(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	orig, err := h.DB.GetReimageRequest(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if orig.Status != api.ReimageStatusFailed {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: fmt.Sprintf("cannot retry reimage in status %q — only failed requests can be retried", orig.Status),
+			Code:  "not_retryable",
+		})
+		return
+	}
+
+	// Check for an already-active reimage on this node.
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), orig.NodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", orig.NodeID).Msg("reimage retry: check active")
+		writeError(w, err)
+		return
+	}
+	if active != nil && active.ID != id {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: fmt.Sprintf("node already has an active reimage request %q (status: %s)", active.ID, active.Status),
+			Code:  "reimage_active",
+		})
+		return
+	}
+
+	// Create a new request cloned from the original.
+	retryActor := "api-retry"
+	if h.GetActorLabel != nil {
+		if label := h.GetActorLabel(r); label != "" {
+			retryActor = label + " (retry)"
+		}
+	}
+	newReq := api.ReimageRequest{
+		ID:          uuid.New().String(),
+		NodeID:      orig.NodeID,
+		ImageID:     orig.ImageID,
+		Status:      api.ReimageStatusPending,
+		DryRun:      orig.DryRun,
+		RequestedBy: retryActor,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := h.DB.CreateReimageRequest(r.Context(), newReq); err != nil {
+		log.Error().Err(err).Str("orig_id", id).Msg("reimage retry: create")
+		writeError(w, err)
+		return
+	}
+
+	if err := h.Orchestrator.Trigger(r.Context(), newReq.ID); err != nil {
+		log.Error().Err(err).Str("req_id", newReq.ID).Msg("reimage retry: trigger failed")
+		updated, dbErr := h.DB.GetReimageRequest(r.Context(), newReq.ID)
+		if dbErr == nil {
+			writeJSON(w, http.StatusBadGateway, updated)
+		} else {
+			writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+				Error: fmt.Sprintf("reimage trigger failed: %v", err),
+				Code:  "reimage_trigger_failed",
+			})
+		}
+		return
+	}
+
+	final, err := h.DB.GetReimageRequest(r.Context(), newReq.ID)
+	if err != nil {
+		final = newReq
+	}
+	writeJSON(w, http.StatusOK, final)
+}
+
+// ─── GET /api/v1/nodes/{id}/reimage/active ───────────────────────────────────
+
+// GetActiveForNode handles GET /api/v1/nodes/{id}/reimage/active (GAP-11).
+// Returns the current active (non-terminal) reimage request for the node, or
+// {"status":"no_active_reimage"} when none exists. Never returns an empty body.
+func (h *ReimageHandler) GetActiveForNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	if _, err := h.DB.GetNodeConfig(r.Context(), nodeID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage get-active: lookup")
+		writeError(w, err)
+		return
+	}
+	if active == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "no_active_reimage"})
+		return
+	}
+	writeJSON(w, http.StatusOK, active)
+}
+
+// ─── DELETE /api/v1/nodes/{id}/reimage/active ────────────────────────────────
+
+// CancelActiveForNode handles DELETE /api/v1/nodes/{id}/reimage/active (S4-10).
+// Cancels the in-flight (non-terminal) reimage for a node, looked up by node ID.
+// Returns 404 if no active reimage exists, 200 with the cancelled record on success.
+func (h *ReimageHandler) CancelActiveForNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+
+	// Confirm node exists.
+	if _, err := h.DB.GetNodeConfig(r.Context(), nodeID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	active, err := h.DB.GetActiveReimageForNode(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", nodeID).Msg("reimage cancel-active: lookup")
+		writeError(w, err)
+		return
+	}
+	if active == nil {
+		writeJSON(w, http.StatusNotFound, api.ErrorResponse{
+			Error: fmt.Sprintf("no active reimage found for node %q", nodeID),
+			Code:  "not_found",
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("canceled by operator (was in %s state)", active.Status)
+	if err := h.DB.UpdateReimageRequestStatus(r.Context(), active.ID, api.ReimageStatusCanceled, msg); err != nil {
+		log.Error().Err(err).Str("req_id", active.ID).Str("node_id", nodeID).Msg("reimage cancel-active: update status")
+		writeError(w, err)
+		return
+	}
+
+	// Clear the reimage_pending flag so future PXE boots route to disk.
+	if err := h.DB.SetReimagePending(r.Context(), nodeID, false); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).Msg("reimage cancel-active: clear reimage_pending (non-fatal)")
+	}
+
+	metrics.DeployTotal.WithLabelValues("canceled").Inc()
+	log.Info().Str("req_id", active.ID).Str("node_id", nodeID).
+		Str("prev_status", string(active.Status)).Msg("reimage cancel-active: cancelled in-flight reimage")
+
+	// Return the updated record.
+	updated, err := h.DB.GetReimageRequest(r.Context(), active.ID)
+	if err != nil {
+		updated = *active
+		updated.Status = api.ReimageStatusCanceled
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// ─── GET /api/v1/reimages ─────────────────────────────────────────────────────
+
+// List handles GET /api/v1/reimages (admin-scoped).
+// Returns all reimage records with optional filters:
+//
+//	?node_id=<id>    — filter by node
+//	?status=<s>      — filter by status (pending, triggered, in_progress, complete, failed, canceled)
+//	?since=<RFC3339> — only records created at or after this time
+//
+// Results are newest-first, capped at 500 rows.
+func (h *ReimageHandler) List(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.URL.Query().Get("node_id")
+	statusFilter := r.URL.Query().Get("status")
+	sinceStr := r.URL.Query().Get("since")
+
+	// Fetch all records for the given node (or all nodes).
+	reqs, err := h.DB.ListReimageRequests(r.Context(), nodeID)
+	if err != nil {
+		log.Error().Err(err).Msg("reimages list")
+		writeError(w, err)
+		return
+	}
+
+	// Apply in-process filters (small table; avoids SQL parameter explosion).
+	filtered := reqs[:0]
+	var sinceTime time.Time
+	if sinceStr != "" {
+		if t, parseErr := time.Parse(time.RFC3339, sinceStr); parseErr == nil {
+			sinceTime = t
+		}
+	}
+	for _, req := range reqs {
+		if statusFilter != "" && string(req.Status) != statusFilter {
+			continue
+		}
+		if !sinceTime.IsZero() && req.CreatedAt.Before(sinceTime) {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+
+	if filtered == nil {
+		filtered = []api.ReimageRequest{}
+	}
+	writeJSON(w, http.StatusOK, api.ListReimagesResponse{Requests: filtered, Total: len(filtered)})
+}
+
+// reconcileDeployGuardTTL returns the cache TTL to use for the pre-deploy
+// reconcile guard. Reads CLUSTR_RECONCILE_TTL; default 1h.
+func reconcileDeployGuardTTL() time.Duration {
+	v := os.Getenv("CLUSTR_RECONCILE_TTL")
+	if v == "" {
+		return 1 * time.Hour
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 1 * time.Hour
+	}
+	return d
+}
+

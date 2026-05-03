@@ -1,0 +1,14 @@
+name: sw-raid-degraded
+description: MD (software RAID) array in degraded state
+plugin: md
+sensor: state
+labels:
+  device: ".*"
+threshold:
+  op: "=="
+  value: 1
+duration: 60s
+severity: warn
+notify:
+  webhook: true
+  email: []

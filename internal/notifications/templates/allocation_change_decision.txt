@@ -1,0 +1,15 @@
+Hi {{.PIName}},
+
+Your allocation change request for "{{.GroupName}}" has been {{.Decision}}.
+
+Request type: {{.RequestType}}
+Decision: {{.Decision}}
+Decided at: {{.DecidedAt}}
+{{- if .Notes}}
+
+Admin notes: {{.Notes}}
+{{- end}}
+
+Log in to your PI portal to view the full request history or submit a new request.
+
+— clustr

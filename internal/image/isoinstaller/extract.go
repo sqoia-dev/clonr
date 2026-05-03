@@ -1,0 +1,529 @@
+package isoinstaller
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+// extractSystemdRunAvailable is detected once at package init and used to
+// decide whether ExtractViaSubprocess can use systemd-run scope isolation.
+var extractSystemdRunAvailable bool
+
+func init() {
+	_, err := exec.LookPath("systemd-run")
+	extractSystemdRunAvailable = (err == nil)
+}
+
+// ExtractViaSubprocess runs rootfs extraction in a subprocess via
+// "clustr-serverd extract ..." so that losetup/mount operations happen outside
+// clustr-serverd's own hardened unit (NoNewPrivileges, tight capabilities, etc.).
+//
+// When systemd-run is available the subprocess is placed in
+// clustr-builders.slice, which has the capability grants and device permissions
+// required for block-device work.  When systemd-run is unavailable (dev
+// machines, containers) the subprocess is exec'd directly — it still runs as
+// the same user but inherits a less-restricted environment than the parent
+// service unit.
+//
+// buildID is used to name the transient scope unit so operators can correlate
+// it in `systemctl status`.  The line callbacks are optional; when non-nil they
+// receive stdout/stderr lines from the subprocess in real time (fed to the
+// build's progress store so the serial-console panel in the UI shows extraction
+// progress).
+func ExtractViaSubprocess(ctx context.Context, buildID string, opts ExtractOptions, onStdout, onStderr func(string)) error {
+	selfBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: locate own binary: %w", err)
+	}
+
+	extractArgs := []string{
+		"extract",
+		"--disk=" + opts.RawDiskPath,
+		"--out=" + opts.RootfsDestDir,
+	}
+
+	var bin string
+	var args []string
+
+	// Run extract directly as a child process. The server runs as root so the
+	// subprocess inherits full capabilities for losetup/mount. Previously this
+	// used systemd-run --scope --slice=clustr-builders.slice, but the slice's
+	// CapabilityBoundingSet restricts rather than grants, causing losetup EPERM.
+	// The QEMU builder still uses the slice (via the factory's systemd-run call);
+	// only the extract step runs directly.
+	bin = selfBin
+	args = extractArgs
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("extract subprocess: stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("extract subprocess: start: %w", err)
+	}
+
+	// Drain stdout and stderr in the background, forwarding to callbacks.
+	// stderr is also collected into a capped buffer (last 4 KB) so that when
+	// the subprocess exits non-zero we can include the actual error message in
+	// the returned error rather than only surfacing it via the progress store.
+	drain := func(r io.Reader, cb func(string)) {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			if cb != nil {
+				cb(scanner.Text())
+			}
+		}
+	}
+
+	const maxStderrBytes = 4 * 1024
+	var stderrMu sync.Mutex
+	var stderrBuf bytes.Buffer
+	go drain(stdoutPipe, onStdout)
+	go drain(stderrPipe, func(line string) {
+		stderrMu.Lock()
+		stderrBuf.WriteString(line)
+		stderrBuf.WriteByte('\n')
+		// Keep only the last maxStderrBytes to bound memory usage.
+		if stderrBuf.Len() > maxStderrBytes {
+			excess := stderrBuf.Len() - maxStderrBytes
+			stderrBuf.Next(excess)
+		}
+		stderrMu.Unlock()
+		if onStderr != nil {
+			onStderr(line)
+		}
+	})
+
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		return nil
+	}
+
+	stderrMu.Lock()
+	capturedStderr := stderrBuf.String()
+	stderrMu.Unlock()
+
+	// Classify exit errors the same way the QEMU wrapper does.
+	exitErr, ok := waitErr.(*exec.ExitError)
+	if !ok {
+		return fmt.Errorf("extract subprocess: %w", waitErr)
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+		if status.Signaled() {
+			return fmt.Errorf("extract subprocess killed by signal %v (check dmesg for OOM)", status.Signal())
+		}
+		return fmt.Errorf("extract subprocess exited with code %d: %s", status.ExitStatus(), capturedStderr)
+	}
+	return fmt.Errorf("extract subprocess: %w", waitErr)
+}
+
+// ExtractOptions configures the filesystem extraction from an installed raw disk.
+type ExtractOptions struct {
+	// RawDiskPath is the path to the raw disk image produced by Build.
+	RawDiskPath string
+
+	// RootfsDestDir is the directory where the root filesystem will be
+	// extracted. It must already exist.
+	RootfsDestDir string
+
+	// BootDestDir, when non-empty, extracts /boot into a separate directory.
+	// When empty, /boot is handled as part of the root rsync.
+	BootDestDir string
+}
+
+// ExtractRootfs mounts an installed raw disk image (via losetup + kpartx),
+// locates the root partition, and rsyncs its contents into RootfsDestDir.
+//
+// Partition discovery strategy:
+//  1. Loop-attach the raw disk with losetup (no --partscan; kpartx creates mappings).
+//  2. Run kpartx to create /dev/mapper/loopNpM device mapper devices.
+//  3. Use lsblk to enumerate partitions via the mapper devices.
+//  4. Skip the biosboot / ESP partition (biosboot GUID or no filesystem / vfat).
+//  5. The partition containing /etc/os-release is treated as root.
+//  6. The partition containing /boot/vmlinuz* or /grub2/ is treated as /boot.
+//
+// kpartx is used instead of losetup --partscan because on some kernels (Rocky
+// Linux 9 with XFS data volume) the kernel's loop partition scanning creates
+// device nodes in /dev but they cannot be opened ("Can't open blockdev").
+// kpartx creates device-mapper aliases (/dev/mapper/loopNpM) which work
+// reliably regardless of kernel loop configuration.
+//
+// This is intentionally simple — the kickstart template uses a fixed layout
+// (biosboot + /boot + /) so the heuristic is reliable for clustr-generated images.
+// Admins using custom kickstarts with unusual layouts should use CaptureNode instead.
+func ExtractRootfs(opts ExtractOptions) error {
+	// ── Loop-attach the raw disk (no --partscan; kpartx handles partitions) ─
+	loopOut, err := exec.Command("losetup", "--find", "--show", opts.RawDiskPath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("losetup: %w\noutput: %s", err, string(loopOut))
+	}
+	loopDev := strings.TrimSpace(string(loopOut))
+	defer func() {
+		// Remove kpartx mappings before releasing the loop device.
+		_ = exec.Command("kpartx", "-d", loopDev).Run()
+		_ = exec.Command("losetup", "-d", loopDev).Run()
+	}()
+
+	// ── Create partition device-mapper mappings via kpartx ──────────────
+	// kpartx -av creates /dev/mapper/loopNp1, /dev/mapper/loopNp2, ...
+	// These devices work reliably on kernels where losetup --partscan
+	// creates device nodes that cannot be opened.
+	if kpartxOut, kpartxErr := exec.Command("kpartx", "-av", loopDev).CombinedOutput(); kpartxErr != nil {
+		return fmt.Errorf("kpartx: %w\noutput: %s", kpartxErr, string(kpartxOut))
+	}
+
+	// Allow udev to process the new device-mapper devices.
+	_ = exec.Command("udevadm", "settle", "--timeout=10").Run()
+
+	// ── Enumerate partitions via lsblk on the loop device ──────────────
+	// Use --pairs output so that empty fields (e.g. FSTYPE on a biosboot
+	// partition) are emitted as KEY="" rather than being collapsed away.
+	partOut, err := exec.Command("lsblk", "--pairs", "-o", "NAME,FSTYPE,PARTTYPE", loopDev).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("lsblk: %w\noutput: %s", err, partOut)
+	}
+
+	// parsePairsField extracts the value of a key from an lsblk --pairs line.
+	// lsblk --pairs lines look like: NAME="loop0p1" FSTYPE="" PARTTYPE="..."
+	parsePairsField := func(line, key string) string {
+		prefix := key + `="`
+		idx := strings.Index(line, prefix)
+		if idx < 0 {
+			return ""
+		}
+		rest := line[idx+len(prefix):]
+		end := strings.Index(rest, `"`)
+		if end < 0 {
+			return rest
+		}
+		return rest[:end]
+	}
+
+	// biosboot GUID (GPT partition type for GRUB BIOS boot area).
+	const biosbootGUID = "21686148-6449-6e6f-744e-656564454649"
+
+	// loopBase is e.g. "loop0". kpartx creates /dev/mapper/loop0p1, loop0p2, ...
+	loopBase := filepath.Base(loopDev)
+
+	// mapperDevForPartition returns the kpartx device-mapper path for a partition.
+	// lsblk returns NAME="loop0p1" for a partition on /dev/loop0.
+	// kpartx creates /dev/mapper/loop0p1 for that partition.
+	mapperDevForPartition := func(name string) string {
+		// name is e.g. "loop0p1". kpartx maps it to /dev/mapper/loop0p1.
+		return "/dev/mapper/" + name
+	}
+
+	var rootDev, bootDev, espDev string
+
+	for _, line := range strings.Split(strings.TrimSpace(string(partOut)), "\n") {
+		name := parsePairsField(line, "NAME")
+		fstype := parsePairsField(line, "FSTYPE")
+		parttype := parsePairsField(line, "PARTTYPE")
+
+		if name == "" || name == loopBase {
+			continue // skip header or the loop device itself
+		}
+
+		// Use the kpartx device-mapper path, not /dev/loopNpM.
+		// The kpartx mapper devices are reliably mountable even on kernels
+		// where /dev/loopNpM cannot be opened.
+		dev := mapperDevForPartition(name)
+		if _, statErr := os.Stat(dev); statErr != nil {
+			continue
+		}
+
+		// Skip biosboot partitions — identified by GUID (no filesystem).
+		if strings.EqualFold(parttype, biosbootGUID) {
+			continue
+		}
+
+		// Detect the ESP (EFI System Partition): vfat filesystem.
+		// Anaconda always formats the ESP as vfat; this is the canonical indicator.
+		if fstype == "vfat" && espDev == "" {
+			espDev = dev
+			continue
+		}
+
+		// Skip other non-data filesystems (no fstype, biosboot by name).
+		if fstype == "" || strings.EqualFold(fstype, "biosboot") {
+			continue
+		}
+
+		// Heuristic: if we haven't found a root yet, probe the mount point.
+		mp := probeMountPoint(dev)
+		switch {
+		case mp == "/" || rootDev == "":
+			if rootDev == "" || mp == "/" {
+				rootDev = dev
+			}
+		case mp == "/boot" && bootDev == "":
+			bootDev = dev
+		}
+	}
+
+	if rootDev == "" {
+		return fmt.Errorf("extract: could not identify root partition on %s — check lsblk output: %s",
+			opts.RawDiskPath, string(partOut))
+	}
+
+	// ── Mount and rsync root partition ───────────────────────────────────
+	rootMnt, err := os.MkdirTemp("", "clustr-root-*")
+	if err != nil {
+		return fmt.Errorf("create root mount: %w", err)
+	}
+	defer os.RemoveAll(rootMnt)
+
+	if out, err := exec.Command("mount", rootDev, rootMnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount root %s: %w\noutput: %s", rootDev, err, string(out))
+	}
+	defer func() { _ = exec.Command("umount", "-l", rootMnt).Run() }()
+
+	// If there is a separate /boot partition, mount it under the root mount
+	// so rsync picks it up naturally.
+	if bootDev != "" {
+		bootMnt := filepath.Join(rootMnt, "boot")
+		if err := os.MkdirAll(bootMnt, 0o755); err != nil {
+			return fmt.Errorf("create boot mount point: %w", err)
+		}
+		if out, err := exec.Command("mount", "-o", "ro", bootDev, bootMnt).CombinedOutput(); err != nil {
+			// Non-fatal: log and continue — we'll get /boot from the root partition
+			// if the installer put it there instead of on a separate partition.
+			_ = string(out) // suppress unused variable
+		} else {
+			defer func() { _ = exec.Command("umount", "-l", bootMnt).Run() }()
+		}
+	}
+
+	// If an ESP was detected, mount it at /boot/efi so rsync captures
+	// grubx64.efi, shimx64.efi, and other EFI binaries (ADR-0009).
+	// Anaconda's 3-partition GPT layout places these on a vfat ESP that is
+	// distinct from /boot; without this mount the ESP contents are never included
+	// in the rootfs blob and deploy finalize fails with "grubx64.efi missing".
+	if espDev != "" {
+		efiMnt := filepath.Join(rootMnt, "boot", "efi")
+		if err := os.MkdirAll(efiMnt, 0o755); err != nil {
+			return fmt.Errorf("create ESP mount point: %w", err)
+		}
+		if out, err := exec.Command("mount", "-o", "ro", espDev, efiMnt).CombinedOutput(); err != nil {
+			// Non-fatal: log and continue — deploy will fail later with a clear
+			// message if grubx64.efi is missing, which is preferable to a hard
+			// extraction error on systems where the ESP probe is a false positive.
+			_ = string(out) // suppress unused variable
+		} else {
+			defer func() { _ = exec.Command("umount", "-l", efiMnt).Run() }()
+		}
+	}
+
+	// rsync the full mounted tree.
+	if err := rsyncExtracted(rootMnt+"/", opts.RootfsDestDir); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// probeMountPoint attempts to identify the likely mount point of a block device
+// by probing its filesystem label or by mounting it read-only and checking for
+// canonical marker files.
+func probeMountPoint(dev string) string {
+	// Try blkid for a PARTLABEL first (fast, no mount required).
+	out, err := exec.Command("blkid", "-o", "value", "-s", "PARTLABEL", dev).CombinedOutput()
+	if err == nil {
+		label := strings.ToLower(strings.TrimSpace(string(out)))
+		switch label {
+		case "root", "/":
+			return "/"
+		case "boot", "/boot":
+			return "/boot"
+		}
+	}
+
+	// Try LABEL.
+	out, err = exec.Command("blkid", "-o", "value", "-s", "LABEL", dev).CombinedOutput()
+	if err == nil {
+		label := strings.ToLower(strings.TrimSpace(string(out)))
+		switch label {
+		case "root":
+			return "/"
+		case "boot":
+			return "/boot"
+		}
+	}
+
+	// Last resort: mount read-only and look for /etc/os-release (root marker).
+	mnt, err := os.MkdirTemp("", "clustr-probe-*")
+	if err != nil {
+		return ""
+	}
+	defer os.RemoveAll(mnt)
+
+	if err := unix.Mount(dev, mnt, "auto", unix.MS_RDONLY, ""); err != nil {
+		return ""
+	}
+	defer func() { _ = unix.Unmount(mnt, unix.MNT_DETACH) }()
+
+	if _, err := os.Stat(filepath.Join(mnt, "etc", "os-release")); err == nil {
+		return "/"
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "vmlinuz")); err == nil {
+		return "/boot"
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "grub2")); err == nil {
+		return "/boot"
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "grub")); err == nil {
+		return "/boot"
+	}
+	return ""
+}
+
+// contentOnlyExcludes lists the rsync --exclude arguments that strip all
+// layout-specific state from an installed rootfs before it is packed into a
+// content-only image tarball (ADR-0009).
+//
+// These paths fall into three categories:
+//
+//  1. Boot identity — files whose content is unique to the machine-id that
+//     Anaconda used during installation. They must be absent from the image
+//     so the deployer can write fresh copies that reference the target node's
+//     actual machine-id and disk topology.
+//     Includes: /etc/fstab, /etc/machine-id, /var/lib/dbus/machine-id,
+//               BLS boot entries, grub.cfg, grubenv.
+//
+//  2. Bootloader binaries — grub2 modules and EFI binaries are
+//     firmware/target-specific; they are re-installed by grub2-install at
+//     deploy time for the target node's firmware type (BIOS or UEFI).
+//     Including them in the image would pin the image to the firmware type
+//     of the build VM, breaking cross-firmware deployments.
+//
+//  3. Anaconda artefacts — anything the installer wrote that is specific to
+//     the install session (e.g. /root/anaconda-ks.cfg, installer logs).
+//
+// Paths use rsync glob syntax. Trailing /** is used for directory subtrees.
+var contentOnlyExcludes = []string{
+	// ── Boot identity ────────────────────────────────────────────────────────
+	// /etc/fstab: empty placeholder; deployer writes the real one with UUIDs
+	// and any operator-configured extra mounts.
+	"--exclude=/etc/fstab",
+	// /etc/machine-id and its dbus symlink: regenerated on first boot by
+	// systemd-firstboot or dbus-uuidgen.
+	"--exclude=/etc/machine-id",
+	"--exclude=/var/lib/dbus/machine-id",
+	// BLS (Boot Loader Specification) entries: Rocky 9+ places one
+	// conf file per kernel per machine-id under /boot/loader/entries/.
+	// The deployer writes fresh entries with the target kernel and UUID.
+	"--exclude=/boot/loader/entries/*.conf",
+	// grub.cfg / grubenv: regenerated by grub2-mkconfig at deploy time.
+	// grubenv holds save_env state (last-boot menu selection) that can cause
+	// the wrong kernel to boot when carried from the build VM.
+	"--exclude=/boot/grub2/grub.cfg",
+	"--exclude=/boot/grub2/grubenv",
+	// ── Bootloader binaries ──────────────────────────────────────────────────
+	// grubx64.efi and shimx64.efi MUST be present in the image (ADR-0009).
+	// The deploy initramfs has no DNS/network access so dnf install is not a
+	// viable fallback — include these binaries from the ESP at image-build time.
+	// Only grub.cfg is excluded (regenerated per-deploy by grub2-mkconfig) and
+	// EFI/BOOT/ (the removable fallback path written fresh by grub2-install --removable).
+	"--exclude=/boot/efi/EFI/*/grub.cfg",
+	"--exclude=/boot/efi/EFI/BOOT/**",
+	// BIOS grub modules: re-installed by grub2-install --target=i386-pc.
+	"--exclude=/boot/grub2/i386-pc/**",
+	// UEFI grub modules in /boot/grub2/x86_64-efi/ are excluded: grub2-install
+	// --target=x86_64-efi reads its modules from /usr/lib/grub/x86_64-efi/ inside
+	// the chroot (the deployed OS RPM-owned copy), not from /boot/grub2/x86_64-efi/.
+	// The modules in /boot/ are a generated cache written by grub2-install itself;
+	// they are re-created at deploy time and must not be pinned to the build VM.
+	"--exclude=/boot/grub2/x86_64-efi/**",
+	// ── Anaconda artefacts ────────────────────────────────────────────────────
+	// Kickstart that Anaconda saved to /root — build-session specific.
+	"--exclude=/root/anaconda-ks.cfg",
+	"--exclude=/root/original-ks.cfg",
+}
+
+// ContentOnlyExcludes returns the rsync exclude arguments used by
+// rsyncExtracted to produce a content-only image tarball (ADR-0009).
+// Exported for testing and introspection.
+func ContentOnlyExcludes() []string {
+	return contentOnlyExcludes
+}
+
+// rsyncExtracted rsyncs an extracted rootfs, preserving all attributes and
+// symlinks literally (dangling symlinks are copied as-is, not dereferenced).
+//
+// Exit code 23 from rsync means "some files/attrs were not transferred". On a
+// freshly installed Rocky/RHEL system this is almost always caused by dangling
+// symlinks — authselect-managed links (/etc/nsswitch.conf, /etc/pam.d/*-auth,
+// etc.), kernel-devel build-dir links, and firmware package oddities. These are
+// intentionally dangling and are safe to carry into the image as-is; they
+// resolve correctly on first boot. We tolerate exit 23 when every error line
+// matches "symlink has no referent". Any other exit-23 cause (I/O error,
+// permission denied, etc.) is still surfaced as an error.
+func rsyncExtracted(src, dst string) error {
+	// --one-file-system is intentionally NOT used here: we want to cross
+	// the /boot mount boundary (already mounted at rootMnt/boot above).
+	// Pseudo-filesystems (/proc, /sys, /dev) don't exist in the installed image.
+	// NOTE: do NOT pass --copy-links / -L / --copy-unsafe-links / --safe-links:
+	// those flags dereference symlinks and turn dangling ones into errors.
+	// -l (preserve symlinks) is already implied by -a.
+	//
+	// contentOnlyExcludes strips layout-specific boot state so the resulting
+	// rootfs is firmware-agnostic and can be deployed to any node (ADR-0009).
+	args := append([]string{"-aAXH", "--numeric-ids"}, contentOnlyExcludes...)
+	args = append(args, src, dst)
+	cmd := exec.Command("rsync", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr // rsync mixes diagnostic output on stdout too
+
+	err := cmd.Run()
+	if err == nil {
+		return nil
+	}
+
+	// Check for exit code 23 (partial transfer due to errors).
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 23 {
+		return fmt.Errorf("rsync extracted rootfs: %w\noutput: %s", err, stderr.String())
+	}
+
+	// Exit 23: inspect each error line. Tolerate only "symlink has no referent".
+	errOutput := stderr.String()
+	for _, line := range strings.Split(errOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// rsync prefixes its own messages with "rsync:" or "rsync error:" — skip those.
+		if strings.HasPrefix(line, "rsync:") || strings.HasPrefix(line, "rsync error:") ||
+			strings.HasPrefix(line, "sent ") || strings.HasPrefix(line, "total size") {
+			continue
+		}
+		// The only tolerated per-file warning.
+		if strings.Contains(line, "symlink has no referent") {
+			continue
+		}
+		// Any other error line is a real problem.
+		return fmt.Errorf("rsync extracted rootfs (exit 23, non-symlink error): %s\nfull output: %s", line, errOutput)
+	}
+
+	// All errors were dangling symlinks — this is expected and safe to ignore.
+	return nil
+}

@@ -1,0 +1,11 @@
+Allocation Expiration Warning — {{.GroupName}}
+
+Your HPC allocation for project group "{{.GroupName}}" is set to expire in {{.DaysRemaining}} day{{if ne .DaysRemaining 1}}s{{end}}, on {{.ExpiresAt}}.
+
+After expiration, nodes in this group may be reclaimed. To extend your allocation, please contact your HPC administrator or submit an allocation change request through the portal.
+
+Group: {{.GroupName}}
+Expires: {{.ExpiresAt}}
+Days remaining: {{.DaysRemaining}}
+
+— clustr allocation management

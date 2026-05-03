@@ -1,0 +1,16 @@
+name: cluster-mces-errors
+description: Machine Check Exception (MCE) count is non-zero; delta operator is a Sprint 23 follow-up
+# NOTE: This rule uses op: ">=" against an absolute counter. A true "delta > 0"
+# operator requires Sprint 23 follow-up work. Until then, this fires whenever
+# the cumulative MCE counter is >= 1 on a node. Operators should resolve and
+# reset the counter after acknowledging the event.
+plugin: system
+sensor: mces_count
+threshold:
+  op: ">="
+  value: 1
+duration: 300s
+severity: warn
+notify:
+  webhook: true
+  email: []

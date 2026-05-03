@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/network-profile",
+  "$ref": "#/$defs/NetworkProfile",
+  "$defs": {
+    "BondConfig": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "bond_name": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "vlan_id": {
+          "type": "integer"
+        },
+        "ip_method": {
+          "type": "string"
+        },
+        "ip_cidr": {
+          "type": "string"
+        },
+        "lacp_rate": {
+          "type": "string"
+        },
+        "xmit_hash_policy": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/BondMember"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "profile_id",
+        "bond_name",
+        "mode",
+        "mtu",
+        "vlan_id",
+        "ip_method",
+        "sort_order",
+        "members",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BondMember": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bond_id": {
+          "type": "string"
+        },
+        "match_mac": {
+          "type": "string"
+        },
+        "match_name": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "bond_id",
+        "sort_order"
+      ]
+    },
+    "IBProfile": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "ipoib_mode": {
+          "type": "string"
+        },
+        "ipoib_mtu": {
+          "type": "integer"
+        },
+        "ip_method": {
+          "type": "string"
+        },
+        "pkeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "device_match": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "profile_id",
+        "ipoib_mode",
+        "ipoib_mtu",
+        "ip_method",
+        "pkeys",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "NetworkProfile": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "bonds": {
+          "items": {
+            "$ref": "#/$defs/BondConfig"
+          },
+          "type": "array"
+        },
+        "ib": {
+          "$ref": "#/$defs/IBProfile"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "created_at",
+        "updated_at"
+      ]
+    }
+  }
+}

@@ -1,0 +1,35 @@
+import * as React from "react"
+import { useNavigate } from "@tanstack/react-router"
+import { useSession } from "@/contexts/auth"
+
+/**
+ * SessionGate — wraps protected routes.
+ * Checks the session state on every render and redirects as needed:
+ *   loading        → render nothing (prevents flash of content)
+ *   setup_required → /setup
+ *   unauthed       → /login
+ *   authed         → render children
+ */
+export function SessionGate({ children }: { children: React.ReactNode }) {
+  const { session } = useSession()
+  const navigate = useNavigate()
+
+  React.useEffect(() => {
+    if (session.status === "setup_required") {
+      navigate({ to: "/setup" })
+    } else if (session.status === "unauthed") {
+      navigate({ to: "/login", search: { firstrun: undefined } })
+    }
+  }, [session.status, navigate])
+
+  if (session.status === "loading") {
+    // Blank during auth check — prevents unauthenticated flash.
+    return null
+  }
+
+  if (session.status !== "authed") {
+    return null
+  }
+
+  return <>{children}</>
+}

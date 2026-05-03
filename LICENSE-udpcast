@@ -1,0 +1,27 @@
+udpcast — NOTICE
+
+clustr-serverd bundles two binaries from the udpcast project:
+
+  udp-sender  (installed at /usr/bin/udp-sender)
+  udp-receiver (bundled in the clustr initramfs at /usr/bin/udp-receiver)
+
+These binaries are used for fleet-reimage multicast image delivery
+(clustr Sprint 25 #157). They are NOT part of the clustr source code.
+
+udpcast is distributed under the GNU General Public License, version 2
+or later (GPL-2.0-or-later).
+
+  Source: https://src.fedoraproject.org/rpms/udpcast
+  Version: 20211207
+  License: GPL-2.0-or-later
+
+The corresponding source tarball (udpcast-20211207.tar.gz) is published
+alongside every clustr release on GitHub:
+
+  https://github.com/sqoia-dev/clustr/releases
+
+This satisfies the requirements of GPL-2.0 §3(a). Recipients may obtain
+the source code from the same location as the binary they received.
+
+The full text of the GNU General Public License version 2 is available at:
+  https://www.gnu.org/licenses/old-licenses/gpl-2.0.html

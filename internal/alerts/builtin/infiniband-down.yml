@@ -1,0 +1,14 @@
+name: infiniband-down
+description: InfiniBand port in Down state
+plugin: infiniband
+sensor: state
+labels:
+  port: ".*"
+threshold:
+  op: "=="
+  value: 0
+duration: 60s
+severity: critical
+notify:
+  webhook: true
+  email: []

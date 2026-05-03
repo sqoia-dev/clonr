@@ -1,0 +1,438 @@
+// builder.go — Slurm build-from-source pipeline.
+// StartBuild kicks off an async build goroutine and returns the build ID immediately.
+// executeBuild runs the full pipeline: download → deps → configure → make → package.
+package slurm
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+
+	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/internal/privhelper"
+)
+
+// BuildConfig is the input for a Slurm build.
+type BuildConfig struct {
+	SlurmVersion   string   `json:"slurm_version"`   // e.g. "24.05.3"
+	Arch           string   `json:"arch"`            // e.g. "x86_64"
+	ConfigureFlags []string `json:"configure_flags"` // extra ./configure flags
+}
+
+// slurmBuildsDir is the permanent artifact storage directory.
+const slurmBuildsDir = "/var/lib/clustr/slurm-builds"
+
+// slurmWorkspaceBase is the root for per-build workspaces.
+const slurmWorkspaceBase = "/var/lib/clustr/builds"
+
+// StartBuild kicks off an async build. Creates the DB record (status: "building")
+// and returns the build ID immediately. Compilation runs in a background goroutine.
+func (m *Manager) StartBuild(ctx context.Context, cfg BuildConfig, initiatedBy string) (string, error) {
+	if cfg.SlurmVersion == "" {
+		return "", fmt.Errorf("slurm: build: slurm_version is required")
+	}
+	if cfg.Arch == "" {
+		cfg.Arch = runtime.GOARCH
+	}
+	if !isSafeVersionString(cfg.SlurmVersion) {
+		return "", fmt.Errorf("slurm: build: invalid version string %q", cfg.SlurmVersion)
+	}
+	if !isSafeVersionString(cfg.Arch) {
+		return "", fmt.Errorf("slurm: build: invalid arch string %q", cfg.Arch)
+	}
+
+	buildID := uuid.New().String()
+	now := time.Now().Unix()
+
+	row := db.SlurmBuildRow{
+		ID:             buildID,
+		Version:        cfg.SlurmVersion,
+		Arch:           cfg.Arch,
+		Status:         "building",
+		ConfigureFlags: cfg.ConfigureFlags,
+		InitiatedBy:    initiatedBy,
+		LogKey:         buildID,
+		StartedAt:      now,
+	}
+	if err := m.db.SlurmCreateBuild(ctx, row); err != nil {
+		return "", fmt.Errorf("slurm: build: create DB record: %w", err)
+	}
+
+	log.Info().
+		Str("build_id", buildID).
+		Str("version", cfg.SlurmVersion).
+		Str("arch", cfg.Arch).
+		Msg("slurm: build started")
+
+	go func() {
+		bgCtx := context.Background()
+		if err := m.executeBuild(bgCtx, buildID, cfg); err != nil {
+			log.Error().Err(err).Str("build_id", buildID).Msg("slurm: build pipeline failed")
+		}
+		// Close SSE log stream for this build so waiting subscribers see EOF.
+		m.finishBuildLog(buildID)
+	}()
+
+	return buildID, nil
+}
+
+// executeBuild runs the complete Slurm build pipeline.
+func (m *Manager) executeBuild(ctx context.Context, buildID string, cfg BuildConfig) error {
+	m.logBuildLine(buildID, fmt.Sprintf("[build] starting Slurm %s for %s", cfg.SlurmVersion, cfg.Arch))
+
+	// Step 1: Create workspace.
+	workspace := filepath.Join(slurmWorkspaceBase, buildID)
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("mkdir workspace: %w", err))
+	}
+
+	// Step 2: Download Slurm tarball.
+	tarURL := fmt.Sprintf("https://download.schedmd.com/slurm/slurm-%s.tar.bz2", cfg.SlurmVersion)
+	tarPath := filepath.Join(workspace, fmt.Sprintf("slurm-%s.tar.bz2", cfg.SlurmVersion))
+	m.logBuildLine(buildID, fmt.Sprintf("[build] downloading %s", tarURL))
+	if err := downloadFile(ctx, tarURL, tarPath); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("download slurm tarball: %w", err))
+	}
+
+	// Step 3: Extract tarball.
+	srcDir := filepath.Join(workspace, "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("mkdir srcdir: %w", err))
+	}
+	m.logBuildLine(buildID, "[build] extracting tarball")
+	if err := runTar(ctx, "-xjf", tarPath, "-C", srcDir); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("extract tarball: %w", err))
+	}
+	topDir, err := findTopDir(srcDir)
+	if err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("find top src dir: %w", err))
+	}
+
+	// Step 4: Install host build-time dependencies via clustr-privhelper.
+	// This step surfaces the package list to the operator before proceeding so
+	// there are no silent dnf installs. Failure is a hard stop — the build
+	// cannot proceed without the required devel packages.
+	buildDeps := slurmBuildDeps()
+	m.logBuildLine(buildID, fmt.Sprintf("[build] Installing packages: %s", strings.Join(buildDeps, ", ")))
+	if err := privhelper.DnfInstall(ctx, buildDeps); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("install build deps: %w", err))
+	}
+	m.logBuildLine(buildID, "[build] build deps installed")
+
+	// Step 4b: Build source dependencies (munge, hwloc, UCX, PMIx, libjwt).
+	m.logBuildLine(buildID, "[build] building source dependencies")
+	depPaths, err := m.buildDependencies(ctx, buildID, cfg.SlurmVersion, cfg.Arch, workspace)
+	if err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("build dependencies: %w", err))
+	}
+
+	// Step 5: Configure Slurm.
+	stagingDir := filepath.Join(workspace, "staging")
+	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("mkdir staging: %w", err))
+	}
+	configureArgs := buildSlurmConfigureArgs(cfg, depPaths)
+	m.logBuildLine(buildID, fmt.Sprintf("[build] ./configure %s", strings.Join(configureArgs, " ")))
+	if err := runCmd(ctx, topDir, "./configure", configureArgs...); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("configure: %w", err))
+	}
+
+	// Step 6: Compile.
+	ncpu := fmt.Sprintf("%d", runtime.NumCPU())
+	m.logBuildLine(buildID, fmt.Sprintf("[build] make -j%s", ncpu))
+	if err := runCmd(ctx, topDir, "make", "-j"+ncpu); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("make: %w", err))
+	}
+
+	// Step 7: Install to staging.
+	m.logBuildLine(buildID, fmt.Sprintf("[build] make install DESTDIR=%s", stagingDir))
+	if err := runCmd(ctx, topDir, "make", "install", "DESTDIR="+stagingDir); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("make install: %w", err))
+	}
+
+	// Step 8: Package staging directory into a tarball artifact.
+	artifactName := fmt.Sprintf("slurm-%s-%s.tar.gz", cfg.SlurmVersion, cfg.Arch)
+	artifactTmp := filepath.Join(workspace, artifactName)
+	m.logBuildLine(buildID, fmt.Sprintf("[build] packaging artifact %s", artifactName))
+	if err := createTarGz(stagingDir, artifactTmp); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("package artifact: %w", err))
+	}
+
+	// Step 8b: Build signed RPMs and push to clustr-internal-repo.
+	// Non-fatal: RPM packaging failure does NOT abort the build — the tarball
+	// artifact is always produced first (fallback path depends on it).
+	// If the GPG key has not been generated yet, this step is silently skipped.
+	m.logBuildLine(buildID, "[build] building and publishing signed RPMs to clustr-internal-repo")
+	if rpmErr := m.buildSlurmRPMs(ctx, buildID, cfg.SlurmVersion, cfg.Arch, stagingDir); rpmErr != nil {
+		m.logBuildLine(buildID, fmt.Sprintf("[build] WARN: RPM packaging failed (non-fatal, tarball artifact still available): %s", rpmErr.Error()))
+		log.Warn().Err(rpmErr).Str("build_id", buildID).Msg("slurm: build: RPM packaging failed (non-fatal)")
+	}
+
+	// Step 9: Compute checksum.
+	checksum, err := checksumFile(artifactTmp)
+	if err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("checksum artifact: %w", err))
+	}
+	info, err := os.Stat(artifactTmp)
+	if err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("stat artifact: %w", err))
+	}
+	artifactSize := info.Size()
+
+	// Step 10: Move to permanent storage.
+	if err := os.MkdirAll(slurmBuildsDir, 0755); err != nil {
+		return m.failBuild(ctx, buildID, fmt.Errorf("mkdir slurm-builds: %w", err))
+	}
+	artifactDst := filepath.Join(slurmBuildsDir, filepath.Base(artifactName))
+	if err := os.Rename(artifactTmp, artifactDst); err != nil {
+		if err2 := copyFileBytes(artifactTmp, artifactDst); err2 != nil {
+			return m.failBuild(ctx, buildID, fmt.Errorf("move artifact: %w (copy: %v)", err, err2))
+		}
+		_ = os.Remove(artifactTmp)
+	}
+
+	// Step 11: Update DB record.
+	completedAt := time.Now().Unix()
+	if err := m.db.SlurmUpdateBuild(ctx, buildID, db.SlurmBuildUpdate{
+		Status:            "completed",
+		ArtifactPath:      artifactDst,
+		ArtifactChecksum:  checksum,
+		ArtifactSizeBytes: artifactSize,
+		CompletedAt:       &completedAt,
+	}); err != nil {
+		log.Error().Err(err).Str("build_id", buildID).Msg("slurm: build: failed to update DB on completion")
+		return err
+	}
+
+	m.logBuildLine(buildID, fmt.Sprintf("[build] DONE — Slurm %s built successfully", cfg.SlurmVersion))
+	return nil
+}
+
+// failBuild records failure on the build row and returns the wrapped error.
+func (m *Manager) failBuild(ctx context.Context, buildID string, cause error) error {
+	m.logBuildLine(buildID, fmt.Sprintf("[build] FAILED: %s", cause.Error()))
+	completedAt := time.Now().Unix()
+	_ = m.db.SlurmUpdateBuild(ctx, buildID, db.SlurmBuildUpdate{
+		Status:       "failed",
+		ErrorMessage: cause.Error(),
+		CompletedAt:  &completedAt,
+	})
+	return cause
+}
+
+// buildSlurmConfigureArgs constructs the ./configure args for Slurm.
+//
+// Dependency wiring (all with explicit install paths so configure finds the
+// headers/libs we just built rather than system-installed versions):
+//
+//   - --with-munge=<path>  — link against our built libmunge, not system munge
+//   - --with-hwloc=<path>  — topology-aware scheduling
+//   - --with-ucx=<path>    — MPI high-speed network transport
+//   - --with-pmix=<path>   — PMI-2/PMIx for MPI process management (needs hwloc)
+//
+// ConfigureFlags override: if the operator passes a flag that starts with the
+// same --with-<dep>= prefix as an auto-wired dependency path (e.g.
+// --with-ucx=/usr/local), the auto-wired flag is skipped and the operator's
+// flag wins. This prevents duplicate --with-<dep>= entries in the configure
+// command and ensures the operator can see exactly which flags are active in
+// the build log.
+func buildSlurmConfigureArgs(cfg BuildConfig, depPaths map[string]string) []string {
+	// Build an operator-override set so auto-wired dep paths can be skipped when
+	// the operator has supplied their own --with-<dep>= value.
+	operatorOverrides := make(map[string]bool)
+	for _, f := range cfg.ConfigureFlags {
+		// Extract the --with-<key>= prefix (up to and including the "=").
+		// Flags like "--with-ucx=/usr/local" → key "with-ucx".
+		// Flags like "--with-pmix" (no "=") → key "with-pmix".
+		if !strings.HasPrefix(f, "--") {
+			continue
+		}
+		bare := strings.TrimPrefix(f, "--")
+		key := bare
+		if idx := strings.IndexByte(bare, '='); idx >= 0 {
+			key = bare[:idx]
+		}
+		operatorOverrides[key] = true
+	}
+
+	args := []string{
+		"--prefix=/usr/local",
+		"--sysconfdir=/etc/slurm",
+		"--enable-pam",
+	}
+
+	// Wire each dependency with an explicit path when available, unless the
+	// operator has supplied their own --with-<dep> flag in ConfigureFlags.
+	if !operatorOverrides["with-munge"] {
+		if p, ok := depPaths["munge"]; ok && p != "" {
+			args = append(args, "--with-munge="+p)
+		} else {
+			args = append(args, "--with-munge")
+		}
+	}
+	if !operatorOverrides["with-hwloc"] {
+		if p, ok := depPaths["hwloc"]; ok && p != "" {
+			args = append(args, "--with-hwloc="+p)
+		}
+	}
+	if !operatorOverrides["with-ucx"] {
+		if p, ok := depPaths["ucx"]; ok && p != "" {
+			args = append(args, "--with-ucx="+p)
+		}
+	}
+	if !operatorOverrides["with-pmix"] {
+		if p, ok := depPaths["pmix"]; ok && p != "" {
+			args = append(args, "--with-pmix="+p)
+		}
+	}
+	if !operatorOverrides["with-jwt"] {
+		if p, ok := depPaths["libjwt"]; ok && p != "" {
+			args = append(args, "--with-jwt="+p)
+		} else {
+			args = append(args, "--with-jwt")
+		}
+	}
+
+	// Append operator-supplied flags last. Because auto-wired flags for any
+	// dep that the operator overrode were skipped above, the configure command
+	// line is clean: each --with-<dep>= appears exactly once.
+	return append(args, cfg.ConfigureFlags...)
+}
+
+// slurmBuildDeps returns the list of system packages that must be present
+// on the build host before the Slurm source build can proceed. These are
+// installed via clustr-privhelper dnf-install (not built from source).
+//
+// All package names here must be present in build/slurm/deps_matrix.json.
+func slurmBuildDeps() []string {
+	return []string{
+		"gcc",
+		"gcc-c++",
+		"make",
+		"autoconf",
+		"automake",
+		"libtool",
+		"openssl-devel",
+		"zlib-devel",
+		"libcurl-devel",
+		"pam-devel",
+		"perl",
+		"python3",
+		"rpm-build",
+		"readline-devel",
+		"bzip2-devel",
+	}
+}
+
+// runTar runs the tar command with explicit flag args (no shell).
+// Setpgid: true isolates the tar subprocess from the clustr-serverd process group
+// so a server restart during extraction does not kill it mid-stream.
+func runTar(ctx context.Context, flags ...string) error {
+	cmd := exec.CommandContext(ctx, "tar", flags...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tar %v: %w\noutput: %s", flags, err, strings.TrimRight(string(out), "\n"))
+	}
+	return nil
+}
+
+// isSafeVersionString allows only alphanumeric, '.', '-', '_'.
+func isSafeVersionString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		ok := (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			c == '.' || c == '-' || c == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// copyFileBytes copies src to dst.
+func copyFileBytes(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// ─── Artifact signed URL ──────────────────────────────────────────────────────
+
+// GenerateArtifactToken creates an HMAC-SHA256 token for artifact download.
+// expiresAt is encoded as a Unix timestamp in the payload.
+func (m *Manager) GenerateArtifactToken(buildID string, expiresAt time.Time) (string, error) {
+	secret, err := m.secretEncryptionKey()
+	if err != nil {
+		return "", fmt.Errorf("artifact token: %w", err)
+	}
+	payload := buildID + ":" + fmt.Sprintf("%d", expiresAt.Unix())
+	mac := computeHMACSHA256(secret, payload)
+	return mac, nil
+}
+
+// ValidateArtifactToken validates the HMAC token for an artifact download request.
+func (m *Manager) ValidateArtifactToken(buildID, token, expires string) bool {
+	secret, err := m.secretEncryptionKey()
+	if err != nil {
+		return false
+	}
+	var expiresUnix int64
+	if _, err := fmt.Sscanf(expires, "%d", &expiresUnix); err != nil {
+		return false
+	}
+	if time.Now().Unix() > expiresUnix {
+		return false
+	}
+	payload := buildID + ":" + expires
+	expected := computeHMACSHA256(secret, payload)
+	return hmac.Equal([]byte(token), []byte(expected))
+}
+
+// GenerateArtifactURL constructs a signed artifact download URL valid for 1 hour.
+func (m *Manager) GenerateArtifactURL(buildID string) (string, error) {
+	expires := time.Now().Add(time.Hour)
+	token, err := m.GenerateArtifactToken(buildID, expires)
+	if err != nil {
+		return "", err
+	}
+	// Use "sig" instead of "token" to avoid conflict with extractBearerToken in
+	// the apiKeyAuth middleware, which falls back to ?token= for WebSocket auth.
+	// If we used ?token= the HMAC value would be treated as a Bearer key, looked
+	// up in the DB, and rejected with 401 before the handler even runs.
+	return fmt.Sprintf("/api/v1/slurm/builds/%s/artifact?sig=%s&expires=%d",
+		buildID, token, expires.Unix()), nil
+}
+
+// computeHMACSHA256 returns hex-encoded HMAC-SHA256(key, payload).
+func computeHMACSHA256(key []byte, payload string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
+}

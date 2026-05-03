@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/deploy-progress",
+  "$ref": "#/$defs/DeployProgress",
+  "$defs": {
+    "DeployProgress": {
+      "properties": {
+        "node_mac": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "phase_index": {
+          "type": "integer"
+        },
+        "phase_total": {
+          "type": "integer"
+        },
+        "bytes_done": {
+          "type": "integer"
+        },
+        "bytes_total": {
+          "type": "integer"
+        },
+        "speed_bps": {
+          "type": "integer"
+        },
+        "eta_seconds": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_mac",
+        "phase",
+        "phase_index",
+        "phase_total",
+        "bytes_done",
+        "bytes_total",
+        "speed_bps",
+        "eta_seconds",
+        "updated_at"
+      ]
+    }
+  }
+}

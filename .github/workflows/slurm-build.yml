@@ -1,0 +1,1208 @@
+# .github/workflows/slurm-build.yml
+#
+# Slurm RPM build pipeline.
+#
+# Trigger: tag push matching slurm-v* (e.g. slurm-v24.11.4-clustr4)
+#
+# What this does:
+#   1. Inside a pinned Rocky 9 container, downloads the SchedMD tarball,
+#      verifies it via dual SHA256 check (pinned in versions.yml + live
+#      SchedMD SHA256 file), builds libjwt RPM from source, builds Slurm RPMs
+#      with rpmbuild -ta, signs all RPMs, runs createrepo_c, generates
+#      manifest.json, tarballs the bundle.
+#   2. Creates a GitHub Release and attaches: signed RPMs, bundle tarball,
+#      bundle .sha256, manifest.json, and the clustr public key.
+#
+# See docs/slurm-build-pipeline.md for full design rationale.
+#
+# Changes in clustr2 (PR6):
+#   - Build libjwt from source so deployed nodes never need EPEL for libjwt.so.1
+#   - Add http-parser-devel to mandatory deps to enable slurmrestd build
+#   - Add binary-presence verification gate (slurmctld, slurmd, slurmdbd,
+#     slurmrestd, sackd) — hard-fails build if expected binaries are missing
+#
+# Changes in clustr3:
+#   - Remove mariadb-devel and hwloc-devel from build deps so the resulting RPMs
+#     do NOT carry libmariadb.so.3 or libhwloc.so.15 as hard runtime deps.
+#     Both were auto-detected by Slurm's configure when the devel headers were
+#     present in the container, even without explicit --with-mysql/--with-hwloc.
+#     These libraries are NOT in the Rocky 9 minimal base image and their absence
+#     caused dnf dep resolution to fail during offline (--disablerepo=*) install.
+#   - Remove rdma-core-devel explicitly before rpmbuild to prevent OFED/IB
+#     auto-detection by Slurm's configure (infiniband-diags, which provides
+#     libibmad.so.5, requires perl — not in minimal base image).
+#   - Replace IB/MariaDB bundle RPMs with hwloc-libs (for slurmd NUMA topology;
+#     hwloc-libs has no problematic transitive deps in the minimal image).
+#   - mariadb-connector-c, mariadb-connector-c-config, infiniband-diags,
+#     libibumad removed from bundle (no longer needed by rebuilt RPMs).
+#
+# Changes in clustr4:
+#   - Add pkgconf, pkgconf-m4, pkgconf-pkg-config, libpkgconf to bundle.
+#     The base slurm RPM has a hard Requires: bash-completion, and
+#     bash-completion Requires: /usr/bin/pkg-config, which is provided by
+#     pkgconf-pkg-config. None of these packages are in the Rocky 9 minimal
+#     base image, so the chroot dnf install during deploy finalize failed
+#     silently (non-fatal) leaving nodes without Slurm installed.
+#
+# Changes in clustr5 (GAP-17 hardening):
+#   - Split bundle into two subdirs: el9-x86_64/ (clustr-signed) and
+#     el9-x86_64-deps/ (Rocky/EPEL passthrough).  Each gets its own repodata.
+#   - Capture Rocky 9 + EPEL 9 GPG keys from the build container and verify
+#     their fingerprints against the values pinned in versions.yml.  Mismatch
+#     = hard build failure.
+#   - Run rpm -K on every dep RPM against the rocky+EPEL keyring before
+#     bundling.  A dep RPM that fails signature verification = hard build failure.
+#   - Write RPM-GPG-KEY-rocky-9 and RPM-GPG-KEY-EPEL-9 into the bundle root
+#     alongside RPM-GPG-KEY-clustr.
+#   - Update manifest.json to schema v3 with has_deps_subdir: true.
+#   - Remove gpgcheck=0 from the chroot .repo file; replaced with two-stanza
+#     gpgcheck=1 (handled in finalize.go, not in this workflow).
+#
+# NON-GOALS (deferred to later PRs/sprints):
+#   - workflow_dispatch and schedule triggers (sprint 2)
+#   - EL10 / aarch64 build targets (sprint 2)
+#   - cosign signing (sprint 2)
+#   - clustr-server bundle-install wiring (PR3/PR4)
+
+on:
+  push:
+    tags:
+      - "slurm-v*"
+
+jobs:
+  build:
+    name: Build Slurm RPMs (${{ matrix.target.os }}-${{ matrix.target.arch }})
+    runs-on: ubuntu-latest
+
+    # Run inside the pinned Rocky Linux 9 container so rpmbuild and all
+    # EL9 toolchain deps are native.  The container digest pins the exact
+    # image layer for reproducibility; update via PR when needed.
+    #
+    # Decision: use container: at job level so all steps share the same
+    # container filesystem without explicit volume mounts.
+    container:
+      image: ${{ matrix.target.container_digest }}
+      options: --user root
+
+    strategy:
+      fail-fast: true
+      matrix:
+        target:
+          # EL9 x86_64 is the MVP target.  EL10 and aarch64 deferred.
+          - os: el9
+            arch: x86_64
+            container_digest: "docker.io/rockylinux/rockylinux:9@sha256:ee90dc0e23c2f59af63886aed78c495fc847c8f0af7e825f48746547ddb7fbe2"
+
+    outputs:
+      bundle_name: ${{ steps.bundle.outputs.bundle_name }}
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+      slurm_version: ${{ steps.versions.outputs.slurm_version }}
+      clustr_release: ${{ steps.versions.outputs.clustr_release }}
+      libjwt_version: ${{ steps.versions.outputs.libjwt_version }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      # ── Parse versions.yml ────────────────────────────────────────────────
+      # Decision: use grep+sed instead of yq to avoid adding a tool dep to
+      # the Rocky container.  versions.yml is a simple flat YAML file so
+      # the grep approach is reliable and the field names are stable.
+      - name: Read versions.yml
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSIONS_FILE="build/slurm/versions.yml"
+
+          SLURM_VERSION=$(grep -E '^\s+version:' "$VERSIONS_FILE" | head -1 \
+            | sed 's/.*version: *"\?\([^"]*\)"\?.*/\1/')
+          SLURM_SHA256=$(grep 'tarball_sha256:' "$VERSIONS_FILE" \
+            | sed 's/.*tarball_sha256: *"\?\([^"]*\)"\?.*/\1/')
+          CLUSTR_RELEASE=$(grep '^clustr_release:' "$VERSIONS_FILE" \
+            | sed 's/clustr_release: *\([0-9]*\).*/\1/')
+
+          # Parse libjwt dep section. The version: key appears multiple times
+          # (slurm and libjwt both have it), so we use awk to enter the
+          # deps.libjwt block and extract from there.
+          LIBJWT_VERSION=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /version:/ {
+              gsub(/.*version: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          LIBJWT_SHA256=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /sha256:/ {
+              gsub(/.*sha256: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          LIBJWT_URL=$(awk '
+            /^deps:/ { in_deps=1 }
+            in_deps && /libjwt:/ { in_libjwt=1 }
+            in_libjwt && /source_url:/ {
+              gsub(/.*source_url: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+
+          # GAP-17: Parse pinned fingerprints for Rocky 9 and EPEL 9 dep signing keys.
+          # These are in the dep_signing_keys block.  Use awk to enter each sub-block.
+          ROCKY9_FINGERPRINT=$(awk '
+            /^dep_signing_keys:/ { in_keys=1 }
+            in_keys && /rocky9:/ { in_rocky=1 }
+            in_rocky && /fingerprint:/ {
+              gsub(/.*fingerprint: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+          EPEL9_FINGERPRINT=$(awk '
+            /^dep_signing_keys:/ { in_keys=1 }
+            in_keys && /epel9:/ { in_epel=1 }
+            in_epel && /fingerprint:/ {
+              gsub(/.*fingerprint: *"?/, ""); gsub(/".*/, ""); print; exit
+            }
+          ' "$VERSIONS_FILE")
+
+          if [ -z "${ROCKY9_FINGERPRINT}" ] || [ -z "${EPEL9_FINGERPRINT}" ]; then
+            echo "FATAL: could not parse dep_signing_keys fingerprints from versions.yml"
+            exit 1
+          fi
+
+          echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "slurm_sha256=${SLURM_SHA256}" | tee -a "$GITHUB_OUTPUT"
+          echo "clustr_release=${CLUSTR_RELEASE}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_version=${LIBJWT_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_sha256=${LIBJWT_SHA256}" | tee -a "$GITHUB_OUTPUT"
+          echo "libjwt_url=${LIBJWT_URL}" | tee -a "$GITHUB_OUTPUT"
+          echo "rocky9_fingerprint=${ROCKY9_FINGERPRINT}" | tee -a "$GITHUB_OUTPUT"
+          echo "epel9_fingerprint=${EPEL9_FINGERPRINT}" | tee -a "$GITHUB_OUTPUT"
+
+          echo "--- versions parsed ---"
+          echo "  slurm_version      : ${SLURM_VERSION}"
+          echo "  slurm_sha256       : ${SLURM_SHA256}"
+          echo "  clustr_release     : ${CLUSTR_RELEASE}"
+          echo "  libjwt_version     : ${LIBJWT_VERSION}"
+          echo "  libjwt_sha256      : ${LIBJWT_SHA256}"
+          echo "  libjwt_url         : ${LIBJWT_URL}"
+          echo "  rocky9_fingerprint : ${ROCKY9_FINGERPRINT}"
+          echo "  epel9_fingerprint  : ${EPEL9_FINGERPRINT}"
+
+      # ── Install EPEL + build dependencies ────────────────────────────────
+      # Repo setup required before the main install:
+      #   1. epel-release: provides munge-devel, libjwt-devel, createrepo_c, etc.
+      #   2. CRB (CodeReady Builder): provides json-c-devel, libyaml-devel and
+      #      other devel headers that EPEL depends on but ships in CRB on EL9.
+      #
+      # INTENTIONALLY OMITTED from build deps (clustr3 change):
+      #   - hwloc-devel: when present, Slurm's configure auto-detects hwloc and
+      #     slurm-slurmd gets a hard dep on libhwloc.so.15.  That library is NOT
+      #     in the Rocky 9 minimal base image and its transitive presence caused
+      #     offline dnf install to fail.  Removing hwloc-devel from build deps
+      #     disables NUMA topology awareness in slurmd — acceptable for lab use.
+      #
+      #
+      # Optional packages (freeipmi-devel, rrdtool-devel, http-parser-devel):
+      # These enable optional Slurm features (IPMI, rrd, REST). They may not
+      # be available in EPEL+CRB for all EL9 snapshots. Install with
+      # --skip-unavailable so a missing optional dep doesn't abort the build.
+      # If missing, the corresponding Slurm feature is simply disabled by the
+      # spec's conditional %if checks. See docs/slurm-build-pipeline.md §4.3.
+      - name: Enable EPEL and install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1. EPEL
+          dnf install -y epel-release
+
+          # 2. CRB (CodeReady Builder) — needed by EPEL packages on EL9
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled crb
+
+          # 3. Enable mariadb AppStream module so mariadb-devel is visible.
+          # Required because Slurm's spec has an unconditional BuildRequires
+          # fallback chain that ultimately requires mariadb-devel (or one of its
+          # MySQL-compat variants) even when MySQL is disabled at configure time.
+          # MySQL is disabled via --with-mysql_config=no in the rpmbuild step.
+          dnf module enable -y mariadb
+
+          # 4. Mandatory build deps — hard fail if any are missing.
+          # Note: the Rocky 9 base container ships curl-minimal which conflicts
+          # with the full curl package. Use --allowerasing to allow DNF to
+          # replace curl-minimal with curl. The full curl binary is only needed
+          # at workflow script level for tarball download; libcurl-devel is the
+          # actual Slurm build dep.
+          #
+          # http-parser-devel: required for slurmrestd. It's in EPEL on EL9
+          # (which is already enabled above). We treat it as mandatory so that
+          # a missing http-parser-devel causes a hard build failure rather than
+          # silently disabling slurmrestd.  The base slurm RPM requires
+          # libjwt.so.2 at runtime (for JWT auth in slurmctld/slurmd), so even
+          # without slurmrestd being installed on a node, libjwt.so.2 must be
+          # present.  We provide libjwt.so.2 by building libjwt from source
+          # (see "Build libjwt RPM from source" step below) rather than
+          # requiring EPEL at deploy time.
+          #
+          # Note: libjwt-devel is used only at Slurm *build* time (inside this
+          # container) to compile the JWT-aware Slurm binaries.  The runtime
+          # libjwt.so.2 that deployed nodes need is supplied by the libjwt RPM
+          # we build from source and include in the bundle.
+          #
+          # mariadb-devel: installed to satisfy Slurm spec's unconditional MySQL
+          # BuildRequires chain.  MySQL support is compiled in; libmariadb.so.3
+          # is satisfied at deploy time via bundled mariadb-connector-c RPM.
+          # NOT installed: hwloc-devel (see INTENTIONALLY OMITTED comment above)
+          dnf install -y --allowerasing \
+            gcc gcc-c++ make \
+            automake autoconf libtool \
+            rpm-build rpm-sign \
+            createrepo_c \
+            gnupg2 \
+            munge munge-devel \
+            mariadb-devel \
+            pam-devel \
+            readline-devel \
+            libcurl-devel \
+            json-c-devel \
+            libyaml-devel \
+            http-parser-devel \
+            lz4-devel \
+            zlib-devel \
+            numactl-devel \
+            dbus-devel \
+            openssl-devel \
+            jansson-devel \
+            perl-devel \
+            perl-ExtUtils-MakeMaker \
+            python3 \
+            curl
+
+          # 4. Explicitly remove rdma-core-devel if it was pulled in transitively.
+          # Slurm's configure auto-detects OFED/InfiniBand support by searching
+          # for /usr/include/infiniband/mad.h (provided by rdma-core-devel).
+          # When detected, the compiled slurm RPM hard-requires libibmad.so.5
+          # (provided by infiniband-diags), which in turn requires /usr/bin/perl
+          # (not in the Rocky 9 minimal base image), causing offline dnf install
+          # to fail.  Removing rdma-core-devel before rpmbuild ensures configure
+          # reports "OFED not found" and skips IB support.
+          dnf remove -y rdma-core-devel libibverbs-devel 2>/dev/null || true
+          # Verify IB headers are gone
+          if [ -f /usr/include/infiniband/mad.h ]; then
+            echo "FATAL: /usr/include/infiniband/mad.h still present after rdma-core-devel removal"
+            rpm -qf /usr/include/infiniband/mad.h 2>/dev/null || true
+            exit 1
+          fi
+          echo "IB headers absent — OFED will not be compiled in: OK"
+
+          # 5. Optional build deps — skip if unavailable on this snapshot.
+          # Missing deps disable the corresponding Slurm plugin at build time.
+          # freeipmi-devel and rrdtool-devel remain optional; their absence
+          # only disables IPMI and RRD plugins which are not in our MVP scope.
+          # libjwt-devel: installed after we build it from source below.
+          dnf install -y --skip-unavailable \
+            freeipmi-devel \
+            rrdtool-devel || true
+
+          echo "--- Installed build dependencies ---"
+          rpm -qa gcc rpm-build munge-devel | sort
+
+      # ── Build libjwt RPM from source ──────────────────────────────────────
+      # libjwt provides libjwt.so.2, a runtime dep of the base slurm RPM.
+      # EPEL ships libjwt for EL9 but we build it ourselves so deployed nodes
+      # never need EPEL at runtime (true zero-egress for the Slurm stack).
+      #
+      # Build strategy:
+      #   1. Download the upstream tarball from GitHub Releases.
+      #   2. Verify SHA256 against the pinned value in versions.yml.
+      #   3. Generate a complete spec from the upstream spec.in template
+      #      (substituting @VERSION@).  The upstream spec.in is minimal and
+      #      clean — no exotic macros, no distro conditionals beyond RHEL >= 8.
+      #   4. rpmbuild -ta to build the library + devel + docs sub-packages.
+      #   5. Install libjwt-devel into the container so Slurm's configure
+      #      detects it and enables JWT support.
+      #   6. Sign the libjwt RPMs with the same clustr key as the Slurm RPMs.
+      #
+      # We only include the runtime library RPM (libjwt-*.el9.x86_64.rpm)
+      # in the bundle — the -devel and -devel-docs sub-packages are build-time
+      # artifacts only and are not needed on deployed nodes.
+      - name: Build libjwt RPM from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIBJWT_VERSION="${{ steps.versions.outputs.libjwt_version }}"
+          LIBJWT_SHA256="${{ steps.versions.outputs.libjwt_sha256 }}"
+          LIBJWT_URL="${{ steps.versions.outputs.libjwt_url }}"
+          TARBALL="libjwt-${LIBJWT_VERSION}.tar.bz2"
+
+          echo "--- Downloading libjwt ${LIBJWT_VERSION} ---"
+          curl -fSL -o "${TARBALL}" "${LIBJWT_URL}"
+
+          echo "--- Verifying SHA256 ---"
+          ACTUAL=$(sha256sum "${TARBALL}" | awk '{print $1}')
+          echo "  pinned : ${LIBJWT_SHA256}"
+          echo "  actual : ${ACTUAL}"
+          if [ "${ACTUAL}" != "${LIBJWT_SHA256}" ]; then
+            echo "FATAL: libjwt tarball SHA256 mismatch"
+            exit 1
+          fi
+          echo "  PASS"
+
+          # The upstream tarball ships dist/libjwt.spec.in with @VERSION@
+          # as the only template variable.  Extract it, substitute version,
+          # and patch the Source: line to match our actual tarball filename.
+          #
+          # The spec.in references `v%{version}.tar.gz` (GitHub auto-generated
+          # archive format) but we download the official release asset which is
+          # named `libjwt-VERSION.tar.bz2`.  We patch the Source: and the
+          # %prep %autosetup to match our actual filename.
+          echo "--- Extracting spec.in from tarball ---"
+          tar -xjOf "${TARBALL}" "libjwt-${LIBJWT_VERSION}/dist/libjwt.spec.in" \
+            | sed "s/@VERSION@/${LIBJWT_VERSION}/g" \
+            | sed "s|Source:.*|Source:             libjwt-${LIBJWT_VERSION}.tar.bz2|" \
+            > libjwt.spec
+
+          echo "--- spec first 15 lines ---"
+          head -15 libjwt.spec
+
+          # Set up a fresh rpmbuild tree for libjwt, separate from the Slurm
+          # tree we create later.
+          mkdir -p libjwt-rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cp "${TARBALL}" libjwt-rpmbuild/SOURCES/
+          cp libjwt.spec libjwt-rpmbuild/SPECS/
+
+          # Install libjwt build dependencies.  These are listed in the spec's
+          # BuildRequires but may not be in the container yet.
+          # - doxygen: required for `make doxygen-doc` in the %build section
+          # - check / check-devel: required for `make check` in the %check section
+          #   (the spec conditionally runs check on RHEL >= 8)
+          # These are in EPEL (already enabled) on EL9.
+          echo "--- Installing libjwt build dependencies ---"
+          dnf install -y check check-devel doxygen
+
+          echo "--- Building libjwt RPMs ---"
+          rpmbuild -bb \
+            --define "_topdir $(pwd)/libjwt-rpmbuild" \
+            --define "_sourcedir $(pwd)/libjwt-rpmbuild/SOURCES" \
+            libjwt-rpmbuild/SPECS/libjwt.spec \
+            2>&1 | tee libjwt-build.log
+
+          echo "--- Built libjwt RPMs ---"
+          find libjwt-rpmbuild/RPMS/ -name '*.rpm' | sort
+
+          # Install libjwt-devel into the container so that Slurm's ./configure
+          # finds libjwt.h and links against libjwt.so.1.
+          # Use --nodeps because libjwt-devel depends on libjwt (the runtime
+          # lib), which we haven't rpm-installed yet; the .so is in the build
+          # tree but not globally installed.  We install both to be safe.
+          echo "--- Installing libjwt runtime + devel for Slurm build ---"
+          LIBJWT_LIB_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ -name 'libjwt-[0-9]*.rpm' | head -1)
+          LIBJWT_DEV_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ -name 'libjwt-devel-*.rpm' | head -1)
+          rpm -ivh "${LIBJWT_LIB_RPM}" "${LIBJWT_DEV_RPM}"
+          ldconfig  # update linker cache so ./configure finds libjwt.so.1
+
+          echo "--- libjwt version installed ---"
+          rpm -q libjwt libjwt-devel
+
+      # ── Download tarball ──────────────────────────────────────────────────
+      - name: Download Slurm tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          URL="https://download.schedmd.com/slurm/slurm-${VERSION}.tar.bz2"
+          echo "Downloading ${URL} ..."
+          curl -fSL -o "slurm-${VERSION}.tar.bz2" "${URL}"
+          echo "Download complete."
+
+      # ── Dual SHA256 verification ──────────────────────────────────────────
+      # Check 1: compare against the pinned sha256 from versions.yml.
+      # Check 2: cross-reference against the live SchedMD SHA256 file.
+      #
+      # NOTE: SchedMD does NOT publish detached GPG signatures (.asc) for
+      # release tarballs as of 2026-04-27 (documented in versions.yml).
+      # The dual SHA256 chain is the trust anchor.
+      # See docs/slurm-build-pipeline.md §5.2.
+      - name: Verify tarball SHA256 (dual check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          PINNED_SHA256="${{ steps.versions.outputs.slurm_sha256 }}"
+          TARBALL="slurm-${VERSION}.tar.bz2"
+
+          echo "--- Check 1: pinned SHA256 from versions.yml ---"
+          ACTUAL_SHA256=$(sha256sum "${TARBALL}" | awk '{print $1}')
+          echo "  pinned : ${PINNED_SHA256}"
+          echo "  actual : ${ACTUAL_SHA256}"
+          if [ "${ACTUAL_SHA256}" != "${PINNED_SHA256}" ]; then
+            echo "FATAL: SHA256 mismatch against pinned value"
+            exit 1
+          fi
+          echo "  PASS"
+
+          echo ""
+          echo "--- Check 2: cross-reference against live SchedMD SHA256 file ---"
+          SCHEDMD_SHA256_URL="https://download.schedmd.com/slurm/SHA256"
+          LIVE_SHA256=$(curl -fsSL "${SCHEDMD_SHA256_URL}" \
+            | grep "${TARBALL}\$" \
+            | awk '{print $1}')
+          if [ -z "${LIVE_SHA256}" ]; then
+            echo "FATAL: tarball not found in SchedMD SHA256 file"
+            exit 1
+          fi
+          echo "  schedmd live : ${LIVE_SHA256}"
+          echo "  actual       : ${ACTUAL_SHA256}"
+          if [ "${ACTUAL_SHA256}" != "${LIVE_SHA256}" ]; then
+            echo "FATAL: SHA256 mismatch against live SchedMD SHA256 file"
+            exit 1
+          fi
+          echo "  PASS"
+          echo ""
+          echo "Both SHA256 checks passed."
+
+      # ── Import clustr RPM signing key ─────────────────────────────────────
+      # Non-interactive RPM signing strategy for EL9 (RPM 4.17+):
+      #   1. Import key into temp GNUPGHOME
+      #   2. Start gpg-agent with allow-loopback-pinentry + allow-preset-passphrase
+      #   3. Get the keygrip and preset passphrase into the agent cache via
+      #      gpg-connect-agent (using the loopback mechanism)
+      #   4. rpm --addsign queries the agent; passphrase served from cache
+      #
+      # GNUPGHOME is exported via GITHUB_ENV so it persists across all steps.
+      - name: Import clustr RPM signing key
+        shell: bash
+        env:
+          CLUSTR_RPM_SIGNING_KEY: ${{ secrets.CLUSTR_RPM_SIGNING_KEY }}
+          CLUSTR_RPM_SIGNING_PASSPHRASE: ${{ secrets.CLUSTR_RPM_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          GPG_HOME=$(mktemp -d)
+          chmod 700 "$GPG_HOME"
+
+          PASS_FILE=$(mktemp)
+          chmod 600 "$PASS_FILE"
+          printf '%s' "${CLUSTR_RPM_SIGNING_PASSPHRASE}" > "$PASS_FILE"
+
+          # Kill the system gpg-agent (started at container init) BEFORE setting
+          # GNUPGHOME. gpgconf --kill targets the agent for the default ~/.gnupg.
+          gpgconf --kill gpg-agent 2>/dev/null || true
+          pkill -x gpg-agent 2>/dev/null || true
+
+          export GNUPGHOME="${GPG_HOME}"
+
+          # Write gpg-agent.conf BEFORE the first gpg call. gpg auto-starts an
+          # agent on first use; writing the conf first ensures the auto-started
+          # agent picks up allow-loopback-pinentry and allow-preset-passphrase.
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n' \
+            > "${GPG_HOME}/gpg-agent.conf"
+
+          # Import the key — this auto-starts gpg-agent with the conf above
+          printf '%s' "${CLUSTR_RPM_SIGNING_KEY}" | \
+            gpg --batch \
+                --pinentry-mode loopback \
+                --passphrase-file "${PASS_FILE}" \
+                --import
+
+          # Give the auto-started agent a moment to finish binding its socket
+          sleep 1
+
+          # Get keygrip(s) and preset the passphrase.
+          # Pure-bash hex encoding — no dependency on xxd/vim-common.
+          PASSPHRASE=$(cat "$PASS_FILE")
+          hex_encode() {
+            local s="$1" out="" i byte
+            for (( i=0; i<${#s}; i++ )); do
+              printf -v byte '%02X' "'${s:$i:1}"
+              out+="$byte"
+            done
+            printf '%s' "$out"
+          }
+          PASSPHRASE_HEX=$(hex_encode "${PASSPHRASE}")
+
+          gpg --with-keygrip --list-secret-keys "41E51A6653BBA540" \
+            | grep "Keygrip" | awk '{print $3}' \
+            | while read -r GRIP; do
+                echo "Presetting passphrase for keygrip ${GRIP}"
+                printf 'PRESET_PASSPHRASE %s -1 %s\n' "${GRIP}" "${PASSPHRASE_HEX}" \
+                | gpg-connect-agent
+              done
+
+          # Verify signing works non-interactively before proceeding
+          echo "ci-test" | \
+            gpg --batch --no-tty \
+                --clearsign \
+                --local-user "41E51A6653BBA540" \
+                -o /dev/null
+          echo "GPG signing self-test passed."
+
+          rm -f "${PASS_FILE}"
+          echo "GNUPGHOME=${GPG_HOME}" >> "$GITHUB_ENV"
+
+          # Write rpmmacros so rpm --addsign finds our key and agent
+          printf '%%_signature gpg\n' > ~/.rpmmacros
+          printf '%%_gpg_name 41E51A6653BBA540\n' >> ~/.rpmmacros
+          printf '%%__gpg /usr/bin/gpg\n' >> ~/.rpmmacros
+
+          gpg --list-secret-keys
+          echo "rpmmacros:"; cat ~/.rpmmacros
+
+      # ── Build RPMs ────────────────────────────────────────────────────────
+      # rpmbuild -ta builds all RPMs + SRPM from the in-tarball spec.
+      # Richard's design doc §6.1 uses -ta ("build all").
+      #
+      # --define "_with_slurmrestd 1": the upstream spec uses %bcond_with
+      # slurmrestd, so slurmrestd is opt-in (disabled by default).  We must
+      # explicitly enable it with this define.  This causes the spec to add
+      # "BuildRequires: http-parser-devel" and pass "--enable-slurmrestd" to
+      # configure.  http-parser-devel is available from EPEL on EL9 and was
+      # already installed in the mandatory deps step above.
+      #
+      # MySQL is kept enabled (mariadb-devel in build deps) because the Slurm
+      # spec's %files section unconditionally includes accounting_storage_mysql.so
+      # regardless of configure flags — disabling MySQL via --with-mysql_config=no
+      # causes the %files packaging step to fail with "File not found".
+      # The libmariadb.so.3 runtime dep from MySQL support is satisfied by
+      # bundling mariadb-connector-c in the deployed node repo (see Stage bundle).
+      #
+      # IB/OFED is prevented by removing rdma-core-devel before this step
+      # (see "Enable EPEL" step, point 5).
+      - name: Build Slurm RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          echo "Starting rpmbuild -ta ..."
+          rpmbuild -ta \
+            --define "_topdir $(pwd)/rpmbuild" \
+            --define "_with_slurmrestd 1" \
+            "slurm-${VERSION}.tar.bz2" \
+            2>&1 | tee rpmbuild-output.log
+          echo "rpmbuild complete."
+          echo "--- Built RPMs ---"
+          find rpmbuild/RPMS/ -name '*.rpm' | sort
+          echo "--- Built SRPMs ---"
+          find rpmbuild/SRPMS/ -name '*.rpm' | sort
+
+      # ── Binary-presence verification ─────────────────────────────────────
+      # Hard gate: every expected binary must be present in the expected RPM.
+      # This catches upstream spec regressions (e.g., a binary added in a new
+      # Slurm release that the spec forgets to list in %files, or a build that
+      # silently disables a component due to a missing dep).
+      #
+      # NOTE on slurmscriptd: slurmscriptd is NOT a standalone binary in
+      # Slurm 24.x — it is compiled into the slurmctld binary itself.  When
+      # slurmctld starts it fork+execs /proc/self/exe (itself) with
+      # SLURMSCRIPTD_MODE env set.  The PR5 lab report described
+      # "slurmscriptd missing" but the root issue was the systemd unit running
+      # slurmctld as User=slurm, which requires the slurm user to exist.  The
+      # binary itself is /usr/sbin/slurmctld.  We verify slurmctld is present.
+      #
+      # Binaries verified:
+      #   slurmctld  → slurm-slurmctld RPM
+      #   slurmd     → slurm-slurmd RPM
+      #   slurmdbd   → slurm-slurmdbd RPM
+      #   slurmrestd → slurm-slurmrestd RPM  (requires http-parser-devel)
+      #   sackd      → slurm-sackd RPM
+      - name: Verify binary presence in built RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Map: expected binary → RPM name pattern
+          declare -A BINARY_TO_RPM=(
+            [slurmctld]="slurm-slurmctld-*.rpm"
+            [slurmd]="slurm-slurmd-*.rpm"
+            [slurmdbd]="slurm-slurmdbd-*.rpm"
+            [slurmrestd]="slurm-slurmrestd-*.rpm"
+            [sackd]="slurm-sackd-*.rpm"
+          )
+
+          FAIL=0
+          for BINARY in "${!BINARY_TO_RPM[@]}"; do
+            PATTERN="${BINARY_TO_RPM[$BINARY]}"
+            RPM_FILE=$(find rpmbuild/RPMS/x86_64/ -name "${PATTERN}" | head -1)
+            if [ -z "${RPM_FILE}" ]; then
+              echo "FAIL: RPM not found matching pattern: ${PATTERN}"
+              FAIL=1
+              continue
+            fi
+            echo "Checking ${BINARY} in ${RPM_FILE##*/} ..."
+            if ! rpm -qpl "${RPM_FILE}" | grep -qF "sbin/${BINARY}"; then
+              echo "  FAIL: /usr/sbin/${BINARY} not found in ${RPM_FILE##*/}"
+              echo "  Contents (sbin/):"
+              rpm -qpl "${RPM_FILE}" | grep sbin/ || echo "    (none)"
+              FAIL=1
+            else
+              echo "  OK: /usr/sbin/${BINARY} present"
+            fi
+          done
+
+          if [ "${FAIL}" -ne 0 ]; then
+            echo ""
+            echo "FATAL: one or more expected binaries missing from RPMs."
+            echo "Check the rpmbuild-output.log artifact for configure output"
+            echo "and %files section warnings."
+            exit 1
+          fi
+          echo ""
+          echo "All expected binaries verified present."
+
+      # ── Sign RPMs ─────────────────────────────────────────────────────────
+      # rpm --addsign uses %__gpg_sign_cmd from ~/.rpmmacros.
+      # GNUPGHOME is set via GITHUB_ENV from the import step.
+      # Decision: sign Slurm binary RPMs and the libjwt runtime RPM.
+      # The libjwt-devel and libjwt-devel-docs RPMs are build-time only; we
+      # sign them anyway for consistency but they are not included in the bundle.
+      - name: Sign RPMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          RPM_COUNT=$(find rpmbuild/RPMS/x86_64/ -name '*.rpm' | wc -l)
+          LIBJWT_COUNT=$(find libjwt-rpmbuild/RPMS/x86_64/ -name '*.rpm' | wc -l)
+          echo "Signing ${RPM_COUNT} Slurm RPMs ..."
+          rpm --addsign rpmbuild/RPMS/x86_64/*.rpm
+          echo "Signing ${LIBJWT_COUNT} libjwt RPMs ..."
+          rpm --addsign libjwt-rpmbuild/RPMS/x86_64/*.rpm
+          echo "Signing complete."
+
+      # ── Verify RPM signatures ─────────────────────────────────────────────
+      # Hard gate: every binary RPM (Slurm + libjwt) must carry a valid
+      # clustr GPG signature before we proceed to the bundle stage.
+      - name: Verify RPM signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpm --import build/slurm/keys/clustr-release.asc.pub
+
+          echo "--- Verifying Slurm RPM signatures ---"
+          FAIL=0
+          for RPM in rpmbuild/RPMS/x86_64/*.rpm; do
+            RESULT=$(rpm -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM}"
+              FAIL=1
+            fi
+          done
+
+          echo "--- Verifying libjwt RPM signatures ---"
+          for RPM in libjwt-rpmbuild/RPMS/x86_64/*.rpm; do
+            RESULT=$(rpm -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM}"
+              FAIL=1
+            fi
+          done
+
+          if [ "${FAIL}" -ne 0 ]; then
+            echo "FATAL: one or more RPMs failed signature verification"
+            exit 1
+          fi
+          echo "All RPM signatures verified OK."
+
+      # ── Capture and verify dep signing keys (GAP-17) ─────────────────────
+      # Extract Rocky 9 and EPEL 9 GPG keys from the build container's
+      # /etc/pki/rpm-gpg/ and verify their fingerprints against the values
+      # pinned in versions.yml. A fingerprint mismatch is a hard build failure.
+      #
+      # This step runs BEFORE dnf download so the keys are present before we
+      # verify the downloaded dep RPMs.
+      - name: Capture and verify dep signing key fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINNED_ROCKY9="${{ steps.versions.outputs.rocky9_fingerprint }}"
+          PINNED_EPEL9="${{ steps.versions.outputs.epel9_fingerprint }}"
+
+          # Rocky 9 key is at RPM-GPG-KEY-Rocky-9 in the container (installed by
+          # rocky-gpg-keys package, which is part of the base rocky image).
+          ROCKY_KEY_SRC="/etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9"
+          EPEL_KEY_SRC="/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9"
+
+          if [ ! -f "${ROCKY_KEY_SRC}" ]; then
+            echo "FATAL: ${ROCKY_KEY_SRC} not found in container"
+            ls /etc/pki/rpm-gpg/ || true
+            exit 1
+          fi
+          if [ ! -f "${EPEL_KEY_SRC}" ]; then
+            echo "FATAL: ${EPEL_KEY_SRC} not found — EPEL must be installed first"
+            echo "(EPEL should already be installed from the 'Enable EPEL' step above)"
+            exit 1
+          fi
+
+          # Compute fingerprint of the container key (40-char, no spaces).
+          compute_fp() {
+            gpg --show-keys --with-fingerprint --with-colons "$1" 2>/dev/null \
+              | awk -F: '$1=="fpr"{print $10; exit}'
+          }
+
+          ACTUAL_ROCKY9=$(compute_fp "${ROCKY_KEY_SRC}")
+          ACTUAL_EPEL9=$(compute_fp "${EPEL_KEY_SRC}")
+
+          echo "--- Rocky 9 GPG key fingerprint ---"
+          echo "  pinned : ${PINNED_ROCKY9}"
+          echo "  actual : ${ACTUAL_ROCKY9}"
+          if [ "${ACTUAL_ROCKY9}" != "${PINNED_ROCKY9}" ]; then
+            echo "FATAL: Rocky 9 GPG key fingerprint mismatch — supply chain integrity violation"
+            exit 1
+          fi
+          echo "  PASS"
+
+          echo "--- EPEL 9 GPG key fingerprint ---"
+          echo "  pinned : ${PINNED_EPEL9}"
+          echo "  actual : ${ACTUAL_EPEL9}"
+          if [ "${ACTUAL_EPEL9}" != "${PINNED_EPEL9}" ]; then
+            echo "FATAL: EPEL 9 GPG key fingerprint mismatch — supply chain integrity violation"
+            exit 1
+          fi
+          echo "  PASS"
+
+          # Copy verified keys to bundle root.
+          mkdir -p bundle
+          cp "${ROCKY_KEY_SRC}" bundle/RPM-GPG-KEY-rocky-9
+          cp "${EPEL_KEY_SRC}" bundle/RPM-GPG-KEY-EPEL-9
+          echo "Verified dep signing keys copied to bundle/"
+
+      # ── Stage bundle directory (clustr5: split into primary + deps subdirs) ──
+      # Bundle layout per docs/slurm-build-pipeline.md §17.4:
+      #   ./manifest.json
+      #   ./RPM-GPG-KEY-clustr           ← clustr release signing key
+      #   ./RPM-GPG-KEY-rocky-9          ← Rocky 9 release key (dep RPM verification)
+      #   ./RPM-GPG-KEY-EPEL-9           ← EPEL 9 release key (munge verification)
+      #   ./el9-x86_64/                  ← clustr-built RPMs only (slurm-*, libjwt-*)
+      #       *.rpm
+      #       repodata/
+      #   ./el9-x86_64-deps/             ← passthrough Rocky/EPEL dep RPMs only
+      #       *.rpm
+      #       repodata/
+      #
+      # The split is critical: verifyRPMSignatures in bundle.go runs two isolated
+      # rpm --dbpath passes, one per subdir, each importing only the appropriate
+      # key. Cross-contamination (a clustr RPM in deps or vice versa) = hard fail.
+      - name: Stage bundle directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          mkdir -p "bundle/${OS}-${ARCH}"
+          mkdir -p "bundle/${OS}-${ARCH}-deps"
+
+          # ── Primary subdir: clustr-built RPMs (slurm-* + libjwt runtime) ──
+          # Copy all Slurm RPMs
+          cp rpmbuild/RPMS/x86_64/*.rpm "bundle/${OS}-${ARCH}/"
+
+          # Copy only the libjwt runtime RPM (not devel, not devel-docs).
+          # Pattern: libjwt-VERSION.el9.x86_64.rpm (no hyphen after version)
+          LIBJWT_LIB_RPM=$(find libjwt-rpmbuild/RPMS/x86_64/ \
+            -name 'libjwt-[0-9]*.rpm' | head -1)
+          if [ -z "${LIBJWT_LIB_RPM}" ]; then
+            echo "FATAL: libjwt runtime RPM not found"
+            ls libjwt-rpmbuild/RPMS/x86_64/ || true
+            exit 1
+          fi
+          cp "${LIBJWT_LIB_RPM}" "bundle/${OS}-${ARCH}/"
+          echo "Included libjwt RPM: ${LIBJWT_LIB_RPM##*/}"
+
+          echo "--- Primary subdir RPMs (clustr-signed) ---"
+          ls "bundle/${OS}-${ARCH}/"*.rpm | xargs -I{} basename {}
+
+          # ── Deps subdir: Rocky/EPEL passthrough RPMs ──
+          # Download into the deps subdir (NOT mixed with clustr-built RPMs).
+          # Package rationale:
+          #   munge, munge-libs        — Slurm auth daemon; signed by Rocky/EPEL key
+          #   mariadb-connector-c      — provides libmariadb.so.3 (MySQL slurm dep)
+          #   mariadb-connector-c-config — provides /etc/my.cnf
+          #   bash-completion          — hard dep of base slurm RPM
+          #   libpkgconf               — provides libpkgconf.so.3; dep of pkgconf
+          #   pkgconf, pkgconf-m4, pkgconf-pkg-config — provide /usr/bin/pkg-config
+          #                              (bash-completion dep; not in Rocky 9 minimal)
+          dnf download --arch=x86_64 --destdir="bundle/${OS}-${ARCH}-deps/" \
+            munge munge-libs \
+            mariadb-connector-c \
+            libpkgconf pkgconf pkgconf-pkg-config
+          dnf download --destdir="bundle/${OS}-${ARCH}-deps/" \
+            mariadb-connector-c-config \
+            bash-completion \
+            pkgconf-m4
+
+          echo "--- Deps subdir RPMs (Rocky/EPEL-signed) ---"
+          ls "bundle/${OS}-${ARCH}-deps/"*.rpm | xargs -I{} basename {}
+
+          cp build/slurm/keys/clustr-release.asc.pub bundle/RPM-GPG-KEY-clustr
+          echo "Primary subdir: $(ls bundle/${OS}-${ARCH}/*.rpm | wc -l) RPMs"
+          echo "Deps subdir:    $(ls bundle/${OS}-${ARCH}-deps/*.rpm | wc -l) RPMs"
+
+      # ── Verify dep RPM signatures against Rocky+EPEL keys (GAP-17) ────────
+      # Hard gate: every RPM in el9-x86_64-deps/ must carry a valid Rocky or
+      # EPEL GPG signature before we proceed to the bundle stage.  This closes
+      # the supply chain gap documented in §17.2 — the Rocky/EPEL signature was
+      # previously never verified anywhere in the clustr trust chain.
+      - name: Verify dep RPM signatures against Rocky+EPEL keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          DEPS_DIR="bundle/${OS}-${ARCH}-deps"
+
+          # Build an isolated rpm db with only Rocky+EPEL keys imported.
+          TMPDB=$(mktemp -d)
+          rpm --dbpath "${TMPDB}" --import bundle/RPM-GPG-KEY-rocky-9
+          rpm --dbpath "${TMPDB}" --import bundle/RPM-GPG-KEY-EPEL-9
+          echo "--- Verifying dep RPM signatures (Rocky+EPEL keyring) ---"
+          FAIL=0
+          for RPM in "${DEPS_DIR}"/*.rpm; do
+            RESULT=$(rpm --dbpath "${TMPDB}" -K "${RPM}" 2>&1)
+            echo "  ${RPM##*/}: ${RESULT}"
+            if ! echo "${RESULT}" | grep -qi "OK"; then
+              echo "  FAIL: signature check failed for ${RPM##*/}"
+              FAIL=1
+            fi
+          done
+          rm -rf "${TMPDB}"
+          if [ "${FAIL}" -ne 0 ]; then
+            echo "FATAL: one or more dep RPMs failed Rocky/EPEL signature verification"
+            exit 1
+          fi
+          echo "All dep RPM signatures verified OK."
+
+      # ── Generate repo metadata (separate createrepo_c per subdir) ─────────
+      # Each subdir gets its own repodata/ so dnf can use them as independent
+      # repositories with per-repo gpgcheck settings.
+      - name: Generate repodata with createrepo_c
+        shell: bash
+        run: |
+          set -euo pipefail
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+
+          echo "--- Generating repodata for primary subdir (${OS}-${ARCH}/) ---"
+          createrepo_c "bundle/${OS}-${ARCH}/"
+          ls -la "bundle/${OS}-${ARCH}/repodata/"
+
+          echo "--- Generating repodata for deps subdir (${OS}-${ARCH}-deps/) ---"
+          createrepo_c "bundle/${OS}-${ARCH}-deps/"
+          ls -la "bundle/${OS}-${ARCH}-deps/repodata/"
+
+      # ── Generate manifest.json ────────────────────────────────────────────
+      # Uses build/slurm/gen-manifest.py (committed helper script) to avoid
+      # inline multi-line Python which has YAML parse issues in some parsers.
+      # bundle_sha256 is set to "__PENDING__" and updated after tarball creation.
+      # HAS_DEPS_SUBDIR=true signals schema v3 (clustr5 split bundle layout).
+      - name: Generate manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILT_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          TARGET_DIR="bundle/${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          DEPS_DIR="bundle/${{ matrix.target.os }}-${{ matrix.target.arch }}-deps"
+          SLURM_VERSION="${{ steps.versions.outputs.slurm_version }}"
+          CLUSTR_RELEASE="${{ steps.versions.outputs.clustr_release }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          BUILD_SHA="${GITHUB_SHA}"
+          OUTPUT_FILE="bundle/manifest.json"
+
+          export TARGET_DIR DEPS_DIR SLURM_VERSION CLUSTR_RELEASE DISTRO="${OS}" ARCH BUILT_AT BUILD_SHA OUTPUT_FILE HAS_DEPS_SUBDIR=true
+          python3 build/slurm/gen-manifest.py
+
+      # ── Create bundle tarball and compute SHA256 ──────────────────────────
+      - name: Create bundle tarball
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.versions.outputs.slurm_version }}"
+          CLUSTR_RELEASE="${{ steps.versions.outputs.clustr_release }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+          BUNDLE_NAME="clustr-slurm-bundle-v${VERSION}-clustr${CLUSTR_RELEASE}-${OS}-${ARCH}.tar.gz"
+
+          echo "Creating ${BUNDLE_NAME} ..."
+          tar czf "${BUNDLE_NAME}" -C bundle .
+
+          BUNDLE_SHA256=$(sha256sum "${BUNDLE_NAME}" | awk '{print $1}')
+          echo "Bundle SHA256: ${BUNDLE_SHA256}"
+
+          echo "${BUNDLE_SHA256}  ${BUNDLE_NAME}" > "${BUNDLE_NAME}.sha256"
+
+          # Update the release-level manifest.json with the real bundle_sha256.
+          # The manifest inside the tarball keeps __PENDING__ (avoids circularity).
+          # PR3 reads this top-level manifest.json to embed the SHA256 in ldflags.
+          python3 -c "import json,sys; d=json.load(open('bundle/manifest.json')); d['bundle_sha256']=sys.argv[1]; json.dump(d,open('bundle/manifest.json','w'),indent=2)" "${BUNDLE_SHA256}"
+
+          echo "bundle_name=${BUNDLE_NAME}" | tee -a "$GITHUB_OUTPUT"
+          echo "bundle_sha256=${BUNDLE_SHA256}" | tee -a "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "--- Bundle summary ---"
+          echo "  File   : ${BUNDLE_NAME}"
+          echo "  SHA256 : ${BUNDLE_SHA256}"
+          ls -lh "${BUNDLE_NAME}"
+
+      # ── Sanity check ──────────────────────────────────────────────────────
+      - name: Sanity check bundle contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_NAME="${{ steps.bundle.outputs.bundle_name }}"
+          OS="${{ matrix.target.os }}"
+          ARCH="${{ matrix.target.arch }}"
+
+          echo "--- Bundle contents ---"
+          tar tzf "${BUNDLE_NAME}"
+
+          echo ""
+          echo "--- Checking primary repomd.xml (el9-x86_64/) ---"
+          REPOMD="bundle/${OS}-${ARCH}/repodata/repomd.xml"
+          if [ ! -f "${REPOMD}" ]; then
+            echo "FATAL: repomd.xml not found at ${REPOMD}"
+            ls -la "bundle/${OS}-${ARCH}/repodata/" || echo "  (repodata dir missing)"
+            exit 1
+          fi
+          echo "repomd.xml present at ${REPOMD} - OK"
+
+          echo ""
+          echo "--- Checking deps repomd.xml (el9-x86_64-deps/) ---"
+          DEPS_REPOMD="bundle/${OS}-${ARCH}-deps/repodata/repomd.xml"
+          if [ ! -f "${DEPS_REPOMD}" ]; then
+            echo "FATAL: deps repomd.xml not found at ${DEPS_REPOMD}"
+            ls -la "bundle/${OS}-${ARCH}-deps/repodata/" || echo "  (deps repodata dir missing)"
+            exit 1
+          fi
+          echo "deps repomd.xml present at ${DEPS_REPOMD} - OK"
+
+          echo ""
+          echo "--- Checking for all three GPG key files in bundle root ---"
+          for KEYFILE in RPM-GPG-KEY-clustr RPM-GPG-KEY-rocky-9 RPM-GPG-KEY-EPEL-9; do
+            if [ ! -f "bundle/${KEYFILE}" ]; then
+              echo "FATAL: ${KEYFILE} not found in bundle root"
+              exit 1
+            fi
+            echo "${KEYFILE}: present - OK"
+          done
+
+          echo ""
+          echo "--- Checking for libjwt RPM in primary subdir ---"
+          LIBJWT_IN_BUNDLE=$(ls "bundle/${OS}-${ARCH}/libjwt-"*.rpm 2>/dev/null | head -1)
+          if [ -z "${LIBJWT_IN_BUNDLE}" ]; then
+            echo "FATAL: libjwt RPM not found in bundle/${OS}-${ARCH}/"
+            ls "bundle/${OS}-${ARCH}/" || true
+            exit 1
+          fi
+          echo "libjwt RPM present: ${LIBJWT_IN_BUNDLE##*/} - OK"
+
+          echo ""
+          echo "--- Checking for Slurm RPMs in primary subdir (clustr-built) ---"
+          FAIL_CHECK=0
+          check_rpm_in_dir() {
+            local label="$1" dir="$2" pattern="$3"
+            local found
+            found=$(ls "${dir}/"${pattern} 2>/dev/null | head -1)
+            if [ -z "${found}" ]; then
+              echo "FATAL: ${label} RPM not found in ${dir}/ (pattern: ${pattern})"
+              FAIL_CHECK=1
+            else
+              echo "${label} RPM present: ${found##*/} - OK"
+            fi
+          }
+          check_rpm_in_dir "slurm"         "bundle/${OS}-${ARCH}" "slurm-[0-9]*.rpm"
+          check_rpm_in_dir "slurm-slurmd"  "bundle/${OS}-${ARCH}" "slurm-slurmd-*.rpm"
+          check_rpm_in_dir "slurm-slurmctld" "bundle/${OS}-${ARCH}" "slurm-slurmctld-*.rpm"
+
+          echo ""
+          echo "--- Checking for dep RPMs in deps subdir (Rocky/EPEL passthrough) ---"
+          check_rpm_in_dir "munge"                      "bundle/${OS}-${ARCH}-deps" "munge-[0-9]*.rpm"
+          check_rpm_in_dir "munge-libs"                 "bundle/${OS}-${ARCH}-deps" "munge-libs-*.rpm"
+          check_rpm_in_dir "mariadb-connector-c"        "bundle/${OS}-${ARCH}-deps" "mariadb-connector-c-[0-9]*.rpm"
+          check_rpm_in_dir "mariadb-connector-c-config" "bundle/${OS}-${ARCH}-deps" "mariadb-connector-c-config-*.rpm"
+          check_rpm_in_dir "bash-completion"            "bundle/${OS}-${ARCH}-deps" "bash-completion-*.rpm"
+          check_rpm_in_dir "libpkgconf"                 "bundle/${OS}-${ARCH}-deps" "libpkgconf-[0-9]*.x86_64.rpm"
+          check_rpm_in_dir "pkgconf"                    "bundle/${OS}-${ARCH}-deps" "pkgconf-[0-9]*.x86_64.rpm"
+          check_rpm_in_dir "pkgconf-m4"                 "bundle/${OS}-${ARCH}-deps" "pkgconf-m4-*.rpm"
+          check_rpm_in_dir "pkgconf-pkg-config"         "bundle/${OS}-${ARCH}-deps" "pkgconf-pkg-config-*.rpm"
+
+          # Cross-contamination check: dep RPMs must NOT appear in primary subdir.
+          echo ""
+          echo "--- Cross-contamination check: dep RPMs must not be in primary subdir ---"
+          for DEP_RPM in "bundle/${OS}-${ARCH}-deps/"*.rpm; do
+            NAME=$(basename "${DEP_RPM}")
+            if [ -f "bundle/${OS}-${ARCH}/${NAME}" ]; then
+              echo "FATAL: cross-contamination — ${NAME} found in both primary and deps subdir"
+              FAIL_CHECK=1
+            fi
+          done
+          if [ "${FAIL_CHECK}" -eq 0 ]; then
+            echo "No cross-contamination detected - OK"
+          fi
+
+          # Negative check: dep RPMs must NOT be in the primary subdir.
+          for DEP_PKG in munge bash-completion pkgconf mariadb; do
+            if ls "bundle/${OS}-${ARCH}/${DEP_PKG}"*.rpm 2>/dev/null | grep -q .; then
+              echo "WARN: ${DEP_PKG} RPM found in primary subdir — should be in deps subdir only"
+              FAIL_CHECK=1
+            fi
+          done
+
+          # Negative check: IB RPMs must NOT be in bundle (removed in clustr3).
+          for BANNED in infiniband-diags libibumad; do
+            for DIR in "bundle/${OS}-${ARCH}" "bundle/${OS}-${ARCH}-deps"; do
+              if ls "${DIR}/${BANNED}"*.rpm 2>/dev/null | grep -q .; then
+                echo "WARN: unexpected ${BANNED} RPM in ${DIR} (IB removed in clustr3)"
+              fi
+            done
+          done
+
+          if [ "${FAIL_CHECK}" -ne 0 ]; then
+            ls "bundle/${OS}-${ARCH}/" || true
+            ls "bundle/${OS}-${ARCH}-deps/" || true
+            exit 1
+          fi
+
+          # Verify has_deps_subdir is true in manifest.json.
+          HAS_DEPS=$(python3 -c "import json; d=json.load(open('bundle/manifest.json')); print(d.get('has_deps_subdir', False))")
+          if [ "${HAS_DEPS}" != "True" ]; then
+            echo "FATAL: manifest.json missing has_deps_subdir: true (schema v3)"
+            cat bundle/manifest.json
+            exit 1
+          fi
+          echo ""
+          echo "--- Release-level manifest.json ---"
+          cat bundle/manifest.json
+
+      # ── Upload artifacts for the release job ─────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: slurm-build-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: |
+            rpmbuild/RPMS/x86_64/*.rpm
+            libjwt-rpmbuild/RPMS/x86_64/*.rpm
+            ${{ steps.bundle.outputs.bundle_name }}
+            ${{ steps.bundle.outputs.bundle_name }}.sha256
+            bundle/manifest.json
+            bundle/RPM-GPG-KEY-clustr
+            bundle/RPM-GPG-KEY-rocky-9
+            bundle/RPM-GPG-KEY-EPEL-9
+            rpmbuild-output.log
+            libjwt-build.log
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── Release job ───────────────────────────────────────────────────────────
+  # Runs after all build matrix jobs pass.  Downloads build artifacts,
+  # creates the GitHub Release, and uploads all assets.
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slurm-build-*
+          merge-multiple: true
+          path: release-assets/
+
+      - name: List release assets
+        shell: bash
+        run: |
+          echo "--- Release assets ---"
+          find release-assets/ -type f | sort
+
+      # ── Parse release metadata ─────────────────────────────────────────────
+      - name: Parse release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}" | tee -a "$GITHUB_OUTPUT"
+
+          SLURM_VERSION=$(echo "${TAG}" | sed 's/slurm-v\(.*\)-clustr[0-9]*/\1/')
+          CLUSTR_N=$(echo "${TAG}" | sed 's/.*-clustr\([0-9]*\)$/\1/')
+          echo "slurm_version=${SLURM_VERSION}" | tee -a "$GITHUB_OUTPUT"
+          echo "clustr_n=${CLUSTR_N}" | tee -a "$GITHUB_OUTPUT"
+
+          BUNDLE_SHA256=$(python3 -c "import json; print(json.load(open('release-assets/bundle/manifest.json'))['bundle_sha256'])")
+          echo "bundle_sha256=${BUNDLE_SHA256}" | tee -a "$GITHUB_OUTPUT"
+
+          echo "  tag           : ${TAG}"
+          echo "  slurm_version : ${SLURM_VERSION}"
+          echo "  clustr_n      : ${CLUSTR_N}"
+          echo "  bundle_sha256 : ${BUNDLE_SHA256}"
+
+      # ── Create the GitHub Release ──────────────────────────────────────────
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SLURM_VERSION: ${{ steps.meta.outputs.slurm_version }}
+          CLUSTR_N: ${{ steps.meta.outputs.clustr_n }}
+          BUNDLE_SHA256: ${{ steps.meta.outputs.bundle_sha256 }}
+        run: |
+          set -euo pipefail
+
+          BUNDLE_FILE=$(find release-assets/ -name 'clustr-slurm-bundle-*.tar.gz' | head -1)
+          BUNDLE_NAME=$(basename "${BUNDLE_FILE}")
+
+          export BUNDLE_NAME OUTPUT_FILE=/tmp/release-notes.md
+          python3 build/slurm/gen-release-notes.py
+
+          ASSET_ARGS=()
+          ASSET_ARGS+=("${BUNDLE_FILE}")
+          ASSET_ARGS+=("${BUNDLE_FILE}.sha256")
+          ASSET_ARGS+=("release-assets/bundle/manifest.json#manifest.json")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-clustr#RPM-GPG-KEY-clustr")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-rocky-9#RPM-GPG-KEY-rocky-9")
+          ASSET_ARGS+=("release-assets/bundle/RPM-GPG-KEY-EPEL-9#RPM-GPG-KEY-EPEL-9")
+
+          # Individual Slurm RPMs (for transparency / rpm -K spot-check)
+          for RPM in release-assets/rpmbuild/RPMS/x86_64/*.rpm; do
+            [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
+          done
+
+          # Individual libjwt RPMs (runtime + devel + docs for completeness)
+          for RPM in release-assets/libjwt-rpmbuild/RPMS/x86_64/*.rpm; do
+            [ -f "${RPM}" ] && ASSET_ARGS+=("${RPM}")
+          done
+
+          if [ -f "release-assets/rpmbuild-output.log" ]; then
+            ASSET_ARGS+=("release-assets/rpmbuild-output.log#BUILD-LOG.txt")
+          fi
+          if [ -f "release-assets/libjwt-build.log" ]; then
+            ASSET_ARGS+=("release-assets/libjwt-build.log#LIBJWT-BUILD-LOG.txt")
+          fi
+
+          echo "Creating GitHub Release: ${TAG}"
+          echo "Asset count: ${#ASSET_ARGS[@]}"
+
+          gh release create "${TAG}" \
+            --title "Slurm ${SLURM_VERSION} (clustr${CLUSTR_N})" \
+            --notes-file /tmp/release-notes.md \
+            "${ASSET_ARGS[@]}"
+
+          echo ""
+          echo "Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: Print bundle SHA256 for PR3 ldflags
+        shell: bash
+        run: |
+          echo ""
+          echo "================================================================"
+          echo "  Bundle SHA256 (embed into clustr-server binary via ldflags):"
+          echo "  ${{ steps.meta.outputs.bundle_sha256 }}"
+          echo "================================================================"

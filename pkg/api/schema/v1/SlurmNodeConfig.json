@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/slurm-node-config",
+  "$ref": "#/$defs/SlurmNodeConfig",
+  "$defs": {
+    "SlurmConfigFile": {
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "file_mode": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "filename",
+        "path",
+        "content",
+        "checksum",
+        "file_mode",
+        "owner",
+        "version"
+      ]
+    },
+    "SlurmNodeConfig": {
+      "properties": {
+        "cluster_name": {
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "configs": {
+          "items": {
+            "$ref": "#/$defs/SlurmConfigFile"
+          },
+          "type": "array"
+        },
+        "scripts": {
+          "items": {
+            "$ref": "#/$defs/SlurmScriptFile"
+          },
+          "type": "array"
+        },
+        "slurm_repo_url": {
+          "type": "string"
+        },
+        "munge_key": {
+          "type": "string"
+        },
+        "gpg_key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "cluster_name",
+        "configs"
+      ]
+    },
+    "SlurmScriptFile": {
+      "properties": {
+        "script_type": {
+          "type": "string"
+        },
+        "dest_path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "script_type",
+        "dest_path",
+        "content",
+        "checksum",
+        "version"
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/register-request",
+  "$ref": "#/$defs/RegisterRequest",
+  "$defs": {
+    "RegisterRequest": {
+      "properties": {
+        "hardware_profile": true,
+        "detected_firmware": {
+          "type": "string"
+        },
+        "multicast_mode": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "hardware_profile"
+      ]
+    }
+  }
+}

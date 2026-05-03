@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/gpg-key",
+  "$ref": "#/$defs/GPGKey",
+  "$defs": {
+    "GPGKey": {
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "armored_key": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "owner",
+        "source",
+        "created_at"
+      ]
+    }
+  }
+}

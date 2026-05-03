@@ -1,0 +1,18 @@
+Hello {{.Username}},
+
+You have been added as a delegated manager of the compute group "{{.GroupName}}".
+
+{{- if .GrantedBy}}
+Granted by: {{.GrantedBy}}
+{{- end}}
+
+As a delegated manager you can:
+  - View group utilization and member roster
+  - Add and remove members
+  - Submit allocation change requests
+  - Set the group allocation expiration
+
+You are not the group owner and cannot change PI ownership or delete the group.
+Log in to the researcher portal to access the groups you manage.
+
+This is an automated message from clustr.

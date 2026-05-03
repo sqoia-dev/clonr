@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/disk-layout",
+  "$ref": "#/$defs/DiskLayout",
+  "$defs": {
+    "Bootloader": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "target"
+      ]
+    },
+    "DiskLayout": {
+      "properties": {
+        "raid_arrays": {
+          "items": {
+            "$ref": "#/$defs/RAIDSpec"
+          },
+          "type": "array"
+        },
+        "zfs_pools": {
+          "items": {
+            "$ref": "#/$defs/ZFSPool"
+          },
+          "type": "array"
+        },
+        "partitions": {
+          "items": {
+            "$ref": "#/$defs/PartitionSpec"
+          },
+          "type": "array"
+        },
+        "bootloader": {
+          "$ref": "#/$defs/Bootloader"
+        },
+        "target_device": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "partitions",
+        "bootloader"
+      ]
+    },
+    "PartitionSpec": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "filesystem": {
+          "type": "string"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "min_bytes": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "label",
+        "size_bytes",
+        "filesystem",
+        "mountpoint",
+        "flags",
+        "min_bytes"
+      ]
+    },
+    "RAIDSpec": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "chunk_kb": {
+          "type": "integer"
+        },
+        "spare": {
+          "type": "integer"
+        },
+        "force_software": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "level",
+        "members"
+      ]
+    },
+    "ZFSPool": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "vdev_type": {
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "properties": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "vdev_type",
+        "members",
+        "mountpoint"
+      ]
+    }
+  }
+}

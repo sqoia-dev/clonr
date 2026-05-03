@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bios-profile-response",
+  "$ref": "#/$defs/BiosProfileResponse",
+  "$defs": {
+    "BiosProfile": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "settings_json": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "vendor",
+        "settings_json",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "BiosProfileResponse": {
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/BiosProfile"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "profile"
+      ]
+    }
+  }
+}

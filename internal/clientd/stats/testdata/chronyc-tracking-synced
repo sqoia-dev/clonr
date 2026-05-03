@@ -1,0 +1,13 @@
+Reference ID    : C0A80101 (ntp1.example.com)
+Stratum         : 3
+Ref time (UTC)  : Thu May  1 12:00:00 2026
+System time     : 0.000012345 seconds slow of NTP time
+Last offset     : -0.000008234 seconds
+RMS offset      : 0.000015678 seconds
+Frequency       : -12.345 ppm slow
+Residual freq   : -0.012 ppm
+Skew            : 0.034 ppm
+Root delay      : 0.023456789 seconds
+Root dispersion : 0.000987654 seconds
+Update interval : 64.0 seconds
+Leap status     : Normal

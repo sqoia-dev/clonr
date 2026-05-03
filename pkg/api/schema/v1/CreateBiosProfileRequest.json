@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/create-bios-profile-request",
+  "$ref": "#/$defs/CreateBiosProfileRequest",
+  "$defs": {
+    "CreateBiosProfileRequest": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "settings_json": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "vendor",
+        "settings_json"
+      ]
+    }
+  }
+}

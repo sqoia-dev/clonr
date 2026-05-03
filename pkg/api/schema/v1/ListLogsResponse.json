@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/list-logs-response",
+  "$ref": "#/$defs/ListLogsResponse",
+  "$defs": {
+    "ListLogsResponse": {
+      "properties": {
+        "logs": {
+          "items": {
+            "$ref": "#/$defs/LogEntry"
+          },
+          "type": "array"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "logs",
+        "total"
+      ]
+    },
+    "LogEntry": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "node_mac": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "object"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "node_mac",
+        "level",
+        "component",
+        "message",
+        "timestamp"
+      ]
+    }
+  }
+}

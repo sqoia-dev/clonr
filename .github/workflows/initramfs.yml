@@ -1,0 +1,147 @@
+name: Initramfs
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# S6-9 — Gate initramfs artifact on ci.yml success.
+#
+# The initramfs binary is the most sensitive release artifact: it runs as root
+# on every node during a deploy.  Shipping a broken or test-failing binary
+# would affect every node that PXE-boots on next reimage.
+#
+# Combined with release.yml's needs: [lab-validate], the full gate chain is:
+#   go test passes (ci.yml / test job)
+#   → initramfs built + reproducibility verified (this workflow)
+#   → lab-validate passes (vm201 BIOS + vm202 UEFI)
+#   → release artifacts published (release.yml)
+#
+# #162 (revised): CI runs inside a stock rockylinux:9 GHA container.
+#   dnf installs kernel-modules at job startup; MODULES_PATH is set to the
+#   only-installed kernel directory under /lib/modules.  No custom builder
+#   image to build, push, version, or maintain.
+#
+# Reproducibility: two back-to-back builds are compared by SHA256.  A mismatch
+# fails the job before the artifact is attached to the release.
+
+jobs:
+  # ─── CI gate ─────────────────────────────────────────────────────────────────
+  ci:
+    name: CI gate (lint + test + build + security)
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ─── Build initramfs ─────────────────────────────────────────────────────────
+  build-initramfs:
+    name: Build initramfs image
+    # Only execute after the full CI suite (lint, test, build, gosec, govulncheck,
+    # trivy) is green.  This means no initramfs is attached to a release if any
+    # test or security check fails.
+    needs: [ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    # Run inside stock Rocky Linux 9.  dnf installs kernel-modules from the
+    # standard Rocky repos; no custom image required.
+    container:
+      image: rockylinux:9
+      options: --user root
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            kernel-modules \
+            kernel-modules-extra \
+            cpio \
+            xz \
+            gzip \
+            file \
+            binutils \
+            findutils \
+            kmod \
+            busybox \
+            tar \
+            pigz \
+            make \
+            git \
+            golang \
+            gcc \
+            autoconf \
+            automake \
+            curl
+
+      - uses: actions/checkout@v4
+
+      - name: Build vendored udpcast (udp-receiver for initramfs)
+        # Build udp-receiver from the vendored source so the initramfs includes
+        # a known-good binary without requiring udpcast on the build host.
+        # Static link attempted first; dynamic fallback if libc static libs absent.
+        # See build/udpcast/versions.yml for version + SHA256 pin.
+        run: |
+          set -euo pipefail
+          UDPCAST_VER=$(awk '/^udpcast:/{in_u=1} in_u && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+          UDPCAST_URL=$(awk '/^udpcast:/{in_u=1} in_u && /source_url:/{sub(/^[[:space:]]*source_url:[[:space:]]*"/, ""); sub(/"[[:space:]]*$/, ""); print; exit}' build/udpcast/versions.yml)
+          UDPCAST_SHA=$(awk '/^udpcast:/{in_u=1} in_u && /source_sha256:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+
+          echo "Building udpcast ${UDPCAST_VER}"
+          curl -fL "${UDPCAST_URL}" -o /tmp/udpcast.tar.gz
+          echo "${UDPCAST_SHA}  /tmp/udpcast.tar.gz" | sha256sum -c -
+
+          tar -xzf /tmp/udpcast.tar.gz -C /tmp
+          cd /tmp/udpcast-${UDPCAST_VER}
+          ./configure
+          if make LDFLAGS=-static udp-sender udp-receiver; then
+            echo "Static link succeeded"
+          else
+            echo "Static link failed — falling back to dynamic"
+            make udp-sender udp-receiver
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64"
+          cp udp-sender udp-receiver "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/"
+          chmod 755 "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender" \
+                    "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver"
+          echo "udp-receiver ready: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver)"
+
+      - name: Build static clustr client
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o bin/clustr \
+              ./cmd/clustr
+
+      # The stock Rocky 9 container has exactly one kernel-modules version
+      # installed; resolve it dynamically so the workflow works across kernel
+      # updates without any pin to maintain.
+      - name: Resolve MODULES_PATH
+        id: modules
+        run: |
+          KVER=$(ls /lib/modules)
+          echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
+          echo "modules_path=/lib/modules/${KVER}" >> "$GITHUB_OUTPUT"
+
+      # ── Reproducibility check ─────────────────────────────────────────────
+      # Build twice with make initramfs-verify, which asserts SHA256 equality.
+      # Both builds run in the same container, same /lib/modules, same binaries.
+      # Any source of non-determinism (unsorted find, embedded timestamps) fails here.
+      - name: Verify reproducible initramfs (build twice, assert SHA256 match)
+        run: make initramfs-verify MODULES_PATH=${{ steps.modules.outputs.modules_path }}
+
+      # ── Final build for release artifact ─────────────────────────────────
+      # initramfs-verify cleans up its temp images; produce the release artifact.
+      - name: Build release initramfs
+        run: make initramfs MODULES_PATH=${{ steps.modules.outputs.modules_path }}
+
+      - name: Attach initramfs to release
+        uses: softprops/action-gh-release@v2
+        with:
+          append_body: false
+          files: |
+            initramfs-clustr.img
+            initramfs-clustr.modules.manifest

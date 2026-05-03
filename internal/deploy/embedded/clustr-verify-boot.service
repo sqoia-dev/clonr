@@ -1,0 +1,21 @@
+[Unit]
+Description=clustr post-reboot verification phone-home
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/clustr/node-token
+ConditionPathExists=/etc/clustr/verify-boot-url
+ConditionPathExists=!/usr/local/bin/clustr-clientd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/clustr-verify-boot
+RemainAfterExit=yes
+TimeoutStartSec=60
+# Retry on network failures
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=10
+StartLimitIntervalSec=600
+
+[Install]
+WantedBy=multi-user.target

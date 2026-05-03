@@ -1,0 +1,93 @@
+{
+  "blockdevices": [
+    {
+      "name": "sda",
+      "type": "disk",
+      "size": "107374182400",
+      "fstype": null,
+      "mountpoint": null,
+      "uuid": null,
+      "partuuid": null,
+      "label": null,
+      "model": "QEMU HARDDISK",
+      "serial": "QM00001",
+      "pkname": null,
+      "rm": false,
+      "ro": false,
+      "tran": "sata",
+      "vendor": "QEMU    ",
+      "children": [
+        {
+          "name": "sda1",
+          "type": "part",
+          "size": "1073741824",
+          "fstype": "linux_raid_member",
+          "mountpoint": null,
+          "uuid": "cccccccc-1111-1111-1111-cccccccccccc",
+          "partuuid": "cccccccc-0001-0001-0001-cccccccccccc",
+          "label": null,
+          "model": null,
+          "serial": null,
+          "pkname": "sda",
+          "rm": false,
+          "ro": false,
+          "tran": null,
+          "vendor": null
+        }
+      ]
+    },
+    {
+      "name": "sdb",
+      "type": "disk",
+      "size": "107374182400",
+      "fstype": null,
+      "mountpoint": null,
+      "uuid": null,
+      "partuuid": null,
+      "label": null,
+      "model": "QEMU HARDDISK",
+      "serial": "QM00002",
+      "pkname": null,
+      "rm": false,
+      "ro": false,
+      "tran": "sata",
+      "vendor": "QEMU    ",
+      "children": [
+        {
+          "name": "sdb1",
+          "type": "part",
+          "size": "1073741824",
+          "fstype": "linux_raid_member",
+          "mountpoint": null,
+          "uuid": "dddddddd-2222-2222-2222-dddddddddddd",
+          "partuuid": "dddddddd-0001-0001-0001-dddddddddddd",
+          "label": null,
+          "model": null,
+          "serial": null,
+          "pkname": "sdb",
+          "rm": false,
+          "ro": false,
+          "tran": null,
+          "vendor": null
+        }
+      ]
+    },
+    {
+      "name": "md0",
+      "type": "raid1",
+      "size": "1072693248",
+      "fstype": "xfs",
+      "mountpoint": "/",
+      "uuid": "eeeeeeee-3333-3333-3333-eeeeeeeeeeee",
+      "partuuid": null,
+      "label": null,
+      "model": null,
+      "serial": null,
+      "pkname": null,
+      "rm": false,
+      "ro": false,
+      "tran": null,
+      "vendor": null
+    }
+  ]
+}

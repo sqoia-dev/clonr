@@ -1,0 +1,11 @@
+Hello {{.Username}},
+
+You have been {{.Action}} from the compute group "{{.GroupName}}".
+
+{{- if .PIName}}
+Group PI: {{.PIName}}
+{{- end}}
+
+If you believe this was an error, contact your PI or system administrator.
+
+This is an automated message from clustr.

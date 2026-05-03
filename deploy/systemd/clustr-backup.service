@@ -1,0 +1,18 @@
+[Unit]
+Description=clustr daily backup — SQLite hot backup + ISO cache rsync
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Run as root — same as clustr-serverd, required to read WAL-locked DB
+User=root
+ExecStart=/opt/clustr/scripts/ops/clustr-backup.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clustr-backup
+# Environment overrides if non-default paths are used
+Environment=CLUSTR_DB_PATH=/var/lib/clustr/db/clustr.db
+Environment=CLUSTR_BACKUP_DIR=/var/lib/clustr/backups
+Environment=CLUSTR_ISO_CACHE_DIR=/var/lib/clustr/iso-cache
+Environment=CLUSTR_ISO_BACKUP_DIR=/var/lib/clustr/iso-cache-backup
+Environment=CLUSTR_IMAGE_DIR=/var/lib/clustr/images

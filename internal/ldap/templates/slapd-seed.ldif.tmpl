@@ -1,0 +1,142 @@
+# slapd-seed.ldif.tmpl — cn=config seed LDIF for clustr LDAP module.
+# Rendered once during Enable() and loaded via slapadd -n 0.
+# After seeding, clustr-serverd NEVER modifies the cn=config tree.
+#
+# Template fields:
+#   .BaseDN           — e.g. "dc=cluster,dc=local"
+#   .DC1              — first DC component, e.g. "cluster"
+#   .DC2              — second DC component, e.g. "local"
+#   .ConfigDir        — absolute path to slapd.d/, e.g. /etc/clustr/ldap/slapd.d
+#   .DataDir          — absolute path to mdb data dir, e.g. /var/lib/clustr/ldap/data
+#   .CACertPath       — absolute path to CA cert PEM, e.g. /etc/clustr/ldap/tls/ca.crt
+#   .ServerCertPath   — absolute path to server cert PEM
+#   .ServerKeyPath    — absolute path to server key PEM
+#   .AdminPassword    — plaintext Directory Manager password (slapd hashes via olcPasswordHash)
+#   .ServicePassword  — plaintext node-reader service account password (slapd hashes via olcPasswordHash)
+
+# ── Global config ─────────────────────────────────────────────────────────────
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcPidFile: /var/run/slapd/slapd.pid
+olcArgsFile: /var/run/slapd/slapd.args
+# Require TLS for all connections. We bind ldaps:// only (port 636).
+# No StartTLS, no plain 389 listener.
+olcSecurity: tls=0
+olcLogLevel: stats
+olcPasswordCryptSaltFormat: $6$rounds=100000$%.16s
+olcTLSCACertificateFile: {{.CACertPath}}
+olcTLSCertificateFile: {{.ServerCertPath}}
+olcTLSCertificateKeyFile: {{.ServerKeyPath}}
+olcTLSVerifyClient: never
+olcTLSProtocolMin: 3.3
+
+# ── Schema includes ────────────────────────────────────────────────────────────
+dn: cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: schema
+
+include: file:///etc/openldap/schema/core.ldif
+include: file:///etc/openldap/schema/cosine.ldif
+include: file:///etc/openldap/schema/inetorgperson.ldif
+include: file:///etc/openldap/schema/nis.ldif
+include: file:///etc/clustr/ldap/openssh-lpk.ldif
+
+# ── Module loading ─────────────────────────────────────────────────────────────
+# ppolicy.so ships with openldap-servers on EL9 at /usr/lib64/openldap/.
+# No index on cn=module — slapd assigns {0} at load.
+dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulePath: /usr/lib64/openldap
+olcModuleLoad: ppolicy.so
+
+# ── Frontend database (cn=frontend) ───────────────────────────────────────────
+# olcPasswordHash lives here (slapd 2.6+ deprecated it on the global entry).
+# {CRYPT} with glibc $6$ SHA-512-crypt at 100k rounds.
+# Built into stock slapd — no external module required.
+# %.16s tells slapd to take 16 chars from its random salt for slapadd-time hashing.
+dn: olcDatabase={-1}frontend,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcFrontendConfig
+olcDatabase: {-1}frontend
+olcPasswordHash: {CRYPT}
+olcAccess: to * by * read
+
+# ── cn=config database (config backend) ───────────────────────────────────────
+dn: olcDatabase={0}config,cn=config
+objectClass: olcDatabaseConfig
+olcDatabase: {0}config
+# Only root (via SASL/EXTERNAL or local socket) may manage cn=config.
+# clustr-serverd seeds this once and never touches it again.
+olcRootDN: cn=config
+olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * none
+
+# ── mdb (user data) database ──────────────────────────────────────────────────
+dn: olcDatabase={1}mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {1}mdb
+olcDbDirectory: {{.DataDir}}
+olcSuffix: {{.BaseDN}}
+olcRootDN: cn=Directory Manager,{{.BaseDN}}
+olcRootPW: {{.AdminPassword}}
+# 1 GB mdb map size
+olcDbMaxSize: 1073741824
+# Checkpoint every 512KB written or every 5 minutes
+olcDbCheckpoint: 512 5
+olcLastMod: TRUE
+# ── Indices ────────────────────────────────────────────────────────────────────
+olcDbIndex: uid eq
+olcDbIndex: uidNumber eq
+olcDbIndex: gidNumber eq
+olcDbIndex: memberUid eq
+olcDbIndex: cn eq,sub
+olcDbIndex: entryCSN eq
+olcDbIndex: entryUUID eq
+# ── ACLs ──────────────────────────────────────────────────────────────────────
+# Rule order matters: first match wins.
+#
+# 1. Directory Manager has full access (implicit via olcRootDN — not needed here,
+#    but we add an explicit ACL for clarity).
+# 2. Service account (node-reader) has read-only access to ou=people and ou=groups.
+# 3. Authenticated users may read their own entry.
+# 4. Anonymous access denied everywhere (we're ldaps:// only, but belt-and-suspenders).
+olcAccess: to dn.subtree="ou=people,{{.BaseDN}}" attrs=userPassword
+  by self write
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by anonymous auth
+  by * none
+olcAccess: to dn.subtree="ou=people,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by dn.exact="cn=node-reader,ou=services,{{.BaseDN}}" read
+  by self read
+  by * none
+olcAccess: to dn.subtree="ou=groups,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by dn.exact="cn=node-reader,ou=services,{{.BaseDN}}" read
+  by * none
+olcAccess: to dn.subtree="ou=services,{{.BaseDN}}" attrs=userPassword
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by anonymous auth
+  by * none
+olcAccess: to dn.subtree="ou=services,{{.BaseDN}}"
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by * none
+olcAccess: to *
+  by dn.exact="cn=Directory Manager,{{.BaseDN}}" write
+  by * none
+
+# ── ppolicy overlay ────────────────────────────────────────────────────────────
+# Attached to the mdb backend. Default policy points to
+# cn=default,ou=policies,<baseDN> which is seeded into the DIT by seedDIT().
+# olcPPolicyUseLockout: TRUE — return PasswordPolicyError on lockout so sssd
+# can surface the error accurately via ldap_access_order=ppolicy.
+dn: olcOverlay={0}ppolicy,olcDatabase={1}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcPPolicyConfig
+olcOverlay: {0}ppolicy
+olcPPolicyDefault: cn=default,ou=policies,{{.BaseDN}}
+olcPPolicyHashCleartext: TRUE
+olcPPolicyUseLockout: TRUE
+olcPPolicyForwardUpdates: FALSE

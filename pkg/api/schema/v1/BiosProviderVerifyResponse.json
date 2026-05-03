@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/bios-provider-verify-response",
+  "$ref": "#/$defs/BiosProviderVerifyResponse",
+  "$defs": {
+    "BiosProviderVerifyResponse": {
+      "properties": {
+        "vendor": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "bin_path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "vendor",
+        "available",
+        "bin_path"
+      ]
+    }
+  }
+}

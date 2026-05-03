@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/rack",
+  "$ref": "#/$defs/Rack",
+  "$defs": {
+    "Enclosure": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "rack_id": {
+          "type": "string"
+        },
+        "rack_slot_u": {
+          "type": "integer"
+        },
+        "height_u": {
+          "type": "integer"
+        },
+        "type_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/EnclosureSlot"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "rack_id",
+        "rack_slot_u",
+        "height_u",
+        "type_id",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "EnclosureSlot": {
+      "properties": {
+        "slot_index": {
+          "type": "integer"
+        },
+        "node_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "slot_index"
+      ]
+    },
+    "NodeRackPosition": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "rack_id": {
+          "type": "string"
+        },
+        "slot_u": {
+          "type": "integer"
+        },
+        "height_u": {
+          "type": "integer"
+        },
+        "enclosure_id": {
+          "type": "string"
+        },
+        "slot_index": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id"
+      ]
+    },
+    "Rack": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "height_u": {
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "positions": {
+          "items": {
+            "$ref": "#/$defs/NodeRackPosition"
+          },
+          "type": "array"
+        },
+        "enclosures": {
+          "items": {
+            "$ref": "#/$defs/Enclosure"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "height_u",
+        "created_at",
+        "updated_at"
+      ]
+    }
+  }
+}

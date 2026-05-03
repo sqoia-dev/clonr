@@ -1,0 +1,15 @@
+Hello {{.PIName}},
+
+The annual review cycle for your compute group is now open.
+
+  Group:    {{.GroupName}}
+  Deadline: {{.Deadline}}
+{{- if .ReviewURL}}
+  Review:   {{.ReviewURL}}
+{{- end}}
+
+Please log in to the PI portal and affirm that your group is active, or request
+archival if the group is no longer in use. Groups with no response by the deadline
+will be marked "no response" in the review summary.
+
+This is an automated message from clustr.

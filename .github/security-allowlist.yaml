@@ -1,0 +1,263 @@
+# clustr security scanner allow-list
+#
+# This file documents every gosec, govulncheck, and trivy finding that has been
+# reviewed and accepted or suppressed with a justification.  New suppressions
+# MUST be added here; inline #nosec annotations that are not listed here will be
+# caught in review.
+#
+# Format:
+#   scanner:    gosec | govulncheck | trivy
+#   id:         rule/vuln/CVE identifier
+#   locations:  source files and line numbers (gosec) or package paths (govulncheck)
+#   disposition: allowlisted | accepted | tracked
+#   rationale:  plain-English justification
+#   tracked_as: sprint item ID if a real fix is planned
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GOSEC
+# ─────────────────────────────────────────────────────────────────────────────
+
+- scanner: gosec
+  id: G115
+  disposition: allowlisted
+  rationale: >
+    All 28 findings are uint64→int64 (or int64→uint64) conversions in disk-size
+    arithmetic inside internal/image/layout/, internal/deploy/deploy.go,
+    internal/deploy/rsync.go, and internal/clientd/heartbeat.go.  The domain
+    maximum is a single-server HPC image store; disk sizes never approach the
+    int64 max of 9.2 EB in practice.  The conversions are in accounting/display
+    paths only — no security boundary is crossed.  G115 is excluded via
+    -exclude=G115 in the CI invocation rather than per-instance nosec to keep
+    the source readable.
+
+- scanner: gosec
+  id: G703
+  disposition: allowlisted
+  rationale: >
+    25 path-traversal taint findings across internal/deploy/finalize.go,
+    internal/server/handlers/images.go, internal/server/handlers/factory.go,
+    internal/server/handlers/buildprogress.go, internal/image/isoinstaller/vm.go,
+    internal/deploy/zfs.go, internal/slurm/routes.go, and
+    internal/server/handlers/shell_ws.go.
+    All paths originate from the database (imageID, artifactPath) or from
+    configuration values set by authenticated admins — not from raw user input.
+    imageID values are UUID-validated at the API layer before any file operation.
+    These are gosec taint-analysis false positives on an admin-only internal
+    provisioning tool.  Rule excluded via -exclude=G703.
+
+- scanner: gosec
+  id: G704
+  disposition: allowlisted
+  rationale: >
+    1 SSRF finding in pkg/client/client.go:496.
+    The clustr CLI client calls a clustr-serverd URL that is configured by the
+    operator (--server flag or CLUSTR_SERVER env var).  SSRF is not a threat
+    model concern here because the client is run by the operator themselves
+    against their own server.  Also 5 additional G704 findings flagging
+    w.Write() calls in server handlers that write internal JSON/script bytes to
+    the HTTP response — these are not SSRF at all (false positive on the rule
+    matching w.Write).  Rule excluded via -exclude=G704.
+
+- scanner: gosec
+  id: G702
+  disposition: allowlisted
+  rationale: >
+    6 command-injection taint findings:
+      internal/server/handlers/shell_ws.go:50 — exec.Command("systemd-run", ...)
+        with nspawnArgs built from image config; only reachable by admin-scope
+        API keys.
+      internal/ldap/slapd.go:353,379,389 — exec.CommandContext calling
+        "systemctl", "date", "slapcat" with fixed binary names; backupDir path
+        comes from CLUSTR_LDAP_BACKUP_DIR env, not from user request.
+      internal/ldap/logs.go:44,114 — exec.CommandContext("journalctl", ...)
+        with hardcoded flags; only reachable by admin-scope API.
+    In all cases the binary name is hardcoded and the variable arguments come
+    from config or DB values, not from untrusted user input.  Admin-only access
+    is enforced by middleware.  Rule excluded via -exclude=G702.
+
+- scanner: gosec
+  id: G118
+  disposition: allowlisted
+  rationale: >
+    7 findings where goroutines use context.Background() or context.TODO()
+    while an HTTP request-scoped context is available.
+    All are intentional by design: reimage jobs (group.go:89), Slurm upgrade
+    jobs (upgrade.go:222,275), Slurm push operations (manager.go:471), image
+    builds (builder.go:78), LDAP provisioning (manager.go:153), and server
+    graceful-shutdown logic (server.go:1060).  These goroutines must outlive
+    the HTTP request that triggered them; using the request context would
+    cancel them when the client disconnects, which would corrupt in-flight
+    deploy state.  This is the correct pattern.  Rule excluded via
+    -exclude=G118.
+
+- scanner: gosec
+  id: G122
+  disposition: allowlisted
+  rationale: >
+    3 findings in filepath.Walk/WalkDir callbacks:
+      internal/slurm/deps.go:496 — cleans up temp dirs in the Slurm deps cache
+      internal/ldap/slapd.go:109 — walks slapd config dir (admin-controlled)
+      internal/image/scrub.go:122 — walks the image rootfs dir (admin-controlled)
+    These directories are written by clustr-serverd itself (not by external
+    users); the race window is not exploitable via a threat actor.  os.Root
+    APIs require Go 1.24+ and would be an improvement; tracked for a future
+    quality pass.  Rule excluded via -exclude=G122.
+
+- scanner: gosec
+  id: G101
+  disposition: allowlisted
+  locations:
+    - internal/server/handlers/api_keys.go:133,135,258,260
+    - internal/db/audit.go:30,31
+    - internal/clientd/client.go:60
+    - cmd/clustr-clientd/main.go:37
+  rationale: >
+    These four locations contain token format prefixes ("clustr-admin-",
+    "clustr-node-"), audit action name strings ("api_key.revoke",
+    "api_key.rotate"), and filesystem paths to token files
+    (/etc/clustr/node-token).  None of these are credential values.
+    Per-instance #nosec G101 annotations added to each location.
+
+- scanner: gosec
+  id: G101
+  disposition: allowlisted
+  locations:
+    - internal/secrets/secrets.go:26
+    - internal/slurm/deps.go:265
+  rationale: >
+    These are intentional canary constants.  The server explicitly checks
+    CLUSTR_SECRET_KEY against these values at startup and hard-fails with
+    ErrKeyRequired if they match, preventing silent use of a publicly-known key.
+    The "credential" gosec detects is the guard value itself, not a secret in
+    use.  Per-instance #nosec G101 annotations added with explanatory comments.
+
+- scanner: gosec
+  id: G101
+  disposition: allowlisted
+  locations:
+    - internal/image/isoinstaller/kickstart.go:55
+  rationale: >
+    defaultRootPasswordHash is a sha-512 crypt hash used in kickstart templates
+    as a template default for ephemeral install images.  Operators always supply
+    their own password at image-build time via the API; the default hash is a
+    last-resort fallback for minimal/test installs.  This is not a secret that
+    grants access to any running system.
+
+- scanner: gosec
+  id: G204
+  disposition: allowlisted
+  locations:
+    - cmd/clustr-serverd/bundle.go (rpm --import and rpm -K invocations)
+  rationale: >
+    Two exec.Command("rpm", ...) calls in verifyRPMSignatures.  The binary
+    name is hardcoded ("rpm").  The --dbpath argument is a path returned by
+    os.MkdirTemp (controlled by the process).  The key file argument is a
+    path returned by os.CreateTemp.  The RPM file paths come from os.ReadDir
+    of a staging directory written by extractBundle under clustr's exclusive
+    control.  No user-supplied input reaches the exec arguments.
+    Per-instance #nosec G204 annotations added to both exec.Command calls.
+
+- scanner: gosec
+  id: G402
+  disposition: fixed
+  locations:
+    - internal/ldap/dit.go:84-87 (fixed: added MinVersion: tls.VersionTLS12)
+    - internal/ldap/dit.go:705-708 (fixed: added MinVersion: tls.VersionTLS12)
+  rationale: >
+    gosec v2.22.4 flags tls.Config structs without an explicit MinVersion even
+    though Go 1.18+ defaults to TLS 1.2.  Both tls.Config instances in
+    internal/ldap/dit.go were missing explicit MinVersion.  Fixed by adding
+    MinVersion: tls.VersionTLS12 to both structs — this makes the intent
+    explicit and eliminates the finding without suppression.
+
+- scanner: gosec
+  id: G402
+  disposition: accepted
+  tracked_as: S4-5
+  locations:
+    - internal/power/proxmox/provider.go:100
+  rationale: >
+    TLS InsecureSkipVerify is set only when the Proxmox node config includes
+    "insecure":"true", which must be explicitly set by an operator.  This
+    matches the Proxmox API's own self-signed certificate reality in most
+    on-premises HPC environments.  A proper fix (configurable CA cert path via
+    tls_ca_cert_path field) is planned as S4-5 (Sprint 4).  The annotation was
+    incorrectly using //nolint:gosec (golangci-lint format) instead of
+    //#nosec G402; corrected in this commit.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GOVULNCHECK
+# ─────────────────────────────────────────────────────────────────────────────
+
+- scanner: govulncheck
+  id: GO-2026-4947
+  disposition: tracked
+  rationale: >
+    Unexpected work during chain building in crypto/x509.  Fixed in go1.25.9.
+    go.mod bumped to go 1.25.9 in this commit; CI uses go-version: "1.25" which
+    resolves to latest patch.  No allowlist suppression needed once go.mod
+    declares 1.25.9.
+
+- scanner: govulncheck
+  id: GO-2026-4946
+  disposition: tracked
+  rationale: >
+    Inefficient policy validation in crypto/x509.  Fixed in go1.25.9.
+    Resolved by go.mod bump to 1.25.9.
+
+- scanner: govulncheck
+  id: GO-2026-4870
+  disposition: tracked
+  rationale: >
+    Unauthenticated TLS 1.3 KeyUpdate record DoS in crypto/tls.  Fixed in
+    go1.25.9.  Clustr-serverd listens on the provisioning network (not the
+    public internet); however this vuln requires only network access, not
+    authentication, so patching is the right call.  Resolved by go.mod bump.
+
+- scanner: govulncheck
+  id: GO-2026-4869
+  disposition: tracked
+  rationale: >
+    Unbounded allocation for old GNU sparse in archive/tar.  Fixed in go1.25.9.
+    Clustr processes operator-supplied tarballs; a malicious tarball could
+    trigger this.  Resolved by go.mod bump.
+
+- scanner: govulncheck
+  id: GO-2026-4602
+  disposition: tracked
+  rationale: >
+    FileInfo can escape from a Root in os.  Fixed in go1.25.8.  Resolved by
+    go.mod bump to 1.25.9.
+
+- scanner: govulncheck
+  id: GO-2026-4601
+  disposition: tracked
+  rationale: >
+    Incorrect parsing of IPv6 host literals in net/url.  Fixed in go1.25.8.
+    The CLI client and server both parse user-supplied URLs; this could affect
+    URL routing.  Resolved by go.mod bump.
+
+# All remaining govulncheck findings (GO-2026-4341, GO-2026-4340, GO-2026-4337,
+# GO-2025-4175, GO-2025-4155, GO-2025-4014 through GO-2025-4007) are in the
+# Go standard library and are all fixed in go1.25.9 or earlier patch releases.
+# All resolved by bumping go.mod to go 1.25.9.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIVY
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Trivy is run against the built container image in CI.  Base image is
+# alpine:3.21 (bumped from 3.19 in this commit).  The --ignore-unfixed flag
+# is set in CI so findings with no available fix do not block the build.
+
+- scanner: trivy
+  id: CVE-2026-40200
+  disposition: fixed
+  component: musl, musl-utils
+  base_image: alpine:3.19 (vulnerable) → alpine:3.21 (fixed)
+  rationale: >
+    musl libc arbitrary code execution and DoS via stack-based buffer overflow.
+    Installed version 1.2.4_git20230717-r5 is vulnerable; fixed in r6.
+    The fix is available in alpine:3.20+ / alpine:3.21.  Dockerfile base image
+    bumped from alpine:3.19 to alpine:3.21 in this commit to resolve both
+    musl and musl-utils findings.  Severity: HIGH (2 findings, same CVE).

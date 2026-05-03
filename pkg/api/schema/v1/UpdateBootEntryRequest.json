@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/update-boot-entry-request",
+  "$ref": "#/$defs/UpdateBootEntryRequest",
+  "$defs": {
+    "UpdateBootEntryRequest": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "kernel_url": {
+          "type": "string"
+        },
+        "initrd_url": {
+          "type": "string"
+        },
+        "cmdline": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  }
+}

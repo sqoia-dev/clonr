@@ -1,0 +1,41 @@
+# nfpm-cli.yaml — package configuration for the clustr CLI binary (RPM only).
+#
+# Usage:
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el9 nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el8 nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el10 nfpm pkg --config nfpm-cli.yaml --packager rpm --target dist/
+#
+# Environment variables consumed:
+#   VERSION     — semver without leading 'v' (e.g. 0.10.0).
+#   ARCH        — amd64 or arm64.
+#   EL_RELEASE  — el8, el9, or el10.
+#
+# Requires binary: clustr-linux-${ARCH}
+
+name: clustr
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+version_schema: semver
+release: "1.${EL_RELEASE}"
+section: admin
+priority: optional
+maintainer: Sqoia Labs <hello@sqoia.dev>
+description: |
+  clustr CLI — client for the clustr HPC node cloning and image management server.
+  Provides commands for node management, image operations, and cluster administration.
+vendor: Sqoia Labs
+homepage: https://github.com/sqoia-dev/clustr
+license: MIT
+
+rpm:
+  group: System Environment/Base
+  summary: clustr CLI — HPC node cloning client
+
+contents:
+  - src: clustr-linux-${ARCH}
+    dst: /usr/bin/clustr
+    file_info:
+      mode: 0755
+      owner: root
+      group: root

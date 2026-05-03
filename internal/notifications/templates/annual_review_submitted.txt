@@ -1,0 +1,12 @@
+A PI has submitted an annual review response.
+
+  PI:     {{.PIName}}
+  Group:  {{.GroupName}}
+  Status: {{.Status}}
+{{- if .Notes}}
+  Notes:  {{.Notes}}
+{{- end}}
+
+Log in to the admin panel to view the full review cycle status.
+
+This is an automated message from clustr.

@@ -1,0 +1,11 @@
+Hello {{.DisplayName}},
+
+Your HPC cluster account has been created.
+
+  Username: {{.Username}}
+  Cluster:  {{.ClusterName}}
+
+You can now log in to the cluster using your assigned credentials.
+If you have questions about accessing the cluster, contact your PI or system administrator.
+
+This is an automated message from clustr.

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/build-state",
+  "$ref": "#/$defs/BuildState",
+  "$defs": {
+    "BuildState": {
+      "properties": {
+        "image_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "bytes_total": {
+          "type": "integer"
+        },
+        "bytes_done": {
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "type": "integer"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "serial_tail": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "qemu_stderr": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "image_id",
+        "phase",
+        "started_at",
+        "updated_at",
+        "bytes_total",
+        "bytes_done",
+        "elapsed_ms"
+      ]
+    }
+  }
+}

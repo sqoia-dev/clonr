@@ -1,0 +1,232 @@
+# nfpm.yaml — package configuration for clustr-serverd RPM distribution.
+#
+# Usage (in CI or locally after building binaries):
+#
+#   # EL9 x86_64
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el9 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+#
+#   # EL8 x86_64
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el8 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+#
+#   # EL10 x86_64
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el10 nfpm pkg --config nfpm.yaml --packager rpm --target dist/
+#
+# Environment variables consumed:
+#   VERSION     — semver without leading 'v' (e.g. 0.10.0). Set from git tag in CI.
+#   ARCH        — target architecture: amd64 or arm64.
+#   EL_RELEASE  — el8, el9, or el10. Written into the RPM Release field so that
+#                 dnf metadata is correct per repo subdir.
+#
+# The Go binary is statically linked (CGO_ENABLED=0) and runs identically on
+# EL8, EL9, and EL10. We build one binary and repackage it three times with
+# the correct Release tag so the RPM filename and dnf metadata are accurate:
+#   clustr-serverd-0.1.0-1.el9.x86_64.rpm
+#   clustr-serverd-0.1.0-1.el8.x86_64.rpm
+#   clustr-serverd-0.1.0-1.el10.x86_64.rpm
+#
+# Requires binary to be built first:
+#   clustr-serverd-linux-${ARCH}  (server binary)
+#
+# See nfpm-cli.yaml for the clustr CLI package.
+
+name: clustr-serverd
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+version_schema: semver
+release: "1.${EL_RELEASE}"
+section: admin
+priority: optional
+maintainer: Sqoia Labs <hello@sqoia.dev>
+description: |
+  clustr server — node cloning and image management for HPC bare-metal clusters.
+  Register nodes, manage OS images and bundles, and reimage machines from a
+  single binary with built-in PXE (DHCP + TFTP), web UI, and REST API.
+vendor: Sqoia Labs
+homepage: https://github.com/sqoia-dev/clustr
+license: MIT
+
+# systemd-container provides systemd-nspawn, required by the image-shell feature.
+# memtest86+ ships in EL8 BaseOS and EL9/EL10 AppStream — no EPEL required.
+# dropbear is in EPEL for EL8, EL9, and EL10. Required by build-initramfs.sh to
+# embed an SSH server in the initramfs for debug access at boot time.
+# screen is in EPEL for EL8, EL9, and EL10. Used by build-initramfs.sh as the
+# interactive shell wrapper for the initramfs console fallback.
+# udpcast (fleet-reimage multicast, Sprint 25 #157) is vendored: udp-sender and
+# udp-receiver are built from source in CI and bundled in the RPM. No manual
+# install required. See build/udpcast/versions.yml and LICENSE-udpcast.
+# Package names are identical across EL8, EL9, and EL10.
+# EPEL is required for dropbear and screen — see README install section.
+depends:
+  - systemd-container
+  - memtest86+
+  - dropbear    # EPEL — SSH server embedded in initramfs for debug access at boot
+  - screen      # EPEL — interactive shell fallback in initramfs console
+
+rpm:
+  group: System Environment/Daemons
+  summary: clustr server — HPC node cloning and image management
+
+contents:
+  # Server binary
+  - src: clustr-serverd-linux-${ARCH}
+    dst: /usr/sbin/clustr-serverd
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Privilege-helper binary — single privilege boundary for all host-side
+  # privileged operations (nsenter, chroot, mknod, etc.).  Packaged with
+  # mode 0755 here; the post-install scriptlet applies the setuid bit (4755)
+  # so that clustr-serverd can exec it as root from a non-root context.
+  # nfpm does not support writing the setuid bit directly — hence %post.
+  - src: clustr-privhelper-linux-${ARCH}
+    dst: /usr/sbin/clustr-privhelper
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Systemd unit (package variant: ExecStart uses /usr/sbin path)
+  - src: deploy/systemd/clustr-serverd.package.service
+    dst: /usr/lib/systemd/system/clustr-serverd.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Default environment config — marked as config so rpm does not overwrite
+  # operator edits on upgrade (noreplace behaviour).
+  - src: deploy/clustr-serverd.conf
+    dst: /etc/clustr/clustr-serverd.conf
+    type: config|noreplace
+    file_info:
+      mode: 0640
+      owner: root
+      group: root
+
+  # Data directories — nfpm creates these as empty dirs owned by root;
+  # the post-install script fixes group ownership to the clustr group.
+  - dst: /var/lib/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/images
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/db
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/boot
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/tftpboot
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/repo
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/ldap
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/log-archive
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/lib/clustr/tmp
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /var/log/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  - dst: /etc/clustr
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: root
+
+  # JSON Schema + OpenAPI 3.1 files (#161) — served by clustr-serverd and
+  # also available on-disk at /usr/share/clustr/schema/v1/ for third-party tooling.
+  - src: pkg/api/schema/v1/*.json
+    dst: /usr/share/clustr/schema/v1/
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # udpcast vendored binaries — GPL-2.0-or-later, built from source in CI.
+  # amd64 only; arm64 entries are stripped by the release.yml packaging step.
+  # Source tarball attached to every GitHub Release (GPL-2.0 §3a compliance).
+  # See build/udpcast/versions.yml and LICENSE-udpcast.
+  #
+  # udp-sender ships to /usr/bin (called directly by clustr-serverd).
+  # udp-receiver ships to /usr/share/clustr/vendor/udpcast/ — namespaced to
+  # avoid PATH collisions if the operator later installs upstream udpcast.
+  # build-initramfs.sh picks it up from that path as fallback #2 (after CI
+  # vendored build, before SSH-pull from host PATH).
+  - src: build/udpcast/dist/${ARCH}/udp-sender
+    dst: /usr/bin/udp-sender
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: build/udpcast/dist/${ARCH}/udp-receiver
+    dst: /usr/share/clustr/vendor/udpcast/udp-receiver
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: LICENSE-udpcast
+    dst: /usr/share/doc/clustr-serverd/udpcast/LICENSE
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+scripts:
+  # post-install: create system user, fix ownership, daemon-reload
+  postinstall: scripts/pkg-postinstall.sh
+  # pre-remove: stop service before removal
+  preremove: scripts/pkg-preremove.sh

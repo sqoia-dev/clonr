@@ -1,0 +1,12 @@
+name: hw-raid-degraded
+description: MegaRAID virtual disk degraded (state >= 1)
+plugin: megaraid
+sensor: vd_state
+threshold:
+  op: ">="
+  value: 1
+duration: 60s
+severity: warn
+notify:
+  webhook: true
+  email: []

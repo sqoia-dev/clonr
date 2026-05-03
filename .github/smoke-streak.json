@@ -1,0 +1,6 @@
+{
+  "consecutive_smoke_passes": 0,
+  "last_updated_sha": "a5fc90e",
+  "last_updated": "2026-04-28",
+  "note": "Threshold reached at streak=3 on 2026-04-28. continue-on-error removed from smoke job (ci.yml). Streak reset to 0. If smoke flakes again, set this back to 0 and re-add continue-on-error until streak reaches 3 again."
+}

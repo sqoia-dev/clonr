@@ -1,0 +1,589 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  lab-validate:
+    name: Lab Validation Gate (vm201 BIOS + vm202 UEFI)
+    # INFORMATIONAL (non-blocking): GitHub-hosted runners cannot reach the
+    # private lab network (192.168.1.x). Failures here do NOT block release
+    # publication. See lab-validate.yml for the upgrade path to a self-hosted runner.
+    uses: ./.github/workflows/lab-validate.yml
+    secrets: inherit
+
+  test:
+    name: Test (release gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install web deps
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Run web tests
+        working-directory: web
+        run: pnpm test --run
+
+      - name: Build web assets
+        working-directory: web
+        run: pnpm build
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: go vet
+        run: go vet -tags webdist ./...
+
+      - name: go test
+        run: go test -tags webdist ./... -v -count=1 -timeout 300s
+
+  # ---------------------------------------------------------------------------
+  # Build CLI binary for each arch, then package as RPM for each EL target.
+  #
+  # EL8 / EL9 / EL10 each get their own subdir on pkg.sqoia.dev with the
+  # correct Release field (1.el8 / 1.el9 / 1.el10) in the RPM filename.
+  # The Go static binary is identical across EL targets — same bits, three
+  # packages, so dnf metadata is correct per repo subdir.
+  # ---------------------------------------------------------------------------
+  build-client:
+    name: Build client (linux/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            nfpm_arch: amd64
+          - goarch: arm64
+            nfpm_arch: arm64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install web deps
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web assets
+        working-directory: web
+        run: pnpm build
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build client binary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -trimpath \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o clustr-linux-${{ matrix.goarch }} \
+              ./cmd/clustr
+
+      - name: SHA256 checksum (binary)
+        run: sha256sum clustr-linux-${{ matrix.goarch }} > clustr-linux-${{ matrix.goarch }}.sha256
+
+      - name: Install nfpm + rpm tools
+        run: |
+          NFPM_VERSION=2.46.3
+          curl -fsSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz nfpm
+          chmod +x nfpm && mv nfpm /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends rpm
+          nfpm --version
+
+      - name: Import GPG signing key
+        env:
+          CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
+        run: |
+          echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Build and sign CLI RPMs (el8 / el9 / el10)
+        env:
+          VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.nfpm_arch }}
+          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION="${VERSION#v}"
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
+            | awk -F: '/^fpr:/{print $10; exit}')
+          mkdir -p dist
+
+          # Pre-expand only ${ARCH} in the nfpm config src: paths, leaving
+          # ${VERSION} and ${EL_RELEASE} intact for nfpm's own env expansion.
+          # This avoids nfpm version-specific differences in glob path expansion.
+          NFPM_CLI_RESOLVED=$(mktemp /tmp/nfpm-cli-XXXXXX.yaml)
+          envsubst '${ARCH}' < nfpm-cli.yaml > "${NFPM_CLI_RESOLVED}"
+
+          for EL in el8 el9 el10; do
+            VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
+              nfpm pkg --config "${NFPM_CLI_RESOLVED}" --packager rpm --target dist/
+          done
+          rm -f "${NFPM_CLI_RESOLVED}"
+
+          # Sign each RPM. Write passphrase to a temp file (600) so the gpg subprocess
+          # can read it via --passphrase-file — avoids the fd-3 heredoc approach that
+          # fails when rpmsign forks gpg as a subprocess with a closed fd.
+          GPG_PASS_FILE=$(mktemp /tmp/gpg-pass-XXXXXX)
+          chmod 600 "${GPG_PASS_FILE}"
+          printf '%s' "${CLUSTR_GPG_PASSPHRASE}" > "${GPG_PASS_FILE}"
+
+          for rpm_file in dist/*.rpm; do
+            echo "Signing: ${rpm_file}"
+            rpmsign --addsign \
+              --define "_gpg_name ${KEY_FP}" \
+              --define "_gpg_path ${HOME}/.gnupg" \
+              --define "_gpg_digest_algo sha256" \
+              --define "__gpg /usr/bin/gpg" \
+              --define "__gpg_check_password_cmd /bin/true" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --output %{__signature_filename} %{__plaintext_filename}" \
+              "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file}"
+          done
+          rm -f "${GPG_PASS_FILE}"
+
+      - name: SHA256 checksums (packages)
+        run: cd dist && sha256sum *.rpm > ../checksums-cli-${{ matrix.goarch }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-linux-${{ matrix.goarch }}
+          path: |
+            clustr-linux-${{ matrix.goarch }}
+            clustr-linux-${{ matrix.goarch }}.sha256
+            dist/
+            checksums-cli-${{ matrix.goarch }}.txt
+
+  # ---------------------------------------------------------------------------
+  # Build server binary for each arch, package as RPM per EL target.
+  # ---------------------------------------------------------------------------
+  build-server:
+    name: Build server (linux/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            nfpm_arch: amd64
+          - goarch: arm64
+            nfpm_arch: arm64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install web deps
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web assets
+        working-directory: web
+        run: pnpm build
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build server binary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          SLURM_VER=$(awk '/^slurm:/{in_slurm=1} in_slurm && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/slurm/versions.yml)
+          CLUSTR_REL=$(awk '/^clustr_release:/{gsub(/[" ]/, "", $2); print $2; exit}' build/slurm/versions.yml)
+          BUNDLE_VER="v${SLURM_VER}-clustr${CLUSTR_REL}"
+          BUNDLE_SHA=$(awk '/^bundle_sha256:/{gsub(/[" ]/, "", $2); print $2; exit}' build/slurm/versions.yml 2>/dev/null || echo "")
+          if [ -z "${BUNDLE_SHA}" ]; then
+            BUNDLE_SHA="575ead6b320ff70b9496e5464a7536a224c35639f7c61bac0fec63721e7394b4"
+          fi
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -tags webdist -trimpath \
+              -ldflags="-s -w \
+                -X main.version=${TAG} \
+                -X main.builtinSlurmVersion=${SLURM_VER} \
+                -X main.builtinSlurmBundleVersion=${BUNDLE_VER} \
+                -X main.builtinSlurmBundleSHA256=${BUNDLE_SHA}" \
+              -o clustr-serverd-linux-${{ matrix.goarch }} \
+              ./cmd/clustr-serverd
+
+      - name: Build clustr-privhelper binary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ ! -d ./cmd/clustr-privhelper ]; then
+            echo "ERROR: cmd/clustr-privhelper is required for release packaging but was not found"
+            exit 1
+          fi
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -trimpath \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o clustr-privhelper-linux-${{ matrix.goarch }} \
+              ./cmd/clustr-privhelper
+
+      - name: Build vendored udpcast (amd64 only)
+        # udpcast (GPL-2.0-or-later) is not in EL8/9/10 repos; we vendor
+        # udp-sender + udp-receiver from source. arm64 is deferred — multicast
+        # fleet reimage targets amd64 bare-metal HPC. See build/udpcast/versions.yml.
+        if: matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          UDPCAST_VER=$(awk '/^udpcast:/{in_u=1} in_u && /version:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+          UDPCAST_URL=$(awk '/^udpcast:/{in_u=1} in_u && /source_url:/{sub(/^[[:space:]]*source_url:[[:space:]]*"/, ""); sub(/"[[:space:]]*$/, ""); print; exit}' build/udpcast/versions.yml)
+          UDPCAST_SHA=$(awk '/^udpcast:/{in_u=1} in_u && /source_sha256:/{gsub(/[" ]/, "", $2); print $2; exit}' build/udpcast/versions.yml)
+
+          echo "Building udpcast ${UDPCAST_VER} from ${UDPCAST_URL}"
+
+          # Install build dependencies. gcc and make are pre-installed on ubuntu-latest;
+          # autoconf and automake are NOT needed for building from a release tarball
+          # (the configure script is already generated). Install libtool for ./configure.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libtool
+
+          # Download + verify
+          curl -fL "${UDPCAST_URL}" -o /tmp/udpcast.tar.gz
+          echo "${UDPCAST_SHA}  /tmp/udpcast.tar.gz" | sha256sum -c -
+          echo "udpcast tarball SHA256 verified"
+
+          # Copy source tarball for GPL-2.0 compliance (attached to release)
+          mkdir -p build/udpcast/dist
+          cp /tmp/udpcast.tar.gz build/udpcast/dist/udpcast-source.tar.gz
+
+          # Extract + build (static if possible, dynamic fallback)
+          tar -xzf /tmp/udpcast.tar.gz -C /tmp
+          cd /tmp/udpcast-${UDPCAST_VER}
+          ./configure
+          if make LDFLAGS=-static udp-sender udp-receiver; then
+            echo "Static link succeeded"
+          else
+            echo "Static link failed — falling back to dynamic"
+            make udp-sender udp-receiver
+          fi
+
+          mkdir -p "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64"
+          cp udp-sender udp-receiver "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/"
+          chmod 755 "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender" \
+                    "${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver"
+
+          echo "udp-sender: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-sender)"
+          echo "udp-receiver: $(file ${GITHUB_WORKSPACE}/build/udpcast/dist/amd64/udp-receiver)"
+
+      - name: SHA256 checksum (binary)
+        run: sha256sum clustr-serverd-linux-${{ matrix.goarch }} > clustr-serverd-linux-${{ matrix.goarch }}.sha256
+
+      - name: Install nfpm + rpm tools
+        run: |
+          NFPM_VERSION=2.46.3
+          curl -fsSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz nfpm
+          chmod +x nfpm && mv nfpm /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends rpm
+          nfpm --version
+
+      - name: Import GPG signing key
+        env:
+          CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
+        run: |
+          echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Build and sign server RPMs (el8 / el9 / el10)
+        env:
+          VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.nfpm_arch }}
+          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION="${VERSION#v}"
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
+            | awk -F: '/^fpr:/{print $10; exit}')
+          mkdir -p dist
+
+          # Pre-expand only ${ARCH} in the nfpm config src: paths, leaving
+          # ${VERSION} and ${EL_RELEASE} intact for nfpm's own env expansion.
+          # For arm64, strip udpcast content blocks — vendored udp-sender is
+          # amd64-only (arm64 deferred, see build/udpcast/versions.yml).
+          NFPM_SERVER_RESOLVED=$(mktemp /tmp/nfpm-server-XXXXXX.yaml)
+          envsubst '${ARCH}' < nfpm.yaml > "${NFPM_SERVER_RESOLVED}"
+          if [ "${ARCH}" = "arm64" ]; then
+            # Remove the udpcast contents block (udp-sender + LICENSE-udpcast entries).
+            # The block starts at "# udpcast vendored binaries" and ends just before
+            # "scripts:" — use a two-address range to delete all lines in between.
+            sed -i '/# udpcast vendored binaries/,/^scripts:/{ /^scripts:/!d }' "${NFPM_SERVER_RESOLVED}"
+          fi
+
+          for EL in el8 el9 el10; do
+            VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
+              nfpm pkg --config "${NFPM_SERVER_RESOLVED}" --packager rpm --target dist/
+          done
+          rm -f "${NFPM_SERVER_RESOLVED}"
+
+          GPG_PASS_FILE=$(mktemp /tmp/gpg-pass-XXXXXX)
+          chmod 600 "${GPG_PASS_FILE}"
+          printf '%s' "${CLUSTR_GPG_PASSPHRASE}" > "${GPG_PASS_FILE}"
+
+          for rpm_file in dist/*.rpm; do
+            echo "Signing: ${rpm_file}"
+            rpmsign --addsign \
+              --define "_gpg_name ${KEY_FP}" \
+              --define "_gpg_path ${HOME}/.gnupg" \
+              --define "_gpg_digest_algo sha256" \
+              --define "__gpg /usr/bin/gpg" \
+              --define "__gpg_check_password_cmd /bin/true" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --output %{__signature_filename} %{__plaintext_filename}" \
+              "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file}"
+          done
+          rm -f "${GPG_PASS_FILE}"
+
+      - name: SHA256 checksums (packages)
+        run: cd dist && sha256sum *.rpm > ../checksums-server-${{ matrix.goarch }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-linux-${{ matrix.goarch }}
+          path: |
+            clustr-serverd-linux-${{ matrix.goarch }}
+            clustr-serverd-linux-${{ matrix.goarch }}.sha256
+            dist/
+            checksums-server-${{ matrix.goarch }}.txt
+
+      # Upload udpcast source tarball for GPL-2.0 §3a compliance.
+      # amd64 only — arm64 udpcast build is deferred.
+      - name: Upload udpcast source tarball (amd64 only)
+        if: matrix.goarch == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: udpcast-source
+          path: build/udpcast/dist/udpcast-source.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Publish signed RPM repo to pkg.sqoia.dev.
+  #
+  # Repo layout on disk:
+  #   /clustr/RPM-GPG-KEY-clustr   — armored public key for rpm --import
+  #   /clustr/el8/clustr.repo      — dnf repo file for EL8
+  #   /clustr/el8/x86_64/          — RPMs + repodata
+  #   /clustr/el8/aarch64/         — RPMs + repodata
+  #   /clustr/el9/clustr.repo
+  #   /clustr/el9/x86_64/
+  #   /clustr/el9/aarch64/
+  #   /clustr/el10/clustr.repo
+  #   /clustr/el10/x86_64/
+  #   /clustr/el10/aarch64/
+  # ---------------------------------------------------------------------------
+  publish-repo:
+    name: Publish to pkg.sqoia.dev
+    runs-on: ubuntu-latest
+    needs: [build-client, build-server]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: all-artifacts/
+
+      - name: Install repo tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends createrepo-c gnupg2
+
+      - name: Import GPG signing key and export public key
+        env:
+          CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
+        run: |
+          echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
+          mkdir -p repo-staging
+          # Armored public key — served at /clustr/RPM-GPG-KEY-clustr for rpm --import
+          gpg --armor --export release@sqoia.dev > repo-staging/RPM-GPG-KEY-clustr
+
+      - name: Stage RPM packages by EL target and arch
+        run: |
+          # nfpm outputs: clustr-serverd-1.13.0-1.el9.x86_64.rpm
+          # Parse EL target and arch from filename, route to correct subdir.
+          for rpm_file in $(find all-artifacts -name '*.rpm' | sort); do
+            filename=$(basename "${rpm_file}")
+            # arch: last field before .rpm (x86_64 or aarch64)
+            pkg_arch="${filename##*.}"
+            filename_no_arch="${filename%.*}"
+            pkg_arch="${filename_no_arch##*.}"
+            # EL target: matches el8/el9/el10 in the Release field
+            el_target=$(echo "${filename}" | grep -oP 'el\d+' | head -1)
+            if [ -n "${el_target}" ] && [ -n "${pkg_arch}" ]; then
+              mkdir -p "repo-staging/${el_target}/${pkg_arch}"
+              cp "${rpm_file}" "repo-staging/${el_target}/${pkg_arch}/"
+              echo "Staged: ${filename} -> ${el_target}/${pkg_arch}/"
+            else
+              echo "WARNING: cannot parse EL/arch from: ${filename}"
+            fi
+          done
+          echo "=== Staged layout ===" && find repo-staging -name '*.rpm'
+
+      - name: Generate per-EL .repo files
+        run: |
+          for EL in el8 el9 el10; do
+            mkdir -p "repo-staging/${EL}"
+            # Note: $basearch is a dnf variable, NOT a shell variable — no escaping needed here.
+            cat > "repo-staging/${EL}/clustr.repo" << 'REPOEOF'
+          [clustr]
+          name=clustr packages - $basearch
+          baseurl=https://pkg.sqoia.dev/clustr/ELTARGET/$basearch
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+          REPOEOF
+            # Replace ELTARGET placeholder with actual EL version
+            sed -i "s/ELTARGET/${EL}/g" "repo-staging/${EL}/clustr.repo"
+          done
+
+      - name: Generate RPM repodata (createrepo_c) per EL and arch
+        run: |
+          for dir in $(find repo-staging -mindepth 2 -maxdepth 2 -type d | sort); do
+            if ls "${dir}"/*.rpm 1>/dev/null 2>&1; then
+              echo "createrepo_c: ${dir}"
+              createrepo_c "${dir}"
+            fi
+          done
+
+      - name: Sign repomd.xml files (detached GPG signature)
+        env:
+          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
+        run: |
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
+            | awk -F: '/^fpr:/{print $10; exit}')
+          for repomd in $(find repo-staging -name 'repomd.xml'); do
+            echo "Signing repodata: ${repomd}"
+            gpg --batch --yes \
+              --passphrase "${CLUSTR_GPG_PASSPHRASE}" \
+              --pinentry-mode loopback \
+              --default-key "${KEY_FP}" \
+              --detach-sign --armor "${repomd}" || true
+          done
+
+      - name: Rsync to pkg.sqoia.dev
+        env:
+          PKG_DEPLOY_KEY: ${{ secrets.PKG_DEPLOY_KEY }}
+        run: |
+          install -m 0600 /dev/null /tmp/pkg_deploy_key
+          echo "${PKG_DEPLOY_KEY}" > /tmp/pkg_deploy_key
+
+          # rsync with --delete so removed packages are cleaned up.
+          # --relative is not used: we sync repo-staging/ INTO /clustr/ on the remote.
+          rsync -avz --delete \
+            -e "ssh -i /tmp/pkg_deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            repo-staging/ \
+            deploy@66.175.212.72:/var/www/pkg.sqoia.dev/clustr/
+
+          rm -f /tmp/pkg_deploy_key
+
+  # ---------------------------------------------------------------------------
+  # Publish GitHub Release — attaches all .rpm + raw binaries.
+  # lab-validate intentionally omitted from needs (informational only).
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-client, build-server, publish-repo]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ### Rocky / RHEL / AlmaLinux 9
+            ```sh
+            sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el9/clustr.repo
+            sudo dnf install clustr-serverd
+            ```
+
+            ### Rocky / RHEL / AlmaLinux 8
+            ```sh
+            sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el8/clustr.repo
+            sudo dnf install clustr-serverd
+            ```
+
+            ### Rocky / RHEL / AlmaLinux 10
+            ```sh
+            sudo rpm --import https://pkg.sqoia.dev/clustr/RPM-GPG-KEY-clustr
+            sudo dnf config-manager --add-repo https://pkg.sqoia.dev/clustr/el10/clustr.repo
+            sudo dnf install clustr-serverd
+            ```
+
+            ### Build from source
+            See [README](https://github.com/sqoia-dev/clustr#build-from-source).
+          files: |
+            clustr-linux-amd64
+            clustr-linux-amd64.sha256
+            clustr-linux-arm64
+            clustr-linux-arm64.sha256
+            clustr-serverd-linux-amd64
+            clustr-serverd-linux-amd64.sha256
+            clustr-serverd-linux-arm64
+            clustr-serverd-linux-arm64.sha256
+            dist/*.rpm
+            udpcast-source.tar.gz

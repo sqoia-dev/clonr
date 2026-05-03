@@ -1,0 +1,371 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # workflow_call allows other workflows (initramfs.yml) to use this as a gate.
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install web deps
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Run web tests
+        run: cd web && pnpm exec vitest run
+
+      - name: Build web assets
+        run: cd web && pnpm build
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: go vet
+        run: go vet -tags webdist ./...
+
+      - name: go build (verify compilation)
+        run: go build -tags webdist ./...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: go test
+        run: go test ./... -v -count=1 -timeout 300s
+
+      # Schema diff-check (#161): regenerate and fail if committed schemas are stale.
+      - name: Check schemas are up-to-date
+        run: |
+          go run ./cmd/generate-schemas --output-dir pkg/api/schema/v1
+          git diff --exit-code pkg/api/schema/ || \
+            (echo "ERROR: Committed schemas are stale. Run 'make schemas' and commit the result." && exit 1)
+
+      # Verify embedded build-initramfs.sh matches canonical.
+      # The script exists in two places: scripts/ (canonical) and
+      # internal/server/handlers/scripts/ (embedded via go:embed for the
+      # in-product Build Initramfs button). Drift here silently ships stale
+      # code to operators — this check makes that a CI failure.
+      - name: Check initramfs script sync
+        run: make check-initramfs-script-sync
+
+      # Structural check: every deployed cmd/* binary must be referenced in the
+      # autodeploy script. Prevents the class of bug where a new binary is added
+      # to cmd/ and shipped via RPM but never built/installed by autodeploy,
+      # causing "no such file or directory" failures on dev/CI hosts that bypass
+      # RPM packaging.
+      #
+      # Excluded dirs: generate-schemas (dev tool, not a deployed binary).
+      # Add to EXCLUDED_CMDS if a new cmd/ dir is intentionally not deployed.
+      - name: Check autodeploy covers all deployed cmd binaries
+        run: |
+          AUTODEPLOY="scripts/autodeploy/clustr-autodeploy.sh"
+          EXCLUDED_CMDS="generate-schemas"
+          MISSING=""
+          for dir in cmd/*/; do
+            name=$(basename "$dir")
+            # Skip non-deployed dev tools
+            if echo "${EXCLUDED_CMDS}" | grep -qw "${name}"; then
+              continue
+            fi
+            if ! grep -q "cmd/${name}" "${AUTODEPLOY}"; then
+              MISSING="${MISSING} cmd/${name}"
+            fi
+          done
+          if [ -n "${MISSING}" ]; then
+            echo "ERROR: The following cmd/ binaries are not referenced in ${AUTODEPLOY}:"
+            for m in ${MISSING}; do echo "  ${m}"; done
+            echo ""
+            echo "Either add a build+install block to ${AUTODEPLOY} for each missing binary,"
+            echo "or add the directory name to EXCLUDED_CMDS in this check if it is intentionally not deployed."
+            exit 1
+          fi
+          echo "OK: all deployed cmd/ binaries are covered by ${AUTODEPLOY}"
+
+      # Race detector scoped to the two packages with the highest goroutine
+      # fan-out: internal/alerts (Engine + StateStore, goroutine-per-tick) and
+      # internal/server (Hub types, HTTP/WS handler fan-out).  Full ./... -race
+      # blows the runner's memory budget — scope is intentionally narrow.
+      # Expand this list as the runner capacity allows (one-line change here).
+      # Runs even if the broad test step above fails so both signals are visible.
+      - name: go test -race (alerts + server)
+        if: always()
+        run: go test -race -count=1 -timeout 10m ./internal/alerts/... ./internal/server/...
+
+  # TEST-1 (#192): build web, run vitest, assert bundle structure, then boot the
+  # embedded binary and smoke-test SPA serving + health readiness probe.
+  web-smoke:
+    name: Web smoke (build + route)
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install web deps
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Run web tests
+        run: cd web && pnpm exec vitest run
+
+      - name: Build web assets
+        run: cd web && pnpm build
+
+      # --- Bundle structural smoke ---
+      # Assert the built index.html contains the SPA bootstrap div and at least
+      # one hashed JS bundle reference.  This catches Vite config regressions
+      # where the output root is wrong or the entry chunk is not emitted.
+      - name: Assert bundle structure
+        run: |
+          INDEX="web/dist/index.html"
+          [ -f "$INDEX" ] || (echo "FAIL: $INDEX not found" && exit 1)
+          grep -q 'id="root"' "$INDEX" || (echo "FAIL: <div id=\"root\"> missing from $INDEX" && exit 1)
+          grep -qE 'src="/assets/[^"]+\.js"' "$INDEX" || (echo "FAIL: no hashed JS bundle script tag in $INDEX" && exit 1)
+          echo "OK: bundle structure check passed"
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Build clustr-serverd (with embedded web)
+        run: go build -tags webdist -trimpath -o bin/clustr-serverd ./cmd/clustr-serverd
+
+      # --- Route smoke ---
+      # Boot the embedded binary against a scratch data dir, then verify:
+      #   GET /          → SPA index (contains "clustr")
+      #   GET /healthz/ready → unauthenticated readiness probe returns 200
+      - name: Route smoke (SPA + health)
+        run: |
+          D=$(mktemp -d)
+          mkdir -p "$D/db" "$D/images" "$D/boot" "$D/tftpboot" "$D/repo" "$D/ldap" "$D/log-archive"
+          CLUSTR_DB_PATH="$D/db/clustr.db" \
+          CLUSTR_IMAGE_DIR="$D/images" \
+          CLUSTR_BOOT_DIR="$D/boot" \
+          CLUSTR_TFTP_DIR="$D/tftpboot" \
+          CLUSTR_REPO_DIR="$D/repo" \
+          CLUSTR_LDAP_DATA_DIR="$D/ldap" \
+          CLUSTR_LOG_ARCHIVE_DIR="$D/log-archive" \
+          CLUSTR_SECRET_KEY="ci-smoke-$(openssl rand -hex 16)" \
+          CLUSTR_AUTH_DEV_MODE=1 \
+          ./bin/clustr-serverd &
+          SERVER_PID=$!
+          sleep 4
+
+          PASS=1
+
+          # / → SPA index.html must contain "clustr"
+          SPA=$(curl -sf http://localhost:8080/ 2>/dev/null || echo "")
+          if echo "$SPA" | grep -qi "clustr"; then
+            echo "OK: GET / returned SPA index"
+          else
+            echo "FAIL: GET / did not return expected SPA content"
+            echo "$SPA"
+            PASS=0
+          fi
+
+          # /healthz/ready → unauthenticated readiness probe
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz/ready || echo "000")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "OK: GET /healthz/ready returned 200"
+          else
+            echo "FAIL: GET /healthz/ready returned $HTTP_STATUS (expected 200)"
+            PASS=0
+          fi
+
+          kill $SERVER_PID 2>/dev/null || true
+          [ "$PASS" = "1" ] || exit 1
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install web deps
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Build web assets
+        run: cd web && pnpm build
+
+      - name: Copy dist for Go embed
+        run: |
+          rm -rf internal/server/web/dist
+          cp -r web/dist internal/server/web/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Build clustr (static, linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr ./cmd/clustr
+
+      - name: Build clustr-serverd (with embedded web)
+        run: go build -tags webdist -trimpath -o bin/clustr-serverd ./cmd/clustr-serverd
+
+      - name: Build clustr-privhelper (static, linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/clustr-privhelper ./cmd/clustr-privhelper
+
+      - name: Verify static linking
+        run: file bin/clustr | grep -q "statically linked"
+
+      - name: Smoke-run clustr-serverd
+        run: |
+          D=$(mktemp -d)
+          mkdir -p "$D/db" "$D/images" "$D/boot" "$D/tftpboot" "$D/repo" "$D/ldap" "$D/log-archive"
+          CLUSTR_DB_PATH="$D/db/clustr.db" \
+          CLUSTR_IMAGE_DIR="$D/images" \
+          CLUSTR_BOOT_DIR="$D/boot" \
+          CLUSTR_TFTP_DIR="$D/tftpboot" \
+          CLUSTR_REPO_DIR="$D/repo" \
+          CLUSTR_LDAP_DATA_DIR="$D/ldap" \
+          CLUSTR_LOG_ARCHIVE_DIR="$D/log-archive" \
+          CLUSTR_SECRET_KEY="ci-smoke-$(openssl rand -hex 16)" \
+          CLUSTR_AUTH_DEV_MODE=1 \
+          ./bin/clustr-serverd &
+          SERVER_PID=$!
+          sleep 4
+          # The SPA index.html contains "clustr"
+          BODY=$(curl -sf http://localhost:8080/ 2>/dev/null || echo "")
+          kill $SERVER_PID 2>/dev/null || true
+          echo "$BODY" | grep -qi "clustr" || (echo "Unexpected body: $BODY" && exit 1)
+
+  gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
+
+      - name: Run gosec
+        run: |
+          gosec \
+            -exclude=G115,G118,G122,G702,G703,G704 \
+            -severity=high \
+            -confidence=medium \
+            -fmt=sarif \
+            -out=gosec-results.sarif \
+            ./... || (cat gosec-results.sarif && exit 1)
+
+      - name: Upload gosec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gosec-results.sarif
+          category: gosec
+        continue-on-error: true
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.9"
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v5
+
+      # Filesystem scan — no Dockerfile needed; scans Go module deps + repo.
+      - name: Scan repo with trivy (table)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: table
+
+      - name: Trivy SARIF output
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+        continue-on-error: true

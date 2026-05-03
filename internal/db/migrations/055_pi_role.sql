@@ -1,0 +1,14 @@
+-- Migration 055: Add pi role to RBAC.
+--
+-- The pi role is the 5th RBAC role: admin / operator / readonly / viewer / pi
+-- PI is more privileged than viewer but more restricted than operator:
+--   - PI can view and manage their own NodeGroups
+--   - PI can add/remove members from their NodeGroups
+--   - PI cannot touch nodes, images, Slurm config, LDAP admin, or global settings
+--
+-- This migration is additive — the users table uses a TEXT role column with no
+-- CHECK constraint, so no schema change is needed. The role value 'pi' is now a
+-- valid application-layer value.
+--
+-- We also seed a pi_auto_approve config column in portal_config.
+ALTER TABLE portal_config ADD COLUMN pi_auto_approve INTEGER NOT NULL DEFAULT 0;

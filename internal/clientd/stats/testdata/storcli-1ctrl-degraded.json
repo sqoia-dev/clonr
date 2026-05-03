@@ -1,0 +1,123 @@
+{
+  "Controllers": [
+    {
+      "Command Status": {
+        "Controller": 0,
+        "Status": "Success",
+        "Description": "None"
+      },
+      "Response Data": {
+        "Basics": {
+          "Controller": 0,
+          "Model": "MegaRAID SAS 9361-8i",
+          "Serial Number": "SV23800088",
+          "Current Controller Date/Time": "Thu 05/01/2026, 12:00:00",
+          "Current System Date/time": "Thu 05/01/2026, 12:00:00",
+          "SAS Address": "500605b00b3e74b0",
+          "PCI Address": "00:03:00:00",
+          "Mfg Date": "06/01/2020",
+          "Rework Date": "00/00/0000",
+          "Revision No": "C1"
+        },
+        "VD LIST": [
+          {
+            "DG/VD": "0/0",
+            "TYPE": "RAID5",
+            "State": "Optl",
+            "Access": "RW",
+            "Consist": "Yes",
+            "Cache": "RWTD",
+            "Cac": "-",
+            "sCC": "ON",
+            "Size": "10.912 TB",
+            "Name": "vol_data"
+          },
+          {
+            "DG/VD": "1/0",
+            "TYPE": "RAID1",
+            "State": "Dgrd",
+            "Access": "RW",
+            "Consist": "No",
+            "Cache": "RWTD",
+            "Cac": "-",
+            "sCC": "ON",
+            "Size": "1.818 TB",
+            "Name": "vol_os"
+          }
+        ],
+        "PD LIST": [
+          {
+            "EID:Slt": "8:0",
+            "State": "Onln",
+            "DG": "0",
+            "Size": "1.818 TB",
+            "Intf": "SAS",
+            "Med": "HDD",
+            "SED": "N",
+            "PI": "N",
+            "SeSz": "512B",
+            "Model": "SEAGATE ST2000NM0008",
+            "Sp": "U",
+            "Type": "-"
+          },
+          {
+            "EID:Slt": "8:1",
+            "State": "Onln",
+            "DG": "0",
+            "Size": "1.818 TB",
+            "Intf": "SAS",
+            "Med": "HDD",
+            "SED": "N",
+            "PI": "N",
+            "SeSz": "512B",
+            "Model": "SEAGATE ST2000NM0008",
+            "Sp": "U",
+            "Type": "-"
+          },
+          {
+            "EID:Slt": "8:2",
+            "State": "Onln",
+            "DG": "1",
+            "Size": "1.818 TB",
+            "Intf": "SAS",
+            "Med": "HDD",
+            "SED": "N",
+            "PI": "N",
+            "SeSz": "512B",
+            "Model": "SEAGATE ST2000NM0008",
+            "Sp": "U",
+            "Type": "-"
+          },
+          {
+            "EID:Slt": "8:3",
+            "State": "Rbld",
+            "DG": "1",
+            "Size": "1.818 TB",
+            "Intf": "SAS",
+            "Med": "HDD",
+            "SED": "N",
+            "PI": "N",
+            "SeSz": "512B",
+            "Model": "SEAGATE ST2000NM0008",
+            "Sp": "U",
+            "Type": "-"
+          }
+        ],
+        "BBU_Info": [
+          {
+            "Model": "CVPM05",
+            "State": "Opt",
+            "BuCAP": "3.441",
+            "Type": "Supercap",
+            "Over Temp": "No",
+            "Clock": "48.0 KHz",
+            "Charging Status": "Complete",
+            "Relative State of Charge": "100 %",
+            "Absolute State of charge": "98 %",
+            "Temperature": "31 C"
+          }
+        ]
+      }
+    }
+  ]
+}

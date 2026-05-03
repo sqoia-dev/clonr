@@ -1,0 +1,99 @@
+# build/slurm/versions.yml
+#
+# Single source-of-truth for the Slurm build pipeline.
+# See docs/slurm-build-pipeline.md §5 for the full verification chain rationale.
+#
+# HOW TO BUMP: edit version + tarball_sha256, reset clustr_release to 1.
+# The full release tag is: slurm-v${slurm.version}-clustr${clustr_release}
+# e.g. slurm-v24.11.4-clustr1
+#
+# VERIFICATION NOTE: SchedMD does not publish detached GPG signatures (.asc)
+# for release tarballs (confirmed 2026-04-27). They publish SHA256/MD5/SHA1
+# checksum files at https://download.schedmd.com/slurm/SHA256 over HTTPS.
+# The build workflow verifies the tarball against tarball_sha256 (pinned here)
+# and cross-references against the live SchedMD SHA256 file at download time.
+# The schedmd_key_fingerprint field below is retained as a placeholder for
+# when/if SchedMD begins publishing detached GPG signatures; the build workflow
+# skips the gpg --verify step until that is available.
+# See docs/slurm-build-pipeline.md §5.2 for the verification chain.
+
+slurm:
+  version: "24.11.4"
+  # SHA256 verified against https://download.schedmd.com/slurm/SHA256 on 2026-04-27
+  # and re-computed locally against the downloaded tarball (both matched)
+  tarball_sha256: "a2baee7b9c0775d64bd623891865a1402266280156e6e03da6c7f362fb405748"
+  tarball_url: "https://download.schedmd.com/slurm/slurm-24.11.4.tar.bz2"
+  schedmd_sha256_url: "https://download.schedmd.com/slurm/SHA256"
+  # SchedMD does not publish detached GPG signatures as of 2026-04-27.
+  # This key ID (from the design doc) is a forward-reference placeholder —
+  # the build workflow will skip gpg --verify until SchedMD publishes .asc files.
+  schedmd_signing_key_id: "0xCB8E2EB3D04E78CC"
+
+# clustr_release: bump this (reset to 1 on upstream version bump) to rebuild
+# without changing the Slurm version (e.g. to fix a packaging bug or rebuild
+# against a refreshed EPEL snapshot).
+# clustr2: fix slurmscriptd packaging verification + bundle libjwt + enable slurmrestd
+# clustr3: remove hwloc-devel from build deps; strip rdma-core-devel before
+#          rpmbuild to prevent OFED/IB auto-detection; eliminates libibmad.so.5
+#          and libhwloc.so.15 hard deps; MySQL kept (libmariadb.so.3 still needed
+#          for slurmdbd); IB RPMs removed from bundle; mariadb-connector-c kept
+# clustr4: add pkgconf + pkgconf-m4 + pkgconf-pkg-config + libpkgconf to bundle;
+#          bash-completion (hard dep of base slurm RPM) requires /usr/bin/pkg-config
+#          which is provided by pkgconf-pkg-config; none of these are in the Rocky 9
+#          minimal base image, causing chroot dnf install to fail during deploy finalize
+# clustr5: GAP-17 hardening — split bundle into el9-x86_64/ (clustr-signed) and
+#          el9-x86_64-deps/ (Rocky+EPEL passthrough); both repos use gpgcheck=1 against
+#          their respective pinned keys; verifyRPMSignatures runs two isolated passes;
+#          chroot .repo file emits two stanzas; removes gpgcheck=0 path
+clustr_release: 5
+
+munge:
+  # MVP: pull from EPEL. Exit ramp to from-source build in sprint 3.
+  # See docs/slurm-build-pipeline.md §10.
+  source: "epel"
+  version: "0.5.16"
+
+deps:
+  libjwt:
+    # libjwt provides libjwt.so.1 which is a runtime dep of the base slurm RPM
+    # when built with JWT support (required for slurmrestd auth).  EPEL 9 ships
+    # libjwt but we build from source so deployed nodes never need EPEL for this
+    # dep.  Building from upstream source eliminates the only remaining EPEL
+    # runtime dep in the clustr bundle.
+    # See docs/slurm-build-pipeline.md §11 (PR6 failures and fixes).
+    #
+    # Decision: 1.x series (not 2.x/3.x) because the SO name is libjwt.so.1,
+    # which matches what the Slurm 24.11.4 spec file links against.
+    # The 2.x/3.x series changed the library versioning and would require a
+    # Slurm rebuild with updated configure flags.
+    version: "1.18.3"
+    source_url: "https://github.com/benmcollins/libjwt/releases/download/v1.18.3/libjwt-1.18.3.tar.bz2"
+    # SHA256 verified against downloaded tarball 2026-04-27
+    sha256: "7c582667fe3e6751897c8d9c1b4c8c117bbfa9067d8398524adb5dded671213e"
+
+# GPG signing keys for dep RPMs that ship in el9-x86_64-deps/ (GAP-17 hardening).
+# Full 40-char fingerprints pinned against canonical upstream sources.
+# Rocky 9 fingerprint: https://rockylinux.org/keys (Rocky Enterprise Software Foundation - Release key 2022)
+# EPEL 9 fingerprint:  https://www.fedoraproject.org/security/ (Fedora epel9)
+# Build CI compares captured container key fingerprints against these; mismatch = hard fail.
+dep_signing_keys:
+  rocky9:
+    fingerprint: "21CB256AE16FC54C6E652949702D426D350D275D"
+    source_url: "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
+    key_file: "build/slurm/keys/RPM-GPG-KEY-rocky-9.asc.pub"
+    description: "Rocky Enterprise Software Foundation - Release key 2022"
+  epel9:
+    fingerprint: "FF8AD1344597106ECE813B918A3872BF3228467C"
+    source_url: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+    key_file: "build/slurm/keys/RPM-GPG-KEY-EPEL-9.asc.pub"
+    description: "Fedora (epel9)"
+
+# Build matrix — EL10 and aarch64 deferred per design doc §3 and §4.2
+targets:
+  - os: el9
+    arch: x86_64
+    container: "docker.io/rockylinux/rockylinux:9"
+    # Pin container by digest for reproducibility. Update via PR when needed.
+    # Run: docker pull rockylinux/rockylinux:9 && docker inspect --format='{{index .RepoDigests 0}}' rockylinux/rockylinux:9
+    # Digest pinned 2026-04-27:
+    container_digest: "docker.io/rockylinux/rockylinux:9@sha256:ee90dc0e23c2f59af63886aed78c495fc847c8f0af7e825f48746547ddb7fbe2"

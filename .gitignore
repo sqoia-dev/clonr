@@ -1,0 +1,52 @@
+# Build artifacts
+/bin/
+/clonr
+/clonr-serverd
+/clonr-serverd-*
+/clonr-static
+/initramfs-clonr.img
+# Root-level clustr build artifacts (never commit binaries to repo root)
+/clustr
+/clustr-serverd
+/clustr-serverd-*
+/clustr-static
+/clustr-clientd
+/clustr-privhelper
+/initramfs-clustr.img
+*.tar.gz
+*.tar.zst
+*.blob
+
+# Go build cache
+*.test
+*.out
+/coverage.html
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
+
+# Lighthouse CI output
+.lighthouseci/
+
+# Web build output — dist is a build artifact, never committed
+# Every build path (CI, autodeploy, release) runs `pnpm build` then
+# copies web/dist → internal/server/web/dist before `go build`.
+web/dist/
+web/node_modules/
+internal/server/web/dist/
+
+# Vendored binary build outputs — compiled in CI, never committed to git
+# Source tarballs and version pins live in build/*/versions.yml (committed).
+build/udpcast/dist/

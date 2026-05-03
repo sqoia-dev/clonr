@@ -1,0 +1,623 @@
+// Package client provides an HTTP client for clustr CLI → clustr-serverd communication.
+package client
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"github.com/sqoia-dev/clustr/pkg/api"
+)
+
+// Client is the HTTP client used by the clustr CLI to talk to clustr-serverd.
+type Client struct {
+	BaseURL   string
+	AuthToken string
+	HTTP      *http.Client
+}
+
+// New creates a Client with a sensible default timeout.
+func New(baseURL, authToken string) *Client {
+	return &Client{
+		BaseURL:   baseURL,
+		AuthToken: authToken,
+		HTTP: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// ListImages returns all BaseImages from the server.
+func (c *Client) ListImages(ctx context.Context) ([]api.BaseImage, error) {
+	var resp api.ListImagesResponse
+	if err := c.get(ctx, "/api/v1/images", &resp); err != nil {
+		return nil, err
+	}
+	return resp.Images, nil
+}
+
+// GetImage retrieves a single BaseImage by ID.
+func (c *Client) GetImage(ctx context.Context, id string) (*api.BaseImage, error) {
+	var img api.BaseImage
+	if err := c.get(ctx, "/api/v1/images/"+id, &img); err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
+// PullImage instructs the server to pull an image from a URL.
+// Returns immediately with the image record in "building" status.
+func (c *Client) PullImage(ctx context.Context, req api.PullRequest) (*api.BaseImage, error) {
+	var img api.BaseImage
+	if err := c.post(ctx, "/api/v1/factory/pull", req, &img); err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
+// GetNodeConfigByMAC retrieves the NodeConfig whose primary_mac matches mac.
+func (c *Client) GetNodeConfigByMAC(ctx context.Context, mac string) (*api.NodeConfig, error) {
+	var cfg api.NodeConfig
+	if err := c.get(ctx, "/api/v1/nodes/by-mac/"+mac, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// ListNodes returns all NodeConfigs from the server.
+func (c *Client) ListNodes(ctx context.Context) ([]api.NodeConfig, error) {
+	var resp api.ListNodesResponse
+	if err := c.get(ctx, "/api/v1/nodes", &resp); err != nil {
+		return nil, err
+	}
+	return resp.Nodes, nil
+}
+
+// GetNode retrieves a single NodeConfig by ID. Requires admin scope.
+func (c *Client) GetNode(ctx context.Context, id string) (*api.NodeConfig, error) {
+	var cfg api.NodeConfig
+	if err := c.get(ctx, "/api/v1/nodes/"+id, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// GetSelfNode retrieves the NodeConfig for the calling node using the
+// /nodes/{id}/self endpoint, which is accessible to node-scoped keys.
+// Used by the deploy agent's state verification loop after deploy-complete.
+func (c *Client) GetSelfNode(ctx context.Context, id string) (*api.NodeConfig, error) {
+	var cfg api.NodeConfig
+	if err := c.get(ctx, "/api/v1/nodes/"+id+"/self", &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// DownloadBlobResult holds the result of a blob download including any
+// server-advertised checksum for integrity verification.
+type DownloadBlobResult struct {
+	// ServerChecksum is the sha256 hex string from X-Clustr-Blob-SHA256, or ""
+	// if the server did not advertise one (e.g. first stream of a filesystem image).
+	ServerChecksum string
+}
+
+// DownloadBlob streams the image blob for imageID into w.
+// Uses a dedicated http.Client without a read timeout since blobs can be large.
+// Returns a DownloadBlobResult with the server-advertised checksum (if any).
+func (c *Client) DownloadBlob(ctx context.Context, imageID string, w io.Writer) (*DownloadBlobResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.BaseURL+"/api/v1/images/"+imageID+"/blob", nil)
+	if err != nil {
+		return nil, fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+
+	// Use a no-timeout client for large blobs.
+	blobClient := &http.Client{}
+	resp, err := blobClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client: download blob: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return nil, c.decodeError(resp)
+	}
+
+	serverChecksum := resp.Header.Get("X-Clustr-Blob-SHA256")
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return nil, fmt.Errorf("client: read blob: %w", err)
+	}
+	return &DownloadBlobResult{ServerChecksum: serverChecksum}, nil
+}
+
+// ImportISOPath instructs the server to import an ISO from a server-local path.
+func (c *Client) ImportISOPath(ctx context.Context, path, name, version string) (*api.BaseImage, error) {
+	body := struct {
+		Path    string `json:"path"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}{Path: path, Name: name, Version: version}
+	var img api.BaseImage
+	if err := c.post(ctx, "/api/v1/factory/import-path", body, &img); err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
+// CaptureNode instructs the server to capture a node's filesystem into a new image.
+// Deprecated: use CaptureImage — kept for API compatibility.
+func (c *Client) CaptureNode(ctx context.Context, req api.CaptureRequest) (*api.BaseImage, error) {
+	return c.CaptureImage(ctx, req)
+}
+
+// CaptureImage instructs clustr-serverd to SSH into the source host and stream its
+// filesystem into a new BaseImage via rsync. Returns immediately with status "building".
+// The server must be able to reach source_host; progress is visible via the image status
+// and server logs. Poll with GetImage(ctx, img.ID) until status is "ready" or "error".
+func (c *Client) CaptureImage(ctx context.Context, req api.CaptureRequest) (*api.BaseImage, error) {
+	var img api.BaseImage
+	if err := c.post(ctx, "/api/v1/factory/capture", req, &img); err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
+// OpenShellSession creates a server-side chroot session for imageID.
+func (c *Client) OpenShellSession(ctx context.Context, imageID string) (*api.ShellSessionResponse, error) {
+	var sess api.ShellSessionResponse
+	if err := c.post(ctx, "/api/v1/images/"+imageID+"/shell-session", nil, &sess); err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// CloseShellSession closes a server-side chroot session.
+func (c *Client) CloseShellSession(ctx context.Context, imageID, sessionID string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		c.BaseURL+"/api/v1/images/"+imageID+"/shell-session/"+sessionID, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, nil)
+}
+
+// ExecInSession runs a command inside a server-side chroot session.
+func (c *Client) ExecInSession(ctx context.Context, imageID, sessionID, command string, args []string) (*api.ExecResponse, error) {
+	req := api.ExecRequest{Command: command, Args: args}
+	var resp api.ExecResponse
+	if err := c.post(ctx, "/api/v1/images/"+imageID+"/shell-session/"+sessionID+"/exec", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// RegisterNode calls POST /api/v1/nodes/register with the given hardware profile JSON.
+// Used by clustr in --auto mode on PXE boot to register itself with the server.
+func (c *Client) RegisterNode(ctx context.Context, req api.RegisterRequest) (*api.RegisterResponse, error) {
+	var resp api.RegisterResponse
+	if err := c.post(ctx, "/api/v1/nodes/register", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// FlipToDisk calls POST /api/v1/nodes/:id/power/flip-to-disk.
+// The server instructs the node's configured power provider to set the next boot
+// device to disk. When cycle is true, the server also power-cycles the node so
+// it reboots immediately into the deployed OS.
+func (c *Client) FlipToDisk(ctx context.Context, nodeID string, cycle bool) error {
+	path := "/api/v1/nodes/" + nodeID + "/power/flip-to-disk"
+	if cycle {
+		path += "?cycle=true"
+	}
+	return c.post(ctx, path, nil, nil)
+}
+
+// ReportDeployComplete calls POST /api/v1/nodes/:id/deploy-complete.
+// Called by the clustr CLI after a successful deployment finalize. The server
+// sets deploy_completed_preboot_at and clears reimage_pending, transitioning the
+// node to NodeStateDeployedPreboot so subsequent PXE boots return "exit" (disk boot).
+func (c *Client) ReportDeployComplete(ctx context.Context, nodeID string) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
+}
+
+// ReportDeployCompleteWithRetry calls POST /api/v1/nodes/:id/deploy-complete
+// with a short per-attempt timeout (15s) and up to maxAttempts retries with
+// exponential backoff. Each attempt is logged so transient failures are visible
+// in the remote log stream.
+//
+// Returns nil on the first successful attempt. Returns the last error if all
+// attempts fail.
+func (c *Client) ReportDeployCompleteWithRetry(ctx context.Context, nodeID string, maxAttempts int) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := c.post(attemptCtx, "/api/v1/nodes/"+nodeID+"/deploy-complete", nil, nil)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		backoff := time.Duration(attempt) * 2 * time.Second
+		// Check parent context before sleeping — don't delay an already-cancelled flow.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("deploy-complete retry cancelled after %d/%d attempts (last: %w)", attempt, maxAttempts, lastErr)
+		case <-time.After(backoff):
+		}
+	}
+	return fmt.Errorf("deploy-complete failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// ReportDeployFailed calls POST /api/v1/nodes/:id/deploy-failed.
+// Called by the clustr CLI after a deployment failure. The server sets
+// last_deploy_failed_at, transitioning the node to NodeStateFailed.
+// The payload carries classified exit code detail for the reimage record.
+func (c *Client) ReportDeployFailed(ctx context.Context, nodeID string, payload api.DeployFailedPayload) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/deploy-failed", payload, nil)
+}
+
+// BuildVerifyBootPayload constructs a VerifyBootRequest from the provided system
+// information fields. ADR-0008. Used by test harnesses and integration tests.
+// Production phone-home is performed by the clustr-verify-boot shell script
+// injected into the deployed rootfs by pkg/deploy/phonehome.go (injectPhoneHome).
+func BuildVerifyBootPayload(hostname, kernelVersion, systemctlState, osRelease string, uptimeSeconds float64) api.VerifyBootRequest {
+	return api.VerifyBootRequest{
+		Hostname:       hostname,
+		KernelVersion:  kernelVersion,
+		UptimeSeconds:  uptimeSeconds,
+		SystemctlState: systemctlState,
+		OSRelease:      osRelease,
+	}
+}
+
+// ReportVerifyBoot calls POST /api/v1/nodes/:id/verify-boot with the given payload.
+// ADR-0008: Used by test harnesses and the optional Go-based verify-boot caller.
+// The primary caller in production is the clustr-verify-boot shell script injected
+// into the deployed rootfs during the finalize phase (pkg/deploy/phonehome.go).
+func (c *Client) ReportVerifyBoot(ctx context.Context, nodeID string, payload api.VerifyBootRequest) error {
+	return c.post(ctx, "/api/v1/nodes/"+nodeID+"/verify-boot", payload, nil)
+}
+
+// Health checks the server's health endpoint.
+func (c *Client) Health(ctx context.Context) (*api.HealthResponse, error) {
+	var h api.HealthResponse
+	if err := c.get(ctx, "/api/v1/health", &h); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+// SendDeployProgress ships a single DeployProgress update to POST /api/v1/deploy/progress.
+func (c *Client) SendDeployProgress(ctx context.Context, prog api.DeployProgress) error {
+	return c.post(ctx, "/api/v1/deploy/progress", prog, nil)
+}
+
+// SendLogs ships a batch of log entries to POST /api/v1/logs.
+func (c *Client) SendLogs(ctx context.Context, entries []api.LogEntry) error {
+	return c.post(ctx, "/api/v1/logs", entries, nil)
+}
+
+// GetNodeGroup retrieves a NodeGroup by ID.
+func (c *Client) GetNodeGroup(ctx context.Context, id string) (*api.NodeGroup, error) {
+	var g api.NodeGroup
+	if err := c.get(ctx, "/api/v1/node-groups/"+id, &g); err != nil {
+		return nil, err
+	}
+	return &g, nil
+}
+
+// GetEffectiveLayout returns the resolved DiskLayout for a node (node/group/image hierarchy).
+func (c *Client) GetEffectiveLayout(ctx context.Context, nodeID string) (*api.EffectiveLayoutResponse, error) {
+	var resp api.EffectiveLayoutResponse
+	if err := c.get(ctx, "/api/v1/nodes/"+nodeID+"/effective-layout", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// QueryLogs retrieves historical log entries matching the given filter.
+func (c *Client) QueryLogs(ctx context.Context, filter api.LogFilter) ([]api.LogEntry, error) {
+	var resp api.ListLogsResponse
+	if err := c.get(ctx, buildLogsPath("/api/v1/logs", filter), &resp); err != nil {
+		return nil, err
+	}
+	return resp.Logs, nil
+}
+
+// buildLogsPath constructs a query-string path for log endpoints from a filter.
+func buildLogsPath(base string, filter api.LogFilter) string {
+	q := url.Values{}
+	if filter.NodeMAC != "" {
+		q.Set("mac", filter.NodeMAC)
+	}
+	if filter.Hostname != "" {
+		q.Set("hostname", filter.Hostname)
+	}
+	if filter.Level != "" {
+		q.Set("level", filter.Level)
+	}
+	if filter.Component != "" {
+		q.Set("component", filter.Component)
+	}
+	if filter.Since != nil {
+		q.Set("since", filter.Since.Format(time.RFC3339))
+	}
+	if filter.Limit > 0 {
+		q.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	if len(q) == 0 {
+		return base
+	}
+	return base + "?" + q.Encode()
+}
+
+// ─── API key management ──────────────────────────────────────────────────────
+
+// APIKeyResponse mirrors the handler's apiKeyResponse wire type.
+// Defined here so the CLI can use it without importing the handlers package.
+type APIKeyResponse struct {
+	ID         string  `json:"id"`
+	Scope      string  `json:"scope"`
+	NodeID     string  `json:"node_id,omitempty"`
+	Label      string  `json:"label,omitempty"`
+	CreatedBy  string  `json:"created_by,omitempty"`
+	HashPrefix string  `json:"hash_prefix"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  *string `json:"expires_at,omitempty"`
+	LastUsedAt *string `json:"last_used_at,omitempty"`
+}
+
+// CreateKeyRequest is the body for POST /admin/api-keys.
+type CreateKeyRequest struct {
+	Scope     string `json:"scope"`
+	Label     string `json:"label"`
+	NodeID    string `json:"node_id,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// CreateKeyResponse holds the newly minted key (shown once) and the record.
+type CreateKeyResponse struct {
+	Key    string         `json:"key"`
+	APIKey APIKeyResponse `json:"api_key"`
+}
+
+// listAPIKeysResponse wraps the array returned by GET /admin/api-keys.
+type listAPIKeysResponse struct {
+	APIKeys []APIKeyResponse `json:"api_keys"`
+}
+
+// ListAPIKeys returns all non-revoked API keys.
+func (c *Client) ListAPIKeys(ctx context.Context) ([]APIKeyResponse, error) {
+	var resp listAPIKeysResponse
+	if err := c.get(ctx, "/api/v1/admin/api-keys", &resp); err != nil {
+		return nil, err
+	}
+	return resp.APIKeys, nil
+}
+
+// CreateAPIKeyRemote creates a new key via the REST API. Returns the raw key (shown once).
+func (c *Client) CreateAPIKeyRemote(ctx context.Context, req CreateKeyRequest) (*CreateKeyResponse, error) {
+	var resp CreateKeyResponse
+	if err := c.post(ctx, "/api/v1/admin/api-keys", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// RevokeAPIKey revokes a key by ID.
+func (c *Client) RevokeAPIKey(ctx context.Context, id string) error {
+	return c.del(ctx, "/api/v1/admin/api-keys/"+id)
+}
+
+// RotateAPIKey atomically rotates a key by ID. Returns the new raw key.
+func (c *Client) RotateAPIKey(ctx context.Context, id string) (*CreateKeyResponse, error) {
+	var resp CreateKeyResponse
+	if err := c.post(ctx, "/api/v1/admin/api-keys/"+id+"/rotate", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ─── Multicast session client helpers ────────────────────────────────────────
+
+// MulticastEnqueueRequest is the body for POST /api/v1/multicast/enqueue.
+type MulticastEnqueueRequest struct {
+	ImageID  string `json:"image_id"`
+	LayoutID string `json:"layout_id,omitempty"`
+	NodeID   string `json:"node_id"`
+}
+
+// MulticastEnqueueResponse is the response for POST /api/v1/multicast/enqueue.
+type MulticastEnqueueResponse struct {
+	SessionID string `json:"session_id"`
+}
+
+// MulticastSessionDescriptor contains the parameters for a udp-receiver invocation.
+type MulticastSessionDescriptor struct {
+	MulticastGroup string `json:"multicast_group"`
+	SenderPort     int    `json:"sender_port"`
+	RateBPS        int64  `json:"rate_bps"`
+	ImageURL       string `json:"image_url"`
+}
+
+// MulticastWaitResult is the response from GET /api/v1/multicast/sessions/{id}/wait.
+// When Status is "staging" the client should retry (HTTP 202 with Retry-After).
+// When Status is "transmitting" or "complete" the Descriptor is populated.
+// When Fallback is true the node must use unicast HTTP.
+type MulticastWaitResult struct {
+	Status     string                      `json:"status"`
+	Fallback   bool                        `json:"fallback"`
+	Descriptor *MulticastSessionDescriptor `json:"descriptor,omitempty"`
+}
+
+// MulticastEnqueue enrolls a node in a multicast session.
+func (c *Client) MulticastEnqueue(ctx context.Context, req MulticastEnqueueRequest) (*MulticastEnqueueResponse, error) {
+	var resp MulticastEnqueueResponse
+	if err := c.post(ctx, "/api/v1/multicast/enqueue", req, &resp); err != nil {
+		return nil, fmt.Errorf("client: multicast enqueue: %w", err)
+	}
+	return &resp, nil
+}
+
+// MulticastWait polls the wait endpoint for a multicast session.
+// It issues a single GET; callers must loop until Fallback is true or
+// Descriptor is non-nil. HTTP 202 responses with an empty descriptor are
+// decoded without error — callers should check Fallback/Descriptor.
+func (c *Client) MulticastWait(ctx context.Context, sessionID, nodeID string) (*MulticastWaitResult, error) {
+	u, err := url.Parse(c.BaseURL + "/api/v1/multicast/sessions/" + sessionID + "/wait")
+	if err != nil {
+		return nil, fmt.Errorf("client: build multicast wait URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("node_id", nodeID)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("client: build multicast wait request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client: multicast wait: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 202 = staging (still waiting for window to fill)
+	// 200 = descriptor ready (or fallback=true)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, c.decodeError(resp)
+	}
+
+	var result MulticastWaitResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("client: decode multicast wait response: %w", err)
+	}
+	return &result, nil
+}
+
+// MulticastRecordOutcome posts the receive outcome for a node in a session.
+// outcome must be one of "success", "failed", or "fellback_unicast".
+func (c *Client) MulticastRecordOutcome(ctx context.Context, sessionID, nodeID, outcome string) error {
+	body := map[string]string{"outcome": outcome}
+	return c.post(ctx, "/api/v1/multicast/sessions/"+sessionID+"/members/"+nodeID+"/outcome", body, nil)
+}
+
+// ─── Generic typed helpers ───────────────────────────────────────────────────
+
+// GetJSON performs a GET to path and decodes the JSON response into out.
+// Used by CLI commands that need to call endpoints not yet typed in the client.
+func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
+	return c.get(ctx, path, out)
+}
+
+// PostJSON performs a POST to path with body as JSON and decodes the response into out.
+func (c *Client) PostJSON(ctx context.Context, path string, body any, out any) error {
+	return c.post(ctx, path, body, out)
+}
+
+// PutJSON performs a PUT to path with body as JSON and decodes the response into out.
+func (c *Client) PutJSON(ctx context.Context, path string, body any, out any) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("client: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+path, bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+	return c.do(req, out)
+}
+
+// DeleteJSON performs a DELETE to path. Returns nil on 204 No Content.
+func (c *Client) DeleteJSON(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, nil)
+}
+
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+func (c *Client) get(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, out)
+}
+
+func (c *Client) del(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	c.setHeaders(req)
+	return c.do(req, nil)
+}
+
+func (c *Client) post(ctx context.Context, path string, body, out any) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("client: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("client: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+	return c.do(req, out)
+}
+
+func (c *Client) setHeaders(req *http.Request) {
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+	req.Header.Set("Accept", "application/json")
+}
+
+func (c *Client) do(req *http.Request, out any) error {
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("client: %s %s: %w", req.Method, req.URL.Path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return c.decodeError(resp)
+	}
+
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return fmt.Errorf("client: decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+// decodeError parses an api.ErrorResponse from a non-2xx response.
+func (c *Client) decodeError(resp *http.Response) error {
+	var errResp api.ErrorResponse
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &errResp); err != nil || errResp.Error == "" {
+		return fmt.Errorf("client: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return fmt.Errorf("client: HTTP %d: %s", resp.StatusCode, errResp.Error)
+}

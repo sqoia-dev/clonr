@@ -1,0 +1,11 @@
+Your auto-compute allocation has been reverted.
+
+NodeGroup:      {{.NodeGroupName}} (ID: {{.NodeGroupID}})
+Slurm partition: {{.SlurmPartitionName}} (flagged for operator removal)
+Undone at:      {{.UndoneAt}}
+Undone by:      {{.UndoneBy}}
+
+If you need a new allocation, please contact your system administrator
+or use the PI portal to create a new project.
+
+— clustr
