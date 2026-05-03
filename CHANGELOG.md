@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 — 2026-05-03
+
+### Fixes
+
+- **isoinstaller:** qemu VMs now get a `virtio-rng` device and 4 GB default memory — fixes early-boot hang on Rocky 10 (entropy starvation + memory pressure).
+- **isoinstaller:** Default build timeout bumped 30 m → 60 m to fit real-world Rocky 10 anaconda + dnf-update wall time.
+
 ## 0.1.1 — 2026-05-03
 
 ### Fixes
