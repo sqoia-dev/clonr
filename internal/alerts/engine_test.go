@@ -87,13 +87,14 @@ notify:
 
 func TestLoadMalformedRuleFile(t *testing.T) {
 	dir := t.TempDir()
-	// Missing required fields.
+	// Rule has a name (so it passes the comment-only skip guard) but uses an
+	// invalid threshold op and unknown severity — Validate() must reject it.
 	content := `
-name: ""
-plugin: ""
-sensor: ""
+name: bad-rule
+plugin: disks
+sensor: used_pct
 threshold:
-  op: "bad"
+  op: "bad-op"
   value: 0
 severity: "unknown"
 `
