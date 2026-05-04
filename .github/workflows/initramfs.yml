@@ -114,8 +114,10 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
+          # -buildvcs=false: git safe.directory not set in rockylinux:9 container;
+          # VCS stamping fails with exit 128.  Version is injected via ldflags anyway.
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath \
+            go build -trimpath -buildvcs=false \
               -ldflags="-s -w -X main.version=${TAG}" \
               -o bin/clustr \
               ./cmd/clustr
