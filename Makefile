@@ -125,6 +125,15 @@ initramfs-verify: bin/clustr
 	   echo "PASS: initramfs is bit-identical across two builds"; \
 	 else \
 	   echo "FAIL: initramfs SHA256 mismatch — build is not reproducible"; \
+	   echo "--- diff: files present in run2 but not run1, or with different content ---"; \
+	   zcat initramfs-run1.img | cpio -t 2>/dev/null | sort > /tmp/initramfs-run1-files.txt || true; \
+	   zcat initramfs-run2.img | cpio -t 2>/dev/null | sort > /tmp/initramfs-run2-files.txt || true; \
+	   diff /tmp/initramfs-run1-files.txt /tmp/initramfs-run2-files.txt || true; \
+	   echo "--- sha256 of individual files (run1 vs run2) ---"; \
+	   zcat initramfs-run1.img | cpio -id --quiet 2>/dev/null -D /tmp/initramfs-run1-extract 2>/dev/null || true; \
+	   zcat initramfs-run2.img | cpio -id --quiet 2>/dev/null -D /tmp/initramfs-run2-extract 2>/dev/null || true; \
+	   diff <(find /tmp/initramfs-run1-extract -type f | sort | xargs sha256sum 2>/dev/null) \
+	        <(find /tmp/initramfs-run2-extract -type f | sort | xargs sha256sum 2>/dev/null) || true; \
 	   exit 1; \
 	 fi
 	@rm -f initramfs-run1.img initramfs-run2.img \
