@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.7 — 2026-05-03
+
+### Critical
+
+- **DB integrity:** SQLite foreign-key enforcement is now actually active at runtime. `modernc.org/sqlite`'s DSN silently ignored the `_foreign_keys=on` parameter, meaning all `ON DELETE CASCADE` constraints have been advisory rather than enforced since clustr-serverd first shipped. FK enforcement is now set explicitly via a `PRAGMA foreign_keys = ON` statement on each connection after migrations complete. Migrations also set `legacy_alter_table=ON` to prevent SQLite 3.26+ from rewriting FK references during table renames.
+- **DB cleanup:** Migration 101 deletes orphan `node_rack_position` rows pointing at deleted enclosures/racks (such rows could not exist if FK cascades had been working; this cleans up data drift accumulated under the broken state). Migration 102 fixes a long-latent FK bug where `ldap_node_state.node_id` referenced a non-existent `nodes` table; corrected to `node_configs`.
+
+### Fixes
+
+- **Datacenter chassis:** `DELETE /api/v1/enclosures/:id` now defensively clears any `node_rack_position` rows for the chassis before deleting the enclosure (belt-and-suspenders on top of FK cascade). The handler never touches `node_configs`. Chassis tile rendering got node name truncation and correct eject button sizing.
+- **Datacenter drag preview:** dragging a node now shows the hostname (with U-count as secondary text) instead of just the U-count.
+
+### Features
+
+- **Image builds:** in-progress imports in `/images` are now clickable to re-open the BuildProgressPanel that was dismissed. Download and install continue in the background; clicking re-attaches to the live event stream.
+
 ## 0.1.6 — 2026-05-03
 
 ### Fixes
