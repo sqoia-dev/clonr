@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3 — 2026-05-03
+
+### Features
+
+- **Self-monitoring (SELF-MON):** clustr-serverd now monitors its own control-plane host — root disk, data disk, scratch space, memory, PSI, systemd unit state, time drift, cert expiry, and image-store orphans. Persistent status strip in the web UI; new `/control-plane` detail route. 17 default alert rules baked in.
+- **Schema:** new `hosts` table with `role` column distinguishing `control_plane` from `cluster_node`. Migration 099. Cluster `nodes` carry a nullable `host_id` FK back to `hosts`.
+- **Anti-regression:** `WatchdogSec=90` on the `clustr-serverd` systemd unit; new `clustr-selfmon-watchdog.timer` fires every 5 minutes, checks `/run/clustr/selfmon.heartbeat` staleness, and posts `crit` to syslog plus an optional fallback webhook (`/etc/clustr/fallback-alert-url`) if the metrics goroutine has hung.
+- **Packaging:** `chrony` declared as a `Requires:` dep for `chronyc tracking` (NTP drift metric).
+
 ## 0.1.2 — 2026-05-03
 
 ### Fixes
