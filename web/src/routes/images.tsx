@@ -160,6 +160,8 @@ export function ImagesPage() {
   const [selectedImage, setSelectedImage] = React.useState<BaseImage | null>(null)
   const [addImageOpen, setAddImageOpen] = React.useState(false)
   const [buildInitramfsOpen, setBuildInitramfsOpen] = React.useState(false)
+  // Bug #247: re-attach to in-progress build from the images table.
+  const [viewProgressImage, setViewProgressImage] = React.useState<BaseImage | null>(null)
 
   // IMG-URL-6: auto-open AddImageSheet from URL param (used by Cmd-K "Add image from URL…").
   React.useEffect(() => {
@@ -372,6 +374,7 @@ export function ImagesPage() {
                 images={baseImages}
                 advanced={advanced}
                 onSelect={setSelectedImage}
+                onViewProgress={setViewProgressImage}
                 handleSort={handleSort}
                 SortIcon={SortIcon}
                 relativeTime={relativeTime}
@@ -412,6 +415,7 @@ export function ImagesPage() {
                 images={initramfsImages}
                 advanced={advanced}
                 onSelect={setSelectedImage}
+                onViewProgress={setViewProgressImage}
                 handleSort={handleSort}
                 SortIcon={SortIcon}
                 relativeTime={relativeTime}
@@ -424,6 +428,26 @@ export function ImagesPage() {
       {selectedImage && (
         <ImageSheet image={selectedImage} onClose={() => setSelectedImage(null)} relativeTime={relativeTime} />
       )}
+
+      {/* Bug #247: re-attach to an in-progress build from the images table */}
+      {viewProgressImage && (
+        <Dialog open onOpenChange={(v) => { if (!v) setViewProgressImage(null) }}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-sm">
+                <Terminal className="h-4 w-4 text-muted-foreground" />
+                Build progress — {viewProgressImage.name}
+              </DialogTitle>
+            </DialogHeader>
+            <BuildProgressPanel
+              imageId={viewProgressImage.id}
+              url={viewProgressImage.source_url ?? ""}
+              onClose={() => setViewProgressImage(null)}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
       {/* IMG-URL-4 / IMG-ISO-4: Add Image sheet */}
       <AddImageSheet open={addImageOpen} onClose={() => setAddImageOpen(false)} />
       {/* INITRD-3..5: Build Initramfs sheet */}
@@ -621,7 +645,8 @@ function fmtBytes(n: number): string {
 
 interface BuildProgressPanelProps {
   imageId: string
-  url: string
+  /** Source URL displayed in the panel header. Optional when re-attaching from the images table. */
+  url?: string
   onClose: () => void
 }
 
@@ -747,8 +772,8 @@ function BuildProgressPanel({ imageId, url, onClose }: BuildProgressPanelProps) 
           <span className="font-medium">{phaseLabel(ps.phase)}</span>
         </div>
 
-        {/* URL */}
-        <p className="text-xs text-muted-foreground font-mono break-all">{url}</p>
+        {/* URL — omitted when re-attaching from the images table without a known source URL */}
+        {url && <p className="text-xs text-muted-foreground font-mono break-all">{url}</p>}
 
         {/* Download progress bar */}
         {isDownloading && (
@@ -1274,12 +1299,14 @@ interface ImageTableProps {
   images: BaseImage[]
   advanced: boolean
   onSelect: (img: BaseImage) => void
+  /** Bug #247: callback to re-attach the BuildProgressPanel for an in-progress build. */
+  onViewProgress?: (img: BaseImage) => void
   handleSort: (col: string) => void
   SortIcon: (props: { col: string }) => React.ReactElement
   relativeTime: (iso?: string) => string
 }
 
-function ImageTable({ images, advanced, onSelect, handleSort, SortIcon, relativeTime }: ImageTableProps) {
+function ImageTable({ images, advanced, onSelect, onViewProgress, handleSort, SortIcon, relativeTime }: ImageTableProps) {
   return (
     <Table>
       <caption className="sr-only">Cluster images</caption>
@@ -1310,8 +1337,24 @@ function ImageTable({ images, advanced, onSelect, handleSort, SortIcon, relative
         {images.map((img) => (
           <TableRow key={img.id} className="cursor-pointer" onClick={() => onSelect(img)}>
             <TableCell>
-              <span className="font-medium text-sm">{img.name}</span>
-              <ImageStatusBadge status={img.status} />
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-sm">{img.name}</span>
+                <ImageStatusBadge status={img.status} />
+                {/* Bug #247: "View progress" button for in-progress builds.
+                    Clicking re-opens the BuildProgressPanel connected to the
+                    same SSE stream — the stream sends a snapshot on connect so
+                    re-attaching picks up current state immediately. */}
+                {img.status === "building" && onViewProgress && (
+                  <button
+                    className="ml-1 inline-flex items-center gap-1 rounded border border-border bg-secondary/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                    title="Re-open build progress panel"
+                    onClick={(e) => { e.stopPropagation(); onViewProgress(img) }}
+                  >
+                    <Terminal className="h-2.5 w-2.5" />
+                    View progress
+                  </button>
+                )}
+              </div>
             </TableCell>
             <TableCell>
               <StatusDot state={imageState(img.status)} label={imageStateLabel(img.status)} />
