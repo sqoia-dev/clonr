@@ -90,16 +90,20 @@ func seedLDAPReady(t *testing.T, d *db.DB, node1, node2 string) {
 	}
 
 	for _, nodeID := range []string{node1, node2} {
-		if err := d.LDAPRecordNodeConfigured(ctx, nodeID, "hash-"+nodeID); err != nil {
-			t.Fatalf("seedLDAPReady: LDAPRecordNodeConfigured %s: %v", nodeID, err)
-		}
-		// Register a minimal node_config row so GetNodeConfig returns a hostname.
+		// Create the node_configs row first: ldap_node_state.node_id has a FK to
+		// node_configs(id) ON DELETE CASCADE, so the parent row must exist before
+		// LDAPRecordNodeConfigured can insert into ldap_node_state.
 		hostname := "node-" + nodeID[:8]
-		_ = d.CreateNodeConfig(ctx, api.NodeConfig{
+		if err := d.CreateNodeConfig(ctx, api.NodeConfig{
 			ID:         nodeID,
 			Hostname:   hostname,
 			PrimaryMAC: "de:ad:be:ef:00:" + nodeID[:2],
-		})
+		}); err != nil {
+			t.Fatalf("seedLDAPReady: CreateNodeConfig %s: %v", nodeID, err)
+		}
+		if err := d.LDAPRecordNodeConfigured(ctx, nodeID, "hash-"+nodeID); err != nil {
+			t.Fatalf("seedLDAPReady: LDAPRecordNodeConfigured %s: %v", nodeID, err)
+		}
 	}
 }
 

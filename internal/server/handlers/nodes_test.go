@@ -29,12 +29,14 @@ func makeTestNodeWithGroup(t *testing.T, d *db.DB, mac, hostname, groupID string
 	now := time.Now().UTC().Truncate(time.Second)
 
 	// Ensure the node_groups row exists (required by FK constraint).
-	_ = d.CreateNodeGroup(ctx, api.NodeGroup{
+	if err := d.CreateNodeGroup(ctx, api.NodeGroup{
 		ID:        groupID,
 		Name:      groupID,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}); err != nil {
+		t.Fatalf("makeTestNodeWithGroup CreateNodeGroup: %v", err)
+	}
 
 	cfg := api.NodeConfig{
 		ID:         "node-" + mac,

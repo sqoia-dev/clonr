@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // TestResolveRepoURL covers the three resolution cases for resolveRepoURL:
@@ -283,11 +285,43 @@ func TestReseedDefaults_Idempotent(t *testing.T) {
 	}
 }
 
+// seedKL1Node creates the minimal base_image + node_configs rows required by
+// FK constraints when calling SlurmSetNodeRoles with FK enforcement enabled.
+func seedKL1Node(t *testing.T, ctx context.Context, database *db.DB, imgID, nodeID, hostname, mac string) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	// Ignore conflict if the image row was already inserted by a prior call.
+	_ = database.CreateBaseImage(ctx, api.BaseImage{
+		ID:         imgID,
+		Name:       "kl1-test-image",
+		Version:    "1.0.0",
+		OS:         "Rocky Linux 9",
+		Arch:       "x86_64",
+		Status:     api.ImageStatusBuilding,
+		Format:     api.ImageFormatFilesystem,
+		DiskLayout: api.DiskLayout{},
+		Tags:       []string{},
+		CreatedAt:  now,
+	})
+	if err := database.CreateNodeConfig(ctx, api.NodeConfig{
+		ID:          nodeID,
+		Hostname:    hostname,
+		FQDN:        hostname + ".test.local",
+		PrimaryMAC:  mac,
+		Interfaces:  []api.InterfaceConfig{{MACAddress: mac, Name: "ens3", IPAddress: "10.0.0.1/24"}},
+		BaseImageID: imgID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("seedKL1Node %s: %v", hostname, err)
+	}
+}
+
 // TestMaybeAutoAssignControllerDualRole_KL1 is the KL-1 invariant test.
 // It verifies that:
-//   1. A controller-only node gets "compute" added automatically.
-//   2. A node already having "compute" is NOT modified.
-//   3. A node with no controller role is NOT modified.
+//  1. A controller-only node gets "compute" added automatically.
+//  2. A node already having "compute" is NOT modified.
+//  3. A node with no controller role is NOT modified.
 func TestMaybeAutoAssignControllerDualRole_KL1(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -299,8 +333,11 @@ func TestMaybeAutoAssignControllerDualRole_KL1(t *testing.T) {
 
 	m := &Manager{db: database}
 
+	const imgID = "kl1-img-001"
+
 	// Case 1: controller-only → should get compute added.
 	const ctrl1 = "ctrl-only-node"
+	seedKL1Node(t, ctx, database, imgID, ctrl1, "ctrl-only", "aa:bb:cc:dd:ee:01")
 	if err := database.SlurmSetNodeRoles(ctx, ctrl1, []string{RoleController}, false); err != nil {
 		t.Fatalf("set roles: %v", err)
 	}
@@ -317,6 +354,7 @@ func TestMaybeAutoAssignControllerDualRole_KL1(t *testing.T) {
 
 	// Case 2: already has compute → should not be modified.
 	const ctrl2 = "ctrl-compute-node"
+	seedKL1Node(t, ctx, database, imgID, ctrl2, "ctrl-compute", "aa:bb:cc:dd:ee:02")
 	initial := []string{RoleController, RoleCompute}
 	if err := database.SlurmSetNodeRoles(ctx, ctrl2, initial, false); err != nil {
 		t.Fatalf("set roles: %v", err)
@@ -329,6 +367,7 @@ func TestMaybeAutoAssignControllerDualRole_KL1(t *testing.T) {
 
 	// Case 3: compute-only node → should not be modified.
 	const comp1 = "compute-only-node"
+	seedKL1Node(t, ctx, database, imgID, comp1, "compute-only", "aa:bb:cc:dd:ee:03")
 	if err := database.SlurmSetNodeRoles(ctx, comp1, []string{RoleCompute}, false); err != nil {
 		t.Fatalf("set roles: %v", err)
 	}

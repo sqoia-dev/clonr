@@ -1,6 +1,8 @@
 package db_test
 
 // enclosures_test.go — integration tests for Sprint-31 chassis enclosure persistence.
+// Also contains the regression test for v0.1.7 Bug #247: chassis DELETE must not
+// touch node_configs rows — only the node_rack_position placement row should be removed.
 // Tests run against an in-process SQLite database (openTestDB) so they work both
 // locally and in CI without any external dependencies.
 //
@@ -178,6 +180,102 @@ func TestListEnclosuresByRack_NestedQuery(t *testing.T) {
 		if sl.NodeID != "" {
 			t.Errorf("enclosure[2] slot %d: expected empty, got %s", sl.SlotIndex, sl.NodeID)
 		}
+	}
+}
+
+// TestDeleteEnclosure_NodeConfigsSurvive is the regression test for v0.1.7 Bug #247.
+//
+// Before the fix, the chassis DELETE path could (via FK cascade failures when
+// foreign_keys was inadvertently disabled by migration 100) leave node_configs
+// rows deleted or position rows orphaned.
+//
+// This test verifies the correct behaviour:
+//  1. Create a rack, an enclosure in it, and a node placed in a slot.
+//  2. DELETE the enclosure.
+//  3. node_configs row MUST still exist with all its data intact.
+//  4. node_rack_position row MUST be gone (the cascade or explicit cleanup must fire).
+//  5. The node appears in ListUnassignedNodes (no placement).
+func TestDeleteEnclosure_NodeConfigsSurvive(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	// 1a. Base image (required FK for node_configs).
+	img := makeImage(uuid.New().String())
+	if err := d.CreateBaseImage(ctx, img); err != nil {
+		t.Fatalf("create base image: %v", err)
+	}
+
+	// 1b. Rack.
+	rackID := uuid.New().String()
+	if err := d.CreateRack(ctx, makeRack(rackID, "rack-bug247")); err != nil {
+		t.Fatalf("create rack: %v", err)
+	}
+
+	// 1c. Enclosure in the rack.
+	encID := uuid.New().String()
+	if err := d.CreateEnclosure(ctx, makeEnclosure(encID, rackID, "twin-2u-2slot", 1)); err != nil {
+		t.Fatalf("create enclosure: %v", err)
+	}
+
+	// 1d. Node placed in slot 1 of the enclosure.
+	nodeID := uuid.New().String()
+	node := makeNodeForTest(nodeID, img.ID, "bug247-node", "de:ad:be:ef:00:01")
+	if err := d.CreateNodeConfig(ctx, node); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	if err := d.SetSlotOccupancy(ctx, encID, 1, nodeID); err != nil {
+		t.Fatalf("set slot occupancy: %v", err)
+	}
+
+	// Confirm placement exists before the delete.
+	encBefore, err := d.GetEnclosure(ctx, encID)
+	if err != nil {
+		t.Fatalf("GetEnclosure before delete: %v", err)
+	}
+	occupied := false
+	for _, sl := range encBefore.Slots {
+		if sl.SlotIndex == 1 && sl.NodeID == nodeID {
+			occupied = true
+		}
+	}
+	if !occupied {
+		t.Fatal("pre-condition: node not found in slot 1 before delete")
+	}
+
+	// 2. DELETE the enclosure.
+	if err := d.DeleteEnclosure(ctx, encID); err != nil {
+		t.Fatalf("DeleteEnclosure: %v", err)
+	}
+
+	// 3. node_configs row MUST still exist.
+	got, err := d.GetNodeConfig(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("GetNodeConfig after enclosure delete: %v — node_configs row was wrongly deleted (data loss)", err)
+	}
+	if got.Hostname != "bug247-node" {
+		t.Errorf("hostname: got %q want %q", got.Hostname, "bug247-node")
+	}
+
+	// 4. node_rack_position row MUST be gone (no placement).
+	// Verify by checking ListUnassignedNodes: the node should appear there.
+	unassigned, err := d.ListUnassignedNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListUnassignedNodes: %v", err)
+	}
+	found := false
+	for _, s := range unassigned {
+		if s.ID == nodeID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("node %s not in unassigned list after enclosure delete — position row may still be orphaned", nodeID)
+	}
+
+	// 5. Enclosure is gone.
+	if _, err := d.GetEnclosure(ctx, encID); err == nil {
+		t.Error("GetEnclosure after delete: expected error (ErrNotFound), got nil")
 	}
 }
 

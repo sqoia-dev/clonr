@@ -44,7 +44,16 @@ type DB struct {
 func Open(dbPath string) (*DB, error) {
 	// WAL mode gives better concurrent read performance; journal_mode must be
 	// set before any DDL runs.
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000", dbPath)
+	//
+	// Note: _foreign_keys=on is intentionally absent from the DSN. Several
+	// migrations use the SQLite rename-and-recreate idiom and rely on FK
+	// enforcement being OFF during DDL (PRAGMA foreign_keys OFF inside a
+	// transaction is ignored by SQLite, so DSN-level FK-on would leave FK ON
+	// during those migrations). Instead, migrate() explicitly disables FK at
+	// the connection level before running migrations, and Open() re-enables
+	// it after all migrations complete via an explicit PRAGMA outside any
+	// transaction.
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", dbPath)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db: open %s: %w", dbPath, err)
@@ -65,6 +74,26 @@ func Open(dbPath string) (*DB, error) {
 	if err := db.migrate(); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("db: migrate: %w", err)
+	}
+	// Restore connection-level pragmas after migrations complete.
+	//
+	// migrate() sets:
+	//   - PRAGMA foreign_keys = off     (so FK constraints are not enforced
+	//     during migrations that touch schema; in-transaction PRAGMA is a no-op
+	//     in SQLite so we do it outside)
+	//   - PRAGMA legacy_alter_table = on (so ALTER TABLE RENAME does not update
+	//     FK references in sqlite_master — required because SQLite 3.26.0+
+	//     unconditionally updates FK references on RENAME, which breaks migrations
+	//     058/059 that use the rename-and-recreate idiom)
+	//
+	// After all migrations are applied we restore normal runtime settings:
+	if _, err := sqlDB.Exec("PRAGMA legacy_alter_table = off"); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("db: restore legacy_alter_table: %w", err)
+	}
+	if _, err := sqlDB.Exec("PRAGMA foreign_keys = on"); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("db: re-enable foreign_keys: %w", err)
 	}
 	go db.lastUsedFlusher()
 	return db, nil
@@ -175,6 +204,41 @@ func (db *DB) SchemaVersion(ctx context.Context) (int, error) {
 //     Use: sqlite3 /var/lib/clustr/clustr.db ".backup /tmp/clustr-test.db" and run
 //     the server against /tmp/clustr-test.db first to validate the migration.
 func (db *DB) migrate() error {
+	// Disable FK enforcement for the duration of all migrations.
+	//
+	// Several migrations (058, 100) use the SQLite table-rename-and-recreate
+	// idiom and embed "PRAGMA foreign_keys = OFF" in their SQL. However,
+	// SQLite silently ignores PRAGMA foreign_key changes inside a transaction.
+	// Because the migration runner wraps each file in a transaction (tx.Exec),
+	// the embedded PRAGMAs have no effect.
+	//
+	// The consequence for migration 058 (users table recreation): with FK
+	// enforcement ON, "ALTER TABLE users RENAME TO _users_old" causes SQLite to
+	// rewrite every FK reference to users in the sqlite_master catalog to point
+	// at _users_old. After "DROP TABLE _users_old" those references become
+	// dangling, and any subsequent INSERT into a table that once referenced
+	// users (e.g. node_groups.pi_user_id) fails with "no such table: _users_old".
+	//
+	// Setting FK enforcement OFF here — at the connection level, outside any
+	// transaction — prevents SQLite from rewriting FK references during RENAME.
+	// db.Open() re-enables FK enforcement after all migrations complete.
+	if _, err := db.sql.Exec("PRAGMA foreign_keys = off"); err != nil {
+		return fmt.Errorf("disable foreign_keys for migrations: %w", err)
+	}
+	// SQLite 3.26.0+ changed ALTER TABLE RENAME to unconditionally update FK
+	// references in the sqlite_master catalog — even when foreign_keys = OFF.
+	// Migrations 058 and 059 use the rename-and-recreate idiom; the new behaviour
+	// causes them to rewrite FK references (e.g. node_groups.pi_user_id) to point
+	// at the temporary table name (_users_old, _users_059_old). After the DROP of
+	// the temporary table the references become dangling, so any subsequent INSERT
+	// into node_groups fails with "no such table: _users_old".
+	//
+	// PRAGMA legacy_alter_table = ON restores the pre-3.26.0 behaviour where
+	// RENAME does NOT update FK references, which is what the migrations expect.
+	if _, err := db.sql.Exec("PRAGMA legacy_alter_table = on"); err != nil {
+		return fmt.Errorf("enable legacy_alter_table for migrations: %w", err)
+	}
+
 	// Ensure tracking table exists.
 	if _, err := db.sql.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
