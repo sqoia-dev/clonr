@@ -220,7 +220,7 @@ export function ControlPlanePage() {
                 {(data.metrics ?? []).length} series
               </Badge>
             </h2>
-            <SectionErrorBoundary>
+            <SectionErrorBoundary section="Metrics">
               <MetricsGrid metrics={data.metrics ?? []} />
             </SectionErrorBoundary>
           </div>
