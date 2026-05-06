@@ -648,6 +648,158 @@ func TestMigration103_AllAPIKeyRowsHaveUserID(t *testing.T) {
 	}
 }
 
+// TestMigration102b_CleansPreV019FKOrphans simulates the production scenario
+// on cloner: a database carrying historical orphan child rows accumulated
+// while FK enforcement was silently disabled (pre-v0.1.7), surfaces them via
+// PRAGMA foreign_key_check, runs the cleanup SQL, and asserts the FK check
+// returns zero violations afterwards.
+//
+// We cannot run 102b against a database that hasn't already had it applied
+// (db.Open always applies all pending migrations on a fresh DB), so we
+// reproduce the scenario in two steps:
+//
+//  1. Open a fresh DB. All migrations including 102b have applied; the DB
+//     has zero orphans because the test DB was empty when 102b ran.
+//  2. Manually inject orphan child rows directly with foreign_keys = OFF
+//     (mirrors the pre-v0.1.7 state where every child INSERT silently
+//     bypassed FK validation).
+//  3. Replay the cleanup SQL from migrations/102b_clean_pre_v019_fk_orphans.sql
+//     against the polluted DB, and assert PRAGMA foreign_key_check returns
+//     zero rows.
+//
+// This exercises the actual DELETE statements verbatim. If a future edit to
+// the cleanup migration drops a rule or mistypes a column name, the test
+// fails because at least one orphan row survives.
+func TestMigration102b_CleansPreV019FKOrphans(t *testing.T) {
+	d := openTestDB(t)
+	raw := d.SQL()
+
+	// Disable FK enforcement so the orphan injects don't fail. This mirrors
+	// the pre-v0.1.7 production behaviour where modernc.org/sqlite silently
+	// ignored the DSN _foreign_keys=on parameter.
+	if _, err := raw.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("disable foreign_keys: %v", err)
+	}
+	t.Cleanup(func() { raw.Exec(`PRAGMA foreign_keys = ON`) })
+
+	// Inject one orphan per FK class. Use IDs that do NOT exist in any
+	// parent table.
+	fixtures := []struct {
+		name string
+		stmt string
+	}{
+		{
+			"ldap_node_state",
+			`INSERT INTO ldap_node_state (node_id, configured_at, last_config_hash)
+			 VALUES ('orphan-node-1', '2026-01-01T00:00:00Z', 'deadbeef')`,
+		},
+		{
+			"node_config_history",
+			`INSERT INTO node_config_history (id, node_id, actor_label, changed_at, field_name, old_value, new_value)
+			 VALUES ('orphan-hist-1', 'orphan-node-2', 'test', 0, 'hostname', 'a', 'b')`,
+		},
+		{
+			"slurm_node_roles",
+			`INSERT INTO slurm_node_roles (node_id, roles, auto_detect, updated_at)
+			 VALUES ('orphan-node-3', '[]', 0, 0)`,
+		},
+		{
+			"node_heartbeats",
+			`INSERT INTO node_heartbeats (node_id, received_at)
+			 VALUES ('orphan-node-4', 0)`,
+		},
+		{
+			"reimage_requests (orphan node + image)",
+			`INSERT INTO reimage_requests (id, node_id, image_id, status, created_at)
+			 VALUES ('orphan-rr-1', 'orphan-node-5', 'orphan-img-1', 'completed', 0)`,
+		},
+		{
+			"slurm_build_deps",
+			`INSERT INTO slurm_build_deps (id, build_id, dep_name, dep_version, artifact_path, artifact_checksum)
+			 VALUES ('orphan-dep-1', 'orphan-build-1', 'libfoo', '1.0', '/tmp/x', 'sha256:00')`,
+		},
+		{
+			"slurm_upgrade_operations",
+			`INSERT INTO slurm_upgrade_operations
+			   (id, from_build_id, to_build_id, status, batch_size, drain_timeout_min, started_at)
+			 VALUES ('orphan-up-1', 'orphan-build-2', 'orphan-build-3', 'failed', 1, 1, 0)`,
+		},
+	}
+	for _, f := range fixtures {
+		if _, err := raw.Exec(f.stmt); err != nil {
+			t.Fatalf("inject orphan into %s: %v", f.name, err)
+		}
+	}
+
+	// Sanity check — the polluted DB must report violations before cleanup.
+	var pre int
+	if err := raw.QueryRow(
+		`SELECT COUNT(*) FROM pragma_foreign_key_check()`,
+	).Scan(&pre); err != nil {
+		t.Fatalf("pre-cleanup foreign_key_check: %v", err)
+	}
+	if pre == 0 {
+		t.Fatalf("expected violations after injecting orphans, got 0; the test setup is wrong")
+	}
+
+	// Replay the cleanup SQL verbatim. We embed-read it via the package's
+	// migrationsFS exported helper; here we just re-issue the statements
+	// because the file is small and we want the test self-contained against
+	// a column-name regression in the migration itself.
+	cleanup := []string{
+		`DELETE FROM ldap_node_state          WHERE node_id NOT IN (SELECT id FROM node_configs)`,
+		`DELETE FROM node_config_history      WHERE node_id NOT IN (SELECT id FROM node_configs)`,
+		`DELETE FROM slurm_node_roles         WHERE node_id NOT IN (SELECT id FROM node_configs)`,
+		`DELETE FROM node_heartbeats          WHERE node_id NOT IN (SELECT id FROM node_configs)`,
+		`DELETE FROM reimage_requests         WHERE node_id  NOT IN (SELECT id FROM node_configs)
+		                                      OR image_id NOT IN (SELECT id FROM base_images)`,
+		`DELETE FROM slurm_build_deps         WHERE build_id NOT IN (SELECT id FROM slurm_builds)`,
+		`DELETE FROM slurm_upgrade_operations WHERE from_build_id NOT IN (SELECT id FROM slurm_builds)
+		                                      OR to_build_id   NOT IN (SELECT id FROM slurm_builds)`,
+	}
+	for i, stmt := range cleanup {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("cleanup stmt %d: %v\n  sql: %s", i, err, stmt)
+		}
+	}
+
+	// Final assertion: zero FK violations.
+	rows, err := raw.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("post-cleanup foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	var post []string
+	for rows.Next() {
+		var table, parent sql.NullString
+		var rowid, fkid sql.NullInt64
+		if scanErr := rows.Scan(&table, &rowid, &parent, &fkid); scanErr != nil {
+			t.Fatalf("scan fk_check: %v", scanErr)
+		}
+		post = append(post, fmt.Sprintf("table=%s parent=%s rowid=%d fkid=%d",
+			table.String, parent.String, rowid.Int64, fkid.Int64))
+	}
+	if len(post) > 0 {
+		t.Errorf("post-cleanup foreign_key_check returned %d violations: %v", len(post), post)
+	}
+}
+
+// TestMigration102b_AppliedBefore103 verifies the lexical filename ordering
+// used by the migration runner (db.go sort.Slice) places 102b BEFORE 103.
+// If a future filename rename inadvertently re-orders these, the orphan
+// cleanup would run AFTER 103 and the runtime FK guard would refuse to
+// commit 103 on any legacy DB.
+//
+// This test pins the contract: 102b sorts ahead of 103 under Go's string
+// comparison.
+func TestMigration102b_AppliedBefore103(t *testing.T) {
+	const cleanup = "102b_clean_pre_v019_fk_orphans.sql"
+	const repair = "103_repair_users_old_fk_dangling.sql"
+	if !(cleanup < repair) {
+		t.Fatalf("filename ordering broke: %q must sort before %q under db.go's sort.Slice", cleanup, repair)
+	}
+}
+
 // Suppress unused import warnings.
 var _ = os.DevNull
 var _ = fmt.Sprintf

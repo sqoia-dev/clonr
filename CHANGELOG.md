@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.10 — 2026-05-03
+
+### Critical
+
+- **Schema cleanup (migration 102b):** Deletes 197 orphan child rows accumulated under the pre-v0.1.7 era when modernc.org/sqlite silently ignored FK enforcement. Affects `ldap_node_state`, `node_config_history`, `slurm_node_roles`, `node_heartbeats`, `reimage_requests`, `slurm_build_deps`, and `slurm_upgrade_operations` — all rows referencing parents in `node_configs`, `base_images`, or `slurm_builds` that were deleted while the FK was advisory-only. Filename uses the `102b` suffix so the cleanup runs **before** migration 103 (lexical filename order, db.go `sort.Slice`); without this, 103's runtime guard correctly refused to commit on cloner because 197 pre-existing violations surfaced post-rebuild.
+- **Unblocks v0.1.9 upgrade:** clustr-serverd was crash-looping on cloner. After 102b lands, both 102b and 103 apply cleanly with `PRAGMA foreign_key_check` returning zero rows after each step.
+
 ## 0.1.9 — 2026-05-06
 
 ### Critical
