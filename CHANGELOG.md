@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.9 — 2026-05-06
+
+### Critical
+
+- **Schema repair (migration 103):** Rebuilds `api_keys`, `node_groups`, and three PI/membership tables to remove dangling FK references to the long-dropped `_users_old` table — an artifact of migration 058's rename-and-drop pattern from before SQLite 3.26 `legacy_alter_table` was understood. All FKs now point at `users(id)`. Unblocks deploys, which were failing with `no such table: main._users_old` during PXE boot token mint.
+- **`api_keys.user_id` is now NOT NULL:** every API key has a user owner. Pre-existing NULL rows are backfilled to the `clustr` bootstrap admin during the rebuild. Node-scope keys default to a 24h TTL on mint; admin-scope keys keep `expires_at = NULL` until rotation UX lands.
+- **Token sweeper:** new goroutine in clustr-serverd, 5-minute cadence, deletes `api_keys` rows past `expires_at`. Bounded growth on the keys table.
+
+### Anti-regression
+
+- **Runtime guard:** the migration runner now runs `PRAGMA foreign_key_check` after every migration applies, and aborts the transaction on any violation. A dangling-FK migration can no longer ship undetected.
+- **CI linter:** new `scripts/migrations-lint.sh` (wired into the CI workflow) flags any new migration that drops or renames a referenced table without rebuilding its dependents. Allowlist for legitimate exceptions documented inline.
+
 ## 0.1.8 — 2026-05-04
 
 ### Critical
