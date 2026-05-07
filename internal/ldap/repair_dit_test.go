@@ -26,8 +26,12 @@ import (
 // makeRepairManager builds a Manager wired to a fresh in-memory DB. No slapd
 // runtime is required; RepairDIT bails before any LDAP socket is opened in
 // every branch tested here.
+//
+// LDAPSaveConfig requires a strong CLUSTR_SECRET_KEY to encrypt credentials,
+// so callers that exercise the save path must invoke this constructor.
 func makeRepairManager(t *testing.T) (*Manager, *db.DB) {
 	t.Helper()
+	t.Setenv("CLUSTR_SECRET_KEY", "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90")
 	database := openTestDB(t)
 	return New(config.ServerConfig{}, database), database
 }

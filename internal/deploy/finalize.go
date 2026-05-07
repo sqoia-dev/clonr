@@ -3389,7 +3389,7 @@ func writeSudoersDropin(mountRoot string, cfg *api.SudoersNodeConfig) error {
 			// Best-effort: don't abort the deploy if the unlink fails (perms,
 			// FS race, exotic mount layout). The new drop-in is what grants
 			// sudo; the stale file at worst references a non-existent group.
-			log.Warn().Err(err).Str("path", legacyPath).
+			logger().Warn().Err(err).Str("path", legacyPath).
 				Msg("finalize: legacy clonr-admins sudoers cleanup failed (non-fatal)")
 		}
 	}
