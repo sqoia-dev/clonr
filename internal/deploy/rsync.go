@@ -1180,6 +1180,28 @@ func expandTargetMapForRAIDMembers(
 	return newMap
 }
 
+// diskWipeCmd is one entry in the disk-wipe sequence run before partitioning.
+// Used by diskWipeSequence and partitionDisk so the wipe-order contract can
+// be unit-tested without an exec spy.
+type diskWipeCmd struct {
+	Name string   // command binary, e.g. "wipefs" or "sgdisk"
+	Args []string // command args including the target disk as the last element
+}
+
+// diskWipeSequence returns the ordered list of commands that must run on a
+// target disk before sgdisk creates the new partition table. wipefs MUST come
+// before sgdisk --zap-all: sgdisk only clears the GPT/MBR header, leaving
+// filesystem and RAID superblocks behind. Those residual signatures cause
+// grub-probe to see "multiple partition labels" on a redeploy of a previously
+// imaged disk and fail the bootloader phase. wipefs is idempotent — a clean
+// disk exits 0 — so it is safe to invoke unconditionally.
+func diskWipeSequence(target string) []diskWipeCmd {
+	return []diskWipeCmd{
+		{Name: "wipefs", Args: []string{"-a", target}},
+		{Name: "sgdisk", Args: []string{"--zap-all", target}},
+	}
+}
+
 // partitionDisk wipes and repartitions the target disk(s) according to the layout.
 //
 // For single-disk layouts all partitions land on `disk`. For RAID-on-whole-disk
@@ -1229,12 +1251,37 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	}
 
 	for target, parts := range targetMap {
-		log.Info().Str("disk", target).Msg("wiping existing partition table")
-		if err := runCmd(ctx, "sgdisk", "--zap-all", target); err != nil {
-			log.Warn().Str("disk", target).Err(err).Msg("sgdisk --zap-all failed, trying wipefs")
+		// Run the wipe sequence: wipefs -a BEFORE sgdisk --zap-all. The
+		// proactive wipefs step clears FS/RAID superblocks that sgdisk's
+		// --zap-all leaves behind; without it, grub-probe on the redeploy
+		// path sees "multiple partition labels" and the bootloader phase
+		// fails. wipefs is idempotent (exit 0 on a clean disk), so a non-
+		// zero exit is logged but not propagated; sgdisk --zap-all remains
+		// the authoritative gate. See diskWipeSequence for the contract.
+		// The RAID-on-whole-disk path partitions the md device (raw members
+		// are skipped above via isMdDevice) and is unaffected by this step.
+		var sgdiskErr error
+		for _, wcmd := range diskWipeSequence(target) {
+			log.Info().Str("disk", target).Str("cmd", wcmd.Name).
+				Strs("args", wcmd.Args).Msg("wiping disk")
+			err := runCmd(ctx, wcmd.Name, wcmd.Args...)
+			if err == nil {
+				continue
+			}
+			if wcmd.Name == "wipefs" {
+				log.Warn().Str("disk", target).Err(err).
+					Msg("wipefs -a returned non-zero (continuing — sgdisk --zap-all will surface real failures)")
+				continue
+			}
+			// sgdisk failure: defer to the legacy retry path below.
+			sgdiskErr = err
+		}
+		if sgdiskErr != nil {
+			log.Warn().Str("disk", target).Err(sgdiskErr).
+				Msg("sgdisk --zap-all failed, retrying wipefs")
 			if err2 := runCmd(ctx, "wipefs", "-a", target); err2 != nil {
 				return fmt.Errorf("wipe disk %s: sgdisk failed (%v) and wipefs also failed (%v) — "+
-					"check if the disk has an active RAID superblock (wipefs -a %s)", target, err, err2, target)
+					"check if the disk has an active RAID superblock (wipefs -a %s)", target, sgdiskErr, err2, target)
 			}
 		}
 		log.Info().Str("disk", target).Msg("disk wiped")

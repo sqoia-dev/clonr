@@ -122,6 +122,48 @@ func installELGRUBEFI(ctx *bootloaderCtx) error {
 	return nil
 }
 
+// elGRUBBIOSArgs builds the grub2-install argv for a single target disk in the
+// EL BIOS/GPT path. Extracted as a pure function so the BIOS argv contract
+// (which controls boot reliability) can be unit-tested without exec mocking.
+//
+// Argv shape (all paths):
+//
+//	--target=i386-pc --boot-directory=<bootDir> --recheck
+//	[--force]                     iff isRAID
+//	--skip-fs-probe               always (RAID and non-RAID)
+//	--modules=<list>              path-specific module list
+//	<disk>                        last positional
+//
+// The non-RAID path now mirrors the RAID-on-whole-disk path's --skip-fs-probe
+// + explicit --modules treatment. grub-probe on a freshly partitioned disk
+// can see stale FS signatures from a previous deploy and fail with "multiple
+// partition labels"; --skip-fs-probe sidesteps that, and the explicit module
+// list ensures the GPT + biosdisk drivers are embedded in the BIOS boot
+// image without relying on probe.
+func elGRUBBIOSArgs(bootDir, disk string, isRAID, isRAIDOnWholeDisk bool) []string {
+	args := []string{
+		"--target=i386-pc",
+		"--boot-directory=" + bootDir,
+		"--recheck",
+	}
+	if isRAID {
+		args = append(args, "--force")
+	}
+	if isRAIDOnWholeDisk {
+		args = append(args,
+			"--skip-fs-probe",
+			"--modules=mdraid1x diskfilter part_gpt xfs ext2",
+		)
+	} else {
+		args = append(args,
+			"--skip-fs-probe",
+			"--modules=part_gpt biosdisk",
+		)
+	}
+	args = append(args, disk)
+	return args
+}
+
 // installELGRUBBIOS runs grub2-install for all targets in a BIOS/GPT layout.
 func installELGRUBBIOS(ctx *bootloaderCtx) error {
 	log := logger()
@@ -137,21 +179,7 @@ func installELGRUBBIOS(ctx *bootloaderCtx) error {
 	var lastErr error
 
 	for _, disk := range ctx.AllTargets {
-		args := []string{
-			"--target=i386-pc",
-			"--boot-directory=" + bootDir,
-			"--recheck",
-		}
-		if ctx.IsRAID {
-			args = append(args, "--force")
-		}
-		if ctx.IsRAIDOnWholeDisk {
-			args = append(args,
-				"--skip-fs-probe",
-				"--modules=mdraid1x diskfilter part_gpt xfs ext2",
-			)
-		}
-		args = append(args, disk)
+		args := elGRUBBIOSArgs(bootDir, disk, ctx.IsRAID, ctx.IsRAIDOnWholeDisk)
 
 		cmd := exec.CommandContext(goCtx, "grub2-install", args...)
 		if err := runAndLog(goCtx, "grub2-install", cmd); err != nil {
