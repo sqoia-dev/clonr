@@ -78,9 +78,19 @@ func generateCA(commonName string) (*certBundle, *rsa.PrivateKey, *x509.Certific
 }
 
 // generateServerCert creates an RSA-4096 server certificate signed by the given
-// CA, valid for 5 years. SANs include the hostname, primary IP, and clustr.local.
+// CA, valid for 5 years. SANs include the hostname, primary IP, any extra IPs
+// the caller wants pinned (e.g. CLUSTR_PXE_SERVER_IP — see internalLDAPHost),
+// and the canonical clustr DNS aliases.
+//
 // Per the design spec, we only bind ldaps:// on 636 — no StartTLS.
-func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCert *x509.Certificate) (*certBundle, error) {
+//
+// extraIPs: additional IPv4/IPv6 literals to include in the SAN list. Required
+// for the CLUSTR_PXE_SERVER_IP case where the primary IP detected by the host
+// resolver differs from the address nodes use to connect (dual-stack hosts
+// where net.LookupHost returns a public IPv6 first but nodes dial the
+// configured PXE IPv4). Duplicates and unparseable entries are silently
+// dropped. Callers should pass the result of internalLDAPHost(cfg) here.
+func generateServerCert(hostname, primaryIP string, extraIPs []string, caKey *rsa.PrivateKey, caCert *x509.Certificate) (*certBundle, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("ldap cert: generate server key: %w", err)
@@ -112,10 +122,31 @@ func generateServerCert(hostname, primaryIP string, caKey *rsa.PrivateKey, caCer
 		net.ParseIP("127.0.0.1"),
 		net.ParseIP("::1"),
 	}
-	if primaryIP != "" {
-		if ip := net.ParseIP(primaryIP); ip != nil {
-			ipAddresses = append(ipAddresses, ip)
+	// Track which IPs are already in the list so we don't add duplicates when
+	// extraIPs overlaps with primaryIP/loopback.
+	seen := map[string]struct{}{
+		"127.0.0.1": {},
+		"::1":       {},
+	}
+	addIP := func(s string) {
+		if s == "" {
+			return
 		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return
+		}
+		// Canonicalize via String() so "::1" and "0:0:0:0:0:0:0:1" dedup.
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		ipAddresses = append(ipAddresses, ip)
+	}
+	addIP(primaryIP)
+	for _, e := range extraIPs {
+		addIP(e)
 	}
 
 	template := &x509.Certificate{

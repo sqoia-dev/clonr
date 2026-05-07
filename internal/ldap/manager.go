@@ -369,6 +369,21 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 
 	hostname := detectHostname()
 	primaryIP := detectPrimaryIP()
+	// internalLDAPHost honors CLUSTR_PXE_SERVER_IP and is the address every
+	// enrolled node uses to dial ldaps://<host>:636. On dual-stack hosts where
+	// detectPrimaryIP returns a public IPv6 but PXE.ServerIP pins an internal
+	// IPv4, the two diverge — and ldap_tls_reqcert=demand on nodes will reject
+	// the cert if the dialed address isn't in the SAN list. Pass it as an
+	// extra SAN IP so cert SANs match NodeConfig.ldap_uri (which uses the
+	// same internalLDAPHost result).
+	extraSANIPs := []string{}
+	if h := internalLDAPHost(m.cfg); h != "" && h != primaryIP {
+		// Only pass IP literals; internalLDAPHost may return a hostname when
+		// neither PXE.ServerIP nor detectPrimaryIP yields a usable address.
+		// IPAddresses-vs-DNSNames is enforced inside generateServerCert via
+		// net.ParseIP — non-IP entries are silently dropped there.
+		extraSANIPs = append(extraSANIPs, h)
+	}
 
 	caBundle, caKey, caCert, err := generateCA(fmt.Sprintf("clustr LDAP CA (%s)", dc1))
 	if err != nil {
@@ -376,7 +391,7 @@ func (m *Manager) doProvision(ctx context.Context, req EnableRequest) {
 		return
 	}
 
-	serverBundle, err := generateServerCert(hostname, primaryIP, caKey, caCert)
+	serverBundle, err := generateServerCert(hostname, primaryIP, extraSANIPs, caKey, caCert)
 	if err != nil {
 		setError(fmt.Sprintf("server cert generation failed: %v", err))
 		return
