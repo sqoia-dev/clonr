@@ -3372,5 +3372,25 @@ func writeSudoersDropin(mountRoot string, cfg *api.SudoersNodeConfig) error {
 	if err := os.WriteFile(path, []byte(content), 0o440); err != nil {
 		return fmt.Errorf("write sudoers drop-in: %w", err)
 	}
+
+	// v0.1.15 defensive cleanup: nodes deployed by pre-clustr-rename installs
+	// have /etc/sudoers.d/clonr-admins on disk. The DB-layer migration 104
+	// flips the configured CN to clustr-admins so this writer now produces
+	// the right filename, but a stray legacy file would still match the
+	// (no-longer-existing) cn=clonr-admins LDAP group and provide no sudo
+	// access. Remove it during every deploy so re-imaged nodes converge.
+	// Best-effort: not-exist is the common case, ignore. Permission errors
+	// on a fresh image are vanishingly unlikely; if they happen the deploy
+	// continues — the new file is what grants sudo, the stale file is dead
+	// weight at worst.
+	if cfg.GroupCN != "clonr-admins" {
+		legacyPath := filepath.Join(dir, "clonr-admins")
+		if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+			// Log via stderr by returning a sentinel-wrapped error? Caller
+			// only logs on non-nil; we don't want to abort the deploy for
+			// a cleanup miss. Swallow non-fatal errors.
+			_ = err
+		}
+	}
 	return nil
 }
