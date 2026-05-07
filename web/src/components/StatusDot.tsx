@@ -10,6 +10,9 @@ const nodeStateConfig: Record<NodeState, { color: string; label: string; shape: 
   failed: { color: "bg-status-error", label: "Failed", shape: "rounded-sm" },
   deployed_preboot: { color: "bg-primary animate-pulse", label: "Pre-boot", shape: "rounded-full" },
   deployed_verified: { color: "bg-status-healthy", label: "Verified", shape: "rounded-full" },
+  // v0.1.15: booted but LDAP client broken (sssd not running, pam_sss missing,
+  // ldap_uri unreachable, etc.). Render as error so operators see real status.
+  deployed_ldap_failed: { color: "bg-status-error", label: "LDAP Failed", shape: "rounded-sm" },
   deploy_verify_timeout: { color: "bg-status-error", label: "Verify Timeout", shape: "rounded-sm" },
 }
 

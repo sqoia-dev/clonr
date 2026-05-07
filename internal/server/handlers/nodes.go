@@ -1120,7 +1120,11 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 			id, payload.Hostname, payload.KernelVersion, payload.SystemctlState)
 
 	// Sprint 15 #99: record LDAP readiness if the node has LDAP configured.
-	// sssd_status is empty for older clients that don't probe SSSD — skip silently.
+	// v0.1.15: a non-nil ldap_ready=false now downgrades the node's state from
+	// deployed_verified → deployed_ldap_failed in api.NodeConfig.State(), so
+	// the UI surfaces the failure and operators don't false-positive on
+	// cluster readiness. The DB write below is the only path that flips
+	// ldap_ready=false in the row, so it must run reliably.
 	if payload.SSSDStatus != "" {
 		if ldapConfigured, ldapErr := h.DB.LDAPNodeIsConfigured(r.Context(), id); ldapErr != nil {
 			log.Warn().Err(ldapErr).Str("node_id", id).Msg("verify-boot: could not check LDAP configured state (non-fatal)")
@@ -1139,8 +1143,18 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 				if ldapReady {
 					log.Info().Str("node_id", id).Msg("verify-boot: LDAP readiness confirmed — sssd connected, pam_sss.so present")
 				} else {
-					log.Warn().Str("node_id", id).Str("detail", ldapDetail).
-						Msg("verify-boot: node has LDAP configured but is NOT LDAP-ready — operator must reimage to resolve")
+					// ERROR-level (was Warn): a deployed node with LDAP
+					// configured but not working is a real provisioning
+					// failure — image lacks sssd/pam_sss, ldap_uri unreachable,
+					// CA mismatch, etc. Node state will surface as
+					// deployed_ldap_failed via NodeConfig.State() per v0.1.15
+					// gating. Operator must reimage (or fix the image) to
+					// recover.
+					log.Error().Str("node_id", id).
+						Str("detail", ldapDetail).
+						Str("sssd_status", payload.SSSDStatus).
+						Bool("pam_sss_present", payload.PAMSSSPresent).
+						Msg("verify-boot: node booted but LDAP client is broken — state=deployed_ldap_failed")
 				}
 			}
 		}

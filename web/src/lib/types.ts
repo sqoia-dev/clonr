@@ -7,6 +7,7 @@ export type NodeState =
   | "failed"
   | "deployed_preboot"
   | "deployed_verified"
+  | "deployed_ldap_failed"
   | "deploy_verify_timeout"
 
 export interface NodeConfig {
@@ -30,6 +31,10 @@ export interface NodeConfig {
   deploy_verify_timeout_at?: string
   last_seen_at?: string
   detected_firmware?: string
+  /** LDAP readiness from verify-boot: undefined = not probed, true = sssd OK,
+   *  false = sssd missing/disconnected → state downgrades to deployed_ldap_failed (v0.1.15). */
+  ldap_ready?: boolean
+  ldap_ready_detail?: string
   /** Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "" (unset). */
   provider?: string
   created_at: string
@@ -61,7 +66,12 @@ export interface ListNodesResponse {
 export function nodeState(n: NodeConfig): NodeState {
   if (n.reimage_pending) return "reimage_pending"
   if (n.last_deploy_failed_at && !n.deploy_completed_preboot_at) return "failed"
-  if (n.deploy_verified_booted_at) return "deployed_verified"
+  if (n.deploy_verified_booted_at) {
+    // v0.1.15: a node that booted but reports sssd not active (ldap_ready === false)
+    // is NOT functionally ready. Downgrade so the UI surfaces the failure.
+    if (n.ldap_ready === false) return "deployed_ldap_failed"
+    return "deployed_verified"
+  }
   if (n.deploy_verify_timeout_at) return "deploy_verify_timeout"
   if (n.deploy_completed_preboot_at) return "deployed_preboot"
   if (n.base_image_id) return "configured"

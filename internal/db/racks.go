@@ -209,6 +209,9 @@ func (db *DB) ListUnassignedNodes(ctx context.Context) ([]api.UnassignedNodeStub
 						 OR nc.last_deploy_failed_at > nc.deploy_completed_preboot_at)
 					THEN 'failed'
 				WHEN nc.deploy_verified_booted_at IS NOT NULL
+					AND nc.ldap_ready = 0
+					THEN 'deployed_ldap_failed'
+				WHEN nc.deploy_verified_booted_at IS NOT NULL
 					THEN 'deployed_verified'
 				WHEN nc.deploy_verify_timeout_at IS NOT NULL
 					THEN 'deploy_verify_timeout'

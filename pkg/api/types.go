@@ -358,6 +358,17 @@ const (
 	// CLUSTR_VERIFY_TIMEOUT after deploy_completed_preboot_at. Indicates a likely
 	// bootloader, kernel, or network failure. Needs operator attention. ADR-0008.
 	NodeStateDeployVerifyTimeout NodeState = "deploy_verify_timeout"
+
+	// NodeStateDeployedLDAPFailed: the OS phoned home post-boot (so the
+	// bootloader+kernel work) but the LDAP module is enabled cluster-wide and
+	// the verify-boot payload reports sssd is not active or pam_sss.so is not
+	// present. Indicates LDAP client setup failed in the deployed image —
+	// users cannot log in via the cluster directory. Operator must reimage
+	// (or fix the image) to recover. v0.1.15.
+	//
+	// Distinct from NodeStateDeployedVerified: a node that booted but is
+	// unable to authenticate cluster users is NOT functionally ready.
+	NodeStateDeployedLDAPFailed NodeState = "deployed_ldap_failed"
 )
 
 // SystemGroup is a local POSIX group to be injected into every deployed node.
@@ -582,11 +593,25 @@ type NodeConfig struct {
 // ADR-0008 two-phase priority order (highest to lowest):
 //  1. ReimagePending — always overrides everything else.
 //  2. LastDeployFailedAt after deploy_completed_preboot_at — node is in error.
-//  3. DeployVerifiedBootedAt set — deployed_verified (OS phoned home post-boot).
-//  4. DeployVerifyTimeoutAt set — deploy_verify_timeout (OS never phoned home).
-//  5. DeployCompletedPrebootAt set — deployed_preboot (initramfs done, awaiting boot).
-//  6. BaseImageID set — node is configured but never deployed.
-//  7. Otherwise — node is registered but has no image.
+//  3. DeployVerifiedBootedAt set + LDAPReady==false — deployed_ldap_failed
+//     (booted but LDAP client broken; v0.1.15).
+//  4. DeployVerifiedBootedAt set — deployed_verified (OS phoned home post-boot).
+//  5. DeployVerifyTimeoutAt set — deploy_verify_timeout (OS never phoned home).
+//  6. DeployCompletedPrebootAt set — deployed_preboot (initramfs done, awaiting boot).
+//  7. BaseImageID set — node is configured but never deployed.
+//  8. Otherwise — node is registered but has no image.
+//
+// LDAP gating rationale (v0.1.15): pre-v0.1.15, a node whose verify-boot
+// payload reported sssd_status=not_installed transitioned to deployed_verified
+// because the state machine only checked DeployVerifiedBootedAt. That made
+// "deployed_verified" mean "node booted and called home" instead of "node is
+// functionally ready", masking real provisioning failures (sssd not installed,
+// pam_sss.so missing, LDAP unreachable). When LDAPReady is explicitly false
+// — meaning the LDAP module is enabled and the node phoned home with sssd
+// not connected — the state is downgraded to deployed_ldap_failed so the UI
+// surfaces the failure and operators don't false-positive on cluster readiness.
+// LDAPReady==nil (unknown / older client / LDAP not configured for this node)
+// preserves the legacy deployed_verified semantics.
 //
 // S6-8: LastDeploySucceededAt back-compat fallback removed (column dropped in migration 049).
 func (n *NodeConfig) State() NodeState {
@@ -602,6 +627,13 @@ func (n *NodeConfig) State() NodeState {
 
 	// Two-phase success states (ADR-0008).
 	if n.DeployVerifiedBootedAt != nil {
+		// v0.1.15: gate on LDAP readiness when the node has LDAP configured.
+		// LDAPReady is only recorded when the node phoned home with sssd_status
+		// non-empty AND LDAPNodeIsConfigured returned true, so a non-nil false
+		// here means the cluster expected LDAP to work and it doesn't.
+		if n.LDAPReady != nil && !*n.LDAPReady {
+			return NodeStateDeployedLDAPFailed
+		}
 		return NodeStateDeployedVerified
 	}
 	if n.DeployVerifyTimeoutAt != nil {
