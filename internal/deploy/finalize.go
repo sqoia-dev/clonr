@@ -3386,10 +3386,11 @@ func writeSudoersDropin(mountRoot string, cfg *api.SudoersNodeConfig) error {
 	if cfg.GroupCN != "clonr-admins" {
 		legacyPath := filepath.Join(dir, "clonr-admins")
 		if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
-			// Log via stderr by returning a sentinel-wrapped error? Caller
-			// only logs on non-nil; we don't want to abort the deploy for
-			// a cleanup miss. Swallow non-fatal errors.
-			_ = err
+			// Best-effort: don't abort the deploy if the unlink fails (perms,
+			// FS race, exotic mount layout). The new drop-in is what grants
+			// sudo; the stale file at worst references a non-existent group.
+			log.Warn().Err(err).Str("path", legacyPath).
+				Msg("finalize: legacy clonr-admins sudoers cleanup failed (non-fatal)")
 		}
 	}
 	return nil

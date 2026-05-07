@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.15 — 2026-05-07
+
+LDAP-functional cut. v0.1.14 shipped a UI fix only (stale reimage badge);
+this release is the LDAP-broken-at-three-layers repair pass uncovered by
+Gilfoyle on freshly-imaged vm201/vm202.
+
+### Critical
+
+- **`sssd.conf` `ldap_uri` pointed at the cloner's public IPv6, unreachable from nodes** (`internal/ldap/manager.go`): `detectPrimaryIP()` resolved `os.Hostname()` via `net.LookupHost` and returned `addrs[0]`. On the dual-stack cloner that races to the global IPv6 (`2600:1700:a4b0:1540:e426:4d06:ccee:53e9`); deployed nodes on the PXE provisioning subnet have no IPv6 connectivity, and slapd binds IPv4-only on `0.0.0.0:636`, so the ldaps URI was unreachable from every node. Fix: new `internalLDAPHost(cfg)` helper prefers `cfg.PXE.ServerIP` (`CLUSTR_PXE_SERVER_IP=10.99.0.1` in the standard install) and only falls back to `detectPrimaryIP`/`detectHostname` when no PXE server IP is configured. Used by `Manager.NodeConfig` (deploy-time `sssd.conf` generation) and `Manager.FanoutLDAPConfig` (post-Enable CA push). `detectPrimaryIP` is left intact for cert SAN generation, with a caution comment so future call sites pick the right helper.
+- **`status=ready` with empty DIT — no recovery path** (`internal/ldap/manager.go`): cloner's `ldap_module_config.status=ready` since 2026-05-01 but `ldapsearch -b dc=cluster,dc=local` returns `err=32 No such object`. data.mdb (159744 bytes) holds only LMDB metadata; the data DIT was never seeded, or was seeded into an mdb file that was later overwritten/lost. `Manager.Enable` short-circuits when status is already `ready`, so the existing seed path was unreachable. Fix: new idempotent `Manager.RepairDIT` operation re-runs `seedDIT` against the live slapd instance (HealthBind first, then add-or-self-heal each canonical entry — base DN, ou=people/groups/services/policies, cn=node-reader, cn=clustr-admins). Wired up at `POST /api/v1/ldap/internal/repair-dit` (admin scope, audit event `ldap.internal.dit_repaired`). Refuses to run when module is disabled, base_dn is empty, or admin/service passwords are unavailable in both memory and DB.
+- **verify-boot transitioned to `deployed_verified` even when sssd was broken** (`pkg/api/types.go`, `internal/server/handlers/nodes.go`, `internal/db/racks.go`, `web/`): pre-v0.1.15 `NodeConfig.State()` returned `NodeStateDeployedVerified` the moment `deploy_verified_booted_at` was set, regardless of the verify-boot payload. vm201/vm202 phoned home with `sssd_status=not_installed`, `pam_sss_present=false` and were stamped `deployed_verified` anyway. New state `NodeStateDeployedLDAPFailed` ("deployed_ldap_failed") plus a priority-3 gate in `State()`: when `LDAPReady != nil && !*LDAPReady`, return the new state instead of `deployed_verified`. `LDAPReady=nil` (older clients, LDAP-not-configured nodes) preserves legacy semantics. Mirrors the gate in racks.go SQL CASE so server-side state derivation matches the typed Go path. Web UI renders the new state as red "LDAP Failed" via `StatusDot.tsx`. Verify-boot log line upgraded from WARN to ERROR for visibility.
+- **Sudoers drop-in still using `clonr-admins` filename + group reference** (`internal/db/migrations/104_fix_sudoers_group_cn.sql`, `internal/deploy/finalize.go`): GAP-S18-2 (#115) renamed the LDAP group CN to `clustr-admins` and added a runtime DIT migration in `seedDIT`, but `ldap_module_config.sudoers_group_cn` was never updated. `cfg.SudoersGroupCN` flows from that column into `writeSudoersDropin` as the filename AND the group reference in the rule body, so every reimage of an LDAP-enabled node kept writing `/etc/sudoers.d/clonr-admins` with `%clonr-admins ALL=(ALL) NOPASSWD:ALL` — pointing at a group that no longer exists in the DIT, granting nothing. Migration 104 is a narrow `UPDATE … WHERE sudoers_group_cn = 'clonr-admins'` (idempotent, preserves operator-set custom group names). `writeSudoersDropin` defensively unlinks any stray `/etc/sudoers.d/clonr-admins` on every deploy when the configured GroupCN is anything else, so already-deployed nodes converge on next reimage.
+
+### Tests
+
+- `internal/ldap/internal_ldap_host_test.go`: pins `internalLDAPHost(cfg)` returns `cfg.PXE.ServerIP` regardless of host network state, falls back gracefully when unset.
+- `internal/ldap/repair_dit_test.go`: pins each precondition refusal in `RepairDIT` (module disabled, base_dn empty, admin password unavailable, service password unavailable). The seed-against-running-slapd path is exercised by manual cherry-pick validation.
+- `pkg/api/state_ldap_gate_test.go`: pins `State()` priority — `LDAPReady=true` → `deployed_verified`, `LDAPReady=nil` → `deployed_verified` (legacy preserved), `LDAPReady=false` → `deployed_ldap_failed` (regression guard), gate doesn't apply pre-verify-boot, ReimagePending dominates.
+- `internal/db/migration_104_test.go`: pins migration 104 normalizes legacy values and preserves operator-set custom group names.
+- `internal/deploy/sudoers_dropin_test.go`: pins drop-in is named after `GroupCN`, body uses the configured CN, legacy `clonr-admins` file is removed during write, but writer never deletes its own output.
+
+### Operational
+
+- After upgrading the cloner to v0.1.15, run `POST /api/v1/ldap/internal/repair-dit` once to populate the empty DIT. Already-deployed nodes need to be reimaged to pick up the corrected `sssd.conf` (`ldap_uri=ldaps://10.99.0.1:636`) and the renamed sudoers file. Migration 104 runs automatically on first start.
+
 ## 0.1.14 — 2026-05-07
 
 ### Fixes
