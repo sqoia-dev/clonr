@@ -415,8 +415,36 @@ func (h *BootHandler) ServeVMLinuz(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeInitramfs handles GET /api/v1/boot/initramfs.img.
+//
+// The on-disk filename of the live (rebuildable) initramfs is
+// "initramfs-clustr.img" — this is the file the build pipeline (re)writes via
+// rename(2) on every successful rebuild and the file the auto-reconcile loop
+// watches for staleness (internal/server/reconcile.go and the InitramfsPath
+// constant in server.go). The legacy filename "initramfs.img" was a static
+// pre-build seed shipped in tftpboot/ for first-boot bootstrap; once a build
+// has occurred, the canonical live file is initramfs-clustr.img and the legacy
+// path is frozen and SHOULD NOT be served.
+//
+// Prefer initramfs-clustr.img if it exists (the rebuildable live file). Fall
+// back to initramfs.img only if the live file is missing — this preserves the
+// pre-first-build bootstrap path on a brand-new install. Without this fallback
+// order, every PXE-booting node continues serving the May-3 frozen image while
+// the v0.1.12+ rebuilds sit unused on disk, masking deploy-logic fixes (the
+// v0.1.13 root-cause investigation surfaced this — the embedded clustr in the
+// served initramfs reported v0.1.11 even though the build pipeline had landed
+// v0.1.12 multiple times).
 func (h *BootHandler) ServeInitramfs(w http.ResponseWriter, r *http.Request) {
-	h.serveFile(w, r, filepath.Join(h.BootDir, "initramfs.img"), "application/octet-stream")
+	livePath := filepath.Join(h.BootDir, "initramfs-clustr.img")
+	if _, err := os.Stat(livePath); err == nil {
+		h.serveFile(w, r, livePath, "application/octet-stream")
+		return
+	}
+	// Fallback: pre-build bootstrap seed. Logged so a repeat of the v0.1.13
+	// "stale-served-initramfs" class is loud, not silent.
+	legacyPath := filepath.Join(h.BootDir, "initramfs.img")
+	log.Warn().Str("served", legacyPath).Str("expected_live", livePath).
+		Msg("boot: serving legacy initramfs.img — initramfs-clustr.img missing; rebuild via /api/v1/initramfs/rebuild")
+	h.serveFile(w, r, legacyPath, "application/octet-stream")
 }
 
 // ServeIPXEEFI handles GET /api/v1/boot/ipxe.efi.

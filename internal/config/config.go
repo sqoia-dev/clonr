@@ -106,7 +106,14 @@ func LoadServerConfig() ServerConfig {
 		LogLevel:          envOrDefault("CLUSTR_LOG_LEVEL", "info"),
 		LogRetention:      parseLogRetention(),
 		LogMaxRowsPerNode: parseLogMaxRows(),
-		ClustrBinPath:   envOrDefault("CLUSTR_BIN_PATH", "/usr/local/bin/clustr"),
+		// Default matches the RPM-installed binary location (/usr/bin/clustr),
+		// not the legacy "make install" path /usr/local/bin/clustr. The systemd
+		// unit shipped by the RPM sets CLUSTR_BIN_PATH=/usr/bin/clustr explicitly,
+		// so this default only fires for non-RPM installs (developer hosts, CI).
+		// The previous default pointed to /usr/local/bin/clustr which does not
+		// exist on RPM hosts, causing initramfs builds to silently fall through
+		// to the os.Executable()-relative fallback in handlers/initramfs.go.
+		ClustrBinPath:   envOrDefault("CLUSTR_BIN_PATH", "/usr/bin/clustr"),
 		ClientdBinPath: os.Getenv("CLUSTR_CLIENTD_BIN_PATH"), // empty = auto-detect at inject time
 		VerifyTimeout: parseVerifyTimeout(),
 		PXE:           LoadPXEConfig(),

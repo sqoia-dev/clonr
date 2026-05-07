@@ -1348,6 +1348,42 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 			ensurePartitionNodes(target, len(parts))
 		}
 		log.Info().Str("disk", target).Msg("partition table re-read complete")
+
+		// Defence-in-depth: wipe filesystem signatures inside each freshly
+		// created partition before the formatting phase writes new ones.
+		//
+		// Background: `wipefs -a <whole-disk>` only erases magic strings
+		// libblkid can see at the disk-device scope (PMBR, GPT primary,
+		// GPT backup). It does NOT recurse into nested partition byte
+		// ranges — for that you must call wipefs on the partition device
+		// directly (`wipefs -a /dev/sdaN`). On a redeploy of a previously
+		// imaged disk, the new GPT lands on top of partition byte ranges
+		// that still hold XFS/ext4/swap superblocks at well-known offsets
+		// from the prior install. grub-bios-setup's grub_fs_probe() walks
+		// the whole disk and can detect those residual signatures, falling
+		// to the (ctx.dest_partmap && fs) branch in util/setup.c which
+		// emits "multiple partition labels" + "Embedding is not possible"
+		// + "will not proceed with blocklists" and aborts with exit 1.
+		//
+		// mkfs writes new signatures over these byte ranges in the next
+		// phase, but grub_fs_probe is content with ANY signature it can
+		// recognise. Pre-wiping each partition makes the subsequent mkfs
+		// the only writer of FS magic at those offsets — no opportunity
+		// for grub-probe to pick up a residual sig that conflicts with
+		// the new partition table at the whole-disk scope.
+		//
+		// Idempotent: a freshly-created partition with no prior content
+		// has nothing to wipe and exits 0. Failures are logged and
+		// non-fatal; mkfs is the authoritative gate.
+		for localNum := range parts {
+			num := localNum + 1
+			pdev := partitionDevice(target, num)
+			log.Info().Str("partition", pdev).Msg("wiping partition interior signatures")
+			if err := runCmd(ctx, "wipefs", "-a", pdev); err != nil {
+				log.Warn().Str("partition", pdev).Err(err).
+					Msg("wipefs -a on partition returned non-zero (continuing — mkfs will overwrite signatures)")
+			}
+		}
 	}
 
 	return nil

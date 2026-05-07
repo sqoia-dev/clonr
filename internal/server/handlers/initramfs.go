@@ -464,6 +464,36 @@ func (h *InitramfsHandler) buildScriptCmd(workDir, outputPath string) (*exec.Cmd
 		clustrBin = filepath.Join(filepath.Dir(exe), clustrBin)
 	}
 
+	// Surface the resolved path and embedded version up front. The v0.1.13
+	// root-cause investigation found that the build pipeline was silently
+	// shipping a different clustr version into the initramfs than the operator
+	// expected (because CLUSTR_BIN_PATH defaulted to a non-existent path and
+	// fell through to the os.Executable()-relative fallback). Logging the
+	// version here means any future "the fix isn't running on the node" puzzle
+	// resolves at the next initramfs build instead of after a full deploy
+	// round-trip.
+	clustrBinAbs := clustrBin
+	if abs, err := filepath.Abs(clustrBin); err == nil {
+		clustrBinAbs = abs
+	}
+	clustrBinStat := "missing"
+	if st, err := os.Stat(clustrBinAbs); err == nil {
+		clustrBinStat = fmt.Sprintf("size=%d mode=%v mtime=%s", st.Size(), st.Mode().Perm(), st.ModTime().UTC().Format(time.RFC3339))
+	}
+	clustrBinVersion := "unknown"
+	if vCmd := exec.Command(clustrBinAbs, "--version"); vCmd != nil {
+		if out, err := vCmd.CombinedOutput(); err == nil {
+			clustrBinVersion = strings.TrimSpace(string(out))
+		} else {
+			clustrBinVersion = fmt.Sprintf("error: %v", err)
+		}
+	}
+	log.Info().
+		Str("clustr_bin", clustrBinAbs).
+		Str("clustr_bin_stat", clustrBinStat).
+		Str("clustr_bin_version", clustrBinVersion).
+		Msg("initramfs build: resolved clustr binary for embedding")
+
 	// build-initramfs.sh uses `sshpass -p $PASS scp user@host:/path` to pull
 	// binaries from localhost. When running on the server itself we create a
 	// sshpass shim that drops the -p flag and relies on root's SSH key via

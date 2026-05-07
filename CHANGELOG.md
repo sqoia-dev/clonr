@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.13 — 2026-05-07
+
+### Critical
+
+- **PXE-served initramfs ignored every rebuild since May 3** (`internal/server/handlers/boot.go`): `BootHandler.ServeInitramfs` was reading `initramfs.img` while the build pipeline writes the live image to `initramfs-clustr.img` (matches `InitramfsPath` in `internal/server/server.go` and the auto-reconcile target in `internal/server/reconcile.go`). On cloner, `initramfs.img` had been frozen at a May-3 dev build (`clustr version dev`, with the v0.1.11 `wiping existing partition table` codepath) for four days. Every initramfs rebuild after that — including v0.1.12 with the round-2 wipefs+grub2-install fix — landed on disk but never reached a PXE-booting node. ServeInitramfs now prefers `initramfs-clustr.img` and falls back to `initramfs.img` only when the live file is missing (preserves the brand-new install bootstrap path), with a WARN log on the fallback so a repeat is loud, not silent. **This is the actual root cause of the vm201/vm202 BIOS bootloader failures three earlier rounds were targeting** — the fix-code was correct, the served initramfs was stale.
+
+### Fixes
+
+- **Defence-in-depth — wipe partition interiors before mkfs** (`internal/deploy/rsync.go::partitionDisk`): after `sgdisk` creates the new partition table and the partition device nodes appear, run `wipefs -a /dev/sdaN` on each partition. `wipefs -a <whole-disk>` only erases magic strings libblkid sees at disk-device scope (PMBR, GPT primary, GPT backup) — it does not recurse into nested partition byte ranges. On a redeploy of a previously imaged disk the new GPT lands on top of partition byte ranges still holding XFS/ext4 superblocks at well-known offsets from the prior install. `grub_fs_probe()` walks the whole disk and can detect those residual signatures, hitting the `(ctx.dest_partmap && fs)` branch in grub-2.06 `util/setup.c` which emits "multiple partition labels" + "Embedding is not possible" + "will not proceed with blocklists" and aborts. mkfs writes new signatures over the same byte ranges in the next phase, so this wipe is best-effort: a non-zero exit is logged but mkfs is the authoritative gate.
+- **Initramfs build — log resolved binary version** (`internal/server/handlers/initramfs.go`): the build handler now logs the absolute path, file stat (`size`, `mode`, `mtime`), and `clustr --version` output of the binary it is about to embed in the initramfs, before invoking `build-initramfs.sh`. Catches the next stale-binary class (wrong `CLUSTR_BIN_PATH`, picked up an unexpected fallback) at the build step instead of after a full deploy round-trip.
+- **Default `CLUSTR_BIN_PATH` matches RPM layout** (`internal/config/config.go`): default flipped from `/usr/local/bin/clustr` (legacy `make install` path) to `/usr/bin/clustr` (RPM-installed location). The systemd unit shipped by the RPM still sets `CLUSTR_BIN_PATH` explicitly, so this only affects non-RPM installs (developer hosts, CI). The previous default pointed at a non-existent file on RPM hosts and silently fell through to the `os.Executable()`-relative `clustr-static` lookup in the build handler.
+
+### Tests
+
+- `internal/server/handlers/serve_initramfs_test.go`: asserts `ServeInitramfs` prefers `initramfs-clustr.img` over `initramfs.img` when both exist, and falls back to the legacy filename when the live build is absent.
+
 ## 0.1.12 — 2026-05-07
 
 ### Fixes
