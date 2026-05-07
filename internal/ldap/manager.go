@@ -980,14 +980,15 @@ func (m *Manager) NodeConfig(ctx context.Context) (*api.LDAPNodeConfig, error) {
 		svcPasswd = row.ServiceBindPassword
 	}
 
-	// #111: use the server's primary IP (not hostname) in ldap_uri so fresh nodes
-	// without DNS for "clustr-server" can authenticate on first boot.
-	// The server cert SAN already includes the IP (Sprint 15 #101), so TLS validation
-	// passes against an IP URI. Falls back to hostname if IP detection fails.
-	serverAddr := detectPrimaryIP()
-	if serverAddr == "" {
-		serverAddr = detectHostname()
-	}
+	// v0.1.15 fix: use the configured PXE server IP (CLUSTR_PXE_SERVER_IP) as the
+	// ldap_uri host, NOT net.LookupHost(hostname). On a dual-stack host (cloner
+	// has a routable IPv6) net.LookupHost returns the public IPv6 first; nodes on
+	// the provisioning subnet have no IPv6 connectivity and slapd binds IPv4-only,
+	// so the resulting ldaps:// URI is unreachable. The PXE server IP is the
+	// authoritative reachable address from every node by definition.
+	// Falls back to detectPrimaryIP/detectHostname only if PXE.ServerIP is unset
+	// (e.g. running outside the standard PXE server context, like in unit tests).
+	serverAddr := internalLDAPHost(m.cfg)
 	serverURI := fmt.Sprintf("ldaps://%s:636", serverAddr)
 
 	return &api.LDAPNodeConfig{
@@ -1156,6 +1157,14 @@ func detectHostname() string {
 
 // detectPrimaryIP returns the primary IP of the system via hostname resolution.
 // Falls back to empty string if detection fails.
+//
+// CAUTION: on dual-stack hosts net.LookupHost returns *all* addresses including
+// public IPv6, with no guarantee of order. Nodes on the PXE provisioning subnet
+// typically have no global IPv6 connectivity, so an IPv6 result here is fatal
+// for sssd/ldaps connectivity from the node side. New code that needs a node-
+// reachable LDAP server address MUST use internalLDAPHost(cfg) instead, which
+// honors CLUSTR_PXE_SERVER_IP. detectPrimaryIP is kept only for cert SAN
+// generation where embedding multiple addresses is acceptable.
 func detectPrimaryIP() string {
 	h, err := os.Hostname()
 	if err != nil {
@@ -1166,6 +1175,27 @@ func detectPrimaryIP() string {
 		return ""
 	}
 	return addrs[0]
+}
+
+// internalLDAPHost returns the LDAP server host that nodes on the PXE
+// provisioning subnet can reach. It prefers cfg.PXE.ServerIP (the operator-
+// configured CLUSTR_PXE_SERVER_IP) because that is, by definition, the address
+// every node uses to talk to clustr-serverd. Falls back to detectPrimaryIP /
+// detectHostname only when no PXE server IP is configured (e.g. during unit
+// tests or non-PXE-server deployments).
+//
+// This fixes the v0.1.14 issue where sssd.conf was generated with the cloner's
+// public IPv6 address as the ldap_uri, which the deployed nodes could not
+// reach because (a) they have no global IPv6 connectivity and (b) slapd binds
+// IPv4-only on 0.0.0.0:636.
+func internalLDAPHost(cfg config.ServerConfig) string {
+	if ip := cfg.PXE.ServerIP; ip != "" {
+		return ip
+	}
+	if ip := detectPrimaryIP(); ip != "" {
+		return ip
+	}
+	return detectHostname()
 }
 
 // ConfigHashForNode computes the SHA-256 hash of a rendered sssd.conf for drift detection.
@@ -1344,11 +1374,9 @@ func (m *Manager) FanoutLDAPConfig(ctx context.Context) []NodePushResult {
 		svcPasswd = row.ServiceBindPassword
 	}
 
-	serverIP := detectPrimaryIP()
-	if serverIP == "" {
-		// Fall back to hostname if IP detection fails — this should be rare.
-		serverIP = detectHostname()
-	}
+	// v0.1.15 fix: use configured PXE server IP, not net.LookupHost (which races
+	// to the public IPv6 on dual-stack hosts). See NodeConfig() for full rationale.
+	serverIP := internalLDAPHost(m.cfg)
 	serverURI := fmt.Sprintf("ldaps://%s:636", serverIP)
 
 	caCertPEM := row.CACertPEM
