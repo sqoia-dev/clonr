@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -128,8 +129,7 @@ func SetPXEBootFirst(ctx context.Context) error {
 	// Find the first PXE entry in the current boot order.
 	pxeIdx := -1
 	for i, num := range currentOrder {
-		label := strings.ToUpper(labelByNum[strings.TrimSpace(num)])
-		if strings.Contains(label, "PXE") || strings.Contains(label, "IPV4") || strings.Contains(label, "IPV6") {
+		if pxeEntryLabelMatch(labelByNum[strings.TrimSpace(num)]) {
 			pxeIdx = i
 			break
 		}
@@ -162,5 +162,70 @@ func SetPXEBootFirst(ctx context.Context) error {
 			orderStr, err, string(cmdOut))
 	}
 
+	return nil
+}
+
+// isUEFISystem reports whether the running system is booted via UEFI.  Detected
+// by the presence of /sys/firmware/efi (the standard kernel marker — present on
+// every UEFI Linux boot, absent on legacy BIOS).  Used by RepairBootOrderForReimage
+// as a fast precheck so the function is a true no-op on BIOS deploys without
+// invoking efibootmgr (which would fail and force the caller to parse error text).
+func isUEFISystem() bool {
+	_, err := os.Stat("/sys/firmware/efi")
+	return err == nil
+}
+
+// pxeEntryLabelMatch reports whether label looks like a PXE / network boot entry.
+// Matches OVMF/SeaBIOS/AMI/Insyde/HP/Dell/Supermicro/Lenovo conventions for IPv4
+// + IPv6 PXE entries.  Centralised so SetPXEBootFirst and RepairBootOrderForReimage
+// stay aligned; otherwise drift between the two parsers leaves the wrong entries
+// at the top of BootOrder.
+func pxeEntryLabelMatch(label string) bool {
+	u := strings.ToUpper(label)
+	return strings.Contains(u, "PXE") ||
+		strings.Contains(u, "IPV4") ||
+		strings.Contains(u, "IPV6") ||
+		strings.Contains(u, "NETWORK")
+}
+
+// RepairBootOrderForReimage hardens NVRAM against the "OS-entry-ahead-of-PXE"
+// regression seen on bare-metal UEFI hosts (#225 FIX-EFI):
+//
+//   - clustr's deploy path runs grub2-install with --no-nvram + --removable,
+//     so we do NOT add an OS NVRAM entry ourselves and rely on UEFI removable-
+//     media auto-discovery of \EFI\BOOT\BOOTX64.EFI for post-deploy boot
+//     (docs/boot-architecture.md §8).
+//   - HOWEVER: NVRAM (efivars / OVMF pflash) survives reimages.  Entries written
+//     by a prior life of the disk — Anaconda kickstart, an older clustr version,
+//     a manual rescue session — persist and continue to land ahead of PXE in
+//     BootOrder, which makes future reimages chain to a stale OS bootloader (or
+//     a now-blank EFI partition) instead of the PXE script.
+//
+// This function runs (best-effort) at the end of the EFI bootloader install step
+// in finalize.  It operates on the LIVE NVRAM of the target node (the deploy
+// initramfs is the running kernel, /sys/firmware/efi is the host firmware), NOT
+// on any chroot view.  Behaviour:
+//
+//  1. If /sys/firmware/efi is absent (BIOS deploy), return nil — no-op.
+//  2. List boot entries via efibootmgr; if listing fails, log+nil (we never
+//     fail a successful deploy because of NVRAM cleanup).
+//  3. Reorder BootOrder so a PXE entry leads (delegated to SetPXEBootFirst, which
+//     already implements that with the pxeEntryLabelMatch heuristic).
+//
+// Errors from efibootmgr are wrapped+returned so the caller can decide; the
+// production hook in finalize logs as warning rather than failing the deploy.
+//
+// Why we do NOT delete OS NVRAM entries here: a `efibootmgr -B -b XXXX` of an
+// arbitrary entry is dangerous on shared-firmware hosts (e.g. a server that also
+// dual-boots Windows, or a tester's laptop accidentally on the deploy network).
+// Reordering is non-destructive and resolves the symptom (OS entry blocks PXE);
+// destructive cleanup is reserved for an explicit operator action.
+func RepairBootOrderForReimage(ctx context.Context) error {
+	if !isUEFISystem() {
+		return nil
+	}
+	if err := SetPXEBootFirst(ctx); err != nil {
+		return fmt.Errorf("efiboot: RepairBootOrderForReimage: %w", err)
+	}
 	return nil
 }

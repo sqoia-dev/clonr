@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -346,6 +347,55 @@ func TestParseBootOrderUnit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPXEEntryLabelMatch verifies the label heuristic used by SetPXEBootFirst
+// and RepairBootOrderForReimage to classify NVRAM boot entries as PXE/network.
+// FIX-EFI (#225): drift between this matcher and the OS-entry filter would leave
+// the wrong entry at the top of BootOrder after a reimage.
+func TestPXEEntryLabelMatch(t *testing.T) {
+	cases := []struct {
+		label string
+		want  bool
+	}{
+		// Common firmware conventions for PXE / network boot entries.
+		{"UEFI PXEv4 (MAC:BC241136E92F)", true}, // Lenovo / Supermicro
+		{"PXE IPv4: Realtek PCIe", true},        // ASRock / generic
+		{"IPv4 Network", true},                  // AMI / Insyde
+		{"IPv6 Network", true},                  // AMI dual-stack
+		{"Network Boot", true},                  // HP iLO firmware
+		{"UEFI: Network Card", true},            // Dell BIOS setup default
+		{"PXE Boot", true},                      // OVMF (QEMU)
+		// OS / disk entries that must NOT be classified as PXE.
+		{"Rocky Linux", false},
+		{"Windows Boot Manager", false},
+		{"ubuntu", false},
+		{"UEFI: PNY USB 3.0 FD", false}, // removable media — superficially looks like UEFI but no PXE/network token
+		{"", false},
+		{"BOOTX64.EFI (removable)", false},
+	}
+	for _, tc := range cases {
+		if got := pxeEntryLabelMatch(tc.label); got != tc.want {
+			t.Errorf("pxeEntryLabelMatch(%q) = %v, want %v", tc.label, got, tc.want)
+		}
+	}
+}
+
+// TestRepairBootOrderForReimage_BIOSNoOp verifies that on a BIOS host
+// (no /sys/firmware/efi) the repair function returns nil without touching
+// efibootmgr.  We can't directly mock the filesystem here, but we exercise the
+// fast path that isUEFISystem reports BIOS by checking the unit-tested predicate.
+// The full UEFI path is exercised by integration on cloner / lab hosts.
+func TestRepairBootOrderForReimage_BIOSNoOp(t *testing.T) {
+	// Confirm the predicate works as intended on the test host.  On CI runners
+	// (containerised) /sys/firmware/efi is almost always absent, so we expect
+	// isUEFISystem to be false and RepairBootOrderForReimage to be a no-op.
+	if isUEFISystem() {
+		t.Skip("test host is UEFI — BIOS no-op path cannot be exercised here")
+	}
+	if err := RepairBootOrderForReimage(context.Background()); err != nil {
+		t.Errorf("RepairBootOrderForReimage on BIOS host: got %v, want nil", err)
 	}
 }
 

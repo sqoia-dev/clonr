@@ -1228,6 +1228,21 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 		return fmt.Errorf("chroot grub2-install --target=x86_64-efi: %w", err)
 	}
 	log.Info().Msg("finalize/boot: grub2-install --target=x86_64-efi inside chroot succeeded")
+
+	// FIX-EFI (#225): on UEFI hosts, ensure a PXE entry leads BootOrder so the
+	// next reimage doesn't get blocked by an OS entry left over from a prior
+	// life of the disk.  Best-effort: a failure here NEVER fails an otherwise
+	// successful deploy — the deployed node will boot via the removable-media
+	// path (\EFI\BOOT\BOOTX64.EFI) regardless of NVRAM order, and the worst case
+	// is that the operator has to power-cycle once for PXE to win on next reboot.
+	// On BIOS systems this is a true no-op (RepairBootOrderForReimage exits early
+	// when /sys/firmware/efi is absent).
+	if err := RepairBootOrderForReimage(ctx); err != nil {
+		log.Warn().Err(err).
+			Msg("finalize/boot: RepairBootOrderForReimage failed (non-fatal — node will boot via removable-media path; future reimage may need an extra power-cycle)")
+	} else {
+		log.Info().Msg("finalize/boot: NVRAM BootOrder repaired (PXE leads or no PXE entry present)")
+	}
 	return nil
 }
 
