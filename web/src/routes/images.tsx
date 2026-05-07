@@ -180,7 +180,7 @@ export function ImagesPage() {
       to: "/images",
       search: {
         q: patch.q !== undefined ? patch.q : q || undefined,
-        tab: patch.tab !== undefined ? patch.tab : tab === "base" ? undefined : tab,
+        tab: (() => { const t = patch.tab !== undefined ? patch.tab : tab; return t === "base" ? undefined : t })(),
         sort: patch.sort !== undefined ? patch.sort : sortCol || undefined,
         dir: patch.dir !== undefined ? patch.dir : sortDir === "asc" ? undefined : "desc",
         addImage: undefined,
@@ -344,7 +344,7 @@ export function ImagesPage() {
       <div className="flex-1 overflow-auto">
         <Tabs
           value={tab}
-          onValueChange={(v) => updateSearch({ tab: v === "base" ? undefined : v })}
+          onValueChange={(v) => updateSearch({ tab: v })}
           className="flex flex-col h-full"
         >
           <div className="px-6 pt-3 border-b border-border shrink-0">
