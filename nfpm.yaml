@@ -267,6 +267,32 @@ contents:
       owner: root
       group: root
 
+  # ── RPM auto-update timer (#225 RPM-UPDATE-1) ────────────────────────────
+  # Polls pkg.sqoia.dev every 15 minutes via the host's configured DNF repo
+  # set; defers when GET /api/v1/system/active-jobs reports any in-flight
+  # deploy / image-build / initramfs-build / reimage / operator-shell.  See
+  # scripts/ops/clustr-rpm-update.sh for the active-jobs guard behaviour.
+  - src: scripts/ops/clustr-rpm-update.sh
+    dst: /usr/local/sbin/clustr-rpm-update.sh
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: deploy/systemd/clustr-rpm-update.service
+    dst: /usr/lib/systemd/system/clustr-rpm-update.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: deploy/systemd/clustr-rpm-update.timer
+    dst: /usr/lib/systemd/system/clustr-rpm-update.timer
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   # udpcast vendored binaries — GPL-2.0-or-later, built from source in CI.
   # amd64 only; arm64 entries are stripped by the release.yml packaging step.
   # Source tarball attached to every GitHub Release (GPL-2.0 §3a compliance).

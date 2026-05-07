@@ -1,0 +1,17 @@
+[Unit]
+Description=clustr RPM auto-update
+Documentation=https://github.com/sqoia-dev/clustr
+After=network-online.target
+Wants=network-online.target
+# Skip if clustr-serverd isn't installed at all (paranoia — the timer wouldn't
+# have been enabled in that case, but a manual systemctl start should still
+# fail closed rather than chase phantom packages).
+ConditionPathExists=/usr/sbin/clustr-serverd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clustr-rpm-update.sh
+
+# Output goes to journal: journalctl -u clustr-rpm-update.service
+StandardOutput=journal
+StandardError=journal

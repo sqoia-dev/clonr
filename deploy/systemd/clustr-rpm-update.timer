@@ -1,0 +1,16 @@
+[Unit]
+Description=clustr RPM auto-update timer — check pkg.sqoia.dev every 15 minutes
+Documentation=https://github.com/sqoia-dev/clustr
+After=network-online.target
+
+[Timer]
+# Fire 2 minutes after boot, then every 15 minutes.
+OnBootSec=2min
+OnUnitActiveSec=15min
+# Randomize start within a 60-second window to avoid thundering-herd if
+# multiple hosts share the same timer cadence.
+RandomizedDelaySec=60
+Unit=clustr-rpm-update.service
+
+[Install]
+WantedBy=timers.target
