@@ -148,12 +148,21 @@ func (s *Server) reconcileImageLocked(ctx context.Context, imageID string, opts 
 }
 
 // resolveBlobPath returns the on-disk path for the blob and a resolution label.
-// Primary: the blob_path column value. Fallback: <imageDir>/<id>/rootfs.tar (F6).
+// Primary: the blob_path column value. Fallback: a format-aware default path
+// (F6 self-heal). The default differs by image format because the writer side
+// chooses different filenames:
+//
+//	ImageFormatFilesystem → <imageDir>/<id>/rootfs.tar  (tar archive of a rootfs)
+//	ImageFormatBlock      → <imageDir>/<id>/image.img   (raw block image, e.g. initramfs builds)
+//
+// Block-format images (initramfs builds, partclone/dd captures) historically
+// finalized without populating blob_path, then got falsely flipped to
+// blob_missing because the resolver only knew about rootfs.tar. The
+// format-aware default fixes that; F6 write-back (runReconcileChecks) will
+// populate blob_path on the next successful pass so future reconciles take
+// the BlobPathFoundAtDBPath branch.
 func (s *Server) resolveBlobPath(img api.BaseImage) (string, reconcile.BlobPathResolution) {
-	// Get blob_path from the DB record. The BaseImage struct doesn't carry
-	// blob_path (it's not in the wire type), so we build the canonical default
-	// path and also check any stored path via a DB read if available.
-	defaultPath := filepath.Join(s.cfg.ImageDir, img.ID, "rootfs.tar")
+	defaultPath := defaultBlobPath(s.cfg.ImageDir, img.ID, img.Format)
 
 	// Try to get the stored blob_path from the DB.
 	blobPath, err := s.db.GetBlobPath(context.Background(), img.ID)
@@ -173,6 +182,27 @@ func (s *Server) resolveBlobPath(img api.BaseImage) (string, reconcile.BlobPathR
 		return defaultPath, reconcile.BlobPathFoundAtDefaultLayout
 	}
 	return defaultPath, reconcile.BlobPathNotFound
+}
+
+// defaultBlobPath returns the canonical on-disk default path for an image's
+// blob given its format. Used as the F6 fallback when blob_path is empty or
+// stale in the DB.
+//
+// Unknown formats (i.e. neither "filesystem" nor "block") fall back to the
+// historical rootfs.tar layout. This is the safer default: a rootfs.tar that
+// genuinely doesn't exist will surface as BlobPathNotFound (F4) and get the
+// row marked blob_missing — visible operator signal — rather than silently
+// hiding a row behind a wrong path. If a third format is ever added, this
+// switch must be extended in lockstep with the writer.
+func defaultBlobPath(imageDir, id string, format api.ImageFormat) string {
+	switch format {
+	case api.ImageFormatBlock:
+		return filepath.Join(imageDir, id, "image.img")
+	case api.ImageFormatFilesystem:
+		return filepath.Join(imageDir, id, "rootfs.tar")
+	default:
+		return filepath.Join(imageDir, id, "rootfs.tar")
+	}
 }
 
 // runReconcileChecks performs the F1–F6 check matrix and applies mutations.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.11 — 2026-05-07
+
+### Fixes
+
+- **Image reconciler — block-format default path:** `resolveBlobPath` now picks the F6 default-layout filename based on `base_images.format`. `ImageFormatBlock` resolves to `<imageDir>/<id>/image.img`; `ImageFormatFilesystem` keeps `<imageDir>/<id>/rootfs.tar`. Pre-fix, every block-format image with an empty `blob_path` (initramfs builds, partclone/dd captures that finalized without a `SetBlobPath` call) was falsely flipped to `blob_missing` on each reconcile tick because the resolver only knew about `rootfs.tar`. Blobs were intact on disk; only the DB status was wrong. No migration needed — existing rows self-heal on the next reconcile pass via the F6 write-back path, which now populates `blob_path` with the correct filename.
+
+### Tests
+
+- New `internal/server/reconcile_image_test.go`: format-aware default-path table test, plus end-to-end `resolveBlobPath` cases for block-format empty-DBPath (the regression), filesystem-format empty-DBPath (anti-regression), and block-format truly-missing (resolver must not falsely heal dead rows).
+
 ## 0.1.10 — 2026-05-03
 
 ### Critical
