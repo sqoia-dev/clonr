@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.12 — 2026-05-07
+
+### Fixes
+
+- **BIOS bootloader install — non-RAID grub2-install flags:** the EL BIOS/GPT path now passes `--skip-fs-probe` and `--modules=part_gpt biosdisk` to `grub2-install` on single-disk (non-RAID) deploys, mirroring what the RAID-on-whole-disk branch already did. Without these flags, grub-probe could observe stale FS signatures from a previous deploy and abort with "multiple partition labels", failing the bootloader phase on a redeploy. Logic extracted into a pure `elGRUBBIOSArgs` helper so the argv contract is unit-testable.
+- **Disk wipe — wipefs before sgdisk:** `partitionDisk` now runs `wipefs -a <disk>` *before* `sgdisk --zap-all <disk>`, instead of only as a fallback after sgdisk failure. sgdisk's `--zap-all` clears the GPT/MBR header but leaves filesystem and RAID superblocks intact; that residue is exactly what trips grub-probe on redeploy. wipefs is idempotent (exit 0 on a clean disk), so the proactive call is logged-only on non-zero — sgdisk remains the authoritative gate. The legacy "sgdisk failed → retry wipefs → fatal" path is preserved. RAID-on-whole-disk topology is unaffected (the md device path partitions the array, raw members are skipped via `isMdDevice`). Wipe sequence factored into `diskWipeSequence` for unit-testable order contract.
+- **Exit code routing — bootloader vs. finalize:** `cmd/clustr/main.go` now inspects the error chain returned from `deployer.Finalize` and returns `ExitBootloader` (10) when the cause is a `*deploy.BootloaderError`, instead of always returning `ExitFinalize` (9). Cosmetic but stops bootloader regressions from being mislabeled as finalize failures in the deploy-failed callback (`exit_code` and `phase` fields).
+
+### Tests
+
+- `internal/deploy/disk_wipe_test.go`: asserts the wipe-order contract — `wipefs -a` strictly precedes `sgdisk --zap-all`, target disk propagates to both commands as the final positional argument.
+- `internal/deploy/distro_el_grub_args_test.go`: asserts the grub2-install argv shape on all three BIOS paths (non-RAID, RAID-on-whole-disk, md-on-partitions). Non-RAID path now requires `--skip-fs-probe` and `--modules=part_gpt biosdisk`.
+
+### Deferred to 0.1.13
+
+- UEFI routing on firmware-blind layouts (vm202).
+- Webapp layout-selection UI.
+
 ## 0.1.11 — 2026-05-07
 
 ### Fixes
