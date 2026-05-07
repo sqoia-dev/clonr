@@ -8,6 +8,8 @@
 //   POST /ldap/internal/disable      — stops slapd + wipes data dir by default;
 //                                      set {preserve_data:true} to keep data
 //   POST /ldap/internal/destroy      — stops + wipes data; requires confirm:"destroy"
+//   POST /ldap/internal/repair-dit   — idempotent seed-or-repair of dc=cluster,...
+//                                      DIT against running slapd; v0.1.15 fix.
 package ldap
 
 import (
@@ -36,6 +38,32 @@ func (m *Manager) registerInternalRoutes(r chi.Router) {
 	r.Get("/ldap/internal/status", m.handleInternalStatus)
 	r.Post("/ldap/internal/disable", m.handleInternalDisable)
 	r.Post("/ldap/internal/destroy", m.handleInternalDestroy)
+	r.Post("/ldap/internal/repair-dit", m.handleInternalRepairDIT)
+}
+
+// handleInternalRepairDIT re-runs the idempotent DIT seed against the live
+// slapd instance, recovering installs where ldap_module_config.status=ready
+// but the data backend is empty.
+//
+// Body (optional): {} — no parameters, no typed-confirm required because the
+// operation is idempotent and read-mostly (only writes entries that are
+// missing, plus a userPassword self-heal on the node-reader service account).
+//
+// Returns 200 OK with {"status":"ok"} on success, 422 with the error text on
+// any seed failure.
+func (m *Manager) handleInternalRepairDIT(w http.ResponseWriter, r *http.Request) {
+	if err := m.RepairDIT(r.Context()); err != nil {
+		log.Error().Err(err).Msg("ldap: repair-dit endpoint failed")
+		jsonError(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	m.audit.Record(r.Context(), "", "", db.AuditActionLDAPDITRepaired,
+		"ldap_module", "1", r.RemoteAddr,
+		nil, map[string]interface{}{"op": "repair_dit"},
+	)
+
+	jsonResponse(w, map[string]string{"status": "ok"}, http.StatusOK)
 }
 
 // ─── Source mode ──────────────────────────────────────────────────────────────

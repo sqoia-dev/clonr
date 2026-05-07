@@ -764,6 +764,100 @@ func (m *Manager) seedDIT(ctx context.Context, dit *ditClient, baseDN, servicePa
 	return nil
 }
 
+// RepairDIT re-runs the data DIT seed against the live slapd instance,
+// idempotently. Use this when ldap_module_config.status=ready but the slapd
+// data backend is empty (DIT lookups against the base DN return No Such Object).
+// This can happen when:
+//
+//   - A prior Enable() reached statusReady but the data.mdb file was lost or
+//     overwritten by a later operation (e.g. host reprovision, RPM scriptlet,
+//     manual `slapcat`/`slapadd` cycle).
+//
+//   - A pre-v0.1.15 install pre-set status=ready via a migration before any
+//     DIT entries had been written, leaving the seed step unreached.
+//
+//   - The seed succeeded once but a Disable+wipe-data was run with the data
+//     dir's underlying volume not actually wiped, so Enable() saw the row
+//     already in statusReady and the repair was never attempted.
+//
+// RepairDIT performs a strict subset of doProvision:
+//   - reads the current LDAP config from the DB (admin password + base DN)
+//   - HealthBinds against ldaps://127.0.0.1:636
+//   - calls seedDIT() with the existing service password from the DB
+//
+// All seedDIT operations are idempotent (entry-already-exists → silent skip
+// or self-heal modify), so calling RepairDIT against a fully populated DIT
+// is a no-op apart from a userPassword self-heal on the node-reader service
+// account.
+//
+// Returns an error if the module is not enabled, the admin password is not
+// in memory (server restarted, no Enable since), or any seed step fails.
+func (m *Manager) RepairDIT(ctx context.Context) error {
+	row, err := m.db.LDAPGetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("ldap: repair DIT: read module config: %w", err)
+	}
+	if !row.Enabled {
+		return fmt.Errorf("ldap: repair DIT: module is not enabled — call Enable() first")
+	}
+	if row.BaseDN == "" {
+		return fmt.Errorf("ldap: repair DIT: base_dn is empty in DB — module was never fully provisioned")
+	}
+
+	m.mu.RLock()
+	adminPass := m.adminPassword
+	svcPasswd := m.servicePassword
+	m.mu.RUnlock()
+
+	// Fall back to DB-stored admin password (migration 028+) when in-memory copy
+	// is empty, so RepairDIT works after a server restart without forcing a
+	// full re-Enable.
+	if adminPass == "" {
+		adminPass = row.AdminPasswd
+	}
+	if adminPass == "" {
+		return fmt.Errorf("ldap: repair DIT: admin password not available in memory or DB — call Enable() to restore credentials")
+	}
+	if svcPasswd == "" {
+		svcPasswd = row.ServiceBindPassword
+	}
+	if svcPasswd == "" {
+		return fmt.Errorf("ldap: repair DIT: service bind password unavailable — module config is corrupt; full re-Enable required")
+	}
+
+	dit := &ditClient{
+		serverURI:  "ldaps://127.0.0.1:636",
+		bindDN:     fmt.Sprintf("cn=Directory Manager,%s", row.BaseDN),
+		bindPasswd: adminPass,
+		baseDN:     row.BaseDN,
+		caCertPEM:  []byte(row.CACertPEM),
+	}
+
+	// Confirm slapd is reachable before attempting the seed.
+	if err := dit.HealthBind(); err != nil {
+		return fmt.Errorf("ldap: repair DIT: slapd not reachable as Directory Manager: %w", err)
+	}
+
+	log.Info().Str("base_dn", row.BaseDN).Msg("ldap: repair DIT: re-running idempotent seed")
+	if err := m.seedDIT(ctx, dit, row.BaseDN, svcPasswd); err != nil {
+		return fmt.Errorf("ldap: repair DIT: seed failed: %w", err)
+	}
+
+	// Restore in-memory passwords in case this was the first call after a
+	// server restart that recovered creds from the DB above.
+	m.mu.Lock()
+	if m.adminPassword == "" {
+		m.adminPassword = adminPass
+	}
+	if m.servicePassword == "" {
+		m.servicePassword = svcPasswd
+	}
+	m.mu.Unlock()
+
+	log.Info().Str("base_dn", row.BaseDN).Msg("ldap: repair DIT: complete")
+	return nil
+}
+
 // migrateClonrAdminsGroup renames cn=clonr-admins,ou=groups,<baseDN> to
 // cn=clustr-admins if the old entry exists and the new one does not.
 // This is a no-op when only cn=clustr-admins exists (already correct)

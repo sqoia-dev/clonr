@@ -115,6 +115,7 @@ const (
 	AuditActionLDAPInternalDisabled  = "ldap.internal.disabled"
 	AuditActionLDAPInternalDestroyed = "ldap.internal.destroyed"
 	AuditActionLDAPModeSwitched      = "ldap.mode.switched"
+	AuditActionLDAPDITRepaired       = "ldap.internal.dit_repaired" // v0.1.15
 )
 
 // AuditRecord is one row in audit_log.
