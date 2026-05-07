@@ -1499,6 +1499,36 @@ func (db *DB) UpdateReimageRequestFailed(ctx context.Context, id string, errMsg 
 	return requireOneRow(res, "reimage_requests", id)
 }
 
+// CloseActiveReimagesForNode bulk-transitions every non-terminal reimage_requests
+// row for nodeID into the given terminal status (complete | failed | canceled),
+// stamping completed_at = now and error_message = msg. Idempotent: if no rows
+// are non-terminal, returns 0 with nil error.
+//
+// This exists so deploy-complete / deploy-failed handlers can defensively close
+// orphaned older rows that were left in 'triggered' or 'in_progress' from a
+// previous attempt. The single-row GetActiveReimageForNode + UpdateReimageRequestStatus
+// path used to leak a row whenever an operator double-fired a reimage and the
+// first deploy never reported back. See fix/v0.1.14-ui-stale-reimage.
+func (db *DB) CloseActiveReimagesForNode(ctx context.Context, nodeID string, status api.ReimageStatus, msg string) (int, error) {
+	switch status {
+	case api.ReimageStatusComplete, api.ReimageStatusFailed, api.ReimageStatusCanceled:
+	default:
+		return 0, fmt.Errorf("db: CloseActiveReimagesForNode: status %q is not terminal", status)
+	}
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE reimage_requests
+		SET status = ?, error_message = ?, completed_at = ?
+		WHERE node_id = ?
+		  AND status NOT IN ('complete', 'failed', 'canceled')
+	`, string(status), msg, now, nodeID)
+	if err != nil {
+		return 0, fmt.Errorf("db: close active reimages for node: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // GetActiveReimageForNode returns the first non-terminal reimage request for
 // nodeID, or (nil, nil) if none exists.
 func (db *DB) GetActiveReimageForNode(ctx context.Context, nodeID string) (*api.ReimageRequest, error) {

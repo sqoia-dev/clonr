@@ -233,3 +233,79 @@ func TestGetActiveReimageForNode(t *testing.T) {
 		t.Errorf("expected nil after terminal state, got %+v", active)
 	}
 }
+
+// TestCloseActiveReimagesForNode verifies that the bulk-close helper transitions
+// every non-terminal row for a node into the requested terminal status, and is
+// idempotent when there are no non-terminal rows. Regression for the stale
+// "Reimage in progress" badge bug (fix/v0.1.14-ui-stale-reimage).
+func TestCloseActiveReimagesForNode(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	img := makeImage(uuid.New().String())
+	_ = d.CreateBaseImage(ctx, img)
+	node := makeNode(uuid.New().String(), img.ID)
+	_ = d.CreateNodeConfig(ctx, node)
+
+	// Two non-terminal rows + one already-terminal row.
+	stuck := makeReimageRequest(node.ID, img.ID)
+	_ = d.CreateReimageRequest(ctx, stuck)
+	_ = d.UpdateReimageRequestStatus(ctx, stuck.ID, api.ReimageStatusTriggered, "")
+
+	inflight := makeReimageRequest(node.ID, img.ID)
+	_ = d.CreateReimageRequest(ctx, inflight)
+	_ = d.UpdateReimageRequestStatus(ctx, inflight.ID, api.ReimageStatusInProgress, "")
+
+	done := makeReimageRequest(node.ID, img.ID)
+	_ = d.CreateReimageRequest(ctx, done)
+	_ = d.UpdateReimageRequestStatus(ctx, done.ID, api.ReimageStatusComplete, "")
+
+	// Bulk-close should transition the two non-terminal rows and skip the terminal one.
+	n, err := d.CloseActiveReimagesForNode(ctx, node.ID, api.ReimageStatusComplete, "")
+	if err != nil {
+		t.Fatalf("close active: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("rows closed: got %d want 2", n)
+	}
+
+	// All three rows should now be in 'complete' status.
+	all, err := d.ListReimageRequests(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(all))
+	}
+	for _, r := range all {
+		if r.Status != api.ReimageStatusComplete {
+			t.Errorf("row %s: status %s want complete", r.ID, r.Status)
+		}
+		if r.CompletedAt == nil {
+			t.Errorf("row %s: completed_at should be set", r.ID)
+		}
+	}
+
+	// GetActiveReimageForNode should now return nil.
+	active, err := d.GetActiveReimageForNode(ctx, node.ID)
+	if err != nil {
+		t.Fatalf("get active: %v", err)
+	}
+	if active != nil {
+		t.Errorf("expected nil after bulk-close, got %+v", active)
+	}
+
+	// Second invocation is a no-op — idempotent.
+	n, err = d.CloseActiveReimagesForNode(ctx, node.ID, api.ReimageStatusComplete, "")
+	if err != nil {
+		t.Fatalf("close active (idempotent): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rows closed on second call: got %d want 0", n)
+	}
+
+	// Non-terminal status argument should be rejected.
+	if _, err := d.CloseActiveReimagesForNode(ctx, node.ID, api.ReimageStatusTriggered, ""); err == nil {
+		t.Error("expected error when passing non-terminal status, got nil")
+	}
+}

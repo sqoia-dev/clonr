@@ -1459,7 +1459,17 @@ function ReimageFlow({ node, autoExpand }: { node: NodeConfig; autoExpand?: bool
   const allImages = imagesData?.images ?? []
   const canConfirm = confirmId === node.id && selectedImageId !== ""
 
-  const isProvisioning = activeReimage && ["pending", "triggered", "in_progress"].includes(activeReimage.status)
+  // Defensive UI gate: even if a reimage_request row is stuck non-terminal in the
+  // DB, suppress the "Reimage in progress" badge once the node has finished its
+  // current provisioning cycle. The server clears reimage_pending the moment
+  // deploy-complete fires, so reimage_pending is the canonical "is a reimage
+  // happening RIGHT NOW" signal — a non-terminal reimage row without a pending
+  // node flag is an orphan from a prior cycle and must not render as in-flight.
+  // (fix/v0.1.14-ui-stale-reimage)
+  const isProvisioning =
+    node.reimage_pending &&
+    activeReimage &&
+    ["pending", "triggered", "in_progress"].includes(activeReimage.status)
 
   // Resolve human-readable names for the current → target diff display.
   const currentImageName = allImages.find((img) => img.id === node.base_image_id)

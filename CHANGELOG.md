@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.14 — 2026-05-07
+
+### Fixes
+
+- **Stale "Reimage in progress" badge after successful redeploy** (`internal/db/db.go`, `internal/server/handlers/nodes.go`, `web/src/routes/nodes.tsx`): when an operator double-fired reimage on the same node — first request stuck in `triggered`, second request kicked off, completed, and self-closed — the older row was never transitioned. The `deploy-complete` handler used `GetActiveReimageForNode` (single-row, `ORDER BY created_at DESC LIMIT 1`) and operated on whichever row that returned. The `/api/v1/nodes/{id}/reimage/active` polling endpoint used the same single-row query, so the UI kept reading the stuck `triggered` row and rendering the "Reimage in progress" badge on a node already in `deployed_verified`. Live evidence on cloner: vm202 (`ac7fb8e3-…`) had three rows — newest `complete`, middle `triggered` (orphaned), oldest `failed`. Fix is two-front. Server: new `DB.CloseActiveReimagesForNode` bulk-transitions every non-terminal row for a node to a terminal status idempotently; `DeployComplete`, `DeployFailed`, and the first `VerifyBoot` call all invoke it so any prior cycle's leaked rows close at the next definitive "node finished provisioning" signal. Webapp: the `Reimage in progress` block now gates on `node.reimage_pending` (the canonical "is a reimage actually happening RIGHT NOW" flag the server clears in `RecordDeploySucceeded`) instead of just the reimage row's status — defence-in-depth so a future server bug never manifests as a stuck badge.
+
+### Tests
+
+- `internal/db/reimage_terminal_test.go::TestCloseActiveReimagesForNode`: asserts bulk-close transitions all non-terminal rows, leaves terminal rows alone, is idempotent on repeat calls, and rejects non-terminal status arguments.
+
+### Operational
+
+- vm202's stuck `triggered` row (`2b5fa813-…`) was cleared directly in the cloner DB so the live UI clears immediately; future occurrences of this class are auto-handled by the bulk-close path.
+
 ## 0.1.13 — 2026-05-07
 
 ### Critical

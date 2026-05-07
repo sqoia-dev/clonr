@@ -939,17 +939,16 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Transition the active reimage record (if any) to complete.
-	active, err := h.DB.GetActiveReimageForNode(r.Context(), id)
-	if err != nil {
-		log.Warn().Err(err).Str("node_id", id).Msg("deploy-complete: could not look up active reimage (non-fatal)")
-	} else if active != nil {
-		if dbErr := h.DB.UpdateReimageRequestStatus(r.Context(), active.ID, api.ReimageStatusComplete, ""); dbErr != nil {
-			log.Warn().Err(dbErr).Str("reimage_id", active.ID).Msg("deploy-complete: could not update reimage record (non-fatal)")
-		} else {
-			log.Info().Str("reimage_id", active.ID).Str("node_id", id).Msg("deploy-complete: reimage record transitioned to complete")
-			metrics.DeployTotal.WithLabelValues("complete").Inc()
-		}
+	// Transition every non-terminal reimage record for this node to complete.
+	// We bulk-close instead of operating on a single "active" row because an
+	// operator can double-fire reimage and leave an older 'triggered' row
+	// stranded — closing all of them keeps the UI honest and is idempotent
+	// when there are zero non-terminal rows. (fix/v0.1.14-ui-stale-reimage)
+	if n, dbErr := h.DB.CloseActiveReimagesForNode(r.Context(), id, api.ReimageStatusComplete, ""); dbErr != nil {
+		log.Warn().Err(dbErr).Str("node_id", id).Msg("deploy-complete: could not close active reimages (non-fatal)")
+	} else if n > 0 {
+		log.Info().Int("closed", n).Str("node_id", id).Msg("deploy-complete: reimage records transitioned to complete")
+		metrics.DeployTotal.WithLabelValues("complete").Inc()
 	}
 
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
@@ -1012,6 +1011,10 @@ func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Transition the active reimage record (if any) to failed with exit detail.
+	// The "active" row gets the structured exit_code/exit_name/phase. After that,
+	// any older orphaned non-terminal rows for this node are bulk-closed as
+	// failed too, so the UI doesn't see stale "in progress" badges from prior
+	// double-fires. (fix/v0.1.14-ui-stale-reimage)
 	active, err := h.DB.GetActiveReimageForNode(r.Context(), id)
 	if err != nil {
 		log.Warn().Err(err).Str("node_id", id).Msg("deploy-failed: could not look up active reimage (non-fatal)")
@@ -1032,6 +1035,12 @@ func (h *NodesHandler) DeployFailed(w http.ResponseWriter, r *http.Request) {
 				Msg("deploy-failed: reimage record transitioned to failed")
 			metrics.DeployTotal.WithLabelValues("failed").Inc()
 		}
+	}
+	// Close any other orphaned non-terminal rows defensively.
+	if n, dbErr := h.DB.CloseActiveReimagesForNode(r.Context(), id, api.ReimageStatusFailed, "superseded by newer deploy-failed"); dbErr != nil {
+		log.Warn().Err(dbErr).Str("node_id", id).Msg("deploy-failed: could not close stragglers (non-fatal)")
+	} else if n > 0 {
+		log.Info().Int("closed", n).Str("node_id", id).Msg("deploy-failed: closed orphaned reimage stragglers")
 	}
 
 	log.Warn().
@@ -1134,6 +1143,19 @@ func (h *NodesHandler) VerifyBoot(w http.ResponseWriter, r *http.Request) {
 						Msg("verify-boot: node has LDAP configured but is NOT LDAP-ready — operator must reimage to resolve")
 				}
 			}
+		}
+	}
+
+	// On the first verify-boot, defensively close any non-terminal reimage rows
+	// for this node. Reaching deployed_verified is a definitive "provisioning
+	// is over" signal; if deploy-complete already closed the active row this is
+	// a no-op, but if older orphaned 'triggered' rows survived they get cleaned
+	// up here. (fix/v0.1.14-ui-stale-reimage)
+	if firstTime {
+		if n, dbErr := h.DB.CloseActiveReimagesForNode(r.Context(), id, api.ReimageStatusComplete, "closed by verify-boot"); dbErr != nil {
+			log.Warn().Err(dbErr).Str("node_id", id).Msg("verify-boot: could not close active reimages (non-fatal)")
+		} else if n > 0 {
+			log.Info().Int("closed", n).Str("node_id", id).Msg("verify-boot: closed orphaned reimage rows")
 		}
 	}
 
