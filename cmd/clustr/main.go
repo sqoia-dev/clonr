@@ -1552,6 +1552,19 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		printDeployError("finalize", err.Error())
 		deployLog.Error().Err(err).Msg("finalize failed")
 		reporter.EndPhase(err.Error())
+		// Bootloader-phase failures must surface ExitBootloader (10),
+		// not ExitFinalize (9). Finalize() runs both finalize-proper
+		// (fstab, machine-id, nspawn) and the bootloader install; a
+		// BootloaderError anywhere in the chain means the failure was
+		// in grub2-install / efibootmgr, not the upstream finalize.
+		// Without this branch the outer DeployError mask shadows the
+		// BootloaderError detection at the deploy-failed report site
+		// and the operator sees exit_code=9 / phase=finalize for a
+		// bootloader regression.
+		var be *deploy.BootloaderError
+		if errors.As(err, &be) {
+			return Wrap(ExitBootloader, "finalize/bootloader", fmt.Errorf("finalize: %w", err))
+		}
 		return Wrap(ExitFinalize, "finalize", fmt.Errorf("finalize: %w", err))
 	}
 	consolePrintln("") // advance past the \r sub-step line
