@@ -272,6 +272,51 @@ func TestServeIPXEScript_DeployVerifyTimeout_DiskBoots(t *testing.T) {
 	assertDiskBoot(t, w, "deploy_verify_timeout -> disk-boot")
 }
 
+// TestServeIPXEScript_DeployedLDAPFailed_DiskBoots is the primary regression
+// test for the PR #2 review fix: a node in deployed_ldap_failed state (booted
+// + phoned home but sssd not connected) MUST disk-boot on a subsequent PXE
+// cycle. Pre-fix the state fell through the disk-boot switch into the
+// initramfs/reimage path, so any node that PXE-booted again (manual reboot,
+// persistent netboot config, IPMI bootdev pxe used during operator triage)
+// would be silently reimaged — losing a potentially trivially-fixable LDAP
+// integration failure. The state means "OS bootable, LDAP broken"; only
+// operators decide whether to repair LDAP or reimage.
+func TestServeIPXEScript_DeployedLDAPFailed_DiskBoots(t *testing.T) {
+	d := openTestDB(t)
+	node := makeTestNode(t, d, "aa:bb:cc:dd:ee:05", "node05")
+
+	// Drive the node to deployed_ldap_failed:
+	//   1. RecordDeploySucceeded -> deploy_completed_preboot_at = now.
+	//   2. RecordVerifyBooted    -> deploy_verified_booted_at = now.
+	//   3. RecordNodeLDAPReady(false, ...) -> ldap_ready = false.
+	// State() returns NodeStateDeployedLDAPFailed when DeployVerifiedBootedAt
+	// is set AND LDAPReady is non-nil and false.
+	if err := d.RecordDeploySucceeded(t.Context(), node.ID); err != nil {
+		t.Fatalf("RecordDeploySucceeded: %v", err)
+	}
+	if _, err := d.RecordVerifyBooted(t.Context(), node.ID); err != nil {
+		t.Fatalf("RecordVerifyBooted: %v", err)
+	}
+	if err := d.RecordNodeLDAPReady(t.Context(), node.ID, false, "sssd not connected"); err != nil {
+		t.Fatalf("RecordNodeLDAPReady: %v", err)
+	}
+
+	got, err := d.GetNodeConfigByMAC(t.Context(), node.PrimaryMAC)
+	if err != nil {
+		t.Fatalf("GetNodeConfigByMAC: %v", err)
+	}
+	if got.State() != api.NodeStateDeployedLDAPFailed {
+		t.Fatalf("precondition: expected deployed_ldap_failed, got %s", got.State())
+	}
+
+	h := newBootHandler(d)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/ipxe?mac="+node.PrimaryMAC, nil)
+	w := httptest.NewRecorder()
+	h.ServeIPXEScript(w, req)
+
+	assertDiskBoot(t, w, "deployed_ldap_failed -> disk-boot (NOT auto-reimage)")
+}
+
 // TestServeIPXEScript_DeployedVerified_DiskBoots verifies that the happy-path
 // fully-verified state also receives a disk-boot script (regression guard).
 func TestServeIPXEScript_DeployedVerified_DiskBoots(t *testing.T) {

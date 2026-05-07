@@ -72,6 +72,13 @@ func (h *BootHandler) ServeMemtest(w http.ResponseWriter, r *http.Request) {
 //   - NodeStateDeployed, NodeStateDeployedVerified: sanboot from local disk --
 //     the node is confirmed healthy; boot from disk unconditionally.
 //
+//   - NodeStateDeployedLDAPFailed: sanboot from local disk -- the OS booted
+//     and phoned home, so the disk image is bootable, but the LDAP client
+//     (sssd) is not ready. Auto-reimaging would discard a potentially
+//     trivially-fixable state (e.g. transient slapd outage, sssd cache flush
+//     needed). The operator must triage and decide whether to repair LDAP or
+//     trigger a reimage explicitly. v0.1.15.
+//
 //   - NodeStateDeployedPreboot: sanboot from local disk -- deploy-complete was
 //     received from initramfs but the OS has not yet phoned home via
 //     POST /verify-boot. We MUST disk-boot here so clustr-verify-boot.service
@@ -141,6 +148,35 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 			case api.NodeStateDeployed, api.NodeStateDeployedVerified:
 				// Terminal success states -- node is confirmed healthy. Boot from disk.
 				log.Info().Str("mac", mac).Str("hostname", nodeCfg.Hostname).Str("state", string(state)).Msg("boot: disk-boot (verified deployed)")
+				script, genErr := h.generateDiskBootScript(r, &nodeCfg)
+				if genErr != nil {
+					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
+					http.Error(w, "failed to generate boot script", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(script)
+				return
+
+			case api.NodeStateDeployedLDAPFailed:
+				// v0.1.15: the OS phoned home post-boot (so the disk image is
+				// bootable) but sssd is not connected to slapd. The node is in
+				// a degraded-but-recoverable state — the OS itself is fine,
+				// LDAP integration is broken. If this node ever PXE-boots
+				// again (manual reboot, persistent netboot config, IPMI
+				// bootdev pxe set during triage) we MUST disk-boot it and let
+				// the operator decide whether to retry LDAP repair or trigger
+				// a reimage explicitly. Auto-reimaging here would discard a
+				// potentially trivially-fixable state (transient slapd outage,
+				// sssd cache flush, missing nss_sss config push) on every PXE
+				// cycle, which is exactly the silent-data-loss class of bug
+				// the deployed_ldap_failed state was introduced to surface.
+				log.Warn().
+					Str("mac", mac).
+					Str("hostname", nodeCfg.Hostname).
+					Str("state", string(state)).
+					Msg("boot: disk-boot (deployed_ldap_failed -- LDAP broken but OS bootable; operator must triage)")
 				script, genErr := h.generateDiskBootScript(r, &nodeCfg)
 				if genErr != nil {
 					log.Error().Err(genErr).Str("mac", mac).Msg("boot: generate disk boot script")
