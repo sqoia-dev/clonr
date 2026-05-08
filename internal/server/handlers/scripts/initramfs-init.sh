@@ -377,6 +377,15 @@ if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/bin/screen ]; then
     # bypasses the PTY entirely — screen still provides an attachable pty for
     # live inspection via "screen -r clustr-deploy", but log I/O is independent.
     log "starting deploy agent in screen session 'clustr-deploy'..."
+    # SCREENDIR: screen needs a writable directory for its socket files.
+    # Without it screen falls back to $HOME/.screen; /root exists in the initramfs
+    # but setting SCREENDIR=/tmp/screen is safer and avoids any HOME lookup.
+    # TERM: screen requires a terminal type; vt100 is universally safe in a minimal
+    # initramfs environment and is always available without terminfo databases.
+    export SCREENDIR=/tmp/screen
+    mkdir -p "$SCREENDIR"
+    chmod 700 "$SCREENDIR"
+    export TERM="${TERM:-vt100}"
     screen -dmS clustr-deploy sh -c \
         "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" >> \"$LOG\" 2>&1; echo \$? > /tmp/clustr-exit-code; exec sh"
     # Wait for the deploy to write its exit code.

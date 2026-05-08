@@ -1208,6 +1208,25 @@ fi
 
 echo "  [+] Kernel modules ready"
 
+# /etc/passwd and /etc/shadow — required by screen (getpwuid) and dropbear.
+# Without /etc/passwd, screen prints "getpwuid(): can't identify your account!"
+# and refuses to start the deploy session. The password field is locked ('x' in
+# passwd, '!' in shadow) — actual auth uses the per-boot password written by the
+# init script at runtime when SSH is enabled.
+cat > "$WORKDIR/etc/passwd" << 'EOF'
+root:x:0:0:root:/root:/bin/sh
+EOF
+cat > "$WORKDIR/etc/shadow" << 'EOF'
+root:!:19000:0:99999:7:::
+EOF
+cat > "$WORKDIR/etc/group" << 'EOF'
+root:x:0:root
+EOF
+chmod 644 "$WORKDIR/etc/passwd" "$WORKDIR/etc/group"
+chmod 640 "$WORKDIR/etc/shadow"
+mkdir -p "$WORKDIR/root"
+echo "  [+] /etc/passwd, /etc/shadow, /etc/group created"
+
 # /etc/resolv.conf placeholder (udhcpc will overwrite this).
 cat > "$WORKDIR/etc/resolv.conf" << 'EOF'
 nameserver 8.8.8.8
