@@ -1811,6 +1811,12 @@ func (s *Server) buildRouter() chi.Router {
 			// clientd heartbeat — admin read of latest heartbeat data.
 			r.Get("/nodes/{id}/heartbeat", clientdH.GetHeartbeat)
 
+			// fix/v0.1.22-ldap-reverify: admin force re-verify of LDAP health.
+			// Pushes the live clientd to run its sssd probe immediately and
+			// returns the result synchronously (10 s timeout). The result is
+			// also written through to node_configs.ldap_ready.
+			r.Post("/nodes/{id}/verify-ldap", clientdH.VerifyLDAPOnNode)
+
 			// Config push — push a whitelisted config file to a live node.
 			r.Put("/nodes/{id}/config-push", clientdH.ConfigPush)
 

@@ -65,17 +65,17 @@ type fakeBiosApplyHub struct {
 
 func (h *fakeBiosApplyHub) RegisterConn(nodeID string, conn *websocket.Conn, send chan []byte, cancel context.CancelFunc) {
 }
-func (h *fakeBiosApplyHub) Unregister(nodeID string)           {}
-func (h *fakeBiosApplyHub) ConnectedNodes() []string           { return nil }
-func (h *fakeBiosApplyHub) IsConnected(nodeID string) bool     { return h.connected }
+func (h *fakeBiosApplyHub) Unregister(nodeID string)                        {}
+func (h *fakeBiosApplyHub) ConnectedNodes() []string                        { return nil }
+func (h *fakeBiosApplyHub) IsConnected(nodeID string) bool                  { return h.connected }
 func (h *fakeBiosApplyHub) AppendJournalEntries(_ string, _ []api.LogEntry) {}
 
 func (h *fakeBiosApplyHub) Send(nodeID string, msg clientd.ServerMessage) error {
 	h.lastSent = msg
 	return nil
 }
-func (h *fakeBiosApplyHub) RegisterAck(msgID string) <-chan clientd.AckPayload { return nil }
-func (h *fakeBiosApplyHub) UnregisterAck(msgID string)                          {}
+func (h *fakeBiosApplyHub) RegisterAck(msgID string) <-chan clientd.AckPayload       { return nil }
+func (h *fakeBiosApplyHub) UnregisterAck(msgID string)                               {}
 func (h *fakeBiosApplyHub) DeliverAck(msgID string, payload clientd.AckPayload) bool { return false }
 func (h *fakeBiosApplyHub) RegisterExec(msgID string) <-chan clientd.ExecResultPayload {
 	return nil
@@ -110,6 +110,13 @@ func (h *fakeBiosApplyHub) RegisterBiosApply(msgID string) <-chan clientd.BiosAp
 }
 func (h *fakeBiosApplyHub) UnregisterBiosApply(msgID string) {}
 func (h *fakeBiosApplyHub) DeliverBiosApplyResult(msgID string, payload clientd.BiosApplyResultPayload) bool {
+	return false
+}
+func (h *fakeBiosApplyHub) RegisterLDAPHealth(msgID string) <-chan clientd.LDAPHealthResultPayload {
+	return nil
+}
+func (h *fakeBiosApplyHub) UnregisterLDAPHealth(msgID string) {}
+func (h *fakeBiosApplyHub) DeliverLDAPHealthResult(msgID string, payload clientd.LDAPHealthResultPayload) bool {
 	return false
 }
 
@@ -220,8 +227,8 @@ func TestBiosApplyOnNode_NoChanges(t *testing.T) {
 	}
 
 	hub := &fakeBiosApplyHub{
-		connected:  true,
-		biosReadCh: readCh,
+		connected:   true,
+		biosReadCh:  readCh,
 		biosApplyCh: make(chan clientd.BiosApplyResultPayload, 1),
 	}
 	h := &ClientdHandler{Hub: hub, BiosDB: db}

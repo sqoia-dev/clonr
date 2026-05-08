@@ -85,6 +85,13 @@ type HeartbeatPayload struct {
 	Services       []ServiceStatus `json:"services"`
 	KernelVersion  string          `json:"kernel_version"`
 	ClientdVersion string          `json:"clientd_version"`
+	// LDAPHealth, when non-nil, is the result of the local sssd/LDAP probe
+	// (see internal/clientd/ldap_health.go). The server consumes this on
+	// every heartbeat to keep node_configs.ldap_ready current — the older
+	// verify-boot-only path was one-shot and went stale forever once sssd
+	// recovered. nil means the probe was skipped (older clientd versions).
+	// fix/v0.1.22-ldap-reverify.
+	LDAPHealth *LDAPHealthStatus `json:"ldap_health,omitempty"`
 }
 
 // DiskUsage describes filesystem utilization for a single mount point.
@@ -505,6 +512,28 @@ type BiosDriftPayload struct {
 	// Populated on a best-effort basis; may be empty if the diff was computed
 	// only via hash comparison.
 	DriftedSettings []BiosSetting `json:"drifted_settings,omitempty"`
+}
+
+// ─── LDAP health request/result (fix/v0.1.22-ldap-reverify) ──────────────────
+
+// LDAPHealthRequestPayload is the payload for the "ldap_health_request"
+// server→node message. Sent by the admin "force re-verify" handler so the
+// node runs the LDAP probe immediately rather than waiting up to 60 s for
+// the next scheduled heartbeat. The node replies with "ldap_health_result".
+type LDAPHealthRequestPayload struct {
+	// RefMsgID is the server's msg_id; echoed in the ldap_health_result reply
+	// so the waiting HTTP handler can correlate.
+	RefMsgID string `json:"ref_msg_id"`
+}
+
+// LDAPHealthResultPayload is the payload for the "ldap_health_result"
+// node→server message. Carries the same LDAPHealthStatus snapshot a
+// heartbeat would carry, plus the RefMsgID echo for handler correlation.
+type LDAPHealthResultPayload struct {
+	// RefMsgID echoes the msg_id from the corresponding ldap_health_request.
+	RefMsgID string `json:"ref_msg_id"`
+	// Health is the probe result. Always populated (the probe never returns nil).
+	Health LDAPHealthStatus `json:"health"`
 }
 
 // BiosSetting is a single BIOS key/value pair in the clientd message wire format.

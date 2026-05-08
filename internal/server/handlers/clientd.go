@@ -31,6 +31,9 @@ type ClientdDBIface interface {
 	InsertLogBatch(ctx context.Context, entries []api.LogEntry) error
 	GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error)
 	InsertStatsBatch(ctx context.Context, rows []db.NodeStatRow) error
+	// fix/v0.1.22-ldap-reverify: per-heartbeat LDAP readiness rewrite.
+	LDAPNodeIsConfigured(ctx context.Context, nodeID string) (bool, error)
+	RecordNodeLDAPReady(ctx context.Context, nodeID string, ready bool, detail string) error
 }
 
 // ClientdHubIface is the hub operations needed by the handler.
@@ -67,6 +70,11 @@ type ClientdHubIface interface {
 	RegisterBiosApply(msgID string) <-chan clientd.BiosApplyResultPayload
 	UnregisterBiosApply(msgID string)
 	DeliverBiosApplyResult(msgID string, payload clientd.BiosApplyResultPayload) bool
+	// LDAPHealth registry — used for ldap_health_request round-trips
+	// (fix/v0.1.22-ldap-reverify, admin "force re-verify" endpoint).
+	RegisterLDAPHealth(msgID string) <-chan clientd.LDAPHealthResultPayload
+	UnregisterLDAPHealth(msgID string)
+	DeliverLDAPHealthResult(msgID string, payload clientd.LDAPHealthResultPayload) bool
 }
 
 // ClientdBiosDBIface is the subset of *db.DB used by BiosApplyOnNode.
@@ -248,6 +256,12 @@ func (h *ClientdHandler) dispatchClientMessage(ctx context.Context, nodeID strin
 	case "bios_drift":
 		h.handleBiosDrift(nodeID, msg)
 
+	case "ldap_health_result":
+		// fix/v0.1.22-ldap-reverify: result of an admin force re-verify.
+		// We deliver to the waiting HTTP handler AND apply the result so the
+		// DB reflects the latest state even if the HTTP caller has gone away.
+		h.handleLDAPHealthResult(ctx, nodeID, msg)
+
 	case "stats_batch":
 		h.handleStatsBatch(ctx, nodeID, msg)
 
@@ -330,6 +344,93 @@ func (h *ClientdHandler) handleHeartbeat(ctx context.Context, nodeID string, msg
 	if err := h.DB.UpdateLastSeen(ctx, nodeID); err != nil {
 		log.Error().Err(err).Str("node_id", nodeID).Msg("clientd ws: UpdateLastSeen failed on heartbeat")
 	}
+
+	// fix/v0.1.22-ldap-reverify: heartbeat-driven LDAP readiness rewrite.
+	// verify-boot was a one-shot probe at first phone-home, so any node where
+	// sssd recovered AFTER first boot stayed flagged "LDAP Failed" forever.
+	// Now every heartbeat brings a fresh probe result and we update the row,
+	// so the UI eventually-consistently reflects truth.  Use the server-lifetime
+	// context for the DB write so a node disconnect doesn't abort it.
+	if payload.LDAPHealth != nil {
+		writeCtx := h.ServerCtx
+		if writeCtx == nil {
+			writeCtx = ctx
+		}
+		applyLDAPHealth(writeCtx, h.DB, nodeID, payload.LDAPHealth)
+	}
+}
+
+// applyLDAPHealth writes an LDAPHealthStatus snapshot through to
+// node_configs.ldap_ready / ldap_ready_detail when the node has LDAP client
+// config. No-op when the node was never LDAP-configured (Configured==false
+// AND LDAPNodeIsConfigured returns false) — nothing about LDAP applies to
+// that node and we should not stamp a misleading detail. Shared by the
+// heartbeat path and the force-reverify result handler.
+func applyLDAPHealth(ctx context.Context, dbIface ClientdDBIface, nodeID string, health *clientd.LDAPHealthStatus) {
+	if health == nil {
+		return
+	}
+	configured, err := dbIface.LDAPNodeIsConfigured(ctx, nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: LDAPNodeIsConfigured failed (non-fatal — skipping ldap_ready update)")
+		return
+	}
+	if !configured {
+		// Node was never deployed with LDAP — leave ldap_ready NULL so the
+		// state-derivation logic in pkg/api treats the node as "no LDAP
+		// expected" rather than "LDAP failed".
+		return
+	}
+	// Node IS LDAP-configured. Trust the probe: ready iff Active && Connected.
+	ready := health.Active && health.Connected
+	detail := health.Detail
+	if detail == "" {
+		if ready {
+			detail = "sssd online"
+		} else {
+			detail = "sssd not ready"
+		}
+	}
+	if err := dbIface.RecordNodeLDAPReady(ctx, nodeID, ready, detail); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: RecordNodeLDAPReady failed (non-fatal)")
+		return
+	}
+	log.Debug().
+		Str("node_id", nodeID).
+		Bool("ready", ready).
+		Str("detail", detail).
+		Msg("clientd ws: ldap_ready updated from health probe")
+}
+
+// handleLDAPHealthResult processes an "ldap_health_result" message from the
+// node. It applies the snapshot to node_configs (so the DB is current even if
+// the HTTP caller has disconnected) and forwards it to the waiting handler
+// via the registry. fix/v0.1.22-ldap-reverify.
+func (h *ClientdHandler) handleLDAPHealthResult(ctx context.Context, nodeID string, msg clientd.ClientMessage) {
+	var payload clientd.LDAPHealthResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("node_id", nodeID).
+			Msg("clientd ws: malformed ldap_health_result payload")
+		return
+	}
+	// Apply the snapshot so the row reflects the latest probe even if the
+	// triggering HTTP request is gone. Use server-lifetime ctx for the write.
+	writeCtx := h.ServerCtx
+	if writeCtx == nil {
+		writeCtx = ctx
+	}
+	applyLDAPHealth(writeCtx, h.DB, nodeID, &payload.Health)
+
+	delivered := h.Hub.DeliverLDAPHealthResult(payload.RefMsgID, payload)
+	log.Debug().
+		Str("node_id", nodeID).
+		Str("ref_msg_id", payload.RefMsgID).
+		Bool("connected", payload.Health.Connected).
+		Bool("active", payload.Health.Active).
+		Bool("delivered", delivered).
+		Msg("clientd ws: ldap_health_result received from node")
 }
 
 // handleLogBatch persists and fans out a batch of journal log entries from a node.
@@ -504,6 +605,100 @@ func (h *ClientdHandler) GetHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, hb)
+}
+
+// VerifyLDAPResponse is the JSON body returned by VerifyLDAPOnNode.
+// Mirrors clientd.LDAPHealthStatus 1:1 plus the boolean "ready" the server
+// derived (Active && Connected) and "applied" reflecting whether the row
+// was rewritten in node_configs.
+type VerifyLDAPResponse struct {
+	Ready      bool   `json:"ready"`
+	Configured bool   `json:"configured"`
+	Active     bool   `json:"active"`
+	Connected  bool   `json:"connected"`
+	Domain     string `json:"domain,omitempty"`
+	Detail     string `json:"detail"`
+	// Applied reflects whether node_configs was rewritten with this result.
+	// When the node has no LDAP config (LDAPNodeIsConfigured==false), the
+	// server intentionally does not record the probe — Applied is false in
+	// that case so the operator sees "node has no LDAP".
+	Applied bool `json:"applied"`
+}
+
+// VerifyLDAPOnNode is the admin "force re-verify" endpoint. Sends an
+// ldap_health_request to the live node, waits up to 10 s for the result,
+// applies it to node_configs, and returns the snapshot to the caller.
+// fix/v0.1.22-ldap-reverify.
+//
+// Route: POST /api/v1/nodes/{id}/verify-ldap (admin scope)
+func (h *ClientdHandler) VerifyLDAPOnNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "id")
+	if nodeID == "" {
+		writeValidationError(w, "missing node id")
+		return
+	}
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clustr-clientd offline)",
+			Code:  "node_offline",
+		})
+		return
+	}
+
+	msgID := uuid.New().String()
+	payload, err := json.Marshal(clientd.LDAPHealthRequestPayload{RefMsgID: msgID})
+	if err != nil {
+		writeError(w, fmt.Errorf("marshal ldap_health_request: %w", err))
+		return
+	}
+	serverMsg := clientd.ServerMessage{
+		Type:    "ldap_health_request",
+		MsgID:   msgID,
+		Payload: json.RawMessage(payload),
+	}
+
+	resultCh := h.Hub.RegisterLDAPHealth(msgID)
+	defer h.Hub.UnregisterLDAPHealth(msgID)
+
+	if err := h.Hub.Send(nodeID, serverMsg); err != nil {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "failed to send ldap_health_request to node: " + err.Error(),
+			Code:  "send_failed",
+		})
+		return
+	}
+
+	log.Info().Str("node_id", nodeID).Str("msg_id", msgID).
+		Msg("clientd: ldap_health_request sent to node, waiting for result")
+
+	select {
+	case result := <-resultCh:
+		// applyLDAPHealth has already run inside handleLDAPHealthResult, but
+		// we still need to derive ready/applied here for the response body.
+		// We avoid a second DB write — query the configured flag for the
+		// "applied" indicator.
+		applied := false
+		if cfg, dbErr := h.DB.LDAPNodeIsConfigured(r.Context(), nodeID); dbErr == nil && cfg {
+			applied = true
+		}
+		writeJSON(w, http.StatusOK, VerifyLDAPResponse{
+			Ready:      result.Health.Active && result.Health.Connected,
+			Configured: result.Health.Configured,
+			Active:     result.Health.Active,
+			Connected:  result.Health.Connected,
+			Domain:     result.Health.Domain,
+			Detail:     result.Health.Detail,
+			Applied:    applied,
+		})
+	case <-time.After(10 * time.Second):
+		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
+			Error: "timed out waiting for ldap_health_result from node (10s)",
+			Code:  "ldap_health_timeout",
+		})
+	case <-r.Context().Done():
+		// Caller disconnected — silently drop.
+		return
+	}
 }
 
 // GetConnectedNodes returns a list of currently connected node IDs.

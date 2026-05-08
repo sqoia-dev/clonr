@@ -92,6 +92,12 @@ func collectHeartbeat(version string) HeartbeatPayload {
 		hb.Services = append(hb.Services, st)
 	}
 
+	// fix/v0.1.22-ldap-reverify: LDAP health snapshot piggybacks on every
+	// heartbeat so the server can keep node_configs.ldap_ready current.
+	// The probe is bounded by ldapProbeTimeout (5 s) so it cannot delay the
+	// 60 s heartbeat cadence even if sssd is wedged.
+	hb.LDAPHealth = collectLDAPHealth()
+
 	return hb
 }
 

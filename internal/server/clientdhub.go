@@ -116,6 +116,11 @@ type ClientdHub struct {
 	// biosApplyRegistry maps outbound msg_id → pendingBiosApplyResult so the
 	// ApplyBios HTTP handler can block until the node replies with bios_apply_result.
 	biosApplyRegistry sync.Map
+
+	// ldapHealthRegistry maps outbound msg_id → pendingLDAPHealthResult so the
+	// admin "force re-verify" HTTP handler can block until the node replies
+	// with ldap_health_result. fix/v0.1.22-ldap-reverify.
+	ldapHealthRegistry sync.Map
 }
 
 // clientdConn holds one live WebSocket connection for a single node.
@@ -404,6 +409,44 @@ func (h *ClientdHub) DeliverBiosApplyResult(msgID string, payload clientd.BiosAp
 		return false
 	}
 	pe := v.(pendingBiosApplyResult)
+	select {
+	case pe.ch <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+// ─── LDAPHealth registry (fix/v0.1.22-ldap-reverify) ─────────────────────────
+
+// pendingLDAPHealthResult is the in-flight state for an ldap_health_request.
+type pendingLDAPHealthResult struct {
+	ch chan clientd.LDAPHealthResultPayload
+}
+
+// RegisterLDAPHealth creates a pending LDAP health entry for msgID and returns
+// the channel to read the LDAPHealthResultPayload from. The caller must call
+// UnregisterLDAPHealth(msgID) when done.
+func (h *ClientdHub) RegisterLDAPHealth(msgID string) <-chan clientd.LDAPHealthResultPayload {
+	ch := make(chan clientd.LDAPHealthResultPayload, 1)
+	h.ldapHealthRegistry.Store(msgID, pendingLDAPHealthResult{ch: ch})
+	return ch
+}
+
+// UnregisterLDAPHealth removes a pending LDAP health entry.
+func (h *ClientdHub) UnregisterLDAPHealth(msgID string) {
+	h.ldapHealthRegistry.Delete(msgID)
+}
+
+// DeliverLDAPHealthResult delivers an LDAPHealthResultPayload to the waiting
+// HTTP handler. Called by the WebSocket handler when it receives an
+// "ldap_health_result" message from the node. Returns true if delivered.
+func (h *ClientdHub) DeliverLDAPHealthResult(msgID string, payload clientd.LDAPHealthResultPayload) bool {
+	v, ok := h.ldapHealthRegistry.Load(msgID)
+	if !ok {
+		return false
+	}
+	pe := v.(pendingLDAPHealthResult)
 	select {
 	case pe.ch <- payload:
 		return true
