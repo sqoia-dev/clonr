@@ -356,7 +356,10 @@ func (h *ClientdHandler) handleHeartbeat(ctx context.Context, nodeID string, msg
 		if writeCtx == nil {
 			writeCtx = ctx
 		}
-		applyLDAPHealth(writeCtx, h.DB, nodeID, payload.LDAPHealth)
+		// Heartbeat path: best-effort write. Errors already logged inside
+		// applyLDAPHealth; we don't propagate them here because the heartbeat
+		// itself succeeded and the next heartbeat (10–30s later) will retry.
+		_, _ = applyLDAPHealth(writeCtx, h.DB, nodeID, payload.LDAPHealth)
 	}
 }
 
@@ -366,21 +369,30 @@ func (h *ClientdHandler) handleHeartbeat(ctx context.Context, nodeID string, msg
 // AND LDAPNodeIsConfigured returns false) — nothing about LDAP applies to
 // that node and we should not stamp a misleading detail. Shared by the
 // heartbeat path and the force-reverify result handler.
-func applyLDAPHealth(ctx context.Context, dbIface ClientdDBIface, nodeID string, health *clientd.LDAPHealthStatus) {
+//
+// Returns (applied, err) where applied==true ONLY when RecordNodeLDAPReady
+// returned nil (i.e. the row was actually persisted). All "no-op" paths
+// (nil health, lookup failure, node not LDAP-configured) return
+// (false, nil) — the caller can distinguish a real write failure from an
+// intentional skip via the err return. Codex P2 (PR #5): VerifyLDAPOnNode
+// previously inferred applied from LDAPNodeIsConfigured, which silently
+// hid transient RecordNodeLDAPReady write errors and reported applied=true
+// when nothing had been persisted.
+func applyLDAPHealth(ctx context.Context, dbIface ClientdDBIface, nodeID string, health *clientd.LDAPHealthStatus) (bool, error) {
 	if health == nil {
-		return
+		return false, nil
 	}
 	configured, err := dbIface.LDAPNodeIsConfigured(ctx, nodeID)
 	if err != nil {
 		log.Warn().Err(err).Str("node_id", nodeID).
 			Msg("clientd ws: LDAPNodeIsConfigured failed (non-fatal — skipping ldap_ready update)")
-		return
+		return false, nil
 	}
 	if !configured {
 		// Node was never deployed with LDAP — leave ldap_ready NULL so the
 		// state-derivation logic in pkg/api treats the node as "no LDAP
 		// expected" rather than "LDAP failed".
-		return
+		return false, nil
 	}
 	// Node IS LDAP-configured. Trust the probe: ready iff Active && Connected.
 	ready := health.Active && health.Connected
@@ -394,20 +406,24 @@ func applyLDAPHealth(ctx context.Context, dbIface ClientdDBIface, nodeID string,
 	}
 	if err := dbIface.RecordNodeLDAPReady(ctx, nodeID, ready, detail); err != nil {
 		log.Warn().Err(err).Str("node_id", nodeID).
-			Msg("clientd ws: RecordNodeLDAPReady failed (non-fatal)")
-		return
+			Msg("clientd ws: RecordNodeLDAPReady failed")
+		return false, err
 	}
 	log.Debug().
 		Str("node_id", nodeID).
 		Bool("ready", ready).
 		Str("detail", detail).
 		Msg("clientd ws: ldap_ready updated from health probe")
+	return true, nil
 }
 
 // handleLDAPHealthResult processes an "ldap_health_result" message from the
-// node. It applies the snapshot to node_configs (so the DB is current even if
-// the HTTP caller has disconnected) and forwards it to the waiting handler
-// via the registry. fix/v0.1.22-ldap-reverify.
+// node. It forwards the payload to the waiting HTTP handler via the registry.
+// When no handler is waiting (the caller disconnected, or the result arrived
+// after timeout), it applies the snapshot itself so the DB still reflects the
+// probe. When a handler IS waiting, that handler owns the apply so the
+// "applied" field in its HTTP response can reflect the actual write outcome
+// (Codex P2 fix on PR #5). fix/v0.1.22-ldap-reverify.
 func (h *ClientdHandler) handleLDAPHealthResult(ctx context.Context, nodeID string, msg clientd.ClientMessage) {
 	var payload clientd.LDAPHealthResultPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -415,15 +431,17 @@ func (h *ClientdHandler) handleLDAPHealthResult(ctx context.Context, nodeID stri
 			Msg("clientd ws: malformed ldap_health_result payload")
 		return
 	}
-	// Apply the snapshot so the row reflects the latest probe even if the
-	// triggering HTTP request is gone. Use server-lifetime ctx for the write.
-	writeCtx := h.ServerCtx
-	if writeCtx == nil {
-		writeCtx = ctx
-	}
-	applyLDAPHealth(writeCtx, h.DB, nodeID, &payload.Health)
-
 	delivered := h.Hub.DeliverLDAPHealthResult(payload.RefMsgID, payload)
+	if !delivered {
+		// No HTTP handler is listening — apply the snapshot here so the DB
+		// row reflects the latest probe instead of being silently dropped.
+		// Use server-lifetime ctx so a node disconnect does not abort it.
+		writeCtx := h.ServerCtx
+		if writeCtx == nil {
+			writeCtx = ctx
+		}
+		_, _ = applyLDAPHealth(writeCtx, h.DB, nodeID, &payload.Health)
+	}
 	log.Debug().
 		Str("node_id", nodeID).
 		Str("ref_msg_id", payload.RefMsgID).
@@ -618,10 +636,16 @@ type VerifyLDAPResponse struct {
 	Connected  bool   `json:"connected"`
 	Domain     string `json:"domain,omitempty"`
 	Detail     string `json:"detail"`
-	// Applied reflects whether node_configs was rewritten with this result.
-	// When the node has no LDAP config (LDAPNodeIsConfigured==false), the
-	// server intentionally does not record the probe — Applied is false in
-	// that case so the operator sees "node has no LDAP".
+	// Applied is true ONLY when node_configs.ldap_ready was actually
+	// rewritten with this result — i.e. RecordNodeLDAPReady returned nil.
+	// It is false when:
+	//   - the node has no LDAP config (intentional skip), or
+	//   - LDAPNodeIsConfigured failed (transient lookup error), or
+	//   - RecordNodeLDAPReady failed (transient write error — in which case
+	//     the HTTP response is also 5xx so the caller knows the persisted
+	//     state did not change).
+	// Codex P2 (PR #5): previously inferred from LDAPNodeIsConfigured, which
+	// silently misreported applied=true on failed writes.
 	Applied bool `json:"applied"`
 }
 
@@ -673,15 +697,18 @@ func (h *ClientdHandler) VerifyLDAPOnNode(w http.ResponseWriter, r *http.Request
 
 	select {
 	case result := <-resultCh:
-		// applyLDAPHealth has already run inside handleLDAPHealthResult, but
-		// we still need to derive ready/applied here for the response body.
-		// We avoid a second DB write — query the configured flag for the
-		// "applied" indicator.
-		applied := false
-		if cfg, dbErr := h.DB.LDAPNodeIsConfigured(r.Context(), nodeID); dbErr == nil && cfg {
-			applied = true
+		// Apply the snapshot ourselves so "applied" in the response reflects
+		// the actual DB write outcome (Codex P2). handleLDAPHealthResult
+		// skips the apply when it successfully delivered to this channel,
+		// leaving us as the sole writer on the admin path. Use server-
+		// lifetime ctx so a request-context cancellation between probe and
+		// write does not corrupt the DB state.
+		writeCtx := h.ServerCtx
+		if writeCtx == nil {
+			writeCtx = r.Context()
 		}
-		writeJSON(w, http.StatusOK, VerifyLDAPResponse{
+		applied, applyErr := applyLDAPHealth(writeCtx, h.DB, nodeID, &result.Health)
+		resp := VerifyLDAPResponse{
 			Ready:      result.Health.Active && result.Health.Connected,
 			Configured: result.Health.Configured,
 			Active:     result.Health.Active,
@@ -689,7 +716,23 @@ func (h *ClientdHandler) VerifyLDAPOnNode(w http.ResponseWriter, r *http.Request
 			Domain:     result.Health.Domain,
 			Detail:     result.Health.Detail,
 			Applied:    applied,
-		})
+		}
+		if applyErr != nil {
+			// RecordNodeLDAPReady failed — surface 5xx so operators do not
+			// get a misleading 200. Body still carries the probe payload
+			// (the node DID respond) plus applied=false.
+			writeJSON(w, http.StatusInternalServerError, struct {
+				VerifyLDAPResponse
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}{
+				VerifyLDAPResponse: resp,
+				Error:              "ldap probe succeeded but persisting ldap_ready failed: " + applyErr.Error(),
+				Code:               "ldap_ready_write_failed",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
 	case <-time.After(10 * time.Second):
 		writeJSON(w, http.StatusGatewayTimeout, api.ErrorResponse{
 			Error: "timed out waiting for ldap_health_result from node (10s)",
