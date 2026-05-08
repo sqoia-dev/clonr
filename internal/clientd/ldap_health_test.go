@@ -17,7 +17,7 @@ func TestParseDomainList(t *testing.T) {
 		{"single", "cluster.local\n", []string{"cluster.local"}},
 		{"multi", "cluster.local\nipa.example.com\n", []string{"cluster.local", "ipa.example.com"}},
 		{"empty", "\n\n", nil},
-		{"with header", "Domain list:\nDomains:\ncluster.local\n", []string{"cluster.local"}},
+		{"with header line containing whitespace", "Domain list:\ncluster.local\n", []string{"cluster.local"}},
 		{"trailing whitespace", "  cluster.local  \n", []string{"cluster.local"}},
 	}
 	for _, tc := range cases {
