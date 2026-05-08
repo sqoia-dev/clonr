@@ -377,29 +377,43 @@ if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/bin/screen ]; then
     # bypasses the PTY entirely — screen still provides an attachable pty for
     # live inspection via "screen -r clustr-deploy", but log I/O is independent.
     log "starting deploy agent in screen session 'clustr-deploy'..."
-    # SCREENDIR: screen needs a writable directory for its socket files.
-    # Without it screen falls back to $HOME/.screen; /root exists in the initramfs
-    # but setting SCREENDIR=/tmp/screen is safer and avoids any HOME lookup.
-    # TERM: screen requires a terminal type; vt100 is universally safe in a minimal
-    # initramfs environment and is always available without terminfo databases.
+    # SCREENDIR: screen needs a writable directory (mode 700) for socket files.
+    # screen creates it itself on first use; do NOT pre-create it — screen
+    # rejects directories with wrong permissions.
+    # TERM: vt100 is universally safe without a terminfo database.
     export SCREENDIR=/tmp/screen
-    mkdir -p "$SCREENDIR"
-    chmod 700 "$SCREENDIR"
     export TERM="${TERM:-vt100}"
+    SCREEN_OK=0
     screen -dmS clustr-deploy sh -c \
-        "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" >> \"$LOG\" 2>&1; echo \$? > /tmp/clustr-exit-code; exec sh"
-    # Wait for the deploy to write its exit code.
-    WAITED=0
-    while [ ! -f /tmp/clustr-exit-code ]; do
-        sleep 5
-        WAITED=$((WAITED + 5))
-        # Log a heartbeat every 60 seconds so the log server shows progress.
-        case "$WAITED" in
-            60|120|180|300|600|900|1200|1800) log "  deploy in progress (${WAITED}s elapsed)..." ;;
-        esac
-    done
-    CLUSTR_EXIT=$(cat /tmp/clustr-exit-code 2>/dev/null | tr -d '[:space:]')
-    CLUSTR_EXIT="${CLUSTR_EXIT:-1}"
+        "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" >> \"$LOG\" 2>&1; echo \$? > /tmp/clustr-exit-code; exec sh" 2>>/tmp/screen-err.log
+    SCREEN_RC=$?
+    if [ $SCREEN_RC -eq 0 ]; then
+        log "  screen session started (rc=0)"
+        SCREEN_OK=1
+    else
+        log "  WARNING: screen failed (rc=$SCREEN_RC) — falling back to direct exec"
+        cat /tmp/screen-err.log >> "$LOG" 2>/dev/null || true
+    fi
+
+    if [ $SCREEN_OK -eq 1 ]; then
+        # Wait for the deploy to write its exit code.
+        WAITED=0
+        while [ ! -f /tmp/clustr-exit-code ]; do
+            sleep 5
+            WAITED=$((WAITED + 5))
+            # Log a heartbeat every 60 seconds so the log server shows progress.
+            case "$WAITED" in
+                60|120|180|300|600|900|1200|1800) log "  deploy in progress (${WAITED}s elapsed)..." ;;
+            esac
+        done
+        CLUSTR_EXIT=$(cat /tmp/clustr-exit-code 2>/dev/null | tr -d '[:space:]')
+        CLUSTR_EXIT="${CLUSTR_EXIT:-1}"
+    else
+        # Screen failed — run deploy directly so we don't block forever.
+        log "  running clustr deploy directly (screen unavailable)"
+        /usr/bin/clustr deploy --auto --server "${CLUSTR_SERVER}" --token "${CLUSTR_TOKEN}" >> "$LOG" 2>&1
+        CLUSTR_EXIT=$?
+    fi
 else
     /usr/bin/clustr deploy --auto --server "${CLUSTR_SERVER}" --token "${CLUSTR_TOKEN}" >> "$LOG" 2>&1
     CLUSTR_EXIT=$?
