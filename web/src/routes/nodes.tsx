@@ -581,6 +581,13 @@ export function NodesPage() {
     staleTime: 10000,
   })
 
+  // IMG-COL-1: base images for name lookup in the Nodes table Image column.
+  const { data: imagesListData } = useQuery<ListImagesResponse>({
+    queryKey: ["images", "base"],
+    queryFn: () => apiFetch<ListImagesResponse>("/api/v1/images?kind=base"),
+    staleTime: 60000,
+  })
+
   // UX-4: invalidate the nodes query whenever a "nodes" event arrives on the
   // multiplexed /api/v1/events stream. Replaces the per-page raw EventSource.
   useEventInvalidation("nodes", ["nodes"])
@@ -878,8 +885,25 @@ export function NodesPage() {
                   <TableCell className="text-xs text-muted-foreground">
                     {relativeTime(node.last_seen_at ?? node.deploy_verified_booted_at)}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
-                    {node.base_image_id ? node.base_image_id.slice(0, 8) : "—"}
+                  <TableCell className="text-xs">
+                    {(() => {
+                      if (!node.base_image_id) return <span className="text-muted-foreground">—</span>
+                      const img = imagesListData?.images?.find((i) => i.id === node.base_image_id)
+                      return img ? (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="cursor-default">{img.name} {img.version}</span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <span className="font-mono text-xs">{node.base_image_id.slice(0, 8)}</span>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : (
+                        <span className="font-mono text-muted-foreground">{node.base_image_id.slice(0, 8)}</span>
+                      )
+                    })()}
                   </TableCell>
                   {/* PWR-LIST-1..2: per-row power action icons */}
                   <TableCell onClick={(e) => e.stopPropagation()}>
@@ -1195,6 +1219,10 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                   <Row label="Deploy complete" value={relativeTime(node.deploy_completed_preboot_at)} />
                   <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
                 </Section>
+
+                {node.ldap_ready !== undefined && (
+                  <LdapStatusSection node={node} qc={qc} />
+                )}
 
                 {/* TAG-5: tag display + inline add in view mode */}
                 <Section title="Tags">
@@ -2014,6 +2042,69 @@ function PowerButtons({ nodeId }: { nodeId: string }) {
         </Tooltip>
       </div>
     </TooltipProvider>
+  )
+}
+
+// ─── LdapStatusSection — v0.1.22 ─────────────────────────────────────────────
+// Renders the LDAP status badge and a "Re-verify LDAP" button that fires
+// POST /api/v1/nodes/{id}/verify-ldap, then refreshes the nodes cache.
+
+function LdapStatusSection({ node, qc }: { node: NodeConfig; qc: ReturnType<typeof useQueryClient> }) {
+  const [verifyError, setVerifyError] = React.useState<string | null>(null)
+
+  const verifyMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${node.id}/verify-ldap`, { method: "POST" }),
+    onSuccess: () => {
+      setVerifyError(null)
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      toast({ title: "LDAP re-verified", description: "Node LDAP status refreshed." })
+    },
+    onError: (err) => {
+      setVerifyError(String(err))
+    },
+  })
+
+  const statusLabel = node.ldap_ready === true
+    ? "OK"
+    : node.ldap_ready === false
+      ? "Failed"
+      : "Unknown"
+
+  const statusClass = node.ldap_ready === true
+    ? "text-green-400"
+    : node.ldap_ready === false
+      ? "text-destructive"
+      : "text-muted-foreground"
+
+  return (
+    <Section title="LDAP">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-0.5">
+          <span className={cn("text-xs font-medium", statusClass)}>{statusLabel}</span>
+          {node.ldap_ready_detail && (
+            <p className="text-xs text-muted-foreground">{node.ldap_ready_detail}</p>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs shrink-0"
+          onClick={() => { setVerifyError(null); verifyMutation.mutate() }}
+          disabled={verifyMutation.isPending}
+        >
+          {verifyMutation.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin mr-1" />
+          ) : (
+            <RefreshCw className="h-3 w-3 mr-1" />
+          )}
+          Re-verify LDAP
+        </Button>
+      </div>
+      {verifyError && (
+        <p className="text-xs text-destructive mt-1">{verifyError}</p>
+      )}
+    </Section>
   )
 }
 
