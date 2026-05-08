@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.22 — 2026-05-08
+
+LDAP readiness staleness fix. v0.1.21 made LDAP work end-to-end on
+freshly-deployed nodes (sssd active, `id rromero` returns uid=10001 with
+clustr-admins membership) but the UI kept showing both nodes as "LDAP Failed"
+because `node_configs.ldap_ready=0` was stamped during the verify-boot
+phone-home — a one-shot probe that fired exactly once at first boot. If sssd
+happened to be slow or broken at that single moment, the row was wrong
+forever; nothing else ever wrote it. Today's manual `UPDATE node_configs SET
+ldap_ready=1` on cloner exposed the class of bug. v0.1.22 makes
+`ldap_ready` a continuously-refreshed value driven by clientd's existing
+60 s heartbeat, plus an admin force-reverify endpoint for instant feedback.
+
+### Fixed
+
+- **Heartbeat-driven LDAP readiness rewrite** (`internal/clientd/ldap_health.go`, `internal/clientd/heartbeat.go`, `internal/clientd/messages.go`, `internal/server/handlers/clientd.go`): clientd now runs a cheap local LDAP probe on every heartbeat (5 s timeout, single `systemctl is-active sssd` + `sssctl domain-list` + `sssctl domain-status <domain>`), packages the result as `LDAPHealthStatus{Configured, Active, Connected, Domain, Detail}`, and piggybacks it on the existing `HeartbeatPayload`. Server's `handleHeartbeat` decodes the field and rewrites `node_configs.ldap_ready` + `ldap_ready_detail` when the node is LDAP-configured (`LDAPNodeIsConfigured` true). Nodes never deployed with LDAP keep `ldap_ready=NULL` so `pkg/api.NodeConfig.State()` continues to treat them as "no LDAP expected" rather than "LDAP failed". Result: any future node where sssd recovers post-first-boot self-heals on the next 60 s tick — no manual SQL, no reimage required.
+- **Admin force re-verify endpoint** (`internal/server/handlers/clientd.go`, `internal/server/clientdhub.go`, `internal/server/server.go`): new `POST /api/v1/nodes/{id}/verify-ldap` (admin scope) sends a `ldap_health_request` server→node WebSocket message; clientd runs the probe immediately and replies with `ldap_health_result`. Server applies the snapshot to `node_configs` AND returns `VerifyLDAPResponse{ready, configured, active, connected, domain, detail, applied}` synchronously (10 s timeout). Round-trip plumbed through a new `ldapHealthRegistry` on the hub matching the existing disk-capture / bios-read pattern. Use case: operator clicks "Re-verify LDAP" in the UI after fixing sssd config and gets instant feedback instead of waiting up to 60 s for the next heartbeat tick.
+
+### Tests
+
+- `internal/clientd/ldap_health_test.go`: pure-function coverage of `parseDomainList` (single/multi/header-line/whitespace), `parseDomainStatus` (online/offline/case-insensitive/no-marker), and `firstNonEmptyLine`. The full probe runs `systemctl`/`sssctl` and is exercised end-to-end on cloner; the unit test covers the parsing surfaces that produce the operator-facing `Detail` string.
+
+### Operational
+
+- The probe shells out to `sssctl` (single dnf-managed binary, present on every clustr-deployed image with LDAP). No new dependencies. Bounded 5 s total — a hung sssd cannot delay heartbeats beyond that.
+- The fix is forward-compat: `LDAPHealth` is `omitempty` on the wire, so a v0.1.22 server still accepts heartbeats from older clientd binaries (it just never refreshes `ldap_ready` for those nodes — same as today). When clientd is upgraded, the next heartbeat catches up.
+
 ## 0.1.17 — 2026-05-08
 
 Fix initramfs deploy hang: PTY backpressure blocks first clustr write in

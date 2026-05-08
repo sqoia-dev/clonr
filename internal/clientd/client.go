@@ -329,6 +329,12 @@ func (c *Client) dispatchServerMessage(msg ServerMessage) {
 	case "bios_apply_request":
 		go c.handleBiosApplyRequest(msg)
 
+	case "ldap_health_request":
+		// fix/v0.1.22-ldap-reverify — admin force re-verify path.
+		// Goroutine because the probe shells out to sssctl; we do not want
+		// a slow probe to block the readLoop.
+		go c.handleLDAPHealthRequest(msg)
+
 	case "stats_ack":
 		c.handleStatsAck(msg)
 
@@ -1274,6 +1280,64 @@ func (c *Client) sendDiskCaptureResult(result DiskCaptureResultPayload) {
 	default:
 		log.Warn().Str("ref_msg_id", result.RefMsgID).
 			Msg("clientd: disk_capture_result dropped — send buffer full")
+	}
+}
+
+// ─── LDAP health (fix/v0.1.22-ldap-reverify) ─────────────────────────────────
+
+// handleLDAPHealthRequest runs the LDAP probe immediately and sends the
+// result back to the server. Used by the admin "force re-verify" endpoint to
+// bypass the 60 s heartbeat cadence when an operator wants instant feedback
+// after fixing sssd config.
+func (c *Client) handleLDAPHealthRequest(msg ServerMessage) {
+	var payload LDAPHealthRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		log.Warn().Err(err).Str("msg_id", msg.MsgID).
+			Msg("clientd: malformed ldap_health_request payload")
+		// Send an empty result so the server's wait does not time out.
+		c.sendLDAPHealthResult(LDAPHealthResultPayload{
+			RefMsgID: msg.MsgID,
+			Health: LDAPHealthStatus{
+				Detail: "malformed ldap_health_request: " + err.Error(),
+			},
+		})
+		return
+	}
+	if payload.RefMsgID == "" {
+		payload.RefMsgID = msg.MsgID
+	}
+
+	log.Info().Str("msg_id", msg.MsgID).Msg("clientd: handling ldap_health_request")
+
+	health := collectLDAPHealth()
+	c.sendLDAPHealthResult(LDAPHealthResultPayload{
+		RefMsgID: payload.RefMsgID,
+		Health:   *health,
+	})
+}
+
+// sendLDAPHealthResult enqueues an "ldap_health_result" message over the WebSocket.
+func (c *Client) sendLDAPHealthResult(result LDAPHealthResultPayload) {
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal ldap_health_result payload")
+		return
+	}
+	msg := ClientMessage{
+		Type:    "ldap_health_result",
+		MsgID:   uuid.New().String(),
+		Payload: json.RawMessage(resultPayload),
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Warn().Err(err).Msg("clientd: failed to marshal ldap_health_result message")
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
+		log.Warn().Str("ref_msg_id", result.RefMsgID).
+			Msg("clientd: ldap_health_result dropped — send buffer full")
 	}
 }
 
