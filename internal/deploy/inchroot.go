@@ -1,15 +1,18 @@
 package deploy
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
@@ -159,7 +162,31 @@ func applyOverwrite(mountRoot string, instr api.InstallInstruction) error {
 // applyScript writes instr.Payload as a POSIX shell script to a temp file,
 // then runs it inside the target root via chroot(2). Fails the deploy if the
 // script exits non-zero.
+//
+// Before chrooting, the executor sets up the standard chroot virtual
+// filesystems (/proc, /sys, /dev) AND bind-mounts the host's
+// /etc/resolv.conf onto the target's /etc/resolv.conf. This lets scripts
+// run `dnf install`, `curl`, `ssh`, or anything else that resolves DNS
+// without hanging on the image's baked-in (and unreachable from the deploy
+// network) nameserver entries. See chroot_mounts.go for the rationale.
+//
+// Script output (stdout + stderr) is streamed line-by-line to the deploy
+// log as it is produced so an operator can see in-progress activity (e.g.
+// "still on dnf install package N of 47") rather than only seeing the
+// final blob after the script exits — important when scripts take minutes.
 func applyScript(ctx context.Context, mountRoot string, instr api.InstallInstruction, stepNum int) error {
+	log := deployLogger(nil)
+
+	// Set up /proc, /sys, /dev, and /etc/resolv.conf bind-mounts so the
+	// chroot has a working environment. This is THE fix for the v0.1.15
+	// "deploy hangs 35+min on dnf install" bug. Cleanup runs unconditionally
+	// (deferred) to avoid leaking mounts on the deploy host.
+	cleanup, err := setupChrootMounts(mountRoot)
+	if err != nil {
+		return fmt.Errorf("setup chroot mounts: %w", err)
+	}
+	defer cleanup()
+
 	// Write the script to a temp file inside the target root so chroot can find it.
 	scriptName := fmt.Sprintf(".clustr-install-step-%d.sh", stepNum)
 	hostScriptPath := filepath.Join(mountRoot, scriptName)
@@ -168,20 +195,64 @@ func applyScript(ctx context.Context, mountRoot string, instr api.InstallInstruc
 	}
 	defer func() { _ = os.Remove(hostScriptPath) }()
 
-	// Run the script inside the chroot.
+	// Run the script inside the chroot, streaming output line-by-line to
+	// the deploy log so long-running steps (dnf install of dozens of pkgs)
+	// are visible in real time.
 	chrootScriptPath := "/" + scriptName
 	cmd := exec.CommandContext(ctx, "chroot", mountRoot, "/bin/sh", chrootScriptPath)
-	out, err := cmd.CombinedOutput()
-	outStr := strings.TrimSpace(string(out))
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		if outStr != "" {
-			return fmt.Errorf("script exited non-zero: %w\noutput:\n%s", err, outStr)
-		}
-		return fmt.Errorf("script exited non-zero: %w", err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	log := deployLogger(nil)
-	if outStr != "" {
-		log.Info().Str("output", outStr).Msg("install script output")
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start chroot: %w", err)
+	}
+
+	// Tail both pipes concurrently; collect tail of output to embed in any
+	// failure error so the operator sees what the script printed before it
+	// died, not just "exit status 1".
+	var (
+		mu       sync.Mutex
+		tailBuf  []string
+		maxLines = 50
+	)
+	addTail := func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(tailBuf) >= maxLines {
+			tailBuf = tailBuf[1:]
+		}
+		tailBuf = append(tailBuf, line)
+	}
+	streamPipe := func(r io.Reader, stream string, wg *sync.WaitGroup) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		// Allow long lines from dnf transaction summaries etc.
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			log.Info().Int("step", stepNum).Str("stream", stream).Msg(line)
+			addTail(line)
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamPipe(stdout, "stdout", &wg)
+	go streamPipe(stderr, "stderr", &wg)
+	wg.Wait()
+
+	if waitErr := cmd.Wait(); waitErr != nil {
+		mu.Lock()
+		tail := strings.Join(tailBuf, "\n")
+		mu.Unlock()
+		if tail != "" {
+			return fmt.Errorf("script exited non-zero: %w\nlast %d lines of output:\n%s", waitErr, len(tailBuf), tail)
+		}
+		return fmt.Errorf("script exited non-zero: %w", waitErr)
 	}
 	return nil
 }

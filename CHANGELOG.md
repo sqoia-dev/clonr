@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.16 — 2026-05-08
+
+Live-deploy DNS fix folded into the LDAP-functional path. v0.1.15 shipped the
+LDAP infrastructure (DIT repair, verify-boot gating, deployed_ldap_failed PXE
+routing) but Gilfoyle's end-to-end validation showed deploys still hung 35+
+minutes mid-finalize. Root cause: chroot DNS injection was happening from
+inside the chroot itself — a self-bind no-op against a baked-in unreachable
+nameserver — so every `dnf install` blocked on package-fetch DNS resolution.
+
+### Critical
+
+- **`install_instructions` script opcode hangs on chroot DNS** (`internal/deploy/chroot_mounts.go`, `internal/deploy/inchroot.go`): Rocky9.7's `install_instructions` script payload tried to set up its own chroot mounts with `mount --bind /etc/resolv.conf /etc/resolv.conf` — but the executor runs the payload via `chroot <target_root> /bin/sh <script>`, so that bind ran INSIDE the chroot. It was a self-bind against the chroot's own broken `/etc/resolv.conf` (image had `nameserver 10.0.2.3`, the QEMU NAT DNS, unreachable from the deploy network). Every `dnf -y install sssd ...` blocked on DNS resolution for tens of seconds per package, accumulating into a 35+ minute deploy stall before the chroot exec eventually died on context cancellation. Fix: new `setupChrootMounts(targetRoot)` helper in `chroot_mounts.go` does the bind from the HOST side BEFORE chrooting — proc, sysfs, recursive-bind /dev (so devpts/shm come along), and crucially `mount --bind /etc/resolv.conf <targetRoot>/etc/resolv.conf` so the host's working resolver is visible inside the chroot. `applyScript` calls `setupChrootMounts` at the top with deferred cleanup; script payloads no longer need any mount lines (the existing self-bind ones in Rocky9.7's payload become harmless no-ops). Helper handles the symlink-resolv.conf case (replaces with regular file before bind so systemd-resolved-stub images work) and the missing-resolv.conf case (creates placeholder before binding). Cleanup uses `MNT_DETACH` so a leaked fd in the chroot doesn't strand the deploy host's mount table.
+- **Script output now streams to deploy log** (`internal/deploy/inchroot.go`): pre-fix `applyScript` used `cmd.CombinedOutput()` — output buffered in memory until the process exited, so a hanging `dnf install` showed nothing in the log for 35min, then dumped the full transcript on timeout. Replaced with `StdoutPipe`/`StderrPipe` + `bufio.Scanner` per-line logging tagged with `step=N stream=stdout|stderr`, plus a 50-line tail buffer that gets embedded in the error message on non-zero exit. Operators now see "still on dnf install package N of 47" in real time. Belt-and-suspenders for #258 SCREEN-CAPTURE — full operator-visible terminal capture is still a separate task, but per-step stdout streaming closes the worst-case "deploy hung 35min, no signal" gap.
+
+### Tests
+
+- `internal/deploy/chroot_mounts_test.go::TestSetupChrootMounts_ResolvConfBind`: plants a broken `nameserver 10.0.2.3` in the target rootfs, runs `setupChrootMounts`, verifies the file now reads as the host's `/etc/resolv.conf` content (bind succeeded), runs cleanup, verifies the broken planted content reappears (bind torn down). Skipped when not running as root (mount(2) requires CAP_SYS_ADMIN).
+- `internal/deploy/chroot_mounts_test.go::TestSetupChrootMounts_NoExistingResolvConf`: pins the placeholder-creation path for minimal images that ship without `/etc/resolv.conf`.
+- `internal/deploy/chroot_mounts_test.go::TestSetupChrootMounts_SymlinkResolvConf`: pins the symlink-replacement path for images where `/etc/resolv.conf` is a systemd-resolved stub link.
+- `internal/deploy/chroot_mounts_test.go::TestSetupChrootMounts_PartialFailureCleansUp`: pins the cleanup-on-partial-failure path so a failed mid-setup mount doesn't leak earlier mounts on the deploy host.
+
+### Operational
+
+- The `mount --bind /etc/resolv.conf /etc/resolv.conf` lines in existing `install_instructions` payloads (e.g. Rocky9.7) become harmless no-ops with this fix in place — no DB migration required. Future seeded `install_instructions` defaults can drop those lines (the executor now owns that lifecycle).
+- This fix unblocks the LDAP path that v0.1.15's three-layer repair targeted: SSSD packages + authselect now actually install in the in-chroot pass rather than timing out, so post-deploy nodes converge to `deployed_verified` instead of `deployed_ldap_failed`.
+
 ## 0.1.15 — 2026-05-07
 
 LDAP-functional cut + two live-deploy blockers folded in (FIX-EFI #225 +
