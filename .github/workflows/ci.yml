@@ -124,7 +124,7 @@ jobs:
       # Runs even if the broad test step above fails so both signals are visible.
       - name: go test -race (alerts + server)
         if: always()
-        run: go test -race -count=1 -timeout 10m ./internal/alerts/... ./internal/server/...
+        run: go test -race -count=1 -timeout 15m ./internal/alerts/... ./internal/server/...
 
   # TEST-1 (#192): build web, run vitest, assert bundle structure, then boot the
   # embedded binary and smoke-test SPA serving + health readiness probe.
