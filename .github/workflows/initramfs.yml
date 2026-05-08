@@ -113,6 +113,11 @@ jobs:
       - name: Build static clustr client
         env:
           TAG: ${{ github.ref_name }}
+          # GOTOOLCHAIN=auto allows Go to download the exact toolchain version
+          # required by go.mod when the Rocky 9 dnf-provided golang is older.
+          # Without this, builds fail with "go.mod requires go >= X.Y.Z (running
+          # go X.Y.Z-1; GOTOOLCHAIN=local)" when go.mod is bumped mid-release.
+          GOTOOLCHAIN: auto
         run: |
           # -buildvcs=false: git safe.directory not set in rockylinux:9 container;
           # VCS stamping fails with exit 128.  Version is injected via ldflags anyway.
