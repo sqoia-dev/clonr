@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.17 — 2026-05-08
+
+Fix initramfs deploy hang: PTY backpressure blocks first clustr write in
+screen-based logging path, causing a 18+ minute delay before any HTTP
+request reaches the server. Root cause confirmed via server access logs
+(zero node requests for 18min, then a 401 on register) and init.log
+analysis (zero bytes from clustr binary despite screen session running).
+
+### Critical
+
+- **Initramfs screen session blocks on PTY backpressure** (`internal/server/handlers/scripts/initramfs-init.sh`): when `clustr.ssh=1`, the init script ran clustr inside a detached screen session with `clustr 2>&1 | tee -a $LOG`. In detached mode, screen's internal scrollback buffer fills up (no attached client draining the PTY master), which stalls the PTY slave write, which blocks `tee`'s `read()` from the pipe, which fills the pipe buffer, which blocks clustr's first `fmt.Fprintln(os.Stderr)` write before a single byte reaches `init.log`. The result: zero log output, zero server calls, for as long as screen's buffer takes to be drained (never, in detached mode). Fix: replace `2>&1 | tee -a "$LOG"` with `>> "$LOG" 2>&1` inside the screen `sh -c` payload. Clustr now appends directly to `init.log` (bypassing the PTY entirely for I/O), while screen's PTY remains available for live operator attachment via `screen -r clustr-deploy`. Backpressure path is eliminated; log writes are always non-blocking.
+
+### Operational
+
+- `screen -r clustr-deploy` still works for live session attachment; the difference is that clustr's output goes to `init.log` directly rather than through the PTY/tee chain. Both the log file and the attached screen session show output correctly.
+
 ## 0.1.16 — 2026-05-08
 
 Live-deploy DNS fix folded into the LDAP-functional path. v0.1.15 shipped the

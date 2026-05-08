@@ -368,9 +368,17 @@ if [ "$ENABLE_SSH" = "1" ] && [ -x /usr/bin/screen ]; then
     # Run deploy agent inside a named screen session so the operator can attach.
     # The screen session runs in detached mode (-dm). We block by polling until
     # the session exits, then read the exit code from /tmp/clustr-exit-code.
+    #
+    # Output is redirected directly to $LOG (no pipe-to-tee) to avoid PTY
+    # backpressure: when screen's internal scrollback buffer fills up in
+    # detached mode it stops reading the PTY master, which stalls the PTY
+    # slave write, which blocks the pipe, which blocks clustr's stderr write
+    # before the first byte reaches the log.  Appending directly to $LOG
+    # bypasses the PTY entirely — screen still provides an attachable pty for
+    # live inspection via "screen -r clustr-deploy", but log I/O is independent.
     log "starting deploy agent in screen session 'clustr-deploy'..."
     screen -dmS clustr-deploy sh -c \
-        "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" 2>&1 | tee -a \"$LOG\"; echo \$? > /tmp/clustr-exit-code; exec sh"
+        "/usr/bin/clustr deploy --auto --server \"${CLUSTR_SERVER}\" --token \"${CLUSTR_TOKEN}\" >> \"$LOG\" 2>&1; echo \$? > /tmp/clustr-exit-code; exec sh"
     # Wait for the deploy to write its exit code.
     WAITED=0
     while [ ! -f /tmp/clustr-exit-code ]; do
