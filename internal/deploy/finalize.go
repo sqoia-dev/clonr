@@ -2774,7 +2774,7 @@ func renderSSSDConf(cfg *api.LDAPNodeConfig, domain string) string {
 # DO NOT EDIT — managed by clustr. Regenerated on each reimage.
 
 [sssd]
-services = nss, pam
+services = nss, pam, ssh
 domains = %s
 
 [nss]
@@ -2812,7 +2812,7 @@ ldap_group_name = cn
 ldap_group_gid_number = gidNumber
 ldap_group_member = memberUid
 
-ldap_tls_reqcert = demand
+ldap_tls_reqcert = allow
 ldap_tls_cacert = /etc/pki/ca-trust/source/anchors/clustr-ca.crt
 
 ldap_account_expire_policy = shadow
