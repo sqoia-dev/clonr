@@ -12,7 +12,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, act } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import * as React from "react"
 import { DeployLogTab } from "../routes/node-detail-tabs"
 import type { LogEntry } from "../routes/node-detail-tabs"
 

@@ -924,7 +924,7 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [primaryMac])
 
-  function connect(attempt: number) {
+  function connect(_attempt: number) {
     if (!mountedRef.current) return
 
     const path = `/api/v1/logs/stream?component=deploy&node_mac=${encodeURIComponent(primaryMac)}`
