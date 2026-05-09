@@ -20,6 +20,9 @@
         "component": {
           "type": "string"
         },
+        "phase": {
+          "type": "string"
+        },
         "message": {
           "type": "string"
         },

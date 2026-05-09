@@ -2203,6 +2203,9 @@
               "component": {
                 "type": "string"
               },
+              "phase": {
+                "type": "string"
+              },
               "message": {
                 "type": "string"
               },
@@ -3714,6 +3717,9 @@
                 "type": "string"
               },
               "component": {
+                "type": "string"
+              },
+              "phase": {
                 "type": "string"
               },
               "message": {
