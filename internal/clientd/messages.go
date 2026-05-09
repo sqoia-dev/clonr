@@ -18,6 +18,9 @@ type StatsSample struct {
 	Unit   string            `json:"unit,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 	TS     time.Time         `json:"ts"`
+	// MetricName foreign-keys back to a STAT-REGISTRY MetricDecl (Sprint 38).
+	// Empty for legacy emit-by-name plugins.
+	MetricName string `json:"metric_name,omitempty"`
 }
 
 // StatsBatchPayload is the payload for the "stats_batch" node→server message.

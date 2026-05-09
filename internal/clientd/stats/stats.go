@@ -49,4 +49,12 @@ type Sample struct {
 	// TS is the timestamp of the collection. Plugins may override this to reflect
 	// when the underlying kernel counter was read; defaults to now if zero.
 	TS time.Time `json:"ts"`
+
+	// MetricName, if non-empty, foreign-keys back to a typed MetricDecl
+	// registered via the MetricRegistry (Sprint 38 STAT-REGISTRY).  Plugins
+	// that pre-date the registry leave this empty; the existing emit-by-name
+	// path keeps working unchanged.  When set, the server uses it to resolve
+	// unit, title, upper-bound, and chart-grouping hints for the UI without a
+	// separate dashboard config.
+	MetricName string `json:"metric_name,omitempty"`
 }
