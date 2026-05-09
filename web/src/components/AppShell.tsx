@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot } from "lucide-react"
+import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot, AlertTriangle, Info, XCircle, Loader2 } from "lucide-react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -345,6 +345,183 @@ function ControlPlaneStrip() {
   )
 }
 
+// ─── Sprint 38: System Alerts popover ────────────────────────────────────────
+//
+// Bell icon in the top-bar.  Badge shows count of active system alerts.
+// Click opens a popover listing alerts from GET /api/v1/system_alerts.
+// Dismiss: POST /api/v1/system_alerts/unset/{key}/{device}
+// Refetches every 30s.
+
+import type { SystemAlert } from "@/lib/types"
+
+const SYSTEM_ALERT_LEVEL_CONFIG: Record<
+  string,
+  { icon: React.ElementType; color: string; badgeColor: string }
+> = {
+  critical: { icon: XCircle,       color: "text-destructive",        badgeColor: "bg-destructive text-white" },
+  warn:     { icon: AlertTriangle,  color: "text-status-warning",     badgeColor: "bg-amber-500 text-white" },
+  info:     { icon: Info,           color: "text-muted-foreground",   badgeColor: "bg-muted text-foreground" },
+}
+
+function SystemAlertsPopover() {
+  const qc = useQueryClient()
+  const [open, setOpen] = React.useState(false)
+  const ref = React.useRef<HTMLDivElement>(null)
+
+  const { data, isLoading } = useQuery<SystemAlert[]>({
+    queryKey: ["system-alerts"],
+    queryFn: () => apiFetch<SystemAlert[]>("/api/v1/system_alerts"),
+    refetchInterval: 30_000,
+    staleTime: 25_000,
+    retry: false,
+  })
+
+  const alerts = data ?? []
+  const critCount = alerts.filter((a) => a.level === "critical").length
+  const warnCount = alerts.filter((a) => a.level === "warn").length
+  const badgeCount = alerts.length
+
+  const dismissMut = useMutation({
+    mutationFn: ({ key, device }: { key: string; device: string }) =>
+      apiFetch(`/api/v1/system_alerts/unset/${encodeURIComponent(key)}/${encodeURIComponent(device)}`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["system-alerts"] })
+      toast({ title: "Alert dismissed" })
+    },
+    onError: (e: Error) => {
+      toast({ title: "Dismiss failed", description: e.message, variant: "destructive" })
+    },
+  })
+
+  React.useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", onDown)
+    return () => document.removeEventListener("mousedown", onDown)
+  }, [open])
+
+  const badgeCls =
+    critCount > 0 ? "bg-destructive text-white" :
+    warnCount > 0 ? "bg-amber-500 text-white" :
+    "bg-muted text-foreground"
+
+  return (
+    <div className="relative" ref={ref} data-testid="system-alerts-popover">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            className={cn(
+              "relative inline-flex items-center justify-center h-8 w-8 rounded-md transition-colors",
+              open
+                ? "bg-secondary text-foreground"
+                : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
+            )}
+            onClick={() => setOpen((v) => !v)}
+            aria-label="System alerts"
+            data-testid="system-alerts-bell"
+          >
+            <Bell className="h-4 w-4" />
+            {badgeCount > 0 && (
+              <span
+                className={cn(
+                  "absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold leading-none",
+                  badgeCls,
+                )}
+                data-testid="system-alerts-badge"
+              >
+                {badgeCount > 9 ? "9+" : badgeCount}
+              </span>
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          System alerts{badgeCount > 0 ? ` (${badgeCount})` : ""}
+        </TooltipContent>
+      </Tooltip>
+
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-2 z-50 w-96 max-h-[480px] flex flex-col rounded-md border border-border bg-card shadow-xl"
+          data-testid="system-alerts-panel"
+        >
+          <div className="flex items-center justify-between border-b border-border px-3 py-2 shrink-0">
+            <span className="text-sm font-medium flex items-center gap-2">
+              <Bell className="h-3.5 w-3.5 text-muted-foreground" />
+              System Alerts
+            </span>
+            {badgeCount > 0 && (
+              <span className={cn("rounded-full px-2 py-0.5 text-xs font-bold", badgeCls)}>
+                {badgeCount}
+              </span>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {isLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : alerts.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground">
+                <Bell className="h-8 w-8 opacity-20" />
+                <p className="text-sm">No active system alerts</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border">
+                {alerts.map((a) => {
+                  const cfg = SYSTEM_ALERT_LEVEL_CONFIG[a.level] ??
+                    { icon: Info, color: "text-muted-foreground", badgeColor: "bg-muted text-foreground" }
+                  const Icon = cfg.icon
+                  const ageMs = Date.now() - new Date(a.set_at).getTime()
+                  const ageMins = Math.floor(ageMs / 60_000)
+                  const ageStr =
+                    ageMins < 1 ? "just now" :
+                    ageMins < 60 ? `${ageMins}m ago` :
+                    `${Math.floor(ageMins / 60)}h ${ageMins % 60}m ago`
+
+                  return (
+                    <div
+                      key={`${a.key}/${a.device}`}
+                      className="flex items-start gap-2 px-3 py-2.5 hover:bg-muted/30"
+                      data-testid={`system-alert-${a.key}`}
+                    >
+                      <Icon className={cn("h-4 w-4 mt-0.5 shrink-0", cfg.color)} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium truncate">
+                          {a.key}
+                          {a.device && (
+                            <span className="ml-1 text-muted-foreground font-normal font-mono">
+                              ({a.device})
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5 break-words">{a.message}</p>
+                        <p className="text-[10px] text-muted-foreground/60 mt-0.5">{ageStr}</p>
+                      </div>
+                      <button
+                        className="shrink-0 text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2 mt-0.5"
+                        onClick={() => dismissMut.mutate({ key: a.key, device: a.device })}
+                        disabled={dismissMut.isPending}
+                        data-testid={`dismiss-alert-${a.key}`}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── AppShell ─────────────────────────────────────────────────────────────────
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -550,6 +727,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <TooltipContent>Open pending changes</TooltipContent>
               </Tooltip>
             )}
+
+            {/* Sprint 38: System Alerts bell */}
+            <SystemAlertsPopover />
 
             {/* Connection indicator */}
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

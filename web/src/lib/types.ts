@@ -177,6 +177,37 @@ export interface ListBundlesResponse {
   total: number
 }
 
+// ── Sprint 38: PROBE-3 / EXTERNAL-STATS / SYSTEM-ALERT-FRAMEWORK ─────────────
+
+/** ProbeResult — from GET /api/v1/nodes/{id}/probes */
+export interface ProbeResult {
+  ping: boolean
+  ssh: boolean
+  bmc: boolean
+  checked_at: string // ISO timestamp
+}
+
+/** ExternalStatSample — one sample from GET /api/v1/nodes/{id}/external_stats */
+export interface ExternalStatSample {
+  plugin: string   // e.g. "bmc", "snmp"
+  sensor: string   // e.g. "cpu_temp"
+  value: number
+  unit?: string
+  title?: string       // human-readable label (STAT-REGISTRY MetricDecl.Title)
+  chart_group?: string // STAT-REGISTRY chart-grouping hint
+  ts: string           // ISO timestamp
+}
+
+/** SystemAlert — one entry from GET /api/v1/system_alerts */
+export interface SystemAlert {
+  key: string
+  device: string
+  level: "info" | "warn" | "critical"
+  message: string
+  set_at: string   // ISO timestamp
+  expires_at?: string
+}
+
 // ── clustr-internal-repo packages ────────────────────────────────────────────
 
 export interface RepoPackage {

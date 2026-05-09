@@ -238,6 +238,13 @@ export function SensorsTab({ nodeId }: { nodeId: string }) {
     return map
   }, [allData])
 
+  // STAT-REGISTRY: group samples that carry chart_group metadata.
+  const byChartGroup = React.useMemo(
+    () => groupSamplesByChartGroup((allData ?? []) as StatSampleWithMeta[]),
+    [allData],
+  )
+  const hasChartGroups = byChartGroup.size > 0
+
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
 
   return (
@@ -275,12 +282,24 @@ export function SensorsTab({ nodeId }: { nodeId: string }) {
         </Button>
       </div>
 
-      {/* Sensor table grouped by plugin */}
+      {/* Sensor table — chart-group view when STAT-REGISTRY metadata present, else plugin view */}
       {allLoading ? (
         <div className="text-xs text-muted-foreground py-4 text-center">Loading sensors…</div>
       ) : (allData ?? []).length === 0 ? (
         <div className="text-xs text-muted-foreground py-4 text-center">
           No stats data. The stats agent must be running on this node and reporting to the server.
+        </div>
+      ) : hasChartGroups ? (
+        <div className="space-y-2">
+          {[...byChartGroup.entries()].map(([group, samples]) => (
+            <ChartGroupCard key={group} group={group} samples={samples} />
+          ))}
+          {/* Also render any plugin groups whose samples lack chart_group */}
+          {[...byPlugin.keys()].map((plugin) => {
+            const rows = byPlugin.get(plugin)!.filter((s) => !(s as StatSampleWithMeta).chart_group)
+            if (rows.length === 0) return null
+            return <PluginGroup key={plugin} plugin={plugin} rows={rows} />
+          })}
         </div>
       ) : (
         <div className="space-y-2">
@@ -1685,4 +1704,221 @@ export function IpmiTab({ nodeId }: { nodeId: string }) {
       </section>
     </div>
   )
+}
+
+// ─── Sprint 38: ExternalStatsTab ─────────────────────────────────────────────
+//
+// Renders BMC/IPMI/SNMP samples for nodes without clustr-clientd.
+// Source: GET /api/v1/nodes/{id}/external_stats
+// Refetches every 60s.  Empty state when no external probes are configured.
+//
+// Samples are dynamically grouped by `chart_group` (STAT-REGISTRY metadata).
+// If `chart_group` is absent the sample falls into an "Other" group.
+
+import type { ExternalStatSample } from "@/lib/types"
+
+function formatExtValue(value: number, unit?: string): string {
+  if (!unit) return value.toFixed(2)
+  const u = unit.toLowerCase()
+  if (u === "celsius" || u === "°c" || u === "c") return `${value.toFixed(1)} °C`
+  if (u === "fahrenheit" || u === "°f" || u === "f") return `${value.toFixed(1)} °F`
+  if (u === "volts" || u === "v") return `${value.toFixed(3)} V`
+  if (u === "amps" || u === "a") return `${value.toFixed(3)} A`
+  if (u === "watts" || u === "w") return `${value.toFixed(1)} W`
+  if (u === "rpm") return `${Math.round(value)} RPM`
+  if (u === "percent" || u === "%") return `${value.toFixed(1)} %`
+  return `${value.toFixed(2)} ${unit}`
+}
+
+function ExternalStatGroup({
+  chartGroup,
+  samples,
+}: {
+  chartGroup: string
+  samples: ExternalStatSample[]
+}) {
+  const [open, setOpen] = React.useState(true)
+  return (
+    <div className="border border-border rounded-md overflow-hidden" data-testid="ext-stat-group">
+      <button
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium bg-secondary/30 hover:bg-secondary/60 transition-colors"
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span>{chartGroup}</span>
+        <span className="text-muted-foreground ml-auto">{samples.length} metric{samples.length !== 1 ? "s" : ""}</span>
+      </button>
+      {open && (
+        <table className="w-full text-xs">
+          <tbody>
+            {samples.map((s, i) => (
+              <tr key={i} className={cn("border-t border-border", i === 0 && "border-t-0")}>
+                <td className="px-3 py-1.5 text-muted-foreground">{s.title ?? s.sensor}</td>
+                <td className="px-2 py-1.5 text-[10px] text-muted-foreground/60 font-mono">{s.plugin}</td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums">
+                  {formatExtValue(s.value, s.unit)}
+                </td>
+                <td className="px-2 py-1.5 text-[10px] text-muted-foreground/50 whitespace-nowrap">
+                  {s.ts ? new Date(s.ts).toLocaleTimeString() : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+export function ExternalStatsTab({ nodeId }: { nodeId: string }) {
+  const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery<ExternalStatSample[]>({
+    queryKey: ["external-stats", nodeId],
+    queryFn: () => apiFetch<ExternalStatSample[]>(`/api/v1/nodes/${nodeId}/external_stats`),
+    refetchInterval: 60_000,
+    staleTime: 55_000,
+  })
+
+  // Group samples by chart_group (falling back to "Other").
+  const groups = React.useMemo(() => {
+    const map = new Map<string, ExternalStatSample[]>()
+    for (const s of data ?? []) {
+      const key = s.chart_group ?? "Other"
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(s)
+    }
+    return map
+  }, [data])
+
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null
+
+  return (
+    <div className="space-y-3 py-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          Agent-less BMC / IPMI / SNMP probes
+          {lastUpdated && <span className="ml-2 opacity-60">updated {lastUpdated}</span>}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs"
+          onClick={() => refetch()}
+        >
+          <RefreshCw className="h-3 w-3 mr-1" />
+          Refresh
+        </Button>
+      </div>
+
+      {isLoading && (
+        <div className="text-xs text-muted-foreground py-4 text-center">Loading external stats…</div>
+      )}
+
+      {isError && (
+        <div className="text-xs text-destructive py-4 text-center">
+          Failed to load external stats.
+        </div>
+      )}
+
+      {!isLoading && !isError && groups.size === 0 && (
+        <div
+          className="flex flex-col items-center justify-center py-12 text-center gap-2 text-muted-foreground"
+          data-testid="ext-stats-empty"
+        >
+          <p className="text-sm">No external probes configured</p>
+          <p className="text-xs opacity-60">
+            External stats are collected when BMC credentials are set on the node and the external probe pool is running.
+          </p>
+        </div>
+      )}
+
+      {groups.size > 0 && (
+        <div className="space-y-2">
+          {[...groups.entries()].map(([group, samples]) => (
+            <ExternalStatGroup key={group} chartGroup={group} samples={samples} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Sprint 38: Dynamic chart-group grouping for SensorsTab ──────────────────
+//
+// StatSample may carry `title` and `chart_group` from the STAT-REGISTRY
+// metadata. This function groups any sample set by chart_group and renders
+// one ChartGroupCard per group.  Used by SensorsTab when chart_group data
+// is present; falls back gracefully to the existing plugin-grouping path.
+
+interface StatSampleWithMeta extends StatSample {
+  title?: string
+  chart_group?: string
+}
+
+function ChartGroupCard({
+  group,
+  samples,
+}: {
+  group: string
+  samples: StatSampleWithMeta[]
+}) {
+  const [open, setOpen] = React.useState(true)
+  const latest = React.useMemo(() => {
+    const map = new Map<string, StatSampleWithMeta>()
+    for (const s of samples) {
+      const key = s.sensor + s.plugin + JSON.stringify(s.labels ?? {})
+      const prev = map.get(key)
+      if (!prev || s.ts > prev.ts) map.set(key, s)
+    }
+    return [...map.values()].sort((a, b) => a.sensor.localeCompare(b.sensor))
+  }, [samples])
+
+  if (latest.length === 0) return null
+
+  return (
+    <div
+      className="border border-border rounded-md overflow-hidden"
+      data-testid={`chart-group-card-${group}`}
+    >
+      <button
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium bg-secondary/30 hover:bg-secondary/60 transition-colors"
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span>{group}</span>
+        <span className="text-muted-foreground ml-auto">{latest.length} sensor{latest.length !== 1 ? "s" : ""}</span>
+      </button>
+      {open && (
+        <table className="w-full text-xs">
+          <tbody>
+            {latest.map((s, i) => (
+              <tr key={i} className={cn("border-t border-border", i === 0 && "border-t-0")}>
+                <td className="px-3 py-1.5 text-muted-foreground">{s.title ?? s.sensor}</td>
+                <td className="px-2 py-1.5 text-[10px] text-muted-foreground/60 font-mono">{s.plugin}</td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums">
+                  {formatValue(s.value, s.unit)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
+/**
+ * groupSamplesByChartGroup — exported for tests.
+ * Groups samples by `chart_group`; samples without chart_group are excluded.
+ * Returns a Map<groupName, samples[]> with stable insertion order.
+ */
+export function groupSamplesByChartGroup(
+  samples: StatSampleWithMeta[],
+): Map<string, StatSampleWithMeta[]> {
+  const map = new Map<string, StatSampleWithMeta[]>()
+  for (const s of samples) {
+    if (!s.chart_group) continue
+    if (!map.has(s.chart_group)) map.set(s.chart_group, [])
+    map.get(s.chart_group)!.push(s)
+  }
+  return map
 }
