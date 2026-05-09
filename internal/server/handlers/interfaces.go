@@ -251,7 +251,22 @@ func TypedInterfacesFromNodeConfig(cfg api.NodeConfig) []TypedInterface {
 //
 // Returns an error only on structural problems (e.g. multiple ipmi rows).
 // Per-field validation must be done by the caller before invoking.
+//
+// Password preservation: GET /interfaces never returns the BMC password
+// (Pass is write-only).  When the UI POSTs an edited interface list back
+// without re-typing the password, the ipmi row's Pass field is empty.
+// Treating empty as "clear the password" silently nukes the stored
+// credential — a regression Codex caught on PR #14.  Mirroring the BMC
+// patch handler's pattern, an empty Pass preserves the existing value.
 func ApplyTypedInterfaces(cfg *api.NodeConfig, rows []TypedInterface, mode string) error {
+	// Snapshot the existing BMC password (if any) up-front so we can
+	// preserve it when the request omits Pass.  Without this snapshot the
+	// "replace" branch below cfg.BMC = ipmi before we read existing.Password.
+	var existingBMCPass string
+	if cfg.BMC != nil {
+		existingBMCPass = cfg.BMC.Password
+	}
+
 	var (
 		eth    []api.InterfaceConfig
 		fab    []api.IBInterfaceConfig
@@ -285,10 +300,16 @@ func ApplyTypedInterfaces(cfg *api.NodeConfig, rows []TypedInterface, mode strin
 			if ipmiCt > 1 {
 				return fmt.Errorf("at most one ipmi-kind interface allowed (BMC is a singleton)")
 			}
+			pass := row.Pass
+			if pass == "" {
+				// Preserve existing password — UI never reads it back so an
+				// empty Pass on PUT means "leave as-is", not "clear".
+				pass = existingBMCPass
+			}
 			ipmi = &api.BMCNodeConfig{
 				IPAddress: row.IP,
 				Username:  row.User,
-				Password:  row.Pass,
+				Password:  pass,
 			}
 		}
 	}
