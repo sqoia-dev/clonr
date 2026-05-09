@@ -32,12 +32,13 @@ import { StatusDot } from "@/components/StatusDot"
 import { useEventInvalidation } from "@/contexts/connection"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult, EffectiveLayoutResponse } from "@/lib/types"
 import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
 import { BootSettingsModal } from "@/components/BootSettingsModal"
+import { DiskLayoutPicker, FirmwareBadge } from "@/components/DiskLayoutPicker"
 import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
 import type { InterfaceRow } from "@/components/InterfaceList"
@@ -1731,6 +1732,10 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                 <VariantsEditor nodeId={node.id} />
 
                 <HardwareSection node={node} />
+
+                {/* DISK-LAYOUT-PICKER — Sprint 35 */}
+                <DiskLayoutSection node={node} />
+
                 <SudoersSection node={node} />
                 <SlurmNodeSection node={node} />
                 <ReimageFlow node={node} autoExpand={autoReimage} />
@@ -3338,5 +3343,130 @@ function SudoersSection({ node }: { node: NodeConfig }) {
         </div>
       )}
     </Section>
+  )
+}
+
+// ─── DiskLayoutSection — Sprint 35 DISK-LAYOUT-PICKER ───────────────────────
+// Shown in node Overview below HardwareSection.
+// Displays the resolved effective layout source, any node-level override, and
+// "Set override…" / "Clear override" actions.
+
+function sourceLabel(source: string): string {
+  if (source === "node") return "node override"
+  if (source === "group") return "group default"
+  if (source === "image") return "image default"
+  if (source.startsWith("layout_catalog:firmware_match")) return "catalog (firmware match)"
+  if (source.startsWith("layout_catalog:firmware_predicate")) return "catalog (firmware predicate)"
+  if (source.startsWith("layout_catalog:firmware_tag")) return "catalog (firmware tag)"
+  if (source.startsWith("layout_catalog:firmware_agnostic")) return "catalog (agnostic)"
+  if (source.startsWith("layout_catalog:firmware_mismatch")) return "catalog (firmware mismatch — autocorrected)"
+  if (source.startsWith("layout_catalog:firmware_unknown")) return "catalog (firmware unknown)"
+  if (source.startsWith("layout_catalog:node")) return "catalog (node pin)"
+  if (source.startsWith("layout_catalog:group")) return "catalog (group pin)"
+  if (source.startsWith("layout_catalog")) return "catalog"
+  return source
+}
+
+function DiskLayoutSection({ node }: { node: NodeConfig }) {
+  const qc = useQueryClient()
+  const [pickerOpen, setPickerOpen] = React.useState(false)
+
+  const { data: effectiveData, isLoading: effectiveLoading } = useQuery<EffectiveLayoutResponse>({
+    queryKey: ["effective-layout", node.id],
+    queryFn: () => apiFetch<EffectiveLayoutResponse>(`/api/v1/nodes/${node.id}/effective-layout`),
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  const hasOverride = effectiveData?.source === "node"
+
+  const clearOverride = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${node.id}/layout-override`, {
+        method: "PUT",
+        body: JSON.stringify({ clear_layout_override: true }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["effective-layout", node.id] })
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Failed to clear override", description: String(err) }),
+  })
+
+  const partitions = effectiveData?.layout?.partitions ?? []
+
+  return (
+    <>
+      <Section title="Disk Layout">
+        {effectiveLoading && (
+          <div className="space-y-1">
+            <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+            <div className="h-4 w-1/2 rounded bg-muted animate-pulse" />
+          </div>
+        )}
+
+        {!effectiveLoading && effectiveData && (
+          <>
+            <Row
+              label="Effective source"
+              value={sourceLabel(effectiveData.source)}
+            />
+            {partitions.length > 0 && (
+              <Row
+                label="Partitions"
+                value={
+                  partitions.map((p) => (p as { mountpoint?: string; fs?: string }).mountpoint ?? (p as { mountpoint?: string; fs?: string }).fs)
+                    .filter(Boolean)
+                    .join(", ") || `${partitions.length} partition(s)`
+                }
+              />
+            )}
+            {node.detected_firmware && (
+              <div className="flex items-start justify-between gap-4 text-sm">
+                <span className="text-muted-foreground shrink-0">Firmware</span>
+                <FirmwareBadge kind={node.detected_firmware as "bios" | "uefi" | "any"} />
+              </div>
+            )}
+            {hasOverride && (
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-xs text-amber-600 font-medium">Node-level override active</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-xs text-destructive hover:text-destructive"
+                  onClick={() => clearOverride.mutate()}
+                  disabled={clearOverride.isPending}
+                >
+                  {clearOverride.isPending ? "Clearing…" : "Clear override"}
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+
+        {!effectiveLoading && !effectiveData && (
+          <p className="text-xs text-muted-foreground">No layout resolved (node has no image assigned).</p>
+        )}
+
+        <div className="pt-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full gap-1.5 text-xs"
+            onClick={() => setPickerOpen(true)}
+          >
+            <HardDrive className="h-3.5 w-3.5" />
+            Set override…
+          </Button>
+        </div>
+      </Section>
+
+      <DiskLayoutPicker
+        nodeId={node.id}
+        nodeFirmware={node.detected_firmware}
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+      />
+    </>
   )
 }

@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot, AlertTriangle, Info, XCircle, Loader2 } from "lucide-react"
+import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot, AlertTriangle, Info, XCircle, Loader2, HardDrive } from "lucide-react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -16,6 +16,7 @@ import { toast } from "@/hooks/use-toast"
 const navItems = [
   { label: "Nodes", path: "/nodes", icon: Server, active: true },
   { label: "Images", path: "/images", icon: Image, active: true },
+  { label: "Disk Layouts", path: "/disk-layouts", icon: HardDrive, active: true },
   { label: "Slurm", path: "/slurm", icon: Cpu, active: true },
   { label: "Alerts", path: "/alerts", icon: Bell, active: true },
   { label: "Datacenter", path: "/datacenter", icon: Building2, active: true },

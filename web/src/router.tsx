@@ -12,6 +12,7 @@ import { SlurmPage } from "@/routes/slurm"
 import { AlertsPage } from "@/routes/alerts"
 import { DatacenterPage } from "@/routes/datacenter"
 import { ControlPlanePage } from "@/routes/control-plane"
+import { DiskLayoutsPage } from "@/routes/disk-layouts"
 import { SessionGate } from "@/components/SessionGate"
 
 const rootRoute = createRootRoute({
@@ -159,6 +160,12 @@ const controlPlaneRoute = createRoute({
   component: ControlPlanePage,
 })
 
+const diskLayoutsRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/disk-layouts",
+  component: DiskLayoutsPage,
+})
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
@@ -174,6 +181,7 @@ const routeTree = rootRoute.addChildren([
     alertsRoute,
     datacenterRoute,
     controlPlaneRoute,
+    diskLayoutsRoute,
   ]),
 ])
 

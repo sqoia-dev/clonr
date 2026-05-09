@@ -902,6 +902,54 @@ export interface ListSlurmPartitionsResponse {
   total: number
 }
 
+// ── Disk Layout Catalog (#146 / Sprint 35) ────────────────────────────────────
+
+export type FirmwareKind = "bios" | "uefi" | "any"
+
+export interface DiskPartition {
+  size: string
+  fs: string
+  flags?: string[]
+  mountpoint?: string
+  label?: string
+}
+
+export interface RAIDSpec {
+  name: string
+  level: string
+  members: string[]
+  raid_type?: string      // "md" | "imsm" | ""
+  imsm_container?: string
+}
+
+export interface DiskLayoutBody {
+  partitions?: DiskPartition[]
+  raid_arrays?: RAIDSpec[]
+}
+
+export interface StoredDiskLayout {
+  id: string
+  name: string
+  source_node_id?: string
+  captured_at: string
+  firmware_kind: FirmwareKind
+  layout: DiskLayoutBody
+  created_at: string
+  updated_at: string
+}
+
+export interface ListDiskLayoutsResponse {
+  layouts: StoredDiskLayout[]
+  total: number
+}
+
+export interface EffectiveLayoutResponse {
+  layout: DiskLayoutBody
+  source: string   // "node" | "group" | "image" | "layout_catalog:*"
+  group_id?: string
+  image_id?: string
+}
+
 // ── Boot Menu entries (#160) ─────────────────────────────────────────────────
 
 export type BootEntryKind = "kernel" | "iso" | "rescue" | "memtest"

@@ -1966,6 +1966,7 @@ func (s *Server) buildRouter() chi.Router {
 				DB:  s.db,
 				Hub: s.clientdHub,
 			}
+			r.Post("/disk-layouts", diskLayoutsH.CreateLayout)
 			r.Post("/disk-layouts/capture/{node_id}", diskLayoutsH.CaptureLayout)
 			r.Get("/disk-layouts", diskLayoutsH.ListLayouts)
 			r.Get("/disk-layouts/{id}", diskLayoutsH.GetLayout)
