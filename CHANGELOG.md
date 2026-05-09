@@ -122,6 +122,92 @@ have cluster-wide blast radius.
   Dinesh dispatch on `feat/sprint-34-ui-a`.
 
 ---
+## Unreleased — Sprint 34 Bundle B
+
+IPMI/BMC core (IPMI-MIN), idempotent BMC reset in deploy (BMC-IN-DEPLOY),
+and the WebSocket Serial-over-LAN backend bridge (SERIAL-CONSOLE backend).
+Bundle A (BOOT-POLICY / BOOT-SETTINGS / HOSTLIST) is dispatched separately;
+VNC-CONSOLE is deferred until real BMC iKVM lab hardware is available.
+
+### Added
+
+- **FreeIPMI wrapper (`internal/ipmi/freeipmi.go`)**: typed
+  `FreeIPMIClient` wrapping `ipmi-power`, `ipmi-sel`, `ipmi-sensors` with
+  a runner abstraction for unit-testable argv composition. Parsers for
+  the comma-separated output produced by `--no-header-output
+  --comma-separated-output --output-event-state`.
+- **Privhelper IPMI verbs (`cmd/clustr-privhelper/ipmi.go`)**: six new
+  verbs — `ipmi-power`, `ipmi-sel`, `ipmi-sensors`, `ipmi-lan-set`,
+  `ipmi-lan-get`, `ipmi-sol-activate`. BMC credentials are passed via
+  stdin as a one-line JSON envelope so the password never appears in
+  `/proc/<pid>/cmdline`. Argv is rebuilt internally per-verb from a
+  static allowlist of fields/actions; raw flags from callers are never
+  honoured.
+- **Privhelper Go client (`internal/privhelper/ipmi.go`)**: typed
+  `IPMIPower`, `IPMISEL`, `IPMISensors`, `IPMILANGet`, `IPMILANSet`,
+  `IPMILANSetPassword` functions wrapping the new verbs.
+- **Admin REST endpoints (`internal/server/handlers/ipmi_admin.go`)**:
+  - `POST /api/v1/nodes/{id}/ipmi/power/{action}` —
+    `{status,on,off,cycle,reset}`
+  - `GET /api/v1/nodes/{id}/ipmi/sel`
+  - `DELETE /api/v1/nodes/{id}/ipmi/sel`
+  - `GET /api/v1/nodes/{id}/ipmi/sensors`
+
+  All admin-scoped; all federated through `clustr-privhelper` so BMC
+  creds stay off /proc cmdline. The legacy `/power /sel /sensors` routes
+  (in-tree ipmitool wrapper) are unchanged.
+- **CLI: `clustr ipmi node <id> {power,sel,sensors}`**
+  (`cmd/clustr/ipmi_admin.go`): hits the admin /ipmi/* endpoints. The
+  existing `clustr ipmi power|sel|sensors` raw-host shape (no node
+  lookup, direct BMC) is preserved.
+- **BMC-IN-DEPLOY (`internal/deploy/bmc.go`)**: idempotent BMC LAN reset
+  that reads `ipmitool lan print 1`, diffs against the desired
+  `api.BMCNodeConfig`, and writes only the fields that differ.
+  Re-deploying a node with the same config is a no-op against the BMC
+  (verified by unit test
+  `TestApplyBMCConfigToHardware_SecondApply_NoWrites`). Wired into
+  `internal/deploy/finalize.go:applyNodeConfig` as the first step of the
+  BMC block; the existing `applyBMCConfig` (user-record write on slot 2)
+  runs after.
+- **SERIAL-CONSOLE backend bridge
+  (`internal/server/handlers/console_sol.go`)**: `GET
+  /api/v1/nodes/{id}/console/sol` (WebSocket, admin scope). Spawns
+  `ipmitool sol activate` via `clustr-privhelper` with a PTY;
+  multiplexes stdin/stdout to the WS connection. Single-active-session
+  per node — a second connect closes the first cleanly via `cancel()`
+  on the bridge context. Wire shape: line-mode stdin, raw-byte stdout,
+  both as `websocket.BinaryMessage` (xterm.js handles the ANSI/VT
+  stream end-to-end). 30s ping interval matches the existing UX-12
+  keepalive pattern.
+
+### Tests
+
+- `internal/ipmi/freeipmi_test.go` — argv composition for
+  power/sel/sensors, CSV parser correctness, runner mock (no real
+  binary).
+- `cmd/clustr-privhelper/ipmi_test.go` — verb arg validation, allowlist
+  parity locks, `isSafeBMCField` injection rejection, channel range
+  check.
+- `internal/deploy/bmc_test.go` — `parseLanPrint`, `planBMCDiff`
+  (all-differ / no-diff / partial-diff), `applyBMCConfigWithRunner`
+  first-apply-writes / second-apply-no-writes idempotency, stable argv
+  sequence.
+- `internal/server/handlers/console_sol_test.go` — WS bidirectional
+  byte forwarding (stdout → WS binary frame, WS → subprocess),
+  single-active-session supersedure, no-BMC rejection, `resolveSOLCreds`
+  priority.
+- `internal/server/handlers/ipmi_admin_test.go` — handler dispatch
+  shape, privhelper failure → 502, no-BMC rejection.
+- `cmd/clustr/ipmi_admin_test.go` — URL composition + argv parsing for
+  `clustr ipmi node ...`.
+
+### Privilege boundary notes
+
+- Every live-IPMI invocation from `clustr-serverd` (the unprivileged
+  "clustr" user) routes through `clustr-privhelper`, per the standing
+  memory rule. No new polkit rules, no sudoers entries.
+- `BMC-IN-DEPLOY` runs in the initramfs as root and exec's `ipmitool`
+  directly — the privhelper's privilege boundary is moot pre-OS.
 
 ## Unreleased — Sprint 33 STREAM-LOG-PHASE
 
