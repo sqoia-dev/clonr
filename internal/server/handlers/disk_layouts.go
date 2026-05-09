@@ -2,6 +2,7 @@
 //
 // Routes:
 //
+//	POST   /api/v1/disk-layouts                    — create (or duplicate) a layout
 //	POST   /api/v1/disk-layouts/capture/{node_id}  — capture from live node
 //	GET    /api/v1/disk-layouts                    — list all
 //	GET    /api/v1/disk-layouts/{id}               — fetch one
@@ -49,6 +50,64 @@ type DiskLayoutsCaptureHub interface {
 type DiskLayoutsHandler struct {
 	DB  DiskLayoutsDBIface
 	Hub DiskLayoutsCaptureHub // nil-safe — capture endpoint returns 503 when nil
+}
+
+// ─── POST /api/v1/disk-layouts ───────────────────────────────────────────────
+
+// CreateLayout creates a new named StoredDiskLayout record.
+// Used by the UI to create from scratch or to duplicate an existing layout
+// (the caller supplies the full body with a new name, e.g. "original (copy)").
+//
+// Body: { "name": "my-layout", "firmware_kind": "any"|"bios"|"uefi", "layout_json": "{...}" }
+// Response (201): { "disk_layout": { id, name, ... } }
+func (h *DiskLayoutsHandler) CreateLayout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name         string `json:"name"`
+		FirmwareKind string `json:"firmware_kind"`
+		LayoutJSON   string `json:"layout_json"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+	if req.Name == "" {
+		writeValidationError(w, "name is required")
+		return
+	}
+
+	fk := req.FirmwareKind
+	if fk == "" {
+		fk = api.FirmwareKindAny
+	}
+	if fk != api.FirmwareKindAny && fk != api.FirmwareKindBIOS && fk != api.FirmwareKindUEFI {
+		writeValidationError(w, "firmware_kind must be 'any', 'bios', or 'uefi'")
+		return
+	}
+
+	var diskLayout api.DiskLayout
+	if req.LayoutJSON != "" {
+		if err := json.Unmarshal([]byte(req.LayoutJSON), &diskLayout); err != nil {
+			writeValidationError(w, "layout_json is not valid JSON: "+err.Error())
+			return
+		}
+	}
+
+	now := time.Now().UTC()
+	dl := api.StoredDiskLayout{
+		ID:           uuid.New().String(),
+		Name:         req.Name,
+		FirmwareKind: fk,
+		Layout:       diskLayout,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := h.DB.CreateDiskLayout(r.Context(), dl); err != nil {
+		log.Error().Err(err).Str("name", req.Name).Msg("disk-layouts: create")
+		writeError(w, err)
+		return
+	}
+	log.Info().Str("layout_id", dl.ID).Str("name", dl.Name).Msg("disk-layouts: created")
+	writeJSON(w, http.StatusCreated, map[string]any{"disk_layout": dl})
 }
 
 // ─── POST /api/v1/disk-layouts/capture/{node_id} ─────────────────────────────
