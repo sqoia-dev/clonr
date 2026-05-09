@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/hostlist"
 )
 
 func init() {
@@ -175,9 +176,13 @@ func newGroupShowCmd() *cobra.Command {
 
 func newGroupAddMemberCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "add-member <group-id|name> <node-id|hostname>",
-		Short: "Add a node to a group (idempotent)",
-		Args:  cobra.ExactArgs(2),
+		Use:   "add-member <group-id|name> <node-id|hostname|hostlist>",
+		Short: "Add one or more nodes to a group (idempotent; accepts hostlist syntax)",
+		Long: `Adds nodes to a group. The node argument may be a single ID/hostname or a
+pdsh-style hostlist pattern (e.g. compute[01-12], rack[1-3]-node[01-04]) which
+is expanded client-side and resolved against the live node list. Unknown
+hostnames in the expansion abort the operation before any membership change.`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			c := clientFromFlags()
@@ -186,18 +191,19 @@ func newGroupAddMemberCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			nodeID, err := resolveNodeID(ctx, c, args[1])
+
+			nodeIDs, err := resolveNodeIDsHostlist(ctx, c, args[1])
 			if err != nil {
 				return err
 			}
 
-			body := api.AddGroupMembersRequest{NodeIDs: []string{nodeID}}
+			body := api.AddGroupMembersRequest{NodeIDs: nodeIDs}
 			var resp api.GroupMembersResponse
 			if err := c.PostJSON(ctx, "/api/v1/node-groups/"+groupID+"/members", body, &resp); err != nil {
 				return fmt.Errorf("add member: %w", err)
 			}
-			fmt.Printf("Node %s added to group %s (%d members total)\n",
-				args[1], resp.Group.Name, len(resp.Members))
+			fmt.Printf("Added %d node(s) to group %s (%d members total)\n",
+				len(nodeIDs), resp.Group.Name, len(resp.Members))
 			return nil
 		},
 	}
@@ -207,8 +213,8 @@ func newGroupAddMemberCmd() *cobra.Command {
 
 func newGroupRemoveMemberCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove-member <group-id|name> <node-id|hostname>",
-		Short: "Remove a node from a group",
+		Use:   "remove-member <group-id|name> <node-id|hostname|hostlist>",
+		Short: "Remove one or more nodes from a group (accepts hostlist syntax)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -218,15 +224,18 @@ func newGroupRemoveMemberCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			nodeID, err := resolveNodeID(ctx, c, args[1])
+
+			nodeIDs, err := resolveNodeIDsHostlist(ctx, c, args[1])
 			if err != nil {
 				return err
 			}
 
-			if err := c.DeleteJSON(ctx, "/api/v1/node-groups/"+groupID+"/members/"+nodeID); err != nil {
-				return fmt.Errorf("remove member: %w", err)
+			for _, nodeID := range nodeIDs {
+				if err := c.DeleteJSON(ctx, "/api/v1/node-groups/"+groupID+"/members/"+nodeID); err != nil {
+					return fmt.Errorf("remove member %s: %w", nodeID, err)
+				}
 			}
-			fmt.Printf("Node %s removed from group.\n", args[1])
+			fmt.Printf("Removed %d node(s) from group.\n", len(nodeIDs))
 			return nil
 		},
 	}
@@ -409,6 +418,67 @@ func resolveNodeID(ctx context.Context, c interface{ GetJSON(context.Context, st
 		}
 	}
 	return "", fmt.Errorf("node %q not found", nameOrID)
+}
+
+// resolveNodeIDsHostlist accepts a single ID/hostname or a pdsh-style
+// hostlist pattern (compute[01-12], rack[1-3]-node[01-04], etc.) and returns
+// the canonical UUIDs of every matching node.
+//
+// A bare 36-char UUID short-circuits the API roundtrip.  Anything else is
+// passed through pkg/hostlist.Expand; if the input has no brackets the
+// expansion is a single-element slice and we fall through to the
+// hostname-or-prefix lookup that resolveNodeID has always done.  Brackets
+// trigger a strict expansion: every expanded name must match a registered
+// node, otherwise we error out without performing any partial work.
+//
+// Sprint 34 HOSTLIST.
+func resolveNodeIDsHostlist(ctx context.Context, c interface {
+	GetJSON(context.Context, string, interface{}) error
+}, hostlistOrName string) ([]string, error) {
+	if len(hostlistOrName) == 36 && strings.Count(hostlistOrName, "-") == 4 {
+		return []string{hostlistOrName}, nil
+	}
+
+	expanded, err := hostlist.Expand(hostlistOrName)
+	if err != nil {
+		return nil, fmt.Errorf("expand hostlist: %w", err)
+	}
+
+	var resp api.ListNodesResponse
+	if err := c.GetJSON(ctx, "/api/v1/nodes", &resp); err != nil {
+		return nil, fmt.Errorf("resolve nodes: %w", err)
+	}
+
+	byHostname := make(map[string]string, len(resp.Nodes))
+	for _, n := range resp.Nodes {
+		byHostname[n.Hostname] = n.ID
+	}
+
+	out := make([]string, 0, len(expanded))
+	var unknown []string
+	for _, name := range expanded {
+		if id, ok := byHostname[name]; ok {
+			out = append(out, id)
+			continue
+		}
+		// Fallback: tolerate ID prefix (resolveNodeID's traditional behaviour
+		// for the single-arg case).
+		matched := false
+		for _, n := range resp.Nodes {
+			if strings.HasPrefix(n.ID, name) {
+				out = append(out, n.ID)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, fmt.Errorf("unknown node(s): %s", strings.Join(unknown, ","))
+	}
+	return out, nil
 }
 
 // truncate shortens a string to maxLen characters.

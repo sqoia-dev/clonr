@@ -400,11 +400,37 @@ func (h *BootHandler) generateDiskBootScript(r *http.Request, node *api.NodeConf
 		}
 	}
 
+	// Sprint 34 BOOT-SETTINGS-MODAL: if the operator pinned a netboot menu
+	// entry on this node, resolve the boot_entries row and pass it through to
+	// the script renderer.  A dangling reference (entry deleted/disabled
+	// between modal save and PXE serve) is degraded to "fall back to default
+	// disk-boot menu" with a warning — never an error that strands the node.
+	var persistedEntry *api.BootEntry
+	if node.NetbootMenuEntry != "" && h.DB != nil {
+		entry, lookupErr := h.DB.GetBootEntry(r.Context(), node.NetbootMenuEntry)
+		switch {
+		case lookupErr == nil && entry.Enabled:
+			persistedEntry = &entry
+		case lookupErr == nil && !entry.Enabled:
+			log.Warn().Str("node", node.Hostname).Str("entry_id", node.NetbootMenuEntry).
+				Msg("boot: persisted netboot_menu_entry is disabled — falling back to default disk boot")
+		default:
+			log.Warn().Err(lookupErr).Str("node", node.Hostname).Str("entry_id", node.NetbootMenuEntry).
+				Msg("boot: persisted netboot_menu_entry not found — falling back to default disk boot")
+		}
+	}
+
 	log.Info().Str("hostname", node.Hostname).Str("firmware", firmware).
 		Int("extra_entries", len(extraEntries)).
 		Bool("multicast_enabled", multicastEnabled).
+		Bool("has_persisted_entry", persistedEntry != nil).
+		Bool("has_persisted_cmdline", node.KernelCmdline != "").
 		Msg("boot: generating disk boot script")
-	return pxe.GenerateDiskBootScript(node.Hostname, firmware, h.ServerURL, h.Version, extraEntries, multicastEnabled)
+	return pxe.GenerateDiskBootScriptWithSettings(
+		node.Hostname, firmware, h.ServerURL, h.Version,
+		extraEntries, multicastEnabled,
+		persistedEntry, node.KernelCmdline,
+	)
 }
 
 // multicastBootParams returns the kernel cmdline fragment for multicast delivery

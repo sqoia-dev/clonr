@@ -234,6 +234,14 @@ type diskBootScriptData struct {
 	// MulticastEnabled controls whether the "Reimage via multicast (fleet)" menu
 	// item is shown. Set by GenerateDiskBootScript when multicast_config.enabled=true.
 	MulticastEnabled bool
+
+	// Sprint 34 BOOT-SETTINGS-MODAL: when PersistedEntry is non-nil the boot
+	// menu defaults to the operator-pinned entry instead of the standard
+	// disk-boot item.  PersistedKernelCmdline (if set) is appended to the
+	// kernel cmdline of any chained entry.  Both are populated by the boot
+	// handler from NodeConfig.NetbootMenuEntry / NodeConfig.KernelCmdline.
+	PersistedEntry         *api.BootEntry
+	PersistedKernelCmdline string
 }
 
 // GenerateWaitRetryScript returns an iPXE script for nodes in reimage_pending
@@ -265,6 +273,30 @@ func GenerateWaitRetryScript(hostname string) ([]byte, error) {
 // multicastEnabled controls whether the "Reimage via multicast (fleet)" item
 // appears in the menu. Pass true when multicast_config.enabled=true in the DB.
 func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extraEntries []api.BootEntry, multicastEnabled bool) ([]byte, error) {
+	return GenerateDiskBootScriptWithSettings(hostname, firmware, serverURL, version,
+		extraEntries, multicastEnabled, nil, "")
+}
+
+// GenerateDiskBootScriptWithSettings is GenerateDiskBootScript plus the Sprint 34
+// BOOT-SETTINGS-MODAL fields:
+//
+//   - persistedEntry: when non-nil, the operator pinned this boot_entries row as
+//     the default for the next PXE boot.  The script auto-selects that entry
+//     instead of the normal disk-boot item.  A nil persistedEntry preserves the
+//     v0.1.22 default-disk-boot behaviour.
+//   - persistedKernelCmdline: when non-empty, appended verbatim to the kernel
+//     cmdline of any chained entry.  Used for serial console pinning or
+//     one-off debug flags.  Empty string means "no override".
+//
+// Both fields are validated upstream by the BOOT-SETTINGS-MODAL handler — the
+// renderer assumes well-formed input here.
+func GenerateDiskBootScriptWithSettings(
+	hostname, firmware, serverURL, version string,
+	extraEntries []api.BootEntry,
+	multicastEnabled bool,
+	persistedEntry *api.BootEntry,
+	persistedKernelCmdline string,
+) ([]byte, error) {
 	tmpl := diskBootUEFITmpl
 	if strings.EqualFold(firmware, "bios") {
 		tmpl = diskBootBIOSTmpl
@@ -273,11 +305,13 @@ func GenerateDiskBootScript(hostname, firmware, serverURL, version string, extra
 		extraEntries = []api.BootEntry{}
 	}
 	data := diskBootScriptData{
-		Hostname:         hostname,
-		ServerURL:        serverURL,
-		Version:          version,
-		ExtraEntries:     extraEntries,
-		MulticastEnabled: multicastEnabled,
+		Hostname:               hostname,
+		ServerURL:              serverURL,
+		Version:                version,
+		ExtraEntries:           extraEntries,
+		MulticastEnabled:       multicastEnabled,
+		PersistedEntry:         persistedEntry,
+		PersistedKernelCmdline: persistedKernelCmdline,
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
