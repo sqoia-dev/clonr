@@ -806,11 +806,12 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 				Msg("finalize: UEFI ESP detected — installing EFI bootloader via driver")
 			reportStep("Verifying EFI system partition")
 			bctx := &bootloaderCtx{
-				Ctx:        ctx,
-				MountRoot:  mountRoot,
-				TargetDisk: d.targetDisk,
-				AllTargets: []string{d.targetDisk},
-				IsEFI:      true,
+				Ctx:             ctx,
+				MountRoot:       mountRoot,
+				TargetDisk:      d.targetDisk,
+				AllTargets:      []string{d.targetDisk},
+				IsEFI:           true,
+				BootOrderPolicy: cfg.BootOrderPolicy,
 			}
 			reportStep("Running GRUB installer in chroot")
 			if err := driver.InstallBootloader(bctx); err != nil {

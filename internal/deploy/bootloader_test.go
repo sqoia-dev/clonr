@@ -399,6 +399,87 @@ func TestRepairBootOrderForReimage_BIOSNoOp(t *testing.T) {
 	}
 }
 
+// TestApplyBootOrderPolicy_BIOSNoOp confirms the Sprint 34 replacement is a
+// true no-op on BIOS hosts for every supported policy value AND for the
+// unknown-policy path (which only reaches the validation switch on UEFI).
+func TestApplyBootOrderPolicy_BIOSNoOp(t *testing.T) {
+	if isUEFISystem() {
+		t.Skip("test host is UEFI — BIOS no-op path cannot be exercised here")
+	}
+	cases := []string{"", "auto", "network", "os", "garbage"}
+	for _, policy := range cases {
+		t.Run(policy, func(t *testing.T) {
+			if err := ApplyBootOrderPolicy(context.Background(), policy); err != nil {
+				t.Errorf("ApplyBootOrderPolicy(%q) on BIOS host: got %v, want nil",
+					policy, err)
+			}
+		})
+	}
+}
+
+// TestBootOrderArgs_PolicyArgvTranslation verifies the argv handed to
+// efibootmgr after a policy decision matches the contract documented in
+// ApplyBootOrderPolicy.  bootOrderArgs is the seam tests exercise without
+// spawning a real efibootmgr process.
+//
+// Sprint 34 BOOT-POLICY: this is the Bundle A acceptance test.
+func TestBootOrderArgs_PolicyArgvTranslation(t *testing.T) {
+	cases := []struct {
+		name  string
+		order []string
+		want  []string
+	}{
+		{
+			name:  "single entry",
+			order: []string{"0001"},
+			want:  []string{"-o", "0001"},
+		},
+		{
+			name:  "PXE-first network policy",
+			order: []string{"0003", "0001", "0002"},
+			want:  []string{"-o", "0003,0001,0002"},
+		},
+		{
+			name:  "OS-first os policy",
+			order: []string{"0001", "0003", "0002"},
+			want:  []string{"-o", "0001,0003,0002"},
+		},
+		{
+			name:  "long order",
+			order: []string{"0001", "0002", "0003", "0004", "0005"},
+			want:  []string{"-o", "0001,0002,0003,0004,0005"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bootOrderArgs(tc.order)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len = %d, want %d (got %v)", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("argv[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestApplyBootOrderPolicy_UnknownOnUEFI verifies the unknown-policy guard
+// fires only on UEFI hosts, where the predicate falls through to the switch.
+func TestApplyBootOrderPolicy_UnknownOnUEFI(t *testing.T) {
+	if !isUEFISystem() {
+		t.Skip("test host is BIOS — UEFI-gated unknown-policy path not reachable")
+	}
+	err := ApplyBootOrderPolicy(context.Background(), "garbage")
+	if err == nil {
+		t.Fatalf("ApplyBootOrderPolicy(garbage) on UEFI host: got nil, want error")
+	}
+	if !strings.Contains(err.Error(), "unknown boot-order policy") {
+		t.Errorf("error = %q; want substring %q", err.Error(), "unknown boot-order policy")
+	}
+}
+
 // ── DistroDriver dispatch unit tests ────────────────────────────────────────
 
 // stubDriver is a minimal DistroDriver that records InstallBootloader calls

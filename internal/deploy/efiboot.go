@@ -189,43 +189,133 @@ func pxeEntryLabelMatch(label string) bool {
 }
 
 // RepairBootOrderForReimage hardens NVRAM against the "OS-entry-ahead-of-PXE"
-// regression seen on bare-metal UEFI hosts (#225 FIX-EFI):
+// regression seen on bare-metal UEFI hosts (#225 FIX-EFI).
 //
-//   - clustr's deploy path runs grub2-install with --no-nvram + --removable,
-//     so we do NOT add an OS NVRAM entry ourselves and rely on UEFI removable-
-//     media auto-discovery of \EFI\BOOT\BOOTX64.EFI for post-deploy boot
-//     (docs/boot-architecture.md §8).
-//   - HOWEVER: NVRAM (efivars / OVMF pflash) survives reimages.  Entries written
-//     by a prior life of the disk — Anaconda kickstart, an older clustr version,
-//     a manual rescue session — persist and continue to land ahead of PXE in
-//     BootOrder, which makes future reimages chain to a stale OS bootloader (or
-//     a now-blank EFI partition) instead of the PXE script.
-//
-// This function runs (best-effort) at the end of the EFI bootloader install step
-// in finalize.  It operates on the LIVE NVRAM of the target node (the deploy
-// initramfs is the running kernel, /sys/firmware/efi is the host firmware), NOT
-// on any chroot view.  Behaviour:
-//
-//  1. If /sys/firmware/efi is absent (BIOS deploy), return nil — no-op.
-//  2. List boot entries via efibootmgr; if listing fails, log+nil (we never
-//     fail a successful deploy because of NVRAM cleanup).
-//  3. Reorder BootOrder so a PXE entry leads (delegated to SetPXEBootFirst, which
-//     already implements that with the pxeEntryLabelMatch heuristic).
-//
-// Errors from efibootmgr are wrapped+returned so the caller can decide; the
-// production hook in finalize logs as warning rather than failing the deploy.
-//
-// Why we do NOT delete OS NVRAM entries here: a `efibootmgr -B -b XXXX` of an
-// arbitrary entry is dangerous on shared-firmware hosts (e.g. a server that also
-// dual-boots Windows, or a tester's laptop accidentally on the deploy network).
-// Reordering is non-destructive and resolves the symptom (OS entry blocks PXE);
-// destructive cleanup is reserved for an explicit operator action.
+// DEPRECATED (Sprint 34 BOOT-POLICY): preserved as a thin shim over
+// ApplyBootOrderPolicy("auto") so existing callers and tests continue to
+// compile.  New call sites in finalize go through
+// ApplyBootOrderPolicy(ctx, node.BootOrderPolicy) directly so the operator's
+// per-node intent is respected.
 func RepairBootOrderForReimage(ctx context.Context) error {
+	return ApplyBootOrderPolicy(ctx, "auto")
+}
+
+// ApplyBootOrderPolicy is the Sprint 34 replacement for the reactive NVRAM
+// repair.  It operates on the LIVE NVRAM of the deploy-target node and
+// reorders BootOrder according to the operator's per-node policy:
+//
+//	"" / "auto" / "network"  — PXE / network entries lead BootOrder; OS
+//	                           entries follow.  This is the v0.1.22 reactive
+//	                           behaviour preserved verbatim — applied via
+//	                           SetPXEBootFirst.
+//
+//	"os"                     — OS entries lead BootOrder; the first PXE entry
+//	                           (if any) is moved to second position.  Used for
+//	                           login / storage / service nodes that the
+//	                           operator wants to cold-boot from disk by
+//	                           default; PXE remains available as a fallback.
+//
+// The function is a TRUE no-op on:
+//
+//   - BIOS hosts (no /sys/firmware/efi).  efibootmgr is meaningless without
+//     UEFI variables; we exit at the predicate.
+//   - UEFI hosts where the requested policy is already satisfied.  We avoid an
+//     unnecessary `efibootmgr -o` write that would dirty NVRAM on every deploy.
+//
+// Errors are wrapped+returned so the deploy caller can decide whether to fail
+// the deploy or just log and continue.  finalize.go logs as a warning — the
+// node will boot via removable-media auto-discovery regardless of NVRAM
+// order, and an at-most-one extra power-cycle is the worst-case downside.
+//
+// Implementation note: the executable invoked is always `efibootmgr`; the
+// argv we generate is exactly:
+//
+//	efibootmgr -o <BOOT0001>,<BOOT0002>,...
+//
+// Tests verify this argv directly via the bootOrderArgs helper so the
+// contract is testable without a real UEFI host.
+func ApplyBootOrderPolicy(ctx context.Context, policy string) error {
 	if !isUEFISystem() {
 		return nil
 	}
-	if err := SetPXEBootFirst(ctx); err != nil {
-		return fmt.Errorf("efiboot: RepairBootOrderForReimage: %w", err)
+	switch policy {
+	case "", "auto", "network":
+		// Existing behaviour — PXE first, OS second.  Already idempotent.
+		if err := SetPXEBootFirst(ctx); err != nil {
+			return fmt.Errorf("efiboot: ApplyBootOrderPolicy(network): %w", err)
+		}
+		return nil
+	case "os":
+		return setOSBootFirst(ctx)
+	default:
+		return fmt.Errorf("efiboot: unknown boot-order policy %q (want auto/network/os)", policy)
+	}
+}
+
+// setOSBootFirst reorders NVRAM BootOrder so an OS entry leads, with the
+// first PXE / network entry moved to second position.  Used by the "os"
+// policy.  Behaviour mirrors SetPXEBootFirst except for the leadership rule.
+//
+// "OS entry" is defined as any entry that does NOT match the
+// pxeEntryLabelMatch heuristic — symmetry with the network-first case keeps
+// the two paths in sync as new firmware label conventions are added.
+func setOSBootFirst(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "efibootmgr", "-v").Output()
+	if err != nil {
+		return fmt.Errorf("efiboot: setOSBootFirst: efibootmgr unavailable: %w", err)
+	}
+	currentOrder := parseBootOrder(string(out))
+	if len(currentOrder) == 0 {
+		return fmt.Errorf("efiboot: setOSBootFirst: no BootOrder found")
+	}
+	entries, err := listBootEntries(ctx)
+	if err != nil {
+		return fmt.Errorf("efiboot: setOSBootFirst: list entries: %w", err)
+	}
+
+	labelByNum := make(map[string]string, len(entries))
+	for _, e := range entries {
+		labelByNum[e.BootNum] = e.Label
+	}
+
+	osIdx := -1
+	for i, num := range currentOrder {
+		if !pxeEntryLabelMatch(labelByNum[strings.TrimSpace(num)]) {
+			osIdx = i
+			break
+		}
+	}
+	if osIdx < 0 {
+		// No OS entry in NVRAM — nothing to promote.  Common on a fresh OVMF
+		// VM where only PXE entries exist; the policy is simply inapplicable
+		// until an OS is installed.
+		return nil
+	}
+	if osIdx == 0 {
+		return nil
+	}
+
+	newOrder := make([]string, 0, len(currentOrder))
+	newOrder = append(newOrder, strings.TrimSpace(currentOrder[osIdx]))
+	for i, num := range currentOrder {
+		if i != osIdx {
+			newOrder = append(newOrder, strings.TrimSpace(num))
+		}
+	}
+
+	args := bootOrderArgs(newOrder)
+	cmd := exec.CommandContext(ctx, "efibootmgr", args...)
+	if cmdOut, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("efiboot: setOSBootFirst: efibootmgr %v: %w\noutput: %s",
+			args, err, string(cmdOut))
 	}
 	return nil
+}
+
+// bootOrderArgs returns the argv slice handed to efibootmgr to set BootOrder
+// to the supplied sequence.  Centralised so the unit test for
+// ApplyBootOrderPolicy can pin the contract without spawning a real
+// efibootmgr process.
+func bootOrderArgs(order []string) []string {
+	return []string{"-o", strings.Join(order, ",")}
 }

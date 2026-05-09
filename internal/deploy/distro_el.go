@@ -94,7 +94,7 @@ func installELGRUBEFI(ctx *bootloaderCtx) error {
 			goCtx = c
 		}
 	}
-	if err := runGrub2InstallEFIInChroot(goCtx, mountRoot); err != nil {
+	if err := runGrub2InstallEFIInChroot(goCtx, mountRoot, ctx.BootOrderPolicy); err != nil {
 		return &BootloaderError{
 			Targets: []string{ctx.TargetDisk},
 			Cause:   fmt.Errorf("UEFI: grub2-install --target=x86_64-efi in chroot: %w", err),
