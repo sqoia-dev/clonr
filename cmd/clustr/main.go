@@ -138,7 +138,8 @@ func init() {
 		newIPMIPXECmd(),
 		newIPMISensorsCmd(),
 		newIPMITestBootFlipDirectCmd(),
-		newIPMISELCmd(), // #129
+		newIPMISELCmd(),  // #129
+		newIPMINodeCmd(), // Sprint 34: clustr ipmi node <id> {power,sel,sensors}
 	)
 	rootCmd.AddCommand(ipmiCmd)
 

@@ -2020,6 +2020,29 @@ func (s *Server) buildRouter() chi.Router {
 			// CFG-4: BMC connection test.
 			r.Post("/nodes/{id}/bmc/test", ipmiH.TestBMC)
 
+			// Sprint 34 IPMI-MIN: admin-scoped /ipmi/* family federated
+			// through clustr-privhelper (which runs freeipmi as root). The
+			// legacy /power /sel /sensors routes above remain on the
+			// in-tree ipmitool wrapper; the /ipmi/* family is the new
+			// privhelper-federated path the CLI's
+			// `clustr ipmi node <id> {power,sel,sensors}` subcommand hits.
+			ipmiAdminH := &handlers.IPMIAdminHandler{
+				DB:            handlers.NewConsoleDBAdapter(s.db),
+				PrivhelperOps: handlers.NewRealPrivhelperOps(),
+			}
+			r.With(requireRole("admin")).Post("/nodes/{id}/ipmi/power/{action}", ipmiAdminH.PowerAction)
+			r.With(requireRole("admin")).Get("/nodes/{id}/ipmi/sel", ipmiAdminH.GetSEL)
+			r.With(requireRole("admin")).Delete("/nodes/{id}/ipmi/sel", ipmiAdminH.ClearSEL)
+			r.With(requireRole("admin")).Get("/nodes/{id}/ipmi/sensors", ipmiAdminH.GetSensors)
+
+			// Sprint 34 SERIAL-CONSOLE: dedicated WS bridge for ipmitool
+			// sol activate. Single-active-session per node; the helper
+			// runs ipmitool as root via clustr-privhelper. Admin-only;
+			// wsTokenLift lifts ?token= into Authorization for browser WS
+			// clients.
+			solH := handlers.NewSOLConsoleHandler(handlers.NewConsoleDBAdapter(s.db))
+			r.With(wsTokenLift, requireRole("admin")).Get("/nodes/{id}/console/sol", solH.HandleSOL)
+
 			// Reimage — queue, track and retry node reimages via the power provider.
 			// Create requires group-scoped operator access.
 			r.With(requireGroupAccess("id", s.db)).Post("/nodes/{id}/reimage", reimageH.Create)
