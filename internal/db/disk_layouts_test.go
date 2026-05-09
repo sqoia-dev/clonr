@@ -108,8 +108,19 @@ func TestDiskLayout_CreateGetList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 2 {
-		t.Errorf("list len = %d, want 2", len(list))
+	// Migration 110 seeds clustr-default-uefi and clustr-default-bios so the
+	// list always contains at least those two plus the two layouts inserted
+	// above.  Assert that our two created rows are in the list rather than
+	// pinning the exact length.
+	seen := map[string]bool{}
+	for _, dl := range list {
+		seen[dl.ID] = true
+	}
+	if !seen[dl1.ID] {
+		t.Errorf("created dl1 (%q) missing from list", dl1.ID)
+	}
+	if !seen[dl2.ID] {
+		t.Errorf("created dl2 (%q) missing from list", dl2.ID)
 	}
 }
 
