@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
@@ -36,6 +36,8 @@ import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
+import { BootSettingsModal } from "@/components/BootSettingsModal"
+import { HostlistInput } from "@/components/HostlistInput"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
@@ -348,11 +350,26 @@ function BulkAddNodes({ onSuccess, readyImages }: { onSuccess: () => void; ready
   const [results, setResults] = React.useState<BatchResult[]>([])
   const [submitted, setSubmitted] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
+  // HOSTLIST: live hostlist preview state for the CSV generator helper
+  const [hostlistHelper, setHostlistHelper] = React.useState("")
+  const [hostlistExpanded, setHostlistExpanded] = React.useState<string[]>([])
 
   function handlePreview() {
     setResults([])
     setSubmitted(false)
     setRows(parseBulkInput(raw))
+  }
+
+  // Generate stub CSV lines from the hostlist expansion and append to raw.
+  function handleHostlistGenerate() {
+    if (hostlistExpanded.length === 0) return
+    const header = raw.trim() === "" ? "hostname,mac,ip,role\n" : ""
+    const csvLines = hostlistExpanded.map((h) => `${h},,,`).join("\n")
+    setRaw((prev) => (prev.trim() ? prev.trimEnd() + "\n" + csvLines : header + csvLines))
+    setRows([])
+    setResults([])
+    setHostlistHelper("")
+    setHostlistExpanded([])
   }
 
   async function handleSubmit() {
@@ -390,6 +407,34 @@ function BulkAddNodes({ onSuccess, readyImages }: { onSuccess: () => void; ready
 
   return (
     <div className="space-y-4">
+      {/* HOSTLIST: range helper */}
+      <div className="rounded-md border border-border bg-secondary/10 px-3 py-3 space-y-2">
+        <p className="text-xs font-medium text-muted-foreground">Hostlist range helper</p>
+        <p className="text-xs text-muted-foreground">
+          Enter a range pattern (e.g. <code className="font-mono">gpu[001-128]</code>) to generate
+          hostname stubs in the CSV below. Fill in the MAC addresses after.
+        </p>
+        <div className="flex gap-2 items-start">
+          <HostlistInput
+            id="bulk-hostlist-helper"
+            value={hostlistHelper}
+            onChange={setHostlistHelper}
+            onExpanded={setHostlistExpanded}
+            placeholder="gpu[001-128] or compute[01-12,20]"
+            className="flex-1"
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0"
+            disabled={hostlistExpanded.length === 0}
+            onClick={handleHostlistGenerate}
+          >
+            Generate CSV
+          </Button>
+        </div>
+      </div>
       <div className="space-y-1">
         <label className="text-sm text-muted-foreground">Paste CSV or YAML</label>
         <textarea
@@ -1042,6 +1087,8 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
   const [tagInput, setTagInput] = React.useState("")
   // #152: per-node detail tabs
   const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
+  // BOOT-SETTINGS-MODAL: controls the boot settings dialog
+  const [bootSettingsOpen, setBootSettingsOpen] = React.useState(false)
 
   const isController = node.tags?.includes("controller")
   const editRemovesController = isController && !editTags.includes("controller")
@@ -1094,6 +1141,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
   }
 
   return (
+    <>
     <Sheet open onOpenChange={(v) => !v && onClose()}>
       <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
         <SheetHeader>
@@ -1280,6 +1328,20 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                 <SlurmNodeSection node={node} />
                 <ReimageFlow node={node} autoExpand={autoReimage} />
                 <CaptureNodeFlow node={node} />
+
+                {/* BOOT-SETTINGS-MODAL: inline trigger */}
+                <div className="pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full gap-1.5 text-xs"
+                    onClick={() => setBootSettingsOpen(true)}
+                  >
+                    <Settings2 className="h-3.5 w-3.5" />
+                    Change Boot Settings…
+                  </Button>
+                </div>
+
                 <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
               </TabsContent>
 
@@ -1307,6 +1369,14 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
         </div>
       </SheetContent>
     </Sheet>
+
+    {/* BOOT-SETTINGS-MODAL */}
+    <BootSettingsModal
+      open={bootSettingsOpen}
+      onClose={() => setBootSettingsOpen(false)}
+      node={node}
+    />
+    </>
   )
 }
 

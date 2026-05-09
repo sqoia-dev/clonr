@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Plus, Users, Pencil, Trash2, AlertTriangle, Play } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { HostlistInput } from "@/components/HostlistInput"
 import {
   Sheet,
   SheetContent,
@@ -250,6 +251,8 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
   const [deleteExpanded, setDeleteExpanded] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState("")
   const [reimageExpanded, setReimageExpanded] = React.useState(false)
+  const [hostlistValue, setHostlistValue] = React.useState("")
+  const [hostlistExpanded, setHostlistExpanded] = React.useState<string[]>([])
 
   // Fetch members.
   const { data: membersData, refetch: refetchMembers } = useQuery<GroupMembersResponse>({
@@ -293,10 +296,10 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
   })
 
   const addMemberMutation = useMutation({
-    mutationFn: (nodeId: string) =>
+    mutationFn: (nodeIds: string[]) =>
       apiFetch<GroupMembersResponse>(`/api/v1/node-groups/${group.id}/members`, {
         method: "POST",
-        body: JSON.stringify({ node_ids: [nodeId] }),
+        body: JSON.stringify({ node_ids: nodeIds }),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["node-groups"] })
@@ -304,6 +307,20 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
     },
     onError: (err) => toast({ variant: "destructive", title: "Failed to add member", description: String(err) }),
   })
+
+  function handleHostlistAdd() {
+    if (hostlistExpanded.length === 0) return
+    const matched = allNodes
+      .filter((n) => !memberIds.has(n.id) && hostlistExpanded.includes(n.hostname))
+      .map((n) => n.id)
+    if (matched.length === 0) {
+      toast({ variant: "destructive", title: "No matching nodes", description: "None of the expanded hostnames are registered non-members." })
+      return
+    }
+    addMemberMutation.mutate(matched)
+    setHostlistValue("")
+    setHostlistExpanded([])
+  }
 
   const removeMemberMutation = useMutation({
     mutationFn: (nodeId: string) =>
@@ -405,15 +422,37 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
                 ))}
               </div>
             )}
-            {/* Add member picker */}
+            {/* Add member — hostlist range or dropdown */}
             {allNodes.filter((n) => !memberIds.has(n.id)).length > 0 && (
-              <div className="mt-2">
+              <div className="mt-2 space-y-2">
+                <p className="text-xs text-muted-foreground">Add by hostlist range or single hostname:</p>
+                <div className="flex gap-2 items-start">
+                  <HostlistInput
+                    value={hostlistValue}
+                    onChange={setHostlistValue}
+                    onExpanded={setHostlistExpanded}
+                    placeholder="node[01-12] or compute01"
+                    className="flex-1"
+                    id="group-hostlist-add"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8 shrink-0"
+                    disabled={hostlistExpanded.length === 0 || addMemberMutation.isPending}
+                    onClick={handleHostlistAdd}
+                  >
+                    {addMemberMutation.isPending ? "Adding…" : "Add"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">Or pick from list:</p>
+                <div>
                 <select
                   className="w-full text-xs border border-border bg-background rounded-md px-2 py-1.5"
                   defaultValue=""
                   onChange={(e) => {
                     if (e.target.value) {
-                      addMemberMutation.mutate(e.target.value)
+                      addMemberMutation.mutate([e.target.value])
                       e.target.value = ""
                     }
                   }}
@@ -423,6 +462,7 @@ function GroupDetailSheet({ group, onClose, onDeleted, onUpdated }: GroupDetailS
                     <option key={n.id} value={n.id}>{n.hostname || n.id}</option>
                   ))}
                 </select>
+                </div>
               </div>
             )}
           </GroupSection>
