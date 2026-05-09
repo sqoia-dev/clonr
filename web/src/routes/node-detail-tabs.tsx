@@ -1,9 +1,10 @@
-// node-detail-tabs.tsx — Sensors, Event Log, and Console tabs for the node Sheet (#152)
+// node-detail-tabs.tsx — Sensors, Event Log, Console, and Deploy Log tabs for the node Sheet (#152)
 //
-// Three independent components, each mounted only when their tab is active:
+// Four independent components, each mounted only when their tab is active:
 //   <SensorsTab nodeId> — recharts sparklines + sensor table from /api/v1/nodes/{id}/stats
 //   <EventLogTab nodeId> — SEL list from /api/v1/nodes/{id}/sel with level/regex/head-tail toolbar
 //   <ConsoleTab nodeId> — xterm.js terminal over WS /api/v1/console/{node_id}
+//   <DeployLogTab nodeId primaryMac> — live SSE log from GET /api/v1/logs/stream?component=deploy&node_mac=<mac>
 
 import * as React from "react"
 import { useQuery, useMutation } from "@tanstack/react-query"
@@ -18,10 +19,10 @@ import {
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { RefreshCw, Trash2, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
+import { RefreshCw, Trash2, AlertTriangle, ChevronDown, ChevronRight, WifiOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { apiFetch, wsUrl } from "@/lib/api"
+import { apiFetch, sseUrl, wsUrl } from "@/lib/api"
 import { sseReconnectDelay } from "@/lib/sse-backoff"
 import { cn } from "@/lib/utils"
 import { toast } from "@/hooks/use-toast"
@@ -786,6 +787,393 @@ export function ConsoleTab({ nodeId }: { nodeId: string }) {
       <p className="text-[10px] text-muted-foreground/60">
         Copy: Ctrl+Shift+C (Linux/Win) / Cmd+C (Mac) &nbsp;·&nbsp; Paste: Ctrl+Shift+V / Cmd+V
       </p>
+    </div>
+  )
+}
+
+// ─── Deploy Log Tab (STREAM-LOG-UI) ──────────────────────────────────────────
+//
+// Streams install-log entries from GET /api/v1/logs/stream?component=deploy&node_mac=<mac>.
+// The server emits newline-delimited JSON; each line is a LogEntry.
+// Auto-reconnects on disconnect using sseReconnectDelay jitter.
+// Auto-scrolls to newest unless the operator has scrolled up (pause-on-scroll-up).
+// Phase filter chips hide noise from completed phases.
+// Max 5000 rows kept in memory; oldest fall off automatically.
+
+// LogEntry mirrors pkg/api/types.go LogEntry (+ STREAM-LOG-PHASE adds `phase`).
+export interface LogEntry {
+  id?: string
+  node_mac?: string
+  component?: string
+  level: string
+  message: string
+  ts: number       // Unix ms (the server field is `ts` in ms per the wire spec)
+  phase?: string   // STREAM-LOG-PHASE field — may be absent before that ships
+}
+
+const MAX_LOG_ROWS = 5000
+
+// DEPLOY_LOG_RECONNECT_MAX caps auto-reconnect before giving up.
+const DEPLOY_LOG_RECONNECT_MAX = 12
+
+// Phase colour palette — stable mapping so colours don't shift between renders.
+const PHASE_COLORS: Record<string, string> = {
+  preflight:    "bg-sky-500/20    text-sky-400    border-sky-500/30",
+  partitioning: "bg-violet-500/20 text-violet-400 border-violet-500/30",
+  formatting:   "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  mount:        "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
+  downloading:  "bg-blue-500/20   text-blue-400   border-blue-500/30",
+  extracting:   "bg-cyan-500/20   text-cyan-400   border-cyan-500/30",
+  chroot:       "bg-teal-500/20   text-teal-400   border-teal-500/30",
+  bootloader:   "bg-amber-500/20  text-amber-400  border-amber-500/30",
+  dracut:       "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  finalizing:   "bg-lime-500/20   text-lime-400   border-lime-500/30",
+  phonehome:    "bg-green-500/20  text-green-400  border-green-500/30",
+  deploy:       "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+}
+
+function phaseBadgeClass(phase: string | undefined): string {
+  if (!phase) return "bg-secondary text-muted-foreground border-border"
+  return PHASE_COLORS[phase.toLowerCase()] ?? "bg-secondary text-muted-foreground border-border"
+}
+
+const LEVEL_COLORS: Record<string, string> = {
+  error: "text-destructive",
+  warn:  "text-status-warning",
+  fatal: "text-destructive font-semibold",
+  debug: "text-muted-foreground/60",
+}
+
+function levelClass(level: string): string {
+  return LEVEL_COLORS[level.toLowerCase()] ?? "text-foreground"
+}
+
+function formatLogTs(tsMs: number): string {
+  const d = new Date(tsMs)
+  const hh = String(d.getHours()).padStart(2, "0")
+  const mm = String(d.getMinutes()).padStart(2, "0")
+  const ss = String(d.getSeconds()).padStart(2, "0")
+  const ms = String(d.getMilliseconds()).padStart(3, "0")
+  return `${hh}:${mm}:${ss}.${ms}`
+}
+
+interface DeployLogTabProps {
+  nodeId: string
+  primaryMac: string
+}
+
+export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps) {
+  const [entries, setEntries] = React.useState<LogEntry[]>([])
+  const [connected, setConnected] = React.useState(false)
+  const [attempts, setAttempts] = React.useState(0)
+  const [failed, setFailed] = React.useState(false)
+  const [phaseFilter, setPhaseFilter] = React.useState<string | null>(null)
+  // hasWarnOrError: tab-level indicator dot — turns true when any warn/error arrives.
+  const [hasWarnOrError, setHasWarnOrError] = React.useState(false)
+
+  // Scroll control: userScrolledUp suppresses auto-scroll.
+  const scrollRef = React.useRef<HTMLDivElement>(null)
+  const userScrolledUpRef = React.useRef(false)
+  const mountedRef = React.useRef(true)
+  const esRef = React.useRef<EventSource | null>(null)
+  const reconnectTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  // attemptRef keeps the latest attempt count stable inside the closure.
+  const attemptRef = React.useRef(0)
+
+  // Deduplicate by id when the server provides one, otherwise accept all.
+  const seenIdsRef = React.useRef<Set<string>>(new Set())
+
+  React.useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      cleanup()
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function cleanup() {
+    if (esRef.current) {
+      esRef.current.onopen = null
+      esRef.current.onerror = null
+      esRef.current.onmessage = null
+      esRef.current.close()
+      esRef.current = null
+    }
+  }
+
+  // Connect / reconnect whenever primaryMac changes (node switched).
+  React.useEffect(() => {
+    cleanup()
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    setEntries([])
+    seenIdsRef.current.clear()
+    setConnected(false)
+    setFailed(false)
+    setAttempts(0)
+    attemptRef.current = 0
+    userScrolledUpRef.current = false
+
+    connect(0)
+
+    return () => {
+      cleanup()
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primaryMac])
+
+  function connect(attempt: number) {
+    if (!mountedRef.current) return
+
+    const path = `/api/v1/logs/stream?component=deploy&node_mac=${encodeURIComponent(primaryMac)}`
+    const es = new EventSource(sseUrl(path), { withCredentials: true })
+    esRef.current = es
+
+    es.onopen = () => {
+      if (!mountedRef.current) { es.close(); return }
+      attemptRef.current = 0
+      setAttempts(0)
+      setConnected(true)
+      setFailed(false)
+    }
+
+    es.onmessage = (ev) => {
+      if (!mountedRef.current) return
+      try {
+        const entry = JSON.parse(ev.data) as LogEntry
+        // Deduplicate if the server provides an id.
+        if (entry.id) {
+          if (seenIdsRef.current.has(entry.id)) return
+          seenIdsRef.current.add(entry.id)
+        }
+        if (entry.level === "warn" || entry.level === "error" || entry.level === "fatal") {
+          setHasWarnOrError(true)
+        }
+        setEntries((prev) => {
+          const next = [...prev, entry]
+          // Evict oldest when over the cap.
+          return next.length > MAX_LOG_ROWS ? next.slice(next.length - MAX_LOG_ROWS) : next
+        })
+      } catch {
+        // malformed line — ignore
+      }
+    }
+
+    es.onerror = () => {
+      if (!mountedRef.current) return
+      setConnected(false)
+      es.close()
+      esRef.current = null
+
+      const nextAttempt = attemptRef.current + 1
+      attemptRef.current = nextAttempt
+      setAttempts(nextAttempt)
+
+      if (nextAttempt > DEPLOY_LOG_RECONNECT_MAX) {
+        setFailed(true)
+        return
+      }
+
+      const delay = sseReconnectDelay(nextAttempt)
+      reconnectTimerRef.current = setTimeout(() => {
+        if (mountedRef.current) connect(nextAttempt)
+      }, delay)
+    }
+  }
+
+  // Auto-scroll to bottom — only when user hasn't scrolled up.
+  React.useEffect(() => {
+    if (userScrolledUpRef.current) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [entries])
+
+  function handleScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    // If user is within 40px of the bottom, re-enable auto-scroll.
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    userScrolledUpRef.current = distFromBottom > 40
+  }
+
+  // Collect distinct phases present in the current entry set.
+  const presentPhases = React.useMemo(() => {
+    const seen = new Set<string>()
+    for (const e of entries) {
+      if (e.phase) seen.add(e.phase)
+    }
+    return [...seen]
+  }, [entries])
+
+  const filteredEntries = React.useMemo(() => {
+    if (!phaseFilter) return entries
+    return entries.filter((e) => e.phase === phaseFilter)
+  }, [entries, phaseFilter])
+
+  return (
+    <div className="flex flex-col gap-3 py-2" style={{ height: "100%" }}>
+      {/* ── Status bar ── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          {connected ? (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-status-healthy animate-pulse" />
+              <span className="text-xs text-status-healthy">Live</span>
+            </>
+          ) : failed ? (
+            <>
+              <WifiOff className="h-3.5 w-3.5 text-destructive" />
+              <span className="text-xs text-destructive">Disconnected</span>
+            </>
+          ) : (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-status-warning animate-pulse" />
+              <span className="text-xs text-muted-foreground">
+                {attempts > 0 ? `Reconnecting (attempt ${attempts})…` : "Connecting…"}
+              </span>
+            </>
+          )}
+        </div>
+
+        {hasWarnOrError && (
+          <span className="inline-flex items-center gap-1 rounded border border-status-warning/30 bg-status-warning/10 px-1.5 py-0.5 text-[10px] text-status-warning">
+            <AlertTriangle className="h-3 w-3" />
+            Warnings / errors
+          </span>
+        )}
+
+        <span className="text-xs text-muted-foreground ml-auto">
+          {filteredEntries.length.toLocaleString()} line{filteredEntries.length !== 1 ? "s" : ""}
+          {entries.length > filteredEntries.length && (
+            <span className="ml-1 opacity-60">(of {entries.length.toLocaleString()})</span>
+          )}
+        </span>
+      </div>
+
+      {/* ── Phase filter chips ── */}
+      {presentPhases.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 items-center">
+          <span className="text-[10px] text-muted-foreground">Phase:</span>
+          <button
+            className={cn(
+              "rounded border px-2 py-0.5 text-[10px] transition-colors",
+              !phaseFilter
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-secondary text-muted-foreground border-border hover:bg-secondary/80",
+            )}
+            onClick={() => setPhaseFilter(null)}
+          >
+            All
+          </button>
+          {presentPhases.map((phase) => (
+            <button
+              key={phase}
+              className={cn(
+                "rounded border px-2 py-0.5 text-[10px] font-mono transition-colors",
+                phaseFilter === phase
+                  ? phaseBadgeClass(phase) + " opacity-100"
+                  : "bg-secondary text-muted-foreground border-border hover:bg-secondary/80",
+              )}
+              onClick={() => setPhaseFilter((prev) => prev === phase ? null : phase)}
+            >
+              {phase}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Empty state ── */}
+      {entries.length === 0 && (
+        <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+          <p className="text-sm text-muted-foreground">No active install log</p>
+          <p className="text-xs text-muted-foreground/60">
+            Waiting for a deploy to start on this node
+          </p>
+        </div>
+      )}
+
+      {/* ── Log rows ── */}
+      {filteredEntries.length > 0 && (
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-auto rounded-md border border-border bg-[#09090b] font-mono text-xs"
+          style={{ minHeight: "300px" }}
+        >
+          <table className="w-full border-collapse">
+            <tbody>
+              {filteredEntries.map((entry, i) => (
+                <tr
+                  key={entry.id ? entry.id : i}
+                  className={cn(
+                    "border-t border-white/5 hover:bg-white/5 transition-colors",
+                    i === 0 && "border-t-0",
+                    (entry.level === "error" || entry.level === "fatal") && "bg-destructive/10",
+                    entry.level === "warn" && "bg-status-warning/5",
+                  )}
+                >
+                  {/* Timestamp gutter */}
+                  <td className="px-3 py-0.5 whitespace-nowrap text-[10px] text-white/30 select-none w-[100px]">
+                    {formatLogTs(entry.ts)}
+                  </td>
+
+                  {/* Phase badge */}
+                  <td className="px-1 py-0.5 w-[110px]">
+                    {entry.phase ? (
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded border px-1.5 py-0 text-[9px] uppercase tracking-wide font-medium",
+                          phaseBadgeClass(entry.phase),
+                        )}
+                      >
+                        {entry.phase}
+                      </span>
+                    ) : (
+                      <span className="text-white/20 text-[9px]">—</span>
+                    )}
+                  </td>
+
+                  {/* Level */}
+                  <td className={cn("px-1 py-0.5 w-[40px] text-[9px] uppercase font-medium", levelClass(entry.level))}>
+                    {entry.level}
+                  </td>
+
+                  {/* Message */}
+                  <td className="px-2 py-0.5 text-white/80 break-all">
+                    {entry.message}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Jump to latest button (shown when user has scrolled up) ── */}
+      {filteredEntries.length > 0 && (
+        <button
+          className="self-end text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+          onClick={() => {
+            userScrolledUpRef.current = false
+            const el = scrollRef.current
+            if (el) el.scrollTop = el.scrollHeight
+          }}
+        >
+          Jump to latest
+        </button>
+      )}
+
+      {failed && (
+        <div className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive flex items-center gap-2">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            Lost connection after {DEPLOY_LOG_RECONNECT_MAX} reconnect attempts.
+            No active deploy session on this node, or the server is unreachable.
+          </span>
+        </div>
+      )}
     </div>
   )
 }
