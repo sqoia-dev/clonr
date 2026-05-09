@@ -836,8 +836,8 @@ export interface LogEntry {
   message: string
   /** Server emits `timestamp` (Unix ms). The `ts` alias is kept for back-compat
    *  with any test fixtures that set it directly; the renderer uses `timestamp`. */
-  timestamp: number  // Unix ms — matches pkg/api/types.go `json:"timestamp"`
-  ts?: number        // legacy alias — do not use in new code
+  timestamp?: number  // Unix ms — matches pkg/api/types.go `json:"timestamp"`
+  ts?: number         // legacy alias — do not use in new code
   phase?: string     // STREAM-LOG-PHASE field — may be absent before that ships
 }
 
