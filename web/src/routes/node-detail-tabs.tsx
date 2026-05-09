@@ -834,9 +834,9 @@ export interface LogEntry {
   component?: string
   level: string
   message: string
-  timestamp: number  // Unix ms — server emits `timestamp` (JSON tag in LogEntry)
-  ts?: number        // Legacy alias — keep for backward compat with older server builds
-  phase?: string   // STREAM-LOG-PHASE field — may be absent before that ships
+  timestamp?: number  // Unix ms — matches pkg/api/types.go `json:"timestamp"`
+  ts?: number         // legacy alias — do not use in new code
+  phase?: string     // STREAM-LOG-PHASE field — may be absent before that ships
 }
 
 const MAX_LOG_ROWS = 5000
