@@ -18,9 +18,9 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/ipmi"
 	"github.com/sqoia-dev/clustr/internal/server"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // ifaceNameRe validates that a network interface name contains only safe
@@ -1259,8 +1259,10 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 //  3. Generate BLS entries from scratch under /boot/loader/entries/ using the
 //     new machine-id and target root UUID.
 //  4. Prepare the RAID dracut config (if RAID layout).
-//  5. Run dracut --regenerate-all --no-hostonly --force inside a chroot to
-//     rebuild initramfs with the correct modules for the target hardware.
+//  5. Run dracut per-kver inside a chroot with portability flags
+//     (-fv -N --lvmconf --force-add mdraid --force-add lvm) to rebuild
+//     initramfs with the correct modules for the target hardware. See
+//     regen_initramfs.go for the per-flag rationale (Sprint 33 DRACUT-REGEN).
 //  6. Run kernel-install add for each production kernel so a BLS entry exists
 //     even when Anaconda's %post did not call kernel-install during image build.
 //  7. Pin GRUB saved_entry to the production kernel (prevents rescue-first boot).
@@ -1469,22 +1471,18 @@ func applyBootConfig(ctx context.Context, mountRoot, targetDisk string, layout a
 		}
 	}
 
-	// --no-hostonly: build a generic initramfs (hardware-agnostic, not tailored
-	// to the deploy host's physical devices). Required because we are running in
-	// a PXE initramfs environment with different hardware than the target node.
-	// --force: overwrite any existing initramfs images without prompting.
-	// --regenerate-all: rebuild for every installed kernel version.
+	// Sprint 33 DRACUT-REGEN: regenerate the initramfs per installed kernel
+	// version with portability flags (--lvmconf, --force-add mdraid, --force-add
+	// lvm) so an image captured on one storage controller (e.g. virtio) boots
+	// on hardware with a different controller (e.g. PERC RAID, SATA AHCI).
+	// See dracut command construction + flag rationale in regen_initramfs.go.
+	//
+	// Iterating per-kver (instead of --regenerate-all) lets the structured-log
+	// heartbeat surface progress on each kernel rather than a single 30-90s
+	// silent pause; failures on one kver do not block the next.
 	reportStep("Rebuilding initramfs")
 	log.Info().Msg("  → Rebuilding initramfs with dracut...")
-	log.Info().Msg("finalize/boot: rebuilding initramfs via dracut --no-hostonly --regenerate-all")
-	dracutCmd := exec.CommandContext(ctx, "chroot", mountRoot,
-		"dracut", "--force", "--no-hostonly", "--regenerate-all")
-	if err := runAndLog(ctx, "dracut", dracutCmd); err != nil {
-		log.Warn().Err(err).
-			Msg("WARNING finalize/boot: dracut --regenerate-all failed — initramfs may lack hardware drivers for target; node may not boot on different hardware")
-	} else {
-		log.Info().Msg("finalize/boot: dracut complete")
-	}
+	runDracutInChroot(ctx, mountRoot, reportStep)
 
 	// ── 7. Delete all BLS entries — hand-crafted grub.cfg is sole boot authority ─
 	// Option A: clustr writes grub.cfg, clustr controls entry order, production
@@ -1970,7 +1968,6 @@ mdadmconf=yes
 	}
 	return nil
 }
-
 
 // getUUID returns the filesystem UUID of a block device using blkid.
 // Returns an error if blkid is unavailable or the device has no UUID (e.g.
@@ -2725,10 +2722,10 @@ func writeSlurmConfig(ctx context.Context, mountRoot, nodeID string, slurmCfg *a
 	// whose existence gates the enable call. If the binary is absent we log INFO
 	// and skip — the node boots cleanly without that service.
 	svcBinaryMap := map[string]string{
-		"munge.service":    "usr/sbin/munged",
-		"slurmd.service":   "usr/sbin/slurmd",
+		"munge.service":     "usr/sbin/munged",
+		"slurmd.service":    "usr/sbin/slurmd",
 		"slurmctld.service": "usr/sbin/slurmctld",
-		"slurmdbd.service": "usr/sbin/slurmdbd",
+		"slurmdbd.service":  "usr/sbin/slurmdbd",
 	}
 
 	// Determine which services to enable based on node role.
@@ -3332,10 +3329,10 @@ func extractELVersion(osReleaseContent string) string {
 // elVersionFromURL returns "9" or "10" (or "") by scanning a repo URL for
 // EL version indicators. Recognises two URL patterns:
 //
-//   1. clustr bundled-repo pattern (PR3): "/repo/el9-x86_64/" → "9"
-//      or "/repo/el10-x86_64/" → "10"
-//   2. OpenHPC / SchedMD pattern: "EL_9" or "EL_10" substrings (kept as
-//      fallback for operator-configured custom repo URLs).
+//  1. clustr bundled-repo pattern (PR3): "/repo/el9-x86_64/" → "9"
+//     or "/repo/el10-x86_64/" → "10"
+//  2. OpenHPC / SchedMD pattern: "EL_9" or "EL_10" substrings (kept as
+//     fallback for operator-configured custom repo URLs).
 //
 // The clustr pattern is checked first. This function must not break when
 // given an OpenHPC URL — both patterns may legitimately appear in the URL

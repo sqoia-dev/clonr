@@ -1629,6 +1629,27 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	}
 	// ──────────────────────────────────────────────────────────────────────
 
+	// ── Sprint 33 MULTICAST-JITTER ──────────────────────────────────────────
+	// When the deploy received its image via multicast, sleep a deterministic
+	// 0-60s offset (seeded by primary MAC) before posting /deploy-complete.
+	// This spreads 256-node-fleet POSTs over a 60s window so the server's
+	// /deploy-complete request rate never spikes above ~5/s even when every
+	// node finishes the multicast transfer in the same one-second window.
+	//
+	// The unicast path is unaffected — it is already serialized by the
+	// per-blob HTTP byte-rate limit, so there is no thundering herd to
+	// suppress. usedMulticast is true iff multicastSessionID != "" AND we
+	// did NOT fall back to unicast (which would have nilled imageStream).
+	usedMulticast := multicastSessionID != "" && imageStream != nil
+	if usedMulticast {
+		jitter := jitterDuration(nodeCfg.PrimaryMAC)
+		deployLog.Info().
+			Str("primary_mac", nodeCfg.PrimaryMAC).
+			Dur("jitter", jitter).
+			Msg("multicast deploy-complete jitter (Sprint 33 MULTICAST-JITTER)")
+	}
+	jitterSleepIfMulticast(usedMulticast, nodeCfg.PrimaryMAC, time.Sleep)
+
 	// ── Deploy complete callback ────────────────────────────────────────────
 	// Tell the server the deploy succeeded. This sets deploy_completed_preboot_at
 	// and clears reimage_pending, transitioning the node to NodeStateDeployedPreboot.
