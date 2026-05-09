@@ -60,13 +60,18 @@ const PROBE_LABELS = [
 
 type ProbeKey = typeof PROBE_LABELS[number]["key"]
 
+/** Returns true when the thrown error is a 404 (probe endpoint returns 404
+ *  when the node has no probe configuration, which is a valid state). */
+function is404Error(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("404:")
+}
+
 function ReachabilityDots({ nodeId }: { nodeId: string }) {
-  const { data } = useQuery<ProbeResult>({
+  const { data, error } = useQuery<ProbeResult>({
     queryKey: ["node-probes", nodeId],
     queryFn: () => apiFetch<ProbeResult>(`/api/v1/nodes/${nodeId}/probes`),
     refetchInterval: 60_000,
     staleTime: 55_000,
-    // Swallow 404/errors — not all nodes have probes configured.
     retry: false,
   })
 
@@ -74,10 +79,28 @@ function ReachabilityDots({ nodeId }: { nodeId: string }) {
     ? new Date(data.checked_at).toLocaleTimeString()
     : null
 
+  // 404 → node has no probe config → grey "not probed" (normal state).
+  // Other errors (5xx, network, auth) → distinct amber dot + tooltip.
+  const hasFetchError = !!error && !is404Error(error)
+
   return (
     <TooltipProvider>
       <div className="flex items-center gap-1" data-testid={`reachability-${nodeId}`}>
-        {PROBE_LABELS.map(({ key, label }) => {
+        {hasFetchError && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                className="h-2 w-2 rounded-full shrink-0 bg-status-warning"
+                aria-label="probe fetch error"
+                data-testid="probe-dot-error"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              Probe fetch failed: {String(error)}
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {!hasFetchError && PROBE_LABELS.map(({ key, label }) => {
           const val: boolean | undefined = data ? (data[key as ProbeKey] as boolean) : undefined
           const color =
             val === true  ? "bg-status-healthy" :
@@ -143,7 +166,15 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
     const errs: Record<string, string> = {}
     if (!hostnameRe.test(hostname)) errs.hostname = "Lowercase letters, digits, hyphens, 1–63 chars"
     setErrors(errs)
-    const iErrs = validateInterfaces(interfaces)
+    let iErrs = validateInterfaces(interfaces)
+    // Require at least one ethernet interface with a non-empty MAC — this is
+    // what drives PXE boot and becomes the node's primary_mac on the server.
+    const hasEthWithMac = interfaces.some(
+      (i) => i.kind === "ethernet" && (i as { mac?: string }).mac?.trim()
+    )
+    if (!hasEthWithMac) {
+      iErrs = { ...iErrs, _global: "At least one Ethernet interface with a MAC address is required" }
+    }
     setIfaceErrors(iErrs)
     return Object.keys(errs).length === 0 && Object.keys(iErrs).length === 0
   }
@@ -273,6 +304,9 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
                     onChange={setInterfaces}
                     errors={ifaceErrors}
                   />
+                  {ifaceErrors._global && (
+                    <p className="text-xs text-destructive mt-1">{ifaceErrors._global}</p>
+                  )}
                 </div>
 
                 <Field label="Base Image">
@@ -743,6 +777,9 @@ export function NodesPage() {
   const [bulkActionPending, setBulkActionPending] = React.useState<string | null>(null)
   const [bulkConfirmInput, setBulkConfirmInput] = React.useState("")
   const [bulkLoading, setBulkLoading] = React.useState(false)
+  // run-command: prompt for command text before dispatching bulk exec
+  const [runCommandOpen, setRunCommandOpen] = React.useState(false)
+  const [runCommandText, setRunCommandText] = React.useState("")
   const qc = useQueryClient()
   // GRP-5: open create group sheet from URL param (Cmd-K)
   const [createGroupOpen, setCreateGroupOpen] = React.useState(false)
@@ -861,7 +898,7 @@ export function NodesPage() {
         url = "/api/v1/nodes/bulk/power/pxe"
       } else if (action === "run-command") {
         url = "/api/v1/exec/bulk"
-        body = { node_ids: nodeIds, command: "" }
+        body = { node_ids: nodeIds, command: runCommandText }
       } else {
         url = `/api/v1/nodes/bulk/${action}`
       }
@@ -894,7 +931,11 @@ export function NodesPage() {
   }
 
   function handleBulkAction(action: string) {
-    if (DESTRUCTIVE_BULK_ACTIONS.has(action)) {
+    if (action === "run-command") {
+      // Open command-text modal before dispatching — prevents sending empty command.
+      setRunCommandText("")
+      setRunCommandOpen(true)
+    } else if (DESTRUCTIVE_BULK_ACTIONS.has(action)) {
       setBulkActionPending(action)
       setBulkConfirmInput("")
     } else {
@@ -1189,6 +1230,48 @@ export function NodesPage() {
               >
                 Clear
               </Button>
+            </div>
+          )}
+
+          {/* Run-command modal — prompts for command text before dispatching bulk exec */}
+          {runCommandOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm" data-testid="run-command-dialog">
+              <div className="w-full max-w-sm rounded-lg border border-border bg-background p-6 shadow-lg space-y-4">
+                <h3 className="text-sm font-semibold">Run command on {selectedNodeIds.size} node{selectedNodeIds.size !== 1 ? "s" : ""}</h3>
+                <Input
+                  autoFocus
+                  className="font-mono text-xs"
+                  placeholder="e.g. systemctl restart slurmctld"
+                  value={runCommandText}
+                  onChange={(e) => setRunCommandText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && runCommandText.trim()) {
+                      setRunCommandOpen(false)
+                      executeBulkAction("run-command")
+                    }
+                  }}
+                  data-testid="run-command-input"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    className="flex-1"
+                    disabled={!runCommandText.trim() || bulkLoading}
+                    onClick={() => { setRunCommandOpen(false); executeBulkAction("run-command") }}
+                    data-testid="run-command-submit"
+                  >
+                    {bulkLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    Run
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { setRunCommandOpen(false); setRunCommandText("") }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
 

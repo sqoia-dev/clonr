@@ -834,7 +834,8 @@ export interface LogEntry {
   component?: string
   level: string
   message: string
-  ts: number       // Unix ms (the server field is `ts` in ms per the wire spec)
+  timestamp: number  // Unix ms — server emits `timestamp` (JSON tag in LogEntry)
+  ts?: number        // Legacy alias — keep for backward compat with older server builds
   phase?: string   // STREAM-LOG-PHASE field — may be absent before that ships
 }
 
@@ -941,6 +942,10 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
     setAttempts(0)
     attemptRef.current = 0
     userScrolledUpRef.current = false
+    // Reset per-node UI state — stale phase filter + warn badge from a previous
+    // node must not persist when the user navigates to a different node.
+    setPhaseFilter(null)
+    setHasWarnOrError(false)
 
     connect(0)
 
@@ -954,7 +959,8 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
   function connect(_attempt: number) {
     if (!mountedRef.current) return
 
-    const path = `/api/v1/logs/stream?component=deploy&node_mac=${encodeURIComponent(primaryMac)}`
+    // Server reads query param `mac` (not `node_mac`) — see internal/server/handlers/logs.go StreamLogs.
+    const path = `/api/v1/logs/stream?component=deploy&mac=${encodeURIComponent(primaryMac)}`
     const es = new EventSource(sseUrl(path), { withCredentials: true })
     esRef.current = es
 
@@ -1143,7 +1149,7 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
                 >
                   {/* Timestamp gutter */}
                   <td className="px-3 py-0.5 whitespace-nowrap text-[10px] text-white/30 select-none w-[100px]">
-                    {formatLogTs(entry.ts)}
+                    {formatLogTs(entry.timestamp ?? entry.ts ?? 0)}
                   </td>
 
                   {/* Phase badge */}
@@ -1266,7 +1272,7 @@ const POWER_ACTIONS = [
   { action: "off",   label: "Power Off", confirmWord: "off" },
   { action: "cycle", label: "Power Cycle", confirmWord: "cycle" },
   { action: "reset", label: "Hard Reset",  confirmWord: "reset" },
-  { action: "soft",  label: "Soft Off",    confirmWord: null },
+  // Soft Off removed: the server has no /power/soft endpoint.
 ] as const
 
 const IPMI_SEL_PAGE_SIZE = 20
@@ -1286,7 +1292,7 @@ function IpmiSeverityPill({ severity }: { severity: string }) {
   const s = severity.toLowerCase()
   const cls =
     s === "critical" ? "bg-destructive/10 text-destructive border-destructive/30" :
-    s === "warning"  ? "bg-status-warning/10 text-status-warning border-status-warning/30" :
+    (s === "warn" || s === "warning") ? "bg-status-warning/10 text-status-warning border-status-warning/30" :
     "bg-muted/30 text-muted-foreground border-border"
   return (
     <span className={cn("inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium", cls)}>

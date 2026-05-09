@@ -58,8 +58,8 @@ function renderModal(props: Partial<React.ComponentProps<typeof BootSettingsModa
   const qc = makeQC()
   qc.setQueryData(["boot-entries"], {
     entries: [
-      { id: "rescue", label: "Rescue Shell", description: "Minimal rescue environment" },
-      { id: "memtest", label: "Memtest86+", description: "Memory diagnostics" },
+      { id: "rescue", name: "Rescue Shell", kind: "rescue", enabled: true },
+      { id: "memtest", name: "Memtest86+", kind: "kernel", enabled: true },
     ],
   })
   const onClose = vi.fn()

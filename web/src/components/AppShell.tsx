@@ -369,7 +369,7 @@ function SystemAlertsPopover() {
   const ref = React.useRef<HTMLDivElement>(null)
 
   // Server returns { alerts: SystemAlert[], count: number } — not a bare array.
-  const { data, isLoading } = useQuery<{ alerts: SystemAlert[]; count: number }>({
+  const { data, isLoading, isError, refetch } = useQuery<{ alerts: SystemAlert[]; count: number }>({
     queryKey: ["system-alerts"],
     queryFn: () => apiFetch<{ alerts: SystemAlert[]; count: number }>("/api/v1/system_alerts"),
     refetchInterval: 30_000,
@@ -465,6 +465,12 @@ function SystemAlertsPopover() {
             {isLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : isError ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground" data-testid="system-alerts-error">
+                <AlertTriangle className="h-6 w-6 text-destructive opacity-60" />
+                <p className="text-sm">Failed to load system alerts</p>
+                <Button variant="ghost" size="sm" onClick={() => refetch()}>Retry</Button>
               </div>
             ) : alerts.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-10 gap-2 text-muted-foreground">

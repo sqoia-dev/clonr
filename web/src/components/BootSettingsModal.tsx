@@ -45,8 +45,9 @@ interface BootEntriesResponse {
 
 export interface BootMenuEntry {
   id: string
-  label: string
-  description?: string
+  name: string
+  kind?: string
+  enabled?: boolean
 }
 
 // ─── BootSettingsModal ─────────────────────────────────────────────────────────
@@ -171,8 +172,7 @@ export function BootSettingsModal({ open, onClose, node }: BootSettingsModalProp
               <option value="">Default (no override)</option>
               {bootEntries.map((entry) => (
                 <option key={entry.id} value={entry.id}>
-                  {entry.label}
-                  {entry.description ? ` — ${entry.description}` : ""}
+                  {entry.name}
                 </option>
               ))}
             </select>
