@@ -112,6 +112,14 @@ func (h *ExternalStatsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // buildExternalStatsResponse stitches the per-source rows into the
 // wire envelope. Exported only at package scope for the unit test in
 // external_stats_test.go.
+//
+// Codex post-ship review issue #11: the envelope's last_seen /
+// expires_at must reflect ONLY the sources we recognise.  The
+// previous implementation updated both timestamps before checking the
+// source, so a stale row from a forward-compat unknown source
+// influenced the envelope while its payload was correctly dropped.
+// We now switch on Source first; only known sources contribute to
+// both the samples map and the envelope timestamps.
 func buildExternalStatsResponse(rows []db.NodeExternalStatRow) externalStatsResponse {
 	resp := externalStatsResponse{
 		Probes: nil,
@@ -127,16 +135,6 @@ func buildExternalStatsResponse(rows []db.NodeExternalStatRow) externalStatsResp
 		earliestExpire time.Time
 	)
 	for _, r := range rows {
-		// Track newest last_seen and earliest expires_at across all
-		// sources. Both are envelope-level convenience fields the UI
-		// uses to render "X seconds ago, fresh until Y".
-		if newestSeen.IsZero() || r.LastSeenAt.After(newestSeen) {
-			newestSeen = r.LastSeenAt
-		}
-		if earliestExpire.IsZero() || r.ExpiresAt.Before(earliestExpire) {
-			earliestExpire = r.ExpiresAt
-		}
-
 		switch r.Source {
 		case db.ExternalSourceProbe:
 			resp.Probes = json.RawMessage(r.Payload)
@@ -147,9 +145,21 @@ func buildExternalStatsResponse(rows []db.NodeExternalStatRow) externalStatsResp
 		case db.ExternalSourceIPMI:
 			resp.Samples.IPMI = json.RawMessage(r.Payload)
 		default:
-			// Unknown source — drop silently. Forward-compatible:
-			// when Bundle B adds a new source, old binaries don't
-			// crash, they just don't display the new data.
+			// Unknown source — drop silently and skip the envelope
+			// contribution.  Forward-compatible: when Bundle B adds a
+			// new source, old binaries don't crash, they just don't
+			// display the new data — and they don't poison the
+			// freshness envelope with timestamps for data they can't
+			// surface.
+			continue
+		}
+
+		// Reached only on a recognised source — update the envelope.
+		if newestSeen.IsZero() || r.LastSeenAt.After(newestSeen) {
+			newestSeen = r.LastSeenAt
+		}
+		if earliestExpire.IsZero() || r.ExpiresAt.Before(earliestExpire) {
+			earliestExpire = r.ExpiresAt
 		}
 	}
 
