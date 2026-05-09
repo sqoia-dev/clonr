@@ -93,6 +93,14 @@ func (db *DB) InsertStatsBatch(ctx context.Context, rows []NodeStatRow) error {
 // time window is returned regardless of expiry — used by the audit /
 // historical-trace API which still wants to surface samples that have
 // since expired.
+//
+// Time-range guard (Codex post-ship review issue #5): the TTL filter
+// is meant for "what is current right now" queries.  Callers asking
+// for an explicit historical window (Since/Until set) want every
+// sample that existed in that window, including ones whose TTL has
+// since elapsed.  QueryNodeStats now only applies the expires_at>now
+// filter when no Since/Until window is supplied; the dedicated
+// QueryLatestNodeStats path (Prometheus scrape) keeps the filter.
 type QueryNodeStatsParams struct {
 	NodeID         string
 	Plugin         string // optional; empty = all plugins
@@ -126,9 +134,13 @@ func (db *DB) QueryNodeStats(ctx context.Context, p QueryNodeStatsParams) ([]Nod
 		q += " AND sensor = ?"
 		args = append(args, p.Sensor)
 	}
-	// Sprint 38 STAT-EXPIRES: hide stale TTL samples from "current"
-	// views unless the caller explicitly opts in.
-	if !p.IncludeExpired {
+	// Sprint 38 STAT-EXPIRES: hide stale TTL samples from the
+	// "current values" view, but skip the filter whenever the caller
+	// supplies an explicit Since/Until window — they want the
+	// historical samples that existed in that range, including ones
+	// whose TTL has since elapsed (Codex post-ship review issue #5).
+	hasTimeRange := !p.Since.IsZero() || !p.Until.IsZero()
+	if !p.IncludeExpired && !hasTimeRange {
 		q += " AND " + nodeStatsExpiresAtFilter
 		args = append(args, nodeStatsExpiresAtArg(time.Now()))
 	}
