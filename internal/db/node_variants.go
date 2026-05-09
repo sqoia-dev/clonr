@@ -188,13 +188,37 @@ func (db *DB) ListVariantsForNode(ctx context.Context, nodeID string, groupID st
 		out = append(out, rs...)
 	}
 
-	// 3. Node-direct variants (highest priority).
+	// 3. Cluster-wide globals + node-direct variants (highest priority).
+	//
+	// Cluster-wide globals are the (scope_kind='global', node_id IS NULL)
+	// rows: variants every node should pick up unless overridden by a
+	// node-direct row.  The previous query restricted to node_id = ?
+	// alone, which silently dropped them — Codex post-ship review
+	// issue #4.
+	//
+	// Ordering: cluster-wide rows come FIRST in the slice (lower
+	// priority) so the applier's "later wins" semantics let node-direct
+	// rows overwrite them.  `(node_id IS NULL) DESC` puts the NULL rows
+	// first; within each tier we still order by created_at ASC for
+	// deterministic UI rendering.
 	if nodeID != "" {
 		rs, err := db.queryVariants(ctx, `
 			SELECT id, node_id, attribute_path, value_json, scope_kind, scope_id, created_at
 			FROM node_config_variants
-			WHERE scope_kind = 'global' AND node_id = ?
-			ORDER BY created_at ASC`, nodeID)
+			WHERE scope_kind = 'global' AND (node_id = ? OR node_id IS NULL)
+			ORDER BY (node_id IS NULL) DESC, created_at ASC`, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rs...)
+	} else {
+		// Symmetric path for nodeless callers (rare): still surface the
+		// cluster-wide rows so admin inspection / planning UIs see them.
+		rs, err := db.queryVariants(ctx, `
+			SELECT id, node_id, attribute_path, value_json, scope_kind, scope_id, created_at
+			FROM node_config_variants
+			WHERE scope_kind = 'global' AND node_id IS NULL
+			ORDER BY created_at ASC`)
 		if err != nil {
 			return nil, err
 		}
