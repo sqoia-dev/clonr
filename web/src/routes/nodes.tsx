@@ -4,9 +4,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Zap,
 } from "lucide-react"
-import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab } from "@/routes/node-detail-tabs"
+import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -1026,7 +1026,7 @@ interface NodeSheetProps {
 // ─── NodeSheet ────────────────────────────────────────────────────────────────
 // Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
 
-type NodeDetailTab = "overview" | "sensors" | "eventlog" | "console" | "deploylog"
+type NodeDetailTab = "overview" | "sensors" | "eventlog" | "console" | "deploylog" | "ipmi"
 
 function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete }: NodeSheetProps) {
   const qc = useQueryClient()
@@ -1203,6 +1203,10 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                   <ScrollText className="h-3 w-3" />
                   Install Log
                 </TabsTrigger>
+                <TabsTrigger value="ipmi" className="flex-1 text-xs gap-1">
+                  <Zap className="h-3 w-3" />
+                  IPMI
+                </TabsTrigger>
               </TabsList>
 
               {/* ── Overview tab (existing content) ── */}
@@ -1301,6 +1305,11 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
               {/* ── Install Log tab (STREAM-LOG-UI) ── */}
               <TabsContent value="deploylog" className="mt-2">
                 <DeployLogTab nodeId={node.id} primaryMac={node.primary_mac} />
+              </TabsContent>
+
+              {/* ── IPMI tab (Sprint 34 UI B) ── */}
+              <TabsContent value="ipmi" className="mt-2">
+                <IpmiTab nodeId={node.id} />
               </TabsContent>
             </Tabs>
           )}
