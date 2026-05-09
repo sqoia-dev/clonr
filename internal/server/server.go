@@ -1169,6 +1169,20 @@ func (s *Server) buildRouter() chi.Router {
 	eventsH := &handlers.EventsHandler{Bus: s.eventBus}
 	ipmiH := &handlers.IPMIHandler{DB: s.db, Cache: s.powerCache, Registry: s.powerRegistry}
 	powerH := &handlers.PowerHandler{DB: s.db, Registry: s.powerRegistry}
+	// Sprint 44 BULK-MULTISELECT-* — bulk power/reimage/drain/netboot/exec.
+	// Reimage and Exec runners reuse the same Orchestrator and clientd Hub as
+	// the per-node endpoints; bulk just fans out N copies under a concurrency cap.
+	bulkH := &handlers.BulkHandler{
+		DB:       s.db,
+		Cache:    s.powerCache,
+		Registry: s.powerRegistry,
+		Reimage:  handlers.NewReimageRunner(s.db, s.reimageOrchestrator),
+		Exec:     handlers.NewExecRunner(s.clientdHub),
+	}
+	// Sprint 44 MULTI-NIC-EDITOR — typed interface read/write.
+	interfacesH := handlers.NewInterfacesHandler(s.db)
+	// Sprint 44 VARIANTS-SYSTEM — per-attribute overlays.
+	variantsH := handlers.NewVariantsHandler(s.db)
 	nodeHealthH := &handlers.NodeHealthHandler{
 		DB:  handlers.NewNodeHealthDBAdapter(s.db, selector.NewDBAdapter(s.db)),
 		Hub: s.clientdHub,
@@ -2076,6 +2090,30 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Get("/nodes/{id}/ipmi/sel", ipmiAdminH.GetSEL)
 			r.With(requireRole("admin")).Delete("/nodes/{id}/ipmi/sel", ipmiAdminH.ClearSEL)
 			r.With(requireRole("admin")).Get("/nodes/{id}/ipmi/sensors", ipmiAdminH.GetSensors)
+
+			// Sprint 44 MULTI-NIC-EDITOR — typed multi-NIC interface read/write.
+			// GET visible to all authenticated users; PUT admin-only to
+			// preserve the existing CFG-* admin gate on BMC creds.
+			r.Get("/nodes/{id}/interfaces", interfacesH.Get)
+			r.With(requireRole("admin")).Put("/nodes/{id}/interfaces", interfacesH.Put)
+
+			// Sprint 44 BULK-MULTISELECT-* — admin-scoped fan-out endpoints.
+			// All five share the same {node_ids:[...]} envelope and per-node
+			// {ok, error} result shape.  See handlers/bulk.go for details.
+			r.With(requireRole("admin")).Post("/nodes/bulk/power/{action}", bulkH.HandleBulkPower)
+			r.With(requireRole("admin")).Post("/nodes/bulk/reimage", bulkH.HandleBulkReimage)
+			r.With(requireRole("admin")).Post("/nodes/bulk/drain", bulkH.HandleBulkDrain)
+			r.With(requireRole("admin")).Post("/nodes/bulk/netboot", bulkH.HandleBulkNetboot)
+			r.With(requireRole("admin")).Post("/nodes/bulk/exec", bulkH.HandleBulkExec)
+
+			// Sprint 44 VARIANTS-SYSTEM — per-attribute overlay store.
+			// effective-config is read-only and visible to all authenticated
+			// users; CRUD on variants is admin-only because variants can
+			// override BMC creds and other security-relevant fields.
+			r.Get("/nodes/{id}/effective-config", variantsH.GetEffectiveConfig)
+			r.With(requireRole("admin")).Get("/variants", variantsH.List)
+			r.With(requireRole("admin")).Post("/variants", variantsH.Create)
+			r.With(requireRole("admin")).Delete("/variants/{id}", variantsH.Delete)
 
 			// Sprint 34 SERIAL-CONSOLE: dedicated WS bridge for ipmitool
 			// sol activate. Single-active-session per node; the helper
