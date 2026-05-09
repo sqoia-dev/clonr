@@ -740,14 +740,24 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		bootOrderPolicy = "auto"
 	}
 
+	// Migration 111 (Sprint 37 DISKLESS Bundle A): default operating_mode to
+	// 'block_install' when caller hasn't set it. Same wire-symmetry logic as
+	// boot_order_policy — every NodeConfig that round-trips has an explicit
+	// value, regardless of whether the caller filled it in.
+	operatingMode := cfg.OperatingMode
+	if operatingMode == "" {
+		operatingMode = api.OperatingModeBlockInstall
+	}
+
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 power_provider, created_at, updated_at, disk_layout_override, extra_mounts,
 			 detected_firmware, bmc_config_encrypted, power_provider_encrypted, provider,
-			 boot_order_policy, netboot_menu_entry, kernel_cmdline)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 boot_order_policy, netboot_menu_entry, kernel_cmdline,
+			 operating_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -759,6 +769,7 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted), cfg.Provider,
 		bootOrderPolicy,
 		nullableString(cfg.NetbootMenuEntry), nullableString(cfg.KernelCmdline),
+		operatingMode,
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
@@ -952,6 +963,7 @@ func nullableString(s string) interface{} {
 // Migration 076: provider added after verify_timeout_override.
 // Migration 082: ldap_ready + ldap_ready_detail (Sprint 15 #99).
 // Migration 105 (Sprint 34): boot_order_policy + netboot_menu_entry + kernel_cmdline.
+// Migration 111 (Sprint 37 DISKLESS Bundle A): operating_mode appended.
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_failed_at,
@@ -963,7 +975,8 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 	       bmc_config_encrypted, power_provider_encrypted,
 	       verify_timeout_override, provider,
 	       ldap_ready, ldap_ready_detail,
-	       boot_order_policy, netboot_menu_entry, kernel_cmdline`
+	       boot_order_policy, netboot_menu_entry, kernel_cmdline,
+	       operating_mode`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
 // the "nc" table alias. The caller must LEFT JOIN node_group_memberships m ON
@@ -973,6 +986,7 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 // Migration 076: provider added after verify_timeout_override.
 // Migration 082: ldap_ready + ldap_ready_detail appended.
 // Migration 105 (Sprint 34): boot_order_policy + netboot_menu_entry + kernel_cmdline.
+// Migration 111 (Sprint 37 DISKLESS Bundle A): operating_mode appended.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
 	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
@@ -985,7 +999,8 @@ const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.
 	       nc.bmc_config_encrypted, nc.power_provider_encrypted,
 	       nc.verify_timeout_override, nc.provider,
 	       nc.ldap_ready, nc.ldap_ready_detail,
-	       nc.boot_order_policy, nc.netboot_menu_entry, nc.kernel_cmdline`
+	       nc.boot_order_policy, nc.netboot_menu_entry, nc.kernel_cmdline,
+	       nc.operating_mode`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -1156,6 +1171,15 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		verifyTimeoutOverrideSQL = *cfg.VerifyTimeoutOverride
 	}
 
+	// Migration 111 (Sprint 37 DISKLESS Bundle A): default operating_mode to
+	// 'block_install' when caller hasn't set it. Symmetric with the create
+	// path — empty on the wire is normalized to the explicit default before
+	// the SQLite CHECK constraint sees it.
+	operatingMode := cfg.OperatingMode
+	if operatingMode == "" {
+		operatingMode = api.OperatingModeBlockInstall
+	}
+
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE node_configs
 		SET hostname = ?, hostname_auto = ?, fqdn = ?, primary_mac = ?, interfaces = ?, ssh_keys = ?,
@@ -1164,7 +1188,8 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		    disk_layout_override = ?, extra_mounts = ?, updated_at = ?,
 		    detected_firmware = ?,
 		    bmc_config_encrypted = ?, power_provider_encrypted = ?,
-		    verify_timeout_override = ?, provider = ?
+		    verify_timeout_override = ?, provider = ?,
+		    operating_mode = ?
 		WHERE id = ?
 	`,
 		cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
@@ -1175,6 +1200,7 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		time.Now().Unix(), cfg.DetectedFirmware,
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted),
 		verifyTimeoutOverrideSQL, cfg.Provider,
+		operatingMode,
 		cfg.ID,
 	)
 	if err != nil {
@@ -1993,6 +2019,11 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		bootOrderPolicy     string
 		netbootMenuEntryVal sql.NullString
 		kernelCmdlineVal    sql.NullString
+		// Migration 111 (Sprint 37 DISKLESS Bundle A): operating_mode column
+		// (NOT NULL TEXT, CHECK-constrained enum). The migration ensures every
+		// pre-existing row carries the 'block_install' default, so a plain
+		// string scan target is correct here — no NullString gymnastics needed.
+		operatingModeVal string
 	)
 
 	// Column order matches nodeConfigCols / nodeConfigColsJoined:
@@ -2001,6 +2032,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	// Migration 054: verify_timeout_override appended.
 	// Migration 082: ldap_ready, ldap_ready_detail appended.
 	// Migration 105 (Sprint 34): boot_order_policy, netboot_menu_entry, kernel_cmdline.
+	// Migration 111 (Sprint 37 DISKLESS Bundle A): operating_mode appended.
 	err := s.Scan(
 		&cfg.ID, &cfg.Hostname, &hostnameAuto, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
@@ -2017,6 +2049,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&verifyTimeoutOverrideVal, &providerVal,
 		&ldapReadyVal, &ldapReadyDetail,
 		&bootOrderPolicy, &netbootMenuEntryVal, &kernelCmdlineVal,
+		&operatingModeVal,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
@@ -2099,6 +2132,15 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	if kernelCmdlineVal.Valid {
 		cfg.KernelCmdline = kernelCmdlineVal.String
 	}
+	// Migration 111 (Sprint 37 DISKLESS Bundle A): operating_mode. Empty
+	// string is normalised to OperatingModeBlockInstall on the read path so a
+	// row written before the migration ran (or by a SQL tool that bypassed
+	// the API) still satisfies the documented "every NodeConfig has an
+	// explicit mode" invariant for downstream consumers.
+	if operatingModeVal == "" {
+		operatingModeVal = api.OperatingModeBlockInstall
+	}
+	cfg.OperatingMode = operatingModeVal
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
 	cfg.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()

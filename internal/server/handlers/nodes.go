@@ -774,6 +774,25 @@ func (h *NodesHandler) PatchNode(w http.ResponseWriter, r *http.Request) {
 		}
 		updated.Provider = s
 	}
+	// Sprint 37 DISKLESS Bundle A — operating_mode.
+	//
+	// Strict enum validation: empty string is rejected here (the wire contract
+	// is "explicit value or omit the key entirely"). The SQLite CHECK
+	// constraint installed by migration 111 is the canonical guard, but we
+	// catch invalid values at the API layer so callers get a 400 with a
+	// useful message instead of an opaque DB error.
+	if v, ok := patch["operating_mode"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			writeValidationError(w, "operating_mode must be a string")
+			return
+		}
+		if !api.IsValidOperatingMode(s) {
+			writeValidationError(w, "operating_mode must be one of: block_install, filesystem_install, stateless_nfs, stateless_ram")
+			return
+		}
+		updated.OperatingMode = s
+	}
 
 	if err := h.DB.UpdateNodeConfig(r.Context(), updated); err != nil {
 		writeError(w, err)

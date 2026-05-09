@@ -630,8 +630,72 @@ type NodeConfig struct {
 	// Validation: length cap of 4 KiB, NUL-byte rejection.
 	KernelCmdline string `json:"kernel_cmdline,omitempty"`
 
+	// Sprint 37 DISKLESS Bundle A — node operating mode.
+	//
+	// OperatingMode declares how this node boots and (optionally) installs.
+	// Persisted in the operating_mode column added by migration 111. Valid
+	// values are enumerated by OperatingModeValues; the SQLite-side CHECK
+	// constraint is the canonical guard, so an unknown value cannot be
+	// persisted regardless of API-layer validation. Empty string is
+	// normalized to OperatingModeBlockInstall on read for forward-compat.
+	//
+	// Bundle A wires only OperatingModeBlockInstall end-to-end. The other
+	// three values are reserved enum slots; ServeIPXEScript serves a TODO
+	// sentinel script for them so the protocol is observable in lab without
+	// shipping a half-broken boot path. Bundle B will deliver
+	// initramfs-variant + NFS-export wiring for the stateless modes.
+	OperatingMode string `json:"operating_mode"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// OperatingMode constants enumerate the values legal for NodeConfig.OperatingMode.
+// Mirrors the CHECK constraint defined in migration 111 — keep these in sync.
+//
+// Sprint 37 DISKLESS Bundle A.
+const (
+	// OperatingModeBlockInstall is the current/default behavior: initramfs
+	// writes the base image to disk and reboots into the on-disk OS. The
+	// only mode wired end-to-end as of Bundle A.
+	OperatingModeBlockInstall = "block_install"
+
+	// OperatingModeFilesystemInstall reserves an enum slot for a chroot/
+	// rsync-style filesystem install path. TODO Bundle B.
+	OperatingModeFilesystemInstall = "filesystem_install"
+
+	// OperatingModeStatelessNFS reserves an enum slot for a stateless boot
+	// that mounts the cluster NFS export of the image rootfs and never
+	// writes to disk. TODO Bundle B.
+	OperatingModeStatelessNFS = "stateless_nfs"
+
+	// OperatingModeStatelessRAM reserves an enum slot for a stateless boot
+	// where the rootfs is loaded fully into RAM via a custom initrd. TODO
+	// Bundle B.
+	OperatingModeStatelessRAM = "stateless_ram"
+)
+
+// OperatingModeValues lists all accepted values for NodeConfig.OperatingMode,
+// in the same order as the migration 111 CHECK constraint. Used by API-layer
+// validators (e.g. the PATCH /api/v1/nodes/{id} handler) to reject bogus
+// values with a 400 before the SQLite CHECK fires.
+var OperatingModeValues = []string{
+	OperatingModeBlockInstall,
+	OperatingModeFilesystemInstall,
+	OperatingModeStatelessNFS,
+	OperatingModeStatelessRAM,
+}
+
+// IsValidOperatingMode reports whether s is an accepted operating_mode value.
+// Empty string is NOT accepted — callers that want "default" should pass
+// OperatingModeBlockInstall explicitly so the wire contract is symmetric.
+func IsValidOperatingMode(s string) bool {
+	for _, v := range OperatingModeValues {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // State derives the current lifecycle state of this node from its stored fields.
