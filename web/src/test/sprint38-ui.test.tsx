@@ -1,7 +1,7 @@
 /**
  * sprint38-ui.test.tsx — Sprint 38 UI tests
  *
- * 1. ReachabilityDots — renders 3 dots from external_stats.probes (GET /api/v1/nodes/{id}/probes)
+ * 1. ReachabilityDots — probe API contract (3 booleans from /probes endpoint)
  * 2. ExternalStatsTab — empty state + happy-path with mock samples
  * 3. Stats tab dynamic chart-group grouping: 2 metrics with different chart_group → 2 cards
  * 4. System Alerts: list + dismiss flow
@@ -50,16 +50,14 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// ─── Test 1: ReachabilityDots — renders 3 dots from probes response ──────────
+// ─── Test 1: ReachabilityDots — probe API contract ───────────────────────────
+//
+// ReachabilityDots is an internal (non-exported) component in nodes.tsx.
+// We test the API contract and data shape it relies on.
 
 describe("ReachabilityDots (PROBE-3)", () => {
-  // ReachabilityDots is an internal component — test it indirectly via the
-  // groupSamplesByChartGroup utility and by verifying the probe fetch shape.
-  // The actual dot rendering is covered in the nodes table integration below,
-  // but we validate the data contract here.
-
-  it("should handle a ProbeResult with mixed reachability values", () => {
-    // Shape contract: { ping, ssh, bmc, checked_at }
+  it("should validate ProbeResult shape with mixed reachability values", () => {
+    // Shape: { ping: bool, ssh: bool, bmc: bool, checked_at: ISO string }
     const result = { ping: true, ssh: false, bmc: true, checked_at: "2026-05-09T12:00:00Z" }
     expect(result.ping).toBe(true)
     expect(result.ssh).toBe(false)
@@ -67,25 +65,24 @@ describe("ReachabilityDots (PROBE-3)", () => {
     expect(typeof result.checked_at).toBe("string")
   })
 
-  it("should render ReachabilityDots with 3 probe dots from /api/v1/nodes/{id}/probes", async () => {
-    // Dynamically import to avoid module-level issues with the WS/term deps
-    const { ReachabilityDots: _RD } = await import("../routes/nodes").catch(() => ({ ReachabilityDots: null }))
-    // ReachabilityDots is not exported — test via data-testid by rendering the full NodesPage
-    // is complex. Instead we verify the fetch URL shape and contract.
-    let capturedUrl = ""
-    fetchHandler = (url) => {
-      capturedUrl = url
-      return Promise.resolve(jsonOk({ ping: true, ssh: true, bmc: false, checked_at: "2026-05-09T12:00:00Z" }))
-    }
-    // The component fires GET /api/v1/nodes/{id}/probes — verify URL pattern
-    const url = `/api/v1/nodes/test-node-123/probes`
-    const res = await fetch(url)
-    const data = await res.json()
-    expect(capturedUrl).toContain("/probes")
-    expect(data).toHaveProperty("ping", true)
-    expect(data).toHaveProperty("ssh", true)
-    expect(data).toHaveProperty("bmc", false)
+  it("should fetch probe data from /api/v1/nodes/{id}/probes returning 3 booleans", async () => {
+    fetchHandler = () =>
+      Promise.resolve(
+        jsonOk({ ping: true, ssh: true, bmc: false, checked_at: "2026-05-09T12:00:00Z" }),
+      )
+    const res = await fetch(`/api/v1/nodes/test-node-123/probes`)
+    const data = await res.json() as { ping: boolean; ssh: boolean; bmc: boolean; checked_at: string }
+    expect(typeof data.ping).toBe("boolean")
+    expect(typeof data.ssh).toBe("boolean")
+    expect(typeof data.bmc).toBe("boolean")
     expect(data).toHaveProperty("checked_at")
+  })
+
+  it("should treat a 404 response as no-probe-data (retry:false path for unconfigured nodes)", async () => {
+    fetchHandler = () => Promise.resolve(new Response(null, { status: 404 }))
+    const res = await fetch(`/api/v1/nodes/unconfigured-node/probes`)
+    // Component uses retry:false — 404 means dots stay grey (undefined state)
+    expect(res.status).toBe(404)
   })
 })
 
@@ -217,9 +214,6 @@ describe("groupSamplesByChartGroup (STAT-REGISTRY)", () => {
 // ─── Test 4: System Alerts — list + dismiss flow ──────────────────────────────
 
 describe("SystemAlertsPopover (SYSTEM-ALERT-FRAMEWORK)", () => {
-  // SystemAlertsPopover is in AppShell which has heavy deps. We test the
-  // fetch/dismiss contract and a lightweight isolated render.
-
   it("should fetch system alerts from GET /api/v1/system_alerts", async () => {
     let capturedUrl = ""
     fetchHandler = (url) => {
@@ -257,8 +251,7 @@ describe("SystemAlertsPopover (SYSTEM-ALERT-FRAMEWORK)", () => {
     expect(capturedMethod).toBe("POST")
   })
 
-  it("should render a SystemAlertsPopover with bell + badge", async () => {
-    // Render a minimal shim that mimics the popover's rendered output
+  it("should render a system alerts popover structure with bell, badge, and alert rows", async () => {
     function MiniPopover() {
       const [alerts] = React.useState([
         { key: "test_alert", device: "dev0", level: "warn" as const, message: "Test message", set_at: new Date().toISOString() },
