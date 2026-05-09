@@ -111,6 +111,37 @@ func NewExecRunner(hub clientdExecHub) BulkExecRunner {
 	return &clientdHubExecRunner{Hub: hub}
 }
 
+// ─── Drain runner adapter ─────────────────────────────────────────────────────
+
+// SlurmDrainer is the subset of *slurm.Manager used by the drain
+// runner.  Defined as an interface here so server.go can pass the
+// production Manager without dragging the slurm package into bulk.go's
+// public surface, and tests can stub the controller dispatch.
+type SlurmDrainer interface {
+	DrainNodes(ctx context.Context, nodeIDs []string, reason string) error
+}
+
+// slurmDrainAdapter satisfies BulkDrainRunner.  Codex post-ship review
+// issue #7 — bulk drain now dispatches one scontrol RPC to the slurm
+// controller via the slurm Manager rather than ExecOne per target.
+type slurmDrainAdapter struct {
+	Mgr SlurmDrainer
+}
+
+// NewDrainRunner returns a BulkDrainRunner that proxies to the slurm
+// Manager.
+func NewDrainRunner(mgr SlurmDrainer) BulkDrainRunner {
+	return &slurmDrainAdapter{Mgr: mgr}
+}
+
+// DrainNodes proxies to Mgr.DrainNodes verbatim.
+func (a *slurmDrainAdapter) DrainNodes(ctx context.Context, nodeIDs []string, reason string) error {
+	if a.Mgr == nil {
+		return fmt.Errorf("drain runner: slurm manager not wired")
+	}
+	return a.Mgr.DrainNodes(ctx, nodeIDs, reason)
+}
+
 // ExecOne runs `command args...` on one node and returns (exit_code, output, err).
 // Output is the concatenation of stdout (preferred) or stderr if no stdout.
 func (e *clientdHubExecRunner) ExecOne(ctx context.Context, nodeID, command string, args []string, timeoutSec int) (int, string, error) {
