@@ -228,21 +228,10 @@ func applyScript(ctx context.Context, mountRoot string, instr api.InstallInstruc
 		}
 		tailBuf = append(tailBuf, line)
 	}
-	streamPipe := func(r io.Reader, stream string, wg *sync.WaitGroup) {
-		defer wg.Done()
-		scanner := bufio.NewScanner(r)
-		// Allow long lines from dnf transaction summaries etc.
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			log.Info().Int("step", stepNum).Str("stream", stream).Msg(line)
-			addTail(line)
-		}
-	}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go streamPipe(stdout, "stdout", &wg)
-	go streamPipe(stderr, "stderr", &wg)
+	go streamPipeWithFallback(stdout, "stdout", stepNum, addTail, &wg)
+	go streamPipeWithFallback(stderr, "stderr", stepNum, addTail, &wg)
 	wg.Wait()
 
 	if waitErr := cmd.Wait(); waitErr != nil {
@@ -255,4 +244,56 @@ func applyScript(ctx context.Context, mountRoot string, instr api.InstallInstruc
 		return fmt.Errorf("script exited non-zero: %w", waitErr)
 	}
 	return nil
+}
+
+// scannerInitBufBytes / scannerMaxTokenBytes are package-level so tests
+// can swap in tiny values (a few KB) and trigger the ErrTooLong
+// fallback path without allocating tens of megabytes of buffer.
+//
+// Production: 1MB initial, 64MB max.  Most workloads (dnf transaction
+// summary, base64 chunks) stay well under the cap.
+var (
+	scannerInitBufBytes  = 1 << 20  // 1 MiB
+	scannerMaxTokenBytes = 64 << 20 // 64 MiB
+)
+
+// streamPipeWithFallback tails r line-by-line via bufio.Scanner with a
+// generous max-token buffer.  When the scanner errors (ErrTooLong
+// from a single-line emission larger than scannerMaxTokenBytes, or any
+// other read failure before EOF), the pipe is drained via a raw
+// bufio.Reader in fixed-size chunks so the child process never blocks
+// on a full pipe.  Without the fallback path a single oversized line
+// caused cmd.Wait to hang until context cancellation — Codex post-ship
+// review issue #13.
+//
+// addTail accepts each emitted log line so the calling chroot driver
+// can stitch the tail into its non-zero-exit error message.
+func streamPipeWithFallback(r io.Reader, stream string, stepNum int, addTail func(string), wg *sync.WaitGroup) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, scannerInitBufBytes), scannerMaxTokenBytes)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Info().Int("step", stepNum).Str("stream", stream).Msg(line)
+		addTail(line)
+	}
+	if err := scanner.Err(); err != nil {
+		log.Warn().Int("step", stepNum).Str("stream", stream).Err(err).
+			Msg("streamPipe: scanner failed; falling back to raw chunked drain")
+		br := bufio.NewReader(r)
+		buf := make([]byte, 64*1024)
+		for {
+			n, readErr := br.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				log.Info().Int("step", stepNum).Str("stream", stream).
+					Int("bytes", n).Bool("raw_chunk", true).
+					Msg(chunk)
+				addTail(chunk)
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}
 }
