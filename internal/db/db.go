@@ -731,13 +731,23 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 	bmcConfig, bmcEncrypted := encryptNodeBlob(bmcConfigRaw, "{}")
 	powerProvider, ppEncrypted := encryptNodeBlob(powerProviderRaw, "{}")
 
+	// Migration 105 (Sprint 34): default boot_order_policy to 'auto' when caller
+	// hasn't set it. We insert explicit 'auto' rather than relying on the
+	// CHECK-constrained DEFAULT so the runtime API contract ("empty == auto")
+	// is symmetric on the wire.
+	bootOrderPolicy := cfg.BootOrderPolicy
+	if bootOrderPolicy == "" {
+		bootOrderPolicy = "auto"
+	}
+
 	_, err = db.sql.ExecContext(ctx, `
 		INSERT INTO node_configs
 			(id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 			 tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 			 power_provider, created_at, updated_at, disk_layout_override, extra_mounts,
-			 detected_firmware, bmc_config_encrypted, power_provider_encrypted, provider)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 detected_firmware, bmc_config_encrypted, power_provider_encrypted, provider,
+			 boot_order_policy, netboot_menu_entry, kernel_cmdline)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		cfg.ID, cfg.Hostname, boolToInt(cfg.HostnameAuto), cfg.FQDN, cfg.PrimaryMAC,
 		string(interfaces), string(sshKeys), cfg.KernelArgs,
@@ -747,6 +757,8 @@ func (db *DB) CreateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		diskLayoutOverride, extraMounts,
 		cfg.DetectedFirmware,
 		boolToInt(bmcEncrypted), boolToInt(ppEncrypted), cfg.Provider,
+		bootOrderPolicy,
+		nullableString(cfg.NetbootMenuEntry), nullableString(cfg.KernelCmdline),
 	)
 	if err != nil {
 		return fmt.Errorf("db: create node config: %w", err)
@@ -939,6 +951,7 @@ func nullableString(s string) interface{} {
 // Migration 054: verify_timeout_override added after power_provider_encrypted.
 // Migration 076: provider added after verify_timeout_override.
 // Migration 082: ldap_ready + ldap_ready_detail (Sprint 15 #99).
+// Migration 105 (Sprint 34): boot_order_policy + netboot_menu_entry + kernel_cmdline.
 const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfaces, ssh_keys, kernel_args,
 	       tags, custom_vars, base_image_id, hardware_profile, bmc_config, ib_config,
 	       power_provider, reimage_pending, last_deploy_failed_at,
@@ -949,7 +962,8 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 	       deploy_verify_timeout_at, last_seen_at, detected_firmware,
 	       bmc_config_encrypted, power_provider_encrypted,
 	       verify_timeout_override, provider,
-	       ldap_ready, ldap_ready_detail`
+	       ldap_ready, ldap_ready_detail,
+	       boot_order_policy, netboot_menu_entry, kernel_cmdline`
 
 // nodeConfigColsJoined is like nodeConfigCols but qualifies every column with
 // the "nc" table alias. The caller must LEFT JOIN node_group_memberships m ON
@@ -958,6 +972,7 @@ const nodeConfigCols = `id, hostname, hostname_auto, fqdn, primary_mac, interfac
 // Migration 049 (S6-8): last_deploy_succeeded_at removed; use deploy_completed_preboot_at.
 // Migration 076: provider added after verify_timeout_override.
 // Migration 082: ldap_ready + ldap_ready_detail appended.
+// Migration 105 (Sprint 34): boot_order_policy + netboot_menu_entry + kernel_cmdline.
 const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.primary_mac,
 	       nc.interfaces, nc.ssh_keys, nc.kernel_args,
 	       nc.tags, nc.custom_vars, nc.base_image_id, nc.hardware_profile, nc.bmc_config, nc.ib_config,
@@ -969,7 +984,8 @@ const nodeConfigColsJoined = `nc.id, nc.hostname, nc.hostname_auto, nc.fqdn, nc.
 	       nc.deploy_verify_timeout_at, nc.last_seen_at, nc.detected_firmware,
 	       nc.bmc_config_encrypted, nc.power_provider_encrypted,
 	       nc.verify_timeout_override, nc.provider,
-	       nc.ldap_ready, nc.ldap_ready_detail`
+	       nc.ldap_ready, nc.ldap_ready_detail,
+	       nc.boot_order_policy, nc.netboot_menu_entry, nc.kernel_cmdline`
 
 // GetNodeConfig retrieves a NodeConfig by its UUID.
 func (db *DB) GetNodeConfig(ctx context.Context, id string) (api.NodeConfig, error) {
@@ -1165,6 +1181,71 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		return fmt.Errorf("db: update node config: %w", err)
 	}
 	return requireOneRow(res, "node_configs", cfg.ID)
+}
+
+// UpdateNodeBootSettings writes the three Sprint 34 boot-routing columns for
+// a single node: boot_order_policy, netboot_menu_entry, kernel_cmdline.
+// All other fields on node_configs are left untouched — this is a focussed
+// write path that the BOOT-SETTINGS-MODAL handler uses so the heavy
+// UpdateNodeConfig isn't pulled in.
+//
+// Pointer-typed args express "no change" (nil) versus "clear" (non-nil empty
+// string).  The handler converts request-side *string to (value, has) before
+// calling.  Empty-string values for netboot_menu_entry and kernel_cmdline
+// store SQL NULL — semantic "no override".  An empty bootOrderPolicy with the
+// pointer non-nil is normalised to "auto" because the column is NOT NULL.
+//
+// Sprint 34 BOOT-POLICY + BOOT-SETTINGS-MODAL.
+func (db *DB) UpdateNodeBootSettings(
+	ctx context.Context,
+	nodeID string,
+	bootOrderPolicy *string,
+	netbootMenuEntry *string,
+	kernelCmdline *string,
+) error {
+	setClauses := []string{}
+	args := []interface{}{}
+
+	if bootOrderPolicy != nil {
+		policy := *bootOrderPolicy
+		if policy == "" {
+			policy = "auto"
+		}
+		setClauses = append(setClauses, "boot_order_policy = ?")
+		args = append(args, policy)
+	}
+	if netbootMenuEntry != nil {
+		setClauses = append(setClauses, "netboot_menu_entry = ?")
+		args = append(args, nullableString(*netbootMenuEntry))
+	}
+	if kernelCmdline != nil {
+		setClauses = append(setClauses, "kernel_cmdline = ?")
+		args = append(args, nullableString(*kernelCmdline))
+	}
+
+	if len(setClauses) == 0 {
+		// No-op write.  We still bump updated_at so audit trails see the
+		// operator interaction.
+		_, err := db.sql.ExecContext(ctx,
+			`UPDATE node_configs SET updated_at = ? WHERE id = ?`,
+			time.Now().Unix(), nodeID,
+		)
+		if err != nil {
+			return fmt.Errorf("db: update node boot settings (no-op touch): %w", err)
+		}
+		return nil
+	}
+
+	setClauses = append(setClauses, "updated_at = ?")
+	args = append(args, time.Now().Unix())
+	args = append(args, nodeID)
+
+	query := "UPDATE node_configs SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	res, err := db.sql.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("db: update node boot settings: %w", err)
+	}
+	return requireOneRow(res, "node_configs", nodeID)
 }
 
 // SetNodeInterfaces persists the interfaces slice for the given node ID.
@@ -1905,6 +1986,13 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		// Migration 082: LDAP readiness probe result (Sprint 15 #99).
 		ldapReadyVal    sql.NullInt64
 		ldapReadyDetail string
+		// Migration 105 (Sprint 34): per-node boot routing policy and persistent
+		// netboot/kernel-cmdline overrides. netboot_menu_entry and kernel_cmdline
+		// are nullable TEXT — represented as sql.NullString so the empty-vs-NULL
+		// distinction round-trips intact (the API treats both as "no override").
+		bootOrderPolicy     string
+		netbootMenuEntryVal sql.NullString
+		kernelCmdlineVal    sql.NullString
 	)
 
 	// Column order matches nodeConfigCols / nodeConfigColsJoined:
@@ -1912,6 +2000,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 	// S6-8: last_deploy_succeeded_at removed; deploy_completed_preboot_at is canonical.
 	// Migration 054: verify_timeout_override appended.
 	// Migration 082: ldap_ready, ldap_ready_detail appended.
+	// Migration 105 (Sprint 34): boot_order_policy, netboot_menu_entry, kernel_cmdline.
 	err := s.Scan(
 		&cfg.ID, &cfg.Hostname, &hostnameAuto, &cfg.FQDN, &cfg.PrimaryMAC,
 		&interfacesJSON, &sshKeysJSON, &cfg.KernelArgs,
@@ -1927,6 +2016,7 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		&bmcConfigEncrypted, &powerProviderEncrypted,
 		&verifyTimeoutOverrideVal, &providerVal,
 		&ldapReadyVal, &ldapReadyDetail,
+		&bootOrderPolicy, &netbootMenuEntryVal, &kernelCmdlineVal,
 	)
 	if err == sql.ErrNoRows {
 		return api.NodeConfig{}, api.ErrNotFound
@@ -2001,6 +2091,14 @@ func scanNodeConfig(s scanner) (api.NodeConfig, error) {
 		cfg.LDAPReady = &v
 	}
 	cfg.LDAPReadyDetail = ldapReadyDetail
+	// Migration 105 (Sprint 34): boot policy + persistent boot settings.
+	cfg.BootOrderPolicy = bootOrderPolicy
+	if netbootMenuEntryVal.Valid {
+		cfg.NetbootMenuEntry = netbootMenuEntryVal.String
+	}
+	if kernelCmdlineVal.Valid {
+		cfg.KernelCmdline = kernelCmdlineVal.String
+	}
 
 	cfg.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
 	cfg.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
