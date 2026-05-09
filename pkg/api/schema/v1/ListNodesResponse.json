@@ -560,6 +560,15 @@
         "ldap_ready_detail": {
           "type": "string"
         },
+        "boot_order_policy": {
+          "type": "string"
+        },
+        "netboot_menu_entry": {
+          "type": "string"
+        },
+        "kernel_cmdline": {
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
