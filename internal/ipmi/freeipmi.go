@@ -29,13 +29,27 @@
 //
 // The wrapper composes argv internally from validated parameters; callers
 // never pass raw strings through. Action and SELOp are typed enums; the
-// host/user/password come from the BMC config struct.
+// host/user come from the BMC config struct on argv via -h/-u.
+//
+// # BMC password handling (CODEX-FIX-1-FOLLOWUP)
+//
+// The BMC password is NEVER placed on argv.  /proc/<pid>/cmdline is
+// world-readable on Linux; a -p <password> argv would leak the secret to
+// any local user during the lifetime of the freeipmi process.  Instead
+// the password is written to a 0600 temp file (see writePasswordFile)
+// and passed to freeipmi via --password-file=<path>.  The exec helper
+// runWithPassword owns the file lifecycle, including cleanup on the
+// runner-error path.  The exported *Argv builders (PowerArgv, SELArgv,
+// SensorsArgv) deliberately omit any password reference so they remain
+// safe to log / inspect / use as canonical-shape fixtures from outside
+// the package.
 package ipmi
 
 import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -112,11 +126,16 @@ func (defaultFreeIPMIRunner) Run(ctx context.Context, argv ...string) (string, e
 type FreeIPMIClient struct {
 	// Host is the BMC LAN address. Empty means in-band/local KCS.
 	Host string
-	// Username + Password are passed on argv via -u/-p. The clustr-privhelper
-	// front-end takes credentials via stdin to keep the password off
-	// /proc/<pid>/cmdline; this struct is the in-process shape used by
-	// callers that do their own argv-stripping (or by tests).
+	// Username is passed on argv via -u; safe because usernames are
+	// operator-supplied identifiers, not secrets.
 	Username string
+	// Password MUST NEVER be written to argv. /proc/<pid>/cmdline is
+	// world-readable on Linux while the freeipmi binaries run, so any
+	// local user could observe a -p <password> substring.  The Power/
+	// SEL/Sensors methods write this value to a 0600 temp file and pass
+	// --password-file=<path> instead.  The exported *Argv functions
+	// deliberately omit any password reference so they remain safe to
+	// log / inspect.
 	Password string
 	// Runner injects exec; nil means use the production runner.
 	Runner FreeIPMIRunner
@@ -130,8 +149,13 @@ func (c *FreeIPMIClient) runner() FreeIPMIRunner {
 	return defaultFreeIPMIRunner{}
 }
 
-// commonArgs builds the host/user/pass flags shared by every freeipmi verb.
+// commonArgs builds the host/user flags shared by every freeipmi verb.
 // Returns an empty slice when c.Host is empty (in-band / local BMC).
+//
+// IMPORTANT: this MUST NOT include the password on argv — freeipmi exposes
+// argv to any local user via /proc/<pid>/cmdline.  The password is
+// supplied to freeipmi out-of-band via a transient 0600 file referenced
+// by --password-file=<path>; see writePasswordFile / runWithPassword.
 func (c *FreeIPMIClient) commonArgs() []string {
 	if c.Host == "" {
 		return nil
@@ -140,11 +164,66 @@ func (c *FreeIPMIClient) commonArgs() []string {
 	if c.Username != "" {
 		args = append(args, "-u", c.Username)
 	}
-	if c.Password != "" {
-		args = append(args, "-p", c.Password)
-	}
 	args = append(args, "--driver-type=LAN_2_0")
 	return args
+}
+
+// writePasswordFile writes the BMC password to a 0600 temp file and returns
+// its path.  The caller is responsible for os.Remove on the path after the
+// freeipmi subprocess exits.  An empty password yields ("", nil): the
+// caller must skip --password-file entirely so freeipmi falls through to
+// its default no-password path (used for in-band / local BMC operations).
+//
+// Mirrors cmd/clustr-privhelper/ipmi.go's writePasswordFile so both code
+// paths use identical mechanics for the BMC password out-of-band channel
+// (CODEX-FIX-1 + CODEX-FIX-1-FOLLOWUP).
+func writePasswordFile(password string) (string, error) {
+	if password == "" {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", "clustr-bmc-*.pwd")
+	if err != nil {
+		return "", fmt.Errorf("freeipmi: create pw file: %w", err)
+	}
+	path := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("freeipmi: chmod pw file: %w", err)
+	}
+	if _, err := f.WriteString(password); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("freeipmi: write pw file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("freeipmi: close pw file: %w", err)
+	}
+	return path, nil
+}
+
+// runWithPassword wraps the runner so the BMC password is materialised
+// in a 0600 temp file, the file flag is appended to argv just before
+// exec, and the file is unconditionally removed afterwards (success or
+// failure).  Returns the runner's stdout/err verbatim.
+//
+// argv MUST NOT yet contain --password-file — this helper appends it.
+//
+// When c.Password is empty, runs argv unchanged: callers in in-band /
+// local mode never need a password file in the first place.
+func (c *FreeIPMIClient) runWithPassword(ctx context.Context, argv []string) (string, error) {
+	pwPath, err := writePasswordFile(c.Password)
+	if err != nil {
+		return "", err
+	}
+	if pwPath != "" {
+		// Cleanup runs regardless of how the runner returns — ensures we
+		// never leak the temp file on exec failure, ctx cancel, or panic.
+		defer func() { _ = os.Remove(pwPath) }()
+		argv = append(argv, "--password-file="+pwPath)
+	}
+	return c.runner().Run(ctx, argv...)
 }
 
 // PowerArgv composes the full argv for an ipmi-power invocation.
@@ -181,12 +260,16 @@ func validPowerAction(action FreeIPMIAction) bool {
 }
 
 // Power performs a power action and returns the trimmed output.
+//
+// The argv composed by PowerArgv is password-free; the password is
+// materialised in a 0600 temp file and passed via --password-file just
+// before exec.  See runWithPassword.
 func (c *FreeIPMIClient) Power(ctx context.Context, action FreeIPMIAction) (string, error) {
 	argv, err := PowerArgv(c, action)
 	if err != nil {
 		return "", err
 	}
-	out, err := c.runner().Run(ctx, argv...)
+	out, err := c.runWithPassword(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -215,12 +298,16 @@ func SELArgv(c *FreeIPMIClient, op FreeIPMISELOp) ([]string, error) {
 
 // SEL runs the SEL list/clear verb. For list, returns the parsed entries.
 // For clear, returns nil entries on success.
+//
+// The argv composed by SELArgv is password-free; the password is
+// materialised in a 0600 temp file and passed via --password-file just
+// before exec.  See runWithPassword.
 func (c *FreeIPMIClient) SEL(ctx context.Context, op FreeIPMISELOp) ([]SELEntry, error) {
 	argv, err := SELArgv(c, op)
 	if err != nil {
 		return nil, err
 	}
-	out, err := c.runner().Run(ctx, argv...)
+	out, err := c.runWithPassword(ctx, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -243,8 +330,12 @@ func SensorsArgv(c *FreeIPMIClient) []string {
 }
 
 // Sensors runs ipmi-sensors and parses the comma-separated output.
+//
+// The argv composed by SensorsArgv is password-free; the password is
+// materialised in a 0600 temp file and passed via --password-file just
+// before exec.  See runWithPassword.
 func (c *FreeIPMIClient) Sensors(ctx context.Context) ([]Sensor, error) {
-	out, err := c.runner().Run(ctx, SensorsArgv(c)...)
+	out, err := c.runWithPassword(ctx, SensorsArgv(c))
 	if err != nil {
 		return nil, err
 	}
