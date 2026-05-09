@@ -50,12 +50,23 @@ const (
 
 var validLevels = map[Level]bool{LevelInfo: true, LevelWarn: true, LevelCritical: true}
 
-// ErrInvalidLevel is returned when an alert is submitted with a level outside
-// the accepted set.
-var ErrInvalidLevel = errors.New("system_alerts: invalid level (want info|warn|critical)")
+// ErrValidation is the sentinel wrapped by every input-validation error
+// returned from this package.  The HTTP handler uses errors.Is to
+// distinguish 4xx user-input failures from 5xx store/database errors,
+// fixing Codex post-ship review issue #8 — the prior implementation
+// matched on the literal "system_alerts:" prefix in err.Error(), but
+// every fmt.Errorf("system_alerts: ...") wrap from store code (e.g.
+// "system_alerts: upsert update: <db error>") matched too, so DB
+// errors returned 400 instead of 500.
+var ErrValidation = errors.New("system_alerts: validation")
 
-// ErrEmptyKey is returned when key is empty.
-var ErrEmptyKey = errors.New("system_alerts: key required")
+// ErrInvalidLevel is returned when an alert is submitted with a level outside
+// the accepted set.  Wraps ErrValidation so handlers can errors.Is
+// against the sentinel.
+var ErrInvalidLevel = fmt.Errorf("%w: invalid level (want info|warn|critical)", ErrValidation)
+
+// ErrEmptyKey is returned when key is empty.  Wraps ErrValidation.
+var ErrEmptyKey = fmt.Errorf("%w: key required", ErrValidation)
 
 // SystemAlert is the wire type for /api/v1/system_alerts responses.
 //
