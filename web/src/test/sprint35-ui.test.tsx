@@ -11,12 +11,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { render, screen, act, waitFor } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { DiskLayoutsPage } from "../routes/disk-layouts"
 import { DiskLayoutPicker } from "../components/DiskLayoutPicker"
-import type { StoredDiskLayout, ListDiskLayoutsResponse, EffectiveLayoutResponse } from "../lib/types"
+import type { StoredDiskLayout, ListDiskLayoutsResponse } from "../lib/types"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -38,10 +38,6 @@ function jsonOk(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   })
-}
-
-function noContent(): Response {
-  return new Response(null, { status: 204 })
 }
 
 beforeEach(() => {
