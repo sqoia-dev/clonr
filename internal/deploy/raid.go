@@ -222,19 +222,30 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 
 	log := logger()
 
-	// Branch: IMSM hardware-RAID passthrough (#150) vs software md RAID.
+	// Branch: IMSM hardware-RAID passthrough (#150 / Sprint 35) vs software md RAID.
 	//
 	// Priority order:
-	//  1. spec.ForceSoftware=true → always software, skip all IMSM detection.
-	//  2. Platform IMSM not available → software.
-	//  3. Per-device classification:
+	//  1. spec.ForceSoftware=true OR spec.RAIDType=="md" → always software,
+	//     skip all IMSM detection.
+	//  2. spec.RAIDType=="imsm" → explicit operator opt-in.  Skip platform/
+	//     per-device autodetection and go straight to the IMSM two-pass mdadm
+	//     path.  This is the deterministic path for layouts that target Intel
+	//     RST hardware (mirrors clustervisor disk_raid_imsm semantics).
+	//  3. Platform IMSM not available → software.
+	//  4. Per-device classification:
 	//     a. All devices on IMSM controllers → IMSM path.
 	//     b. Mixed (some IMSM, some not) → warn + software for entire array.
 	//     c. All devices on software controllers → software path.
-	if spec.ForceSoftware {
+	if spec.RAIDType == "imsm" {
+		log.Info().Str("device", devPath).Str("level", spec.Level).
+			Strs("members", members).
+			Msg("deploy/raid: explicit raid_type=imsm — creating IMSM RAID container + volume")
+		return createIMSMArray(ctx, spec, members, devPath)
+	}
+	if spec.ForceSoftware || spec.RAIDType == "md" {
 		if IMSMAvailable(ctx) {
 			log.Info().Str("device", devPath).
-				Msg("IMSM available but force_software=true; using software md RAID")
+				Msg("IMSM available but force_software=true (or raid_type=md); using software md RAID")
 		}
 		// Fall through to software RAID path below.
 	} else if IMSMAvailable(ctx) {
@@ -299,31 +310,91 @@ func createRAIDArray(ctx context.Context, spec api.RAIDSpec, hw hardware.SystemI
 	return nil
 }
 
+// IMSMContainerName returns the device path for the IMSM container that
+// holds spec's sub-array.  Defaults to "/dev/md/imsm0" when spec.IMSMContainer
+// is unset.  Mirrors clustervisor's per-controller container layout.
+func IMSMContainerName(spec api.RAIDSpec) string {
+	name := spec.IMSMContainer
+	if name == "" {
+		name = "imsm0"
+	}
+	return "/dev/md/" + name
+}
+
+// IMSMVolumeName returns the device path for the IMSM sub-array (volume).
+// Uses spec.Name (e.g. "md0" → "/dev/md/md0") so multiple sub-arrays can
+// co-exist within one container when each has a unique RAIDSpec.Name.
+// Falls back to "Volume0" for backward compatibility when Name is unset.
+func IMSMVolumeName(spec api.RAIDSpec) string {
+	name := spec.Name
+	if name == "" {
+		name = "Volume0"
+	}
+	return "/dev/md/" + name
+}
+
+// BuildIMSMContainerArgs builds the mdadm argv for pass 1 of IMSM assembly:
+// container creation.
+//
+//	mdadm --create /dev/md/<container> --metadata=imsm --raid-devices=N --run <members...>
+//
+// raidDevices is the number of physical devices in the container.  The
+// returned slice is the args TO mdadm (i.e. argv[1:]).
+//
+// Pure function — exported for unit testing.
+func BuildIMSMContainerArgs(containerDev string, raidDevices int, members []string) []string {
+	args := []string{
+		"--create", containerDev,
+		"--metadata=imsm",
+		"--raid-devices", strconv.Itoa(raidDevices),
+		"--run", // don't wait for confirmation
+	}
+	args = append(args, members...)
+	return args
+}
+
+// BuildIMSMVolumeArgs builds the mdadm argv for pass 2 of IMSM assembly:
+// sub-array (volume) creation inside the container.
+//
+//	mdadm --create /dev/md/<volume> --metadata=imsm --level=<L> --raid-devices=N --run /dev/md/<container>
+//
+// chunkKB ≤ 0 omits the --chunk flag (lets mdadm pick a default).
+// The container path MUST be the trailing argument — mdadm parses it as the
+// parent pool when --metadata=imsm is set.
+//
+// Pure function — exported for unit testing.
+func BuildIMSMVolumeArgs(volumeDev, containerDev, level string, raidDevices, chunkKB int) []string {
+	args := []string{
+		"--create", volumeDev,
+		"--metadata=imsm",
+		"--level", level,
+		"--raid-devices", strconv.Itoa(raidDevices),
+		"--run",
+	}
+	if chunkKB > 0 {
+		args = append(args, "--chunk", strconv.Itoa(chunkKB)+"K")
+	}
+	args = append(args, containerDev)
+	return args
+}
+
 // createIMSMArray assembles a RAID array using the IMSM (Intel Matrix Storage
-// Manager) metadata format. This is a two-step process:
+// Manager) metadata format.  Two-pass:
 //
-//  1. Create an IMSM container that spans all member devices:
-//     mdadm --create --metadata=imsm --raid-devices=N /dev/md/imsm0 [devs...]
-//
-//  2. Create the RAID volume inside the container:
-//     mdadm --create --metadata=imsm /dev/md/Volume0 -n N -l LEVEL /dev/md/imsm0
-//
-// The resulting volume (/dev/md/Volume0 or /dev/mdN after udev settle) is what
-// the rest of the deploy flow partitions and formats.
+//  1. mdadm -C /dev/md/<container> --metadata=imsm --raid-devices=N <devs...>
+//  2. mdadm -C /dev/md/<spec.Name> --level=L --raid-devices=N --metadata=imsm /dev/md/<container>
 //
 // Reference: mdadm(8), "IMSM / Intel Matrix Storage Manager" section.
+// Mirrors clustervisor's disk_raid_imsm in ClonerInstall.pm:589.
 func createIMSMArray(ctx context.Context, spec api.RAIDSpec, members []string, devPath string) error {
 	log := logger()
 	n := len(members) - spec.Spare
 
+	containerDev := IMSMContainerName(spec)
+	volumeDev := IMSMVolumeName(spec)
+
 	// Step 1 — IMSM container.
-	containerDev := "/dev/md/imsm0"
-	containerArgs := []string{
-		"--create", "--metadata=imsm",
-		"--raid-devices", strconv.Itoa(n),
-		containerDev,
-	}
-	containerArgs = append(containerArgs, members...)
+	containerArgs := BuildIMSMContainerArgs(containerDev, n, members)
 
 	log.Info().Str("container", containerDev).Strs("members", members).
 		Msg("deploy/raid: creating IMSM container")
@@ -334,21 +405,11 @@ func createIMSMArray(ctx context.Context, spec api.RAIDSpec, members []string, d
 	// Brief udev settle so the container device node appears before the volume step.
 	_ = runCmd(ctx, "udevadm", "settle")
 
-	// Step 2 — IMSM volume inside the container.
-	volumeDev := "/dev/md/Volume0"
-	volumeArgs := []string{
-		"--create", "--metadata=imsm",
-		volumeDev,
-		"-n", strconv.Itoa(n),
-		"-l", spec.Level,
-		containerDev,
-	}
-	if spec.ChunkKB > 0 {
-		volumeArgs = append(volumeArgs, "--chunk", strconv.Itoa(spec.ChunkKB)+"K")
-	}
+	// Step 2 — IMSM sub-array (volume) inside the container.
+	volumeArgs := BuildIMSMVolumeArgs(volumeDev, containerDev, spec.Level, n, spec.ChunkKB)
 
 	log.Info().Str("volume", volumeDev).Str("level", spec.Level).
-		Msg("deploy/raid: creating IMSM volume")
+		Msg("deploy/raid: creating IMSM volume (sub-array)")
 	if err := runAndLog(ctx, "mdadm", exec.CommandContext(ctx, "mdadm", volumeArgs...)); err != nil {
 		return fmt.Errorf("mdadm imsm volume create: %w", err)
 	}
