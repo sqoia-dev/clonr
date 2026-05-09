@@ -834,8 +834,11 @@ export interface LogEntry {
   component?: string
   level: string
   message: string
-  ts: number       // Unix ms (the server field is `ts` in ms per the wire spec)
-  phase?: string   // STREAM-LOG-PHASE field — may be absent before that ships
+  /** Server emits `timestamp` (Unix ms). The `ts` alias is kept for back-compat
+   *  with any test fixtures that set it directly; the renderer uses `timestamp`. */
+  timestamp: number  // Unix ms — matches pkg/api/types.go `json:"timestamp"`
+  ts?: number        // legacy alias — do not use in new code
+  phase?: string     // STREAM-LOG-PHASE field — may be absent before that ships
 }
 
 const MAX_LOG_ROWS = 5000
@@ -941,6 +944,10 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
     setAttempts(0)
     attemptRef.current = 0
     userScrolledUpRef.current = false
+    // Reset per-node UI state so stale filter/badge from the previous node
+    // don't persist after the operator switches to a different node (fix #5).
+    setPhaseFilter(null)
+    setHasWarnOrError(false)
 
     connect(0)
 
@@ -954,7 +961,8 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
   function connect(_attempt: number) {
     if (!mountedRef.current) return
 
-    const path = `/api/v1/logs/stream?component=deploy&node_mac=${encodeURIComponent(primaryMac)}`
+    // Server reads query param `mac` (not `node_mac`) — see internal/server/handlers/logs.go StreamLogs.
+    const path = `/api/v1/logs/stream?component=deploy&mac=${encodeURIComponent(primaryMac)}`
     const es = new EventSource(sseUrl(path), { withCredentials: true })
     esRef.current = es
 
@@ -1143,7 +1151,7 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
                 >
                   {/* Timestamp gutter */}
                   <td className="px-3 py-0.5 whitespace-nowrap text-[10px] text-white/30 select-none w-[100px]">
-                    {formatLogTs(entry.ts)}
+                    {formatLogTs(entry.timestamp ?? entry.ts ?? 0)}
                   </td>
 
                   {/* Phase badge */}
@@ -1261,12 +1269,13 @@ function sensorStateClass(state: string): string {
 
 const DESTRUCTIVE_POWER_ACTIONS = new Set(["off", "cycle", "reset"])
 
+// "soft" (ACPI graceful shutdown) is not implemented on the server; removed to
+// avoid confusing operators with a button that hits a non-existent endpoint.
 const POWER_ACTIONS = [
-  { action: "on",    label: "Power On",  confirmWord: null },
-  { action: "off",   label: "Power Off", confirmWord: "off" },
+  { action: "on",    label: "Power On",    confirmWord: null },
+  { action: "off",   label: "Power Off",   confirmWord: "off" },
   { action: "cycle", label: "Power Cycle", confirmWord: "cycle" },
   { action: "reset", label: "Hard Reset",  confirmWord: "reset" },
-  { action: "soft",  label: "Soft Off",    confirmWord: null },
 ] as const
 
 const IPMI_SEL_PAGE_SIZE = 20
@@ -1284,9 +1293,10 @@ function IpmiSectionHeading({ children }: { children: React.ReactNode }) {
 
 function IpmiSeverityPill({ severity }: { severity: string }) {
   const s = severity.toLowerCase()
+  // Server SEL constants emit "warn"; tolerate "warning" as well for robustness.
   const cls =
     s === "critical" ? "bg-destructive/10 text-destructive border-destructive/30" :
-    s === "warning"  ? "bg-status-warning/10 text-status-warning border-status-warning/30" :
+    (s === "warn" || s === "warning") ? "bg-status-warning/10 text-status-warning border-status-warning/30" :
     "bg-muted/30 text-muted-foreground border-border"
   return (
     <span className={cn("inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium", cls)}>
