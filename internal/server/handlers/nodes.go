@@ -19,6 +19,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/metrics"
 	"github.com/sqoia-dev/clustr/internal/webhook"
 	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/sqoia-dev/clustr/pkg/hostlist"
 )
 
 // sortNodeConfigs sorts a slice of NodeConfigs by the given column name.
@@ -173,6 +174,12 @@ func sanitizeNodeConfigs(cfgs []api.NodeConfig) []api.NodeConfig {
 // Accepts optional ?page= and ?per_page= (default 50) for pagination.
 // When pagination params are absent the full list is returned (backward compatible).
 // S5-3: accepts ?sort=hostname|status|last_deploy|group and ?dir=asc|desc.
+//
+// Sprint 34 HOSTLIST: accepts ?names=<pattern> with pdsh-style hostlist syntax
+// (e.g. node[01-12], rack[1-3]-node[01-12]) and filters the result to nodes
+// whose Hostname matches the expansion. Unknown names are surfaced via
+// X-Clustr-Unmatched-Hostnames so the caller can flag them to the operator
+// without breaking the partial-match contract.
 func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	baseImageID := r.URL.Query().Get("base_image_id")
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
@@ -180,6 +187,8 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	sortDir := r.URL.Query().Get("dir")
 	// TAG-2: collect all ?tag= values (multiple allowed, AND semantics).
 	tagFilter := r.URL.Query()["tag"]
+	// HOSTLIST (Sprint 34): optional ?names=<pdsh-pattern> filters by hostname.
+	namesPattern := strings.TrimSpace(r.URL.Query().Get("names"))
 	rawPage, rawPerPage, paging := parsePaginationQuery(r)
 
 	nodes, err := h.DB.SearchNodeConfigs(r.Context(), baseImageID, search, tagFilter)
@@ -192,6 +201,39 @@ func (h *NodesHandler) ListNodes(w http.ResponseWriter, r *http.Request) {
 		nodes = []api.NodeConfig{}
 	}
 	nodes = sanitizeNodeConfigs(nodes)
+
+	// HOSTLIST: server-side hostname filter. Expansion errors are 400s.
+	// After expansion we surface unmatched names in a response header so the
+	// UI can show "12 of 14 matched (compute13, compute14 unknown)".
+	if namesPattern != "" {
+		wanted, expandErr := hostlist.Expand(namesPattern)
+		if expandErr != nil {
+			writeValidationError(w, fmt.Sprintf("invalid hostlist pattern in ?names=: %s", expandErr.Error()))
+			return
+		}
+		wantedSet := make(map[string]struct{}, len(wanted))
+		for _, name := range wanted {
+			wantedSet[name] = struct{}{}
+		}
+		matched := make([]api.NodeConfig, 0, len(wanted))
+		matchedHostnames := make(map[string]struct{}, len(wanted))
+		for _, n := range nodes {
+			if _, ok := wantedSet[n.Hostname]; ok {
+				matched = append(matched, n)
+				matchedHostnames[n.Hostname] = struct{}{}
+			}
+		}
+		var unmatched []string
+		for _, name := range wanted {
+			if _, ok := matchedHostnames[name]; !ok {
+				unmatched = append(unmatched, name)
+			}
+		}
+		if len(unmatched) > 0 {
+			w.Header().Set("X-Clustr-Unmatched-Hostnames", strings.Join(unmatched, ","))
+		}
+		nodes = matched
+	}
 
 	// S5-3: server-side sort by requested column.
 	if sortCol != "" {
@@ -481,6 +523,124 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 
 	setNodeConfigSunsetHeader(w) // S6-7: "groups" deprecated, removed in v1.1
 	writeJSON(w, http.StatusOK, cfg)
+}
+
+// UpdateBootSettings handles PUT /api/v1/nodes/:id/boot-settings.
+//
+// Sprint 34 BOOT-SETTINGS-MODAL.  Writes the three Sprint 34 boot-routing
+// columns on a node: boot_order_policy, netboot_menu_entry, kernel_cmdline.
+// All other fields are untouched — this is a focussed write path that only
+// the boot settings modal calls.
+//
+// Request body (api.UpdateNodeBootSettingsRequest): all fields are
+// pointer-typed.  Pointer-nil = "no change".  Empty-string non-nil = "clear".
+// Non-empty non-nil = "set".  Validation:
+//
+//   - BootOrderPolicy must be one of "auto", "network", "os" or empty (which
+//     normalises to "auto" since the column is NOT NULL).
+//   - NetbootMenuEntry, when non-empty, must reference an existing
+//     boot_entries row id.  We surface the dangling-reference case as a 400
+//     so the operator's mental model stays honest.
+//   - KernelCmdline length is capped at 4 KiB; embedded NUL bytes are
+//     rejected (a deploy-time corruption vector).
+//
+// Audit: every successful PUT is recorded via the existing audit service so
+// operators have a write-trail for boot policy changes — these decisions
+// silently affect every future reimage of the node.
+func (h *NodesHandler) UpdateBootSettings(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	existing, err := h.DB.GetNodeConfig(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var req api.UpdateNodeBootSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeValidationError(w, "invalid JSON body")
+		return
+	}
+
+	// Validate policy.
+	if req.BootOrderPolicy != nil {
+		policy := *req.BootOrderPolicy
+		switch policy {
+		case "", "auto", "network", "os":
+			// OK.
+		default:
+			writeValidationError(w, fmt.Sprintf(
+				"boot_order_policy must be one of: auto, network, os (got %q)", policy))
+			return
+		}
+	}
+
+	// Validate kernel cmdline.
+	if req.KernelCmdline != nil {
+		cmdline := *req.KernelCmdline
+		if len(cmdline) > 4096 {
+			writeValidationError(w, fmt.Sprintf(
+				"kernel_cmdline length %d exceeds 4096-byte cap", len(cmdline)))
+			return
+		}
+		if strings.ContainsRune(cmdline, 0) {
+			writeValidationError(w, "kernel_cmdline must not contain NUL bytes")
+			return
+		}
+	}
+
+	// Validate netboot menu entry references an existing boot_entries row.
+	// Empty string is a "clear" sentinel and skips the lookup.
+	if req.NetbootMenuEntry != nil && *req.NetbootMenuEntry != "" {
+		if _, lookupErr := h.DB.GetBootEntry(r.Context(), *req.NetbootMenuEntry); lookupErr != nil {
+			writeValidationError(w, fmt.Sprintf(
+				"netboot_menu_entry %q does not reference an existing boot entry: %s",
+				*req.NetbootMenuEntry, lookupErr.Error()))
+			return
+		}
+	}
+
+	if err := h.DB.UpdateNodeBootSettings(r.Context(), id,
+		req.BootOrderPolicy, req.NetbootMenuEntry, req.KernelCmdline); err != nil {
+		log.Error().Err(err).Str("node_id", id).Msg("update node boot settings")
+		writeError(w, err)
+		return
+	}
+
+	updated, err := h.DB.GetNodeConfig(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if h.Audit != nil {
+		aID, aLabel := "", ""
+		if h.GetActorInfo != nil {
+			aID, aLabel = h.GetActorInfo(r)
+		}
+		h.Audit.Record(r.Context(), aID, aLabel, db.AuditActionNodeUpdate, "node", id,
+			r.RemoteAddr,
+			map[string]string{
+				"boot_order_policy":  existing.BootOrderPolicy,
+				"netboot_menu_entry": existing.NetbootMenuEntry,
+				"kernel_cmdline":     existing.KernelCmdline,
+			},
+			map[string]string{
+				"boot_order_policy":  updated.BootOrderPolicy,
+				"netboot_menu_entry": updated.NetbootMenuEntry,
+				"kernel_cmdline":     updated.KernelCmdline,
+			})
+	}
+
+	log.Info().
+		Str("node_id", id).
+		Str("hostname", updated.Hostname).
+		Str("boot_order_policy", updated.BootOrderPolicy).
+		Str("netboot_menu_entry", updated.NetbootMenuEntry).
+		Int("kernel_cmdline_len", len(updated.KernelCmdline)).
+		Msg("nodes: boot settings updated")
+
+	writeJSON(w, http.StatusOK, sanitizeNodeConfig(updated))
 }
 
 // DeleteNode handles DELETE /api/v1/nodes/:id

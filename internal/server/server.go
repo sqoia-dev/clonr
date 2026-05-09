@@ -1785,6 +1785,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireGroupAccess("id", s.db)).Patch("/nodes/{id}", nodes.PatchNode)
 			r.With(requireGroupAccess("id", s.db)).Delete("/nodes/{id}", nodes.DeleteNode)
 
+			// Sprint 34 BOOT-SETTINGS-MODAL: per-node boot policy + netboot/cmdline overrides.
+			// Admin-only; the settings silently affect every future reimage so we don't
+			// gate on group access alone.
+			r.With(requireRole("admin")).Put("/nodes/{id}/boot-settings", nodes.UpdateBootSettings)
+
 			// S5-12: Node config change history (admin-only audit trail).
 			configHistoryH := &handlers.NodeConfigHistoryHandler{DB: s.db}
 			r.With(requireRole("admin")).Get("/nodes/{id}/config-history", configHistoryH.HandleList)

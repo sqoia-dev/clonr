@@ -1,5 +1,128 @@
 # Changelog
 
+## Unreleased — Sprint 34 Bundle A (BOOT-POLICY + BOOT-SETTINGS-MODAL backend + HOSTLIST)
+
+Three cohesive backend additions for Sprint 34:
+
+### `pkg/hostlist` — pdsh-style range parser
+
+New `pkg/hostlist/` package with `Expand(string) ([]string, error)` and
+`Compress([]string) string`. Handles single brackets (`node[01-12]`),
+zero-padded ranges (`node[001-128]`), comma-joined ranges
+(`node[01-04,08,12-15]`), out-of-order specifications
+(`node[03,01,02]`), top-level commas, and multi-bracket cross-products
+(`rack[1-3]-node[01-12]` = 36 names).
+
+Wired into:
+
+- `internal/server/handlers/nodes.go:ListNodes` — `GET /api/v1/nodes?names=<pattern>`
+  filters by hostname against the expanded set. Unknown names surface in the
+  `X-Clustr-Unmatched-Hostnames` response header so the UI can display
+  "12 of 14 matched (compute13, compute14 unknown)".
+- `cmd/clustr/group.go` — `add-member` and `remove-member` accept a hostlist
+  pattern as the second positional arg. Strict expansion: every name must
+  resolve, otherwise the command errors before any membership change.
+
+### `BOOT-POLICY` — explicit per-node BootOrderPolicy field
+
+`NodeConfig.BootOrderPolicy` (one of `auto` / `network` / `os`) replaces the
+v0.1.22 reactive `RepairBootOrderForReimage`. Threaded from cfg →
+`bootloaderCtx.BootOrderPolicy` → `runGrub2InstallEFIInChroot` → new
+`ApplyBootOrderPolicy(ctx, policy)`.
+
+- `auto` / `network` / `""` preserve the v0.1.22 PXE-first repair semantics
+  (back-compat for legacy nodes; `auto` is the migration default).
+- `os` reorders BootOrder so an OS entry leads, with the first PXE entry
+  moved to second position. Used for login / storage / service nodes that
+  cold-boot from disk by default and only PXE on demand.
+
+`RepairBootOrderForReimage` is preserved as a thin shim over
+`ApplyBootOrderPolicy("auto")` so existing callers and tests compile.
+
+Schema: migration `105_node_boot_policy_settings.sql` adds three columns to
+`node_configs`: `boot_order_policy` (CHECK constrained, default `'auto'`),
+`netboot_menu_entry` (nullable TEXT), `kernel_cmdline` (nullable TEXT).
+
+### `BOOT-SETTINGS-MODAL` backend
+
+New `NodeConfig.NetbootMenuEntry` and `NodeConfig.KernelCmdline` fields wired
+into `internal/server/handlers/boot.go:generateDiskBootScript` so when a
+deployed node's PXE-boot script is served:
+
+- `NetbootMenuEntry` (a row id from `boot_entries`, validated server-side)
+  becomes the auto-selected default item in the iPXE menu. A dangling /
+  disabled entry is degraded to "fall back to default disk-boot menu" with
+  a logged warning — never strands the node.
+- `KernelCmdline` is appended verbatim to the kernel cmdline of any chained
+  entry. Use cases: serial console pinning (`console=ttyS0,115200n8`),
+  one-shot debug flags (`nomodeset`).
+
+`internal/pxe/boot.go` exports a new `GenerateDiskBootScriptWithSettings`
+function (the existing `GenerateDiskBootScript` becomes a thin shim with
+`persistedEntry=nil, persistedKernelCmdline=""` for back-compat). Both BIOS
+and UEFI iPXE templates were extended with a `:persisted` label that fires
+when `PersistedEntry` is set.
+
+### Wire shape — `PUT /api/v1/nodes/{id}/boot-settings`
+
+```jsonc
+PUT /api/v1/nodes/{id}/boot-settings
+Content-Type: application/json
+
+{
+  "boot_order_policy":  "network",             // optional; "auto"|"network"|"os" or "" (clear→auto)
+  "netboot_menu_entry": "rescue-entry-uuid",   // optional; must reference boot_entries.id (or "" to clear)
+  "kernel_cmdline":     "console=ttyS0,115200n8" // optional; ≤4096 bytes, no NUL (or "" to clear)
+}
+
+→ 200 OK { ...full sanitized NodeConfig... }
+→ 400 Bad Request — invalid policy / oversize cmdline / NUL byte / dangling entry id
+→ 404 Not Found — node id unknown
+```
+
+All three fields are pointer-typed in the request struct
+(`api.UpdateNodeBootSettingsRequest`). Pointer-nil = "leave alone".
+Empty string non-nil = "clear" (`boot_order_policy` "" normalises to "auto"
+because the column is NOT NULL). Non-empty non-nil = "set".
+
+Audit: every successful PUT records before/after via the existing
+`AuditActionNodeUpdate` so operators have a write-trail for boot policy
+changes (these decisions silently affect every future reimage).
+
+Auth: admin-only. Group-scoped operators can edit a node's hostname / image
+via `PUT /api/v1/nodes/{id}` but not its boot routing — boot settings
+have cluster-wide blast radius.
+
+### Tests
+
+- `pkg/hostlist/hostlist_test.go` (new) — 22 cases covering plain names,
+  contiguous + gapped + out-of-order ranges, multi-bracket cross-products,
+  zero-pad preservation, large ranges (128-element), error paths
+  (unmatched brackets, empty groups, reversed ranges, non-numeric, leading /
+  trailing dashes, double commas), and round-trip Compress(Expand(x))
+  invariants.
+- `internal/deploy/bootloader_test.go`:
+  - `TestApplyBootOrderPolicy_BIOSNoOp` — every policy value (including
+    "garbage") is a no-op on BIOS hosts (CI default).
+  - `TestBootOrderArgs_PolicyArgvTranslation` — pins the exact
+    `efibootmgr -o <BOOT0001>,<BOOT0002>,...` argv contract via the
+    `bootOrderArgs` helper without spawning a real efibootmgr.
+  - `TestApplyBootOrderPolicy_UnknownOnUEFI` — gates the unknown-policy
+    error on UEFI hosts only (skipped on BIOS CI).
+- `internal/server/handlers/nodes_boot_settings_test.go` (new) — 8 cases
+  covering happy-path policy set, empty-string normalisation to auto,
+  invalid policy rejection, kernel_cmdline length cap and NUL rejection,
+  netboot_menu_entry dangling-reference rejection, netboot_menu_entry
+  happy path, pointer-semantics preservation, and 404 for unknown node id.
+
+### Out of scope (Bundle B / UI)
+
+- IPMI / BMC / SOL — separate Richard dispatch on `feat/sprint-34-bundle-b`.
+- Web UI for the Boot Settings modal + Hostlist filter input — separate
+  Dinesh dispatch on `feat/sprint-34-ui-a`.
+
+---
+
 ## Unreleased — Sprint 33 STREAM-LOG-PHASE
 
 Phase-tagged install-log streaming so the web UI's live tail can colour-group
