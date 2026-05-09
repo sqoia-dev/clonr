@@ -218,16 +218,30 @@ func TestRemoteLogWriter_PhaseConcurrency(t *testing.T) {
 
 	wg.Wait()
 
-	// Drain whatever made it into the buffer. We don't assert exact counts
-	// (n entries may exceed the buffer cap, which is fine — drops are
-	// expected and documented). We only need to confirm we got some entries
+	// Drain whatever made it into the buffer and wait deterministically for
+	// the fake server to record at least one batch. We don't assert exact
+	// counts (n entries may exceed the buffer cap, which is fine — drops are
+	// expected and documented); we only need to confirm some entries shipped
 	// and none crashed the writer.
-	if err := w.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
+	//
+	// Why poll: writes from the goroutine fire a background-flusher signal
+	// (urgent flush path on info-level lines once buffer fills). After
+	// wg.Wait() the producer goroutines are done, but the in-flight
+	// background flush may still be marshalling/POSTing to the httptest
+	// server. We call Flush() on each tick to drain anything the background
+	// flusher hasn't picked up yet, and bail as soon as the server records
+	// a batch. The 5s deadline tolerates slow CI runners under -race.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := w.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		if len(fake.entries()) > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if len(fake.entries()) == 0 {
-		t.Fatal("expected at least some buffered entries to be shipped")
-	}
+	t.Fatal("expected at least some buffered entries to be shipped within 5s")
 }
 
 func mustWrite(t *testing.T, w *RemoteLogWriter, line string) {
