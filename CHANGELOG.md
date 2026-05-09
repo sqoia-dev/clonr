@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased — Sprint 33 deploy-pipeline trio
+
+Three small deploy-pipeline hardenings that share a CI run and ship together.
+Each one targets a discrete failure class observed across the v0.1.10 →
+v0.1.21 patch storm (see `docs/SPRINT-PLAN.md` Sprint 33 source notes).
+
+### Added
+
+- **DRACUT-REGEN: per-kver portable initramfs regeneration**
+  (`internal/deploy/regen_initramfs.go`, `internal/deploy/finalize.go`):
+  the in-chroot dracut call in `applyBootConfig` is replaced with a
+  per-kernel-version loop driven by `runDracutInChroot`. For every
+  `vmlinuz-<kver>` in the deployed `/boot`, it runs
+  `chroot <root> dracut -fv -N --lvmconf --force-add mdraid --force-add lvm
+  /boot/initramfs-<kver>.img <kver>`. The new portability flags
+  (`--lvmconf`, `--force-add mdraid`, `--force-add lvm`) ensure an image
+  captured on virtio (no md, no lvm in the running kernel modules) boots
+  correctly on a target with a different storage controller (PERC RAID,
+  SATA AHCI, mdraid root, LVM root). Per-kver iteration also threads
+  progress through the existing `runAndLog` so the v0.1.22 install_log
+  heartbeat surfaces each kver's progress instead of one monolithic 30-90s
+  silent pause. Failures on any single kver are logged-non-fatal; the
+  next kver is still attempted. New file `internal/deploy/regen_initramfs.go`
+  with unit tests at `internal/deploy/regen_initramfs_test.go` covering the
+  argv shape, kernel discovery (including rescue-kernel filtering), empty
+  /boot, and missing /boot.
+
+- **MULTICAST-JITTER: deterministic 0-60s pre-`/deploy-complete` sleep**
+  (`cmd/clustr/multicast_jitter.go`, `cmd/clustr/main.go`): when 256 nodes
+  finish a multicast image transfer in the same one-second window, every
+  node POSTs `/deploy-complete` simultaneously and the server's request
+  rate spikes to 256/s, spilling into request latency and (on the small
+  pkg.sqoia.dev tier) timing out some POSTs. Each multicast-completed
+  node now sleeps a deterministic 0-60s offset (FNV-1a-hash of primary
+  MAC seeds a `math/rand` source; offset = `Intn(60)`) before posting.
+  Determinism is critical for retries: a node that failed at offset=17
+  retries at offset=17, not at a fresh random offset that would re-bunch
+  the herd at the retry attempt. Unicast deploys are not affected
+  (already serialized by the per-blob HTTP byte-rate limit). Unit tests at
+  `cmd/clustr/multicast_jitter_test.go` cover the no-op-on-unicast path,
+  the [0, 60s) bound, per-MAC determinism, cross-MAC distribution, and the
+  `multicastJitterMaxSeconds` const contract.
+
+- **PRE-ZERO: `dd if=/dev/zero of=$disk bs=1M count=10 conv=fsync` before
+  `wipefs -a`** (`internal/deploy/rsync.go`): `diskWipeSequence` now
+  prepends a 10 MiB dd zero pass before the existing `wipefs -a` →
+  `sgdisk --zap-all` chain. `wipefs` only erases recognised
+  filesystem/RAID superblocks; raw stage-1 GRUB bytes / MBR partition
+  tables / boot-sector code are invisible to it. Without dd-first, a
+  previously imaged disk can chain-load a stale GRUB stage 1 on the next
+  boot before the freshly written bootloader runs. Idempotent (zeroing
+  the same 10 MiB twice is fine), best-effort (logged-non-fatal on
+  failure — wipefs and sgdisk remain the authoritative gates).
+  `internal/deploy/disk_wipe_test.go` extended with `TestDiskWipeSequence_DDFirst`
+  and `TestDiskWipeSequence_DDBeforeWipefs` plus updated existing tests
+  to the new 3-command sequence.
+
+### Source
+
+`clustervisor` was the cross-reference: `ClonerInstall.pm` runs `dd ...
+count=10` before partitioning, regenerates the initrd in-chroot per kernel
+via `_create_system_files_el`, and uses jittered post-multicast callbacks.
+Each behaviour was a known production-deploy hardening that mainline
+clustr was missing.
+
+### Out of scope
+
+- `STREAM-LOG-PHASE` and `STREAM-LOG-UI` (Sprint 33 observability half) ship
+  in a separate dispatch.
+
 ## v0.1.22 — 2026-05-08
 
 LDAP readiness staleness fix. v0.1.21 made LDAP work end-to-end on

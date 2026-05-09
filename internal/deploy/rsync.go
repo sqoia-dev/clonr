@@ -1189,14 +1189,35 @@ type diskWipeCmd struct {
 }
 
 // diskWipeSequence returns the ordered list of commands that must run on a
-// target disk before sgdisk creates the new partition table. wipefs MUST come
-// before sgdisk --zap-all: sgdisk only clears the GPT/MBR header, leaving
-// filesystem and RAID superblocks behind. Those residual signatures cause
-// grub-probe to see "multiple partition labels" on a redeploy of a previously
-// imaged disk and fail the bootloader phase. wipefs is idempotent — a clean
-// disk exits 0 — so it is safe to invoke unconditionally.
+// target disk before sgdisk creates the new partition table.
+//
+// Order is load-bearing:
+//
+//  1. dd if=/dev/zero of=<disk> bs=1M count=10 — Sprint 33 PRE-ZERO. Belt-
+//     and-braces zeroing of the first 10 MiB clears boot-sector / GRUB stage 1
+//     bytes, MBR partition tables, and protective-MBR remnants that wipefs
+//     does not see (it only clears recognised filesystem/RAID superblocks,
+//     not raw stage-1 bootloader code). Without this, a previously-deployed
+//     disk can chain-load a stale GRUB stage 1 on the next boot before the
+//     freshly written bootloader takes over. Idempotent: zeroing the same
+//     10 MiB twice is fine.
+//  2. wipefs -a <disk> — clears filesystem + RAID superblocks that sgdisk's
+//     --zap-all leaves behind. Without this, grub-probe sees "multiple
+//     partition labels" on redeploys and fails the bootloader phase.
+//  3. sgdisk --zap-all <disk> — drops the GPT/MBR header. Authoritative
+//     gate; failure here aborts the wipe.
+//
+// All three commands are idempotent — re-running on a freshly wiped disk is
+// a no-op — so the sequence is safe to invoke unconditionally on every
+// deploy. dd and wipefs failures are logged-non-fatal (the next steps will
+// surface a real problem); sgdisk failure is propagated.
 func diskWipeSequence(target string) []diskWipeCmd {
 	return []diskWipeCmd{
+		// Sprint 33 PRE-ZERO: wipe the first 10 MiB of the disk to evict
+		// boot-sector / GRUB stage 1 / MBR remnants that wipefs cannot see.
+		// conv=fsync forces the kernel to flush writes before exit so a
+		// later sgdisk does not race against an in-flight pagecache write.
+		{Name: "dd", Args: []string{"if=/dev/zero", "of=" + target, "bs=1M", "count=10", "conv=fsync"}},
 		{Name: "wipefs", Args: []string{"-a", target}},
 		{Name: "sgdisk", Args: []string{"--zap-all", target}},
 	}
@@ -1251,15 +1272,16 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 	}
 
 	for target, parts := range targetMap {
-		// Run the wipe sequence: wipefs -a BEFORE sgdisk --zap-all. The
-		// proactive wipefs step clears FS/RAID superblocks that sgdisk's
-		// --zap-all leaves behind; without it, grub-probe on the redeploy
-		// path sees "multiple partition labels" and the bootloader phase
-		// fails. wipefs is idempotent (exit 0 on a clean disk), so a non-
-		// zero exit is logged but not propagated; sgdisk --zap-all remains
-		// the authoritative gate. See diskWipeSequence for the contract.
-		// The RAID-on-whole-disk path partitions the md device (raw members
-		// are skipped above via isMdDevice) and is unaffected by this step.
+		// Run the wipe sequence: dd zero (PRE-ZERO) → wipefs -a → sgdisk
+		// --zap-all. dd clears boot-sector / GRUB stage 1 bytes that wipefs
+		// can't see; wipefs clears FS/RAID superblocks that sgdisk's
+		// --zap-all leaves behind; sgdisk drops the GPT/MBR header.
+		// dd and wipefs are best-effort (logged on failure, not propagated).
+		// sgdisk --zap-all remains the authoritative gate: its failure is
+		// caught below and retried via the legacy wipefs fallback. See
+		// diskWipeSequence for the load-bearing-order contract. The
+		// RAID-on-whole-disk path partitions the md device (raw members are
+		// skipped above via isMdDevice) and is unaffected by this step.
 		var sgdiskErr error
 		for _, wcmd := range diskWipeSequence(target) {
 			log.Info().Str("disk", target).Str("cmd", wcmd.Name).
@@ -1268,7 +1290,16 @@ func (d *FilesystemDeployer) partitionDisk(ctx context.Context, disk string) err
 			if err == nil {
 				continue
 			}
-			if wcmd.Name == "wipefs" {
+			switch wcmd.Name {
+			case "dd":
+				// Sprint 33 PRE-ZERO is best-effort. A failure here means
+				// the disk is unwriteable, in which case wipefs and sgdisk
+				// will fail too and the real error will surface there with
+				// better context. Log and proceed.
+				log.Warn().Str("disk", target).Err(err).
+					Msg("dd zero (PRE-ZERO) returned non-zero (continuing — wipefs/sgdisk will surface real failures)")
+				continue
+			case "wipefs":
 				log.Warn().Str("disk", target).Err(err).
 					Msg("wipefs -a returned non-zero (continuing — sgdisk --zap-all will surface real failures)")
 				continue
