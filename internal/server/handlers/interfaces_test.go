@@ -262,6 +262,82 @@ func TestInterfaces_PutMergeMode(t *testing.T) {
 	}
 }
 
+// TestInterfaces_PutEmptyPassPreservesStoredPassword guards against the
+// regression Codex caught on PR #14 (issue #2): GET /interfaces never
+// returns the BMC password, so a normal read-edit-save cycle in the UI
+// re-POSTs the row with Pass="" — and the previous handler unconditionally
+// overwrote cfg.BMC.Password with that empty string, silently nuking the
+// credential.  The fix mirrors the BMC patch handler's pattern: empty
+// Pass preserves the existing value.
+func TestInterfaces_PutEmptyPassPreservesStoredPassword(t *testing.T) {
+	db := &fakeInterfacesDB{nodes: map[string]api.NodeConfig{
+		"n1": {
+			ID: "n1",
+			BMC: &api.BMCNodeConfig{
+				IPAddress: "192.168.10.50",
+				Username:  "admin",
+				Password:  "preserved-secret",
+			},
+		},
+	}}
+	r := newInterfacesRouter(db)
+
+	// Re-POST the same interface list with the password field omitted —
+	// exactly what the UI does when an operator edits the IP/user but
+	// doesn't re-type the password.
+	body, _ := json.Marshal(InterfacesRequest{
+		Mode: "replace",
+		Interfaces: []TypedInterface{
+			{Kind: "ipmi", Name: "ipmi0", IP: "192.168.10.99", Channel: "1", User: "admin"},
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/v1/nodes/n1/interfaces", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	cfg := db.nodes["n1"]
+	if cfg.BMC == nil {
+		t.Fatal("BMC was wiped — should have been preserved")
+	}
+	if cfg.BMC.IPAddress != "192.168.10.99" {
+		t.Errorf("IP not updated: %q", cfg.BMC.IPAddress)
+	}
+	if cfg.BMC.Password != "preserved-secret" {
+		t.Errorf("password not preserved: got %q, want %q", cfg.BMC.Password, "preserved-secret")
+	}
+}
+
+// TestInterfaces_PutNonEmptyPassReplaces verifies the preservation logic
+// only activates when Pass is empty — supplying a new password still
+// rotates the credential as the operator intends.
+func TestInterfaces_PutNonEmptyPassReplaces(t *testing.T) {
+	db := &fakeInterfacesDB{nodes: map[string]api.NodeConfig{
+		"n1": {
+			ID:  "n1",
+			BMC: &api.BMCNodeConfig{IPAddress: "10.0.0.5", Username: "admin", Password: "old"},
+		},
+	}}
+	r := newInterfacesRouter(db)
+	body, _ := json.Marshal(InterfacesRequest{
+		Mode: "replace",
+		Interfaces: []TypedInterface{
+			{Kind: "ipmi", Name: "ipmi0", IP: "10.0.0.5", Channel: "1", User: "admin", Pass: "new"},
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/v1/nodes/n1/interfaces", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := db.nodes["n1"].BMC.Password; got != "new" {
+		t.Errorf("password = %q, want %q", got, "new")
+	}
+}
+
 func TestInterfaces_PutMultipleIPMIRejected(t *testing.T) {
 	db := &fakeInterfacesDB{nodes: map[string]api.NodeConfig{
 		"n1": {ID: "n1"},
