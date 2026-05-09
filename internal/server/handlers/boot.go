@@ -138,11 +138,56 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 			log.Error().Err(err).Str("mac", mac).Msg("boot: lookup node by MAC")
 		} else if err == nil {
 			state := nodeCfg.State()
+			// Sprint 37 DISKLESS Bundle A: log the operating_mode on every PXE
+			// routing decision so the protocol is observable in lab without
+			// requiring a DB query. Empty string is normalised to the default
+			// 'block_install' on the read path; logging the resolved value.
+			operatingMode := nodeCfg.OperatingMode
+			if operatingMode == "" {
+				operatingMode = api.OperatingModeBlockInstall
+			}
 			log.Info().
 				Str("mac", mac).
 				Str("hostname", nodeCfg.Hostname).
 				Str("state", string(state)).
+				Str("operating_mode", operatingMode).
 				Msg("boot: PXE routing decision")
+			log.Info().
+				Str("node", nodeCfg.ID).
+				Str("mode", operatingMode).
+				Msg("boot: serving iPXE for node")
+
+			// Sprint 37 DISKLESS Bundle A: schema-and-protocol foundation only.
+			// Modes other than block_install have no end-to-end wiring yet —
+			// Bundle B delivers initramfs variants, NFS exports, and the
+			// cluster image-pointer mechanism. Until then we serve a TODO
+			// sentinel iPXE script that exits with a clear error message so
+			// the protocol is observable in lab without a half-broken boot
+			// path stranding a node mid-deploy.
+			//
+			// block_install (default) falls through to the existing state
+			// machine below — bit-for-bit unchanged behavior for every node
+			// that already exists at upgrade time.
+			if operatingMode != api.OperatingModeBlockInstall {
+				log.Warn().
+					Str("mac", mac).
+					Str("hostname", nodeCfg.Hostname).
+					Str("node", nodeCfg.ID).
+					Str("operating_mode", operatingMode).
+					Msg("boot: operating_mode not yet wired (Bundle B pending) — serving TODO sentinel")
+				script := fmt.Sprintf(
+					"#!ipxe\n"+
+						"echo clustr: operating_mode %s not yet wired -- Bundle B pending\n"+
+						"echo clustr: node=%s hostname=%s\n"+
+						"echo clustr: this iPXE script intentionally fails fast to avoid stranding the node\n"+
+						"exit 1\n",
+					operatingMode, nodeCfg.ID, nodeCfg.Hostname,
+				)
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(script))
+				return
+			}
 
 			switch state {
 			case api.NodeStateDeployed, api.NodeStateDeployedVerified:
