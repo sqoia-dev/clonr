@@ -74,7 +74,12 @@ func jitterSleepIfMulticast(usedMulticast bool, primaryMAC string, sleep func(ti
 func jitterDuration(primaryMAC string) time.Duration {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(primaryMAC))
-	r := rand.New(rand.NewSource(int64(h.Sum32())))
+	// math/rand (G404) is the correct choice here: this is a deterministic
+	// load-spreading offset, not a security boundary. crypto/rand would
+	// defeat the per-MAC determinism that retries depend on (a node that
+	// failed at offset=17 retries at offset=17). The seed is the FNV-1a
+	// hash of the node's primary MAC.
+	r := rand.New(rand.NewSource(int64(h.Sum32()))) // #nosec G404 -- intentional: deterministic load spread, not crypto
 	secs := r.Intn(multicastJitterMaxSeconds)
 	return time.Duration(secs) * time.Second
 }
