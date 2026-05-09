@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,12 +60,19 @@ func putBootSettingsRequest(t *testing.T, h *NodesHandler, nodeID string, body a
 // as a user-input problem.  Only ErrNotFound should be 400; other
 // errors must surface as 5xx.
 //
-// We exercise the "other errors" path by closing the DB before the
-// PUT, which makes any subsequent query return sql.ErrConnDone (or
-// "database is closed") wrapped by the db package — definitely not
-// ErrNotFound.
+// We exercise the "other errors" path by directly poisoning the
+// underlying *sql.DB (ping returns an error, queries fail) — the
+// openTestDB cleanup still runs Close() afterwards which panics on a
+// double-closed channel.  Avoid that by using a freshly opened DB
+// without t.Cleanup registration.
 func TestUpdateBootSettings_NetbootMenuEntry_DBError_Returns500(t *testing.T) {
-	d := openTestDB(t)
+	// Use a private DB we can close ourselves without stepping on the
+	// shared openTestDB cleanup helper.
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "tmp.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
 	makeBootSettingsTestNode(t, d, "node-1", "aa:bb:cc:dd:ee:0a", "n0a")
 	h := newNodesHandler(d)
 
