@@ -262,12 +262,21 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 	// BMC / IPMI — configure local BMC network and credentials.
 	// This operates on the physical BMC directly (not the chroot), so it is
 	// done here rather than inside the deployed filesystem.
+	//
+	// Sprint 34 BMC-IN-DEPLOY: ApplyBMCConfigToHardware reads current state
+	// first and only writes the fields that differ. Re-deploying with the
+	// same config is a no-op against the BMC. applyBMCConfig still runs
+	// after to write the BMC-user record (slot 2) which the diff layer
+	// doesn't yet model — see internal/deploy/bmc.go for the LAN-only diff
+	// scope.
 	if cfg.BMC != nil {
-		log.Info().Str("bmc_ip", cfg.BMC.IPAddress).Msg("finalize: configuring BMC via ipmitool")
+		log.Info().Str("bmc_ip", cfg.BMC.IPAddress).Msg("finalize: BMC-IN-DEPLOY idempotent reset (lan)")
+		if err := ApplyBMCConfigToHardware(ctx, cfg.BMC); err != nil {
+			log.Warn().Err(err).Msg("WARNING: finalize: BMC LAN reset failed (non-fatal)")
+		}
+		log.Info().Str("bmc_ip", cfg.BMC.IPAddress).Msg("finalize: configuring BMC user via ipmitool")
 		if err := applyBMCConfig(ctx, cfg.BMC); err != nil {
-			// Non-fatal: BMC configuration failure should not abort a deployment.
-			// The operator can manually configure the BMC afterward.
-			log.Warn().Err(err).Msg("WARNING: finalize: BMC configuration failed (non-fatal)")
+			log.Warn().Err(err).Msg("WARNING: finalize: BMC user configuration failed (non-fatal)")
 		} else {
 			log.Info().Str("bmc_ip", cfg.BMC.IPAddress).Msg("finalize: BMC configured")
 		}
@@ -1241,8 +1250,10 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot, bootOrderPolicy 
 	//
 	// Best-effort: a failure here NEVER fails an otherwise successful deploy
 	// — the deployed node will boot via the removable-media path
-	// (\EFI\BOOT\BOOTX64.EFI) regardless of NVRAM order.  On BIOS systems
-	// this is a true no-op.
+	// (\EFI\BOOT\BOOTX64.EFI) regardless of NVRAM order, and the worst case
+	// is that the operator has to power-cycle once for the policy to win on
+	// next reboot.  On BIOS systems this is a true no-op (ApplyBootOrderPolicy
+	// exits early when /sys/firmware/efi is absent).
 	policy := bootOrderPolicy
 	if policy == "" {
 		policy = "auto"
