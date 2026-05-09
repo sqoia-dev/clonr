@@ -175,8 +175,6 @@ func applyOverwrite(mountRoot string, instr api.InstallInstruction) error {
 // "still on dnf install package N of 47") rather than only seeing the
 // final blob after the script exits — important when scripts take minutes.
 func applyScript(ctx context.Context, mountRoot string, instr api.InstallInstruction, stepNum int) error {
-	log := deployLogger(nil)
-
 	// Set up /proc, /sys, /dev, and /etc/resolv.conf bind-mounts so the
 	// chroot has a working environment. This is THE fix for the v0.1.15
 	// "deploy hangs 35+min on dnf install" bug. Cleanup runs unconditionally
@@ -270,15 +268,16 @@ var (
 // can stitch the tail into its non-zero-exit error message.
 func streamPipeWithFallback(r io.Reader, stream string, stepNum int, addTail func(string), wg *sync.WaitGroup) {
 	defer wg.Done()
+	logger := deployLogger(nil)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, scannerInitBufBytes), scannerMaxTokenBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
-		log.Info().Int("step", stepNum).Str("stream", stream).Msg(line)
+		logger.Info().Int("step", stepNum).Str("stream", stream).Msg(line)
 		addTail(line)
 	}
 	if err := scanner.Err(); err != nil {
-		log.Warn().Int("step", stepNum).Str("stream", stream).Err(err).
+		logger.Warn().Int("step", stepNum).Str("stream", stream).Err(err).
 			Msg("streamPipe: scanner failed; falling back to raw chunked drain")
 		br := bufio.NewReader(r)
 		buf := make([]byte, 64*1024)
@@ -286,7 +285,7 @@ func streamPipeWithFallback(r io.Reader, stream string, stepNum int, addTail fun
 			n, readErr := br.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
-				log.Info().Int("step", stepNum).Str("stream", stream).
+				logger.Info().Int("step", stepNum).Str("stream", stream).
 					Int("bytes", n).Bool("raw_chunk", true).
 					Msg(chunk)
 				addTail(chunk)
