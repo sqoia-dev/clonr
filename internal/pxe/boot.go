@@ -105,6 +105,12 @@ func GenerateBootScript(serverURL, token, multicastParams string) (script []byte
 // iPXE's console renderer (which honours whitespace) displays it centred. The menu
 // command creates its own rendering context that strips leading spaces from item --gap
 // text, so all decorative/info lines live outside the menu block.
+//
+// Sprint 34 BOOT-SETTINGS-MODAL: when {{.PersistedEntry}} is non-nil the
+// menu's --default and the choose-default fall back to entry_<id> rather
+// than disk, so an operator-pinned boot entry is what fires after the
+// 5-second timeout.  When {{.PersistedKernelCmdline}} is non-empty it is
+// appended to every chained ExtraEntries kernel cmdline.
 const diskBootBIOSTemplate = `#!ipxe
 
 # --- header (echo preserves whitespace; item --gap strips leading spaces) ---
@@ -115,16 +121,18 @@ echo
 echo                    Node : {{.Hostname}}
 echo                    MAC  : ${mac}
 echo
+{{- $defaultTarget := "disk" -}}
+{{- if .PersistedEntry }}{{- $defaultTarget = printf "entry_%s" .PersistedEntry.ID -}}{{- end }}
 
 # --- menu ------------------------------------------------------------------
 menu Select boot option:
 item --gap --
-item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
+item {{if not .PersistedEntry}}--default disk --timeout 5000 {{end}}disk   Boot from disk{{if not .PersistedEntry}}      [auto 5s]{{end}}
 item reimage                              Reimage this node{{if .MulticastEnabled}}
 item reimage-fleet                        Reimage via multicast (fleet){{end}}{{range .ExtraEntries}}
-item entry_{{.ID}}                        {{.Name}}{{end}}
+item {{if and $.PersistedEntry (eq $.PersistedEntry.ID .ID)}}--default {{end}}entry_{{.ID}}                        {{.Name}}{{if and $.PersistedEntry (eq $.PersistedEntry.ID .ID)}}      [auto 5s]{{end}}{{end}}
 item --gap --
-choose --default disk --timeout 5000 target && goto ${target} || goto disk
+choose --default {{$defaultTarget}} --timeout 5000 target && goto ${target} || goto {{$defaultTarget}}
 
 :disk
 sanboot --no-describe --drive 0x80 || exit
@@ -137,7 +145,7 @@ chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1&multicast=1 || 
 {{end}}{{range .ExtraEntries}}
 :entry_{{.ID}}
 echo Booting {{.Name}}...
-kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
+kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}{{if $.PersistedKernelCmdline}} {{$.PersistedKernelCmdline}}{{end}}
 {{if .InitrdURL}}initrd {{.InitrdURL}}
 {{end}}boot || goto disk
 {{end}}`
@@ -165,6 +173,10 @@ kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
 // iPXE's console renderer (which honours whitespace) displays it centred. The menu
 // command creates its own rendering context that strips leading spaces from item --gap
 // text, so all decorative/info lines live outside the menu block.
+//
+// Sprint 34 BOOT-SETTINGS-MODAL parity with the BIOS template — see
+// diskBootBIOSTemplate above for the persisted-entry / cmdline override
+// rationale.  Same template-side conditionals apply here.
 const diskBootUEFITemplate = `#!ipxe
 
 # --- header (echo preserves whitespace; item --gap strips leading spaces) ---
@@ -175,16 +187,18 @@ echo
 echo                    Node : {{.Hostname}}
 echo                    MAC  : ${mac}
 echo
+{{- $defaultTarget := "disk" -}}
+{{- if .PersistedEntry }}{{- $defaultTarget = printf "entry_%s" .PersistedEntry.ID -}}{{- end }}
 
 # --- menu ------------------------------------------------------------------
 menu Select boot option:
 item --gap --
-item --default disk --timeout 5000 disk   Boot from disk      [auto 5s]
+item {{if not .PersistedEntry}}--default disk --timeout 5000 {{end}}disk   Boot from disk{{if not .PersistedEntry}}      [auto 5s]{{end}}
 item reimage                              Reimage this node{{if .MulticastEnabled}}
 item reimage-fleet                        Reimage via multicast (fleet){{end}}{{range .ExtraEntries}}
-item entry_{{.ID}}                        {{.Name}}{{end}}
+item {{if and $.PersistedEntry (eq $.PersistedEntry.ID .ID)}}--default {{end}}entry_{{.ID}}                        {{.Name}}{{if and $.PersistedEntry (eq $.PersistedEntry.ID .ID)}}      [auto 5s]{{end}}{{end}}
 item --gap --
-choose --default disk --timeout 5000 target && goto ${target} || goto disk
+choose --default {{$defaultTarget}} --timeout 5000 target && goto ${target} || goto {{$defaultTarget}}
 
 :disk
 exit
@@ -197,7 +211,7 @@ chain {{.ServerURL}}/api/v1/boot/ipxe?mac=${mac}&force_reimage=1&multicast=1 || 
 {{end}}{{range .ExtraEntries}}
 :entry_{{.ID}}
 echo Booting {{.Name}}...
-kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}
+kernel {{.KernelURL}}{{if .Cmdline}} {{.Cmdline}}{{end}}{{if $.PersistedKernelCmdline}} {{$.PersistedKernelCmdline}}{{end}}
 {{if .InitrdURL}}initrd {{.InitrdURL}}
 {{end}}boot || goto disk
 {{end}}`
