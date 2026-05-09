@@ -225,7 +225,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, rule-write, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, rule-write, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply, ipmi-power, ipmi-sel, ipmi-sensors, ipmi-lan-set, ipmi-lan-get, ipmi-sol-activate\n")
 		os.Exit(1)
 	}
 
@@ -259,6 +259,18 @@ func main() {
 		exitCode = verbBiosRead(callerUID, verbArgs)
 	case "bios-apply":
 		exitCode = verbBiosApply(callerUID, verbArgs)
+	case "ipmi-power":
+		exitCode = verbIPMIPower(callerUID, verbArgs)
+	case "ipmi-sel":
+		exitCode = verbIPMISEL(callerUID, verbArgs)
+	case "ipmi-sensors":
+		exitCode = verbIPMISensors(callerUID, verbArgs)
+	case "ipmi-lan-set":
+		exitCode = verbIPMILANSet(callerUID, verbArgs)
+	case "ipmi-lan-get":
+		exitCode = verbIPMILANGet(callerUID, verbArgs)
+	case "ipmi-sol-activate":
+		exitCode = verbIPMISOLActivate(callerUID, verbArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: unknown verb %q\n", verb)
 		exitCode = 1
