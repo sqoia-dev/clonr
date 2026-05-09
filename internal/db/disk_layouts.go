@@ -19,21 +19,35 @@ func (db *DB) CreateDiskLayout(ctx context.Context, dl api.StoredDiskLayout) err
 		return fmt.Errorf("db: marshal disk layout: %w", err)
 	}
 	sourceNodeID := sql.NullString{String: dl.SourceNodeID, Valid: dl.SourceNodeID != ""}
+	firmwareKind := normalizeFirmwareKind(dl.FirmwareKind)
 	_, err = db.sql.ExecContext(ctx, `
-		INSERT INTO disk_layouts (id, name, source_node_id, captured_at, layout_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO disk_layouts (id, name, source_node_id, captured_at, layout_json, created_at, updated_at, firmware_kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, dl.ID, dl.Name, sourceNodeID, dl.CapturedAt.Unix(), string(layoutJSON),
-		dl.CreatedAt.Unix(), dl.UpdatedAt.Unix())
+		dl.CreatedAt.Unix(), dl.UpdatedAt.Unix(), firmwareKind)
 	if err != nil {
 		return fmt.Errorf("db: create disk layout: %w", err)
 	}
 	return nil
 }
 
+// normalizeFirmwareKind clamps an externally-supplied firmware_kind to one
+// of the three accepted values.  Empty / unknown maps to "any".  The check
+// constraint on the SQLite column rejects anything else, so this also acts
+// as the API-layer guardrail before we hit the DB.
+func normalizeFirmwareKind(s string) string {
+	switch s {
+	case api.FirmwareKindBIOS, api.FirmwareKindUEFI, api.FirmwareKindAny:
+		return s
+	default:
+		return api.FirmwareKindAny
+	}
+}
+
 // GetDiskLayout returns a StoredDiskLayout by ID. Returns api.ErrNotFound when absent.
 func (db *DB) GetDiskLayout(ctx context.Context, id string) (api.StoredDiskLayout, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at
+		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at, firmware_kind
 		FROM disk_layouts WHERE id = ?
 	`, id)
 	return scanDiskLayout(row)
@@ -42,7 +56,7 @@ func (db *DB) GetDiskLayout(ctx context.Context, id string) (api.StoredDiskLayou
 // GetDiskLayoutByName returns a StoredDiskLayout by name. Returns api.ErrNotFound when absent.
 func (db *DB) GetDiskLayoutByName(ctx context.Context, name string) (api.StoredDiskLayout, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at
+		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at, firmware_kind
 		FROM disk_layouts WHERE name = ?
 	`, name)
 	return scanDiskLayout(row)
@@ -51,7 +65,7 @@ func (db *DB) GetDiskLayoutByName(ctx context.Context, name string) (api.StoredD
 // ListDiskLayouts returns all StoredDiskLayout rows, ordered by name.
 func (db *DB) ListDiskLayouts(ctx context.Context) ([]api.StoredDiskLayout, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at
+		SELECT id, name, source_node_id, captured_at, layout_json, created_at, updated_at, firmware_kind
 		FROM disk_layouts ORDER BY name ASC
 	`)
 	if err != nil {
@@ -82,6 +96,22 @@ func (db *DB) UpdateDiskLayoutFields(ctx context.Context, id, name string, layou
 	`, name, string(layoutJSON), time.Now().Unix(), id)
 	if err != nil {
 		return fmt.Errorf("db: update disk layout: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return api.ErrNotFound
+	}
+	return nil
+}
+
+// SetDiskLayoutFirmwareKind updates the firmware_kind tag for a stored layout.
+// kind is normalized to one of "bios"/"uefi"/"any".
+func (db *DB) SetDiskLayoutFirmwareKind(ctx context.Context, id, kind string) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE disk_layouts SET firmware_kind = ?, updated_at = ? WHERE id = ?
+	`, normalizeFirmwareKind(kind), time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("db: set disk layout firmware_kind: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -202,9 +232,10 @@ func scanDiskLayout(s diskLayoutScanner) (api.StoredDiskLayout, error) {
 		layoutJSONStr  string
 		createdAtUnix  int64
 		updatedAtUnix  int64
+		firmwareKind   string
 	)
 	err := s.Scan(&dl.ID, &dl.Name, &sourceNodeNull, &capturedAtUnix,
-		&layoutJSONStr, &createdAtUnix, &updatedAtUnix)
+		&layoutJSONStr, &createdAtUnix, &updatedAtUnix, &firmwareKind)
 	if err == sql.ErrNoRows {
 		return api.StoredDiskLayout{}, api.ErrNotFound
 	}
@@ -217,6 +248,7 @@ func scanDiskLayout(s diskLayoutScanner) (api.StoredDiskLayout, error) {
 	dl.CapturedAt = time.Unix(capturedAtUnix, 0).UTC()
 	dl.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
 	dl.UpdatedAt = time.Unix(updatedAtUnix, 0).UTC()
+	dl.FirmwareKind = normalizeFirmwareKind(firmwareKind)
 	if err := json.Unmarshal([]byte(layoutJSONStr), &dl.Layout); err != nil {
 		return api.StoredDiskLayout{}, fmt.Errorf("db: unmarshal disk layout json: %w", err)
 	}

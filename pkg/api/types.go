@@ -157,6 +157,20 @@ type RAIDSpec struct {
 	// an IMSM-capable controller is present. Default false: the deploy path
 	// routes to IMSM assembly when the platform supports it.
 	ForceSoftware bool `json:"force_software,omitempty"`
+	// RAIDType is the explicit assembly type for this array.  One of:
+	//   ""     — auto.  Use platform/per-device IMSM detection (legacy path).
+	//   "imsm" — operator-opted-in Intel IMSM hardware RAID.  Skip
+	//            autodetection and always go through createIMSMArray.
+	//   "md"   — explicit software md RAID.  Equivalent to ForceSoftware=true.
+	// Sprint 35 / IMSM: layouts that explicitly want IMSM containers set
+	// raid_type=imsm so the selection is deterministic and not platform-dependent.
+	RAIDType string `json:"raid_type,omitempty"`
+	// IMSMContainer is the device-name fragment to use for the IMSM container
+	// that holds this sub-array.  Defaults to "imsm0" when empty.  Multiple
+	// arrays sharing the same IMSMContainer are co-located in the same
+	// IMSM container (mirrors clustervisor disk_raid_imsm semantics where
+	// volumes are sub-arrays of one container per controller).
+	IMSMContainer string `json:"imsm_container,omitempty"`
 }
 
 // PartitionSpec describes a single partition within a DiskLayout.
@@ -1059,9 +1073,22 @@ type StoredDiskLayout struct {
 	SourceNodeID string     `json:"source_node_id,omitempty"` // nil for hand-authored
 	CapturedAt   time.Time  `json:"captured_at"`
 	Layout       DiskLayout `json:"layout"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// FirmwareKind is the firmware family this layout targets.  One of
+	// "bios", "uefi", "any".  Used by the firmware-aware selector
+	// (Sprint 35 / #255) to prefer a UEFI-bearing layout for UEFI nodes
+	// when neither the node nor its group has pinned a specific layout.
+	// Defaults to "any" for layouts created before migration 110.
+	FirmwareKind string    `json:"firmware_kind"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+// FirmwareKind constants for StoredDiskLayout.FirmwareKind.
+const (
+	FirmwareKindBIOS = "bios"
+	FirmwareKindUEFI = "uefi"
+	FirmwareKindAny  = "any"
+)
 
 // ListDiskLayoutsResponse is returned by GET /api/v1/disk-layouts.
 type ListDiskLayoutsResponse struct {

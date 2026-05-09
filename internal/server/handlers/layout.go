@@ -26,23 +26,31 @@ type diskLayoutCatalogResolver interface {
 	GetNodeDiskLayoutID(ctx context.Context, nodeID string) (string, error)
 	GetGroupDiskLayoutID(ctx context.Context, groupID string) (string, error)
 	GetDiskLayout(ctx context.Context, id string) (api.StoredDiskLayout, error)
+	ListDiskLayouts(ctx context.Context) ([]api.StoredDiskLayout, error)
 }
 
-// resolveDiskLayoutFromCatalog implements the #146 disk_layout_id precedence:
+// resolveDiskLayoutFromCatalog implements the #146 / #255 disk_layout_id precedence:
 //
 //  1. node.disk_layout_id (per-node FK override) — highest
 //  2. node_groups.disk_layout_id (group FK default)
-//  3. Returns (zero, false) when neither level has a matching record — caller
-//     must fall back to the existing inline-override / image-default path.
+//  3. Sprint 35 / #255: firmware-aware catalog fallback when nodeFirmware
+//     is known.  Picks the best layout from the full catalog using
+//     PickLayoutForFirmware (preferring a UEFI-tagged or ESP-bearing
+//     layout for UEFI nodes, BIOS-tagged or biosboot-bearing for BIOS).
+//  4. Returns (zero, false) when nothing matches — caller falls back to the
+//     existing inline-override / image-default path.
 //
 // A missing record for a non-empty FK is treated as a miss (warning logged);
 // the caller falls back rather than returning an error so a stale FK doesn't
 // take a node offline.
+//
+// nodeFirmware is the node's DetectedFirmware ("bios" / "uefi" / "" if
+// unknown); pass an empty string to skip the level-3 firmware-aware fallback.
 func resolveDiskLayoutFromCatalog(
 	ctx context.Context,
 	r diskLayoutCatalogResolver,
-	nodeID, groupID string,
-) (layout api.DiskLayout, source string, ok bool) {
+	nodeID, groupID, nodeFirmware string,
+) (resolved api.DiskLayout, source string, ok bool) {
 	// Level 1: per-node FK.
 	nodeDiskLayoutID, _ := r.GetNodeDiskLayoutID(ctx, nodeID)
 	if nodeDiskLayoutID != "" {
@@ -65,6 +73,26 @@ func resolveDiskLayoutFromCatalog(
 			log.Warn().Err(err).Str("node_id", nodeID).Str("group_id", groupID).
 				Str("disk_layout_id", groupDiskLayoutID).
 				Msg("effective-layout: group disk_layout_id resolves to missing record — falling back")
+		}
+	}
+
+	// Level 3 (Sprint 35 / #255): firmware-aware fallback.  Only fires when
+	// the node has reported its firmware.  Legacy nodes whose firmware is
+	// still unknown keep the image-default path (caller-handled).
+	if nodeFirmware != "" {
+		all, err := r.ListDiskLayouts(ctx)
+		if err == nil && len(all) > 0 {
+			pick := layout.PickLayoutForFirmware(all, nodeFirmware)
+			if pick.Picked {
+				log.Debug().
+					Str("node_id", nodeID).
+					Str("node_firmware", nodeFirmware).
+					Str("picked_layout_id", pick.Layout.ID).
+					Str("picked_layout_name", pick.Layout.Name).
+					Str("source", pick.Source).
+					Msg("effective-layout: firmware-aware catalog fallback selected layout")
+				return pick.Layout.Layout, pick.Source, true
+			}
 		}
 	}
 
@@ -215,8 +243,9 @@ func (h *LayoutHandler) GetEffectiveLayout(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// ── Precedence levels 1 & 2: named disk layout from the catalog ──────────
-	effective, source, catalogHit := resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID)
+	// ── Precedence levels 1, 2, 3: named disk layout from the catalog ─────────
+	// Level 3 is the firmware-aware fallback added in Sprint 35 (#255).
+	effective, source, catalogHit := resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID, node.DetectedFirmware)
 
 	// ── Precedence levels 3-5: existing inline / image-default path ───────────
 	if !catalogHit {
