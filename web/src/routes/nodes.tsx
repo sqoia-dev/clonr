@@ -5,7 +5,7 @@ import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
   Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
-  Square, CheckSquare, Layers, WifiOff, ImagePlay, Play, GitBranch,
+  Square, CheckSquare, WifiOff, ImagePlay, Play, GitBranch,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
@@ -42,7 +42,6 @@ import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
 import type { InterfaceRow } from "@/components/InterfaceList"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
-import { expandHostlist } from "@/lib/hostlist"
 
 // ─── Sprint 38: PROBE-3 — Reachability dots ──────────────────────────────────
 //
@@ -107,8 +106,6 @@ function ReachabilityDots({ nodeId }: { nodeId: string }) {
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
 const hostnameRe = /^[a-z0-9-]{1,63}$/
-const macRe = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
-const ipv4Re = /^(\d{1,3}\.){3}\d{1,3}(\/\d+)?$/
 
 function normalizeMAC(raw: string): string {
   return raw.toLowerCase().replace(/[^0-9a-f]/g, "").replace(/(.{2})(?=.)/g, "$1:")
@@ -746,6 +743,7 @@ export function NodesPage() {
   const [bulkActionPending, setBulkActionPending] = React.useState<string | null>(null)
   const [bulkConfirmInput, setBulkConfirmInput] = React.useState("")
   const [bulkLoading, setBulkLoading] = React.useState(false)
+  const qc = useQueryClient()
   // GRP-5: open create group sheet from URL param (Cmd-K)
   const [createGroupOpen, setCreateGroupOpen] = React.useState(false)
   React.useEffect(() => {

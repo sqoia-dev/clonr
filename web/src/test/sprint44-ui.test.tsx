@@ -11,23 +11,12 @@
 
 import * as React from "react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
+import { render, screen, fireEvent } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { InterfaceList, validateInterfaces } from "../components/InterfaceList"
 import type { InterfaceRow } from "../components/InterfaceList"
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
-
-function makeQC() {
-  return new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  })
-}
-
-function withQC(ui: React.ReactElement, qc = makeQC()) {
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>)
-}
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>
 let fetchHandler: FetchHandler | null = null
@@ -71,14 +60,12 @@ describe("MULTI-NIC-EDITOR — InterfaceList component", () => {
   })
 
   it("should add an ethernet interface when clicking Add Ethernet", () => {
-    const user = userEvent.setup()
     render(<ControlledList />)
     fireEvent.click(screen.getByTestId("add-iface-ethernet"))
     expect(screen.getByTestId("iface-0-mac")).toBeInTheDocument()
   })
 
   it("should add an IPMI interface when clicking Add IPMI", () => {
-    const user = userEvent.setup()
     render(<ControlledList />)
     fireEvent.click(screen.getByTestId("add-iface-ipmi"))
     expect(screen.getByTestId("iface-0-ip")).toBeInTheDocument()
@@ -296,7 +283,7 @@ describe("BULK-POWER — API contract shape", () => {
     const nodeIds = ["node-x", "node-y"]
     let capturedUrl = ""
 
-    fetchHandler = (url, init) => {
+    fetchHandler = (url) => {
       capturedUrl = url
       return Promise.resolve(jsonOk({ results: nodeIds.map((id) => ({ node_id: id, ok: true })) }))
     }
