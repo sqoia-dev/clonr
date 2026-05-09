@@ -1,13 +1,14 @@
-// node-detail-tabs.tsx — Sensors, Event Log, Console, and Deploy Log tabs for the node Sheet (#152)
+// node-detail-tabs.tsx — Sensors, Event Log, Console, Deploy Log, and IPMI tabs for the node Sheet (#152)
 //
-// Four independent components, each mounted only when their tab is active:
+// Five independent components, each mounted only when their tab is active:
 //   <SensorsTab nodeId> — recharts sparklines + sensor table from /api/v1/nodes/{id}/stats
 //   <EventLogTab nodeId> — SEL list from /api/v1/nodes/{id}/sel with level/regex/head-tail toolbar
 //   <ConsoleTab nodeId> — xterm.js terminal over WS /api/v1/console/{node_id}
 //   <DeployLogTab nodeId primaryMac> — live SSE log from GET /api/v1/logs/stream?component=deploy&node_mac=<mac>
+//   <IpmiTab nodeId> — IPMI panel: power controls, sensor pull, SEL viewer (Sprint 34 UI B)
 
 import * as React from "react"
-import { useQuery, useMutation } from "@tanstack/react-query"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import {
   ResponsiveContainer,
   LineChart,
@@ -19,7 +20,14 @@ import {
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { RefreshCw, Trash2, AlertTriangle, ChevronDown, ChevronRight, WifiOff } from "lucide-react"
+import { RefreshCw, Trash2, AlertTriangle, ChevronDown, ChevronRight, WifiOff, Power, Zap } from "lucide-react"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { apiFetch, sseUrl, wsUrl } from "@/lib/api"
@@ -1174,6 +1182,507 @@ export function DeployLogTab({ nodeId: _nodeId, primaryMac }: DeployLogTabProps)
           </span>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── IPMI Tab (Sprint 34 UI B) ────────────────────────────────────────────────
+//
+// Three sections:
+//   1. Power controls  — POST /api/v1/nodes/{id}/power/{action}
+//   2. Sensor pull     — GET  /api/v1/nodes/{id}/sensors
+//   3. SEL viewer      — GET  /api/v1/nodes/{id}/sel  +  POST /api/v1/nodes/{id}/sel/clear
+
+// ─── IPMI types ───────────────────────────────────────────────────────────────
+
+interface IpmiSensor {
+  name: string
+  value: string
+  unit: string
+  state: string // ipmitool state: ok | cr | nc | nr | ns | na
+}
+
+interface IpmiSensorsResponse {
+  node_id: string
+  sensors: IpmiSensor[]
+  last_checked: string
+}
+
+interface IpmiSELEntry {
+  id: string
+  date: string
+  time: string
+  sensor: string
+  event: string
+  severity: string
+  raw: string
+  timestamp: string
+}
+
+interface IpmiSELResponse {
+  node_id: string
+  entries: IpmiSELEntry[]
+  last_checked: string
+}
+
+// ─── IPMI helpers ─────────────────────────────────────────────────────────────
+
+const SENSOR_STATE_COLORS: Record<string, string> = {
+  ok: "text-status-healthy",
+  cr: "text-destructive",
+  nc: "text-status-warning",
+  nr: "text-status-warning",
+  ns: "text-muted-foreground",
+  na: "text-muted-foreground",
+}
+
+function sensorStateClass(state: string): string {
+  return SENSOR_STATE_COLORS[state.toLowerCase()] ?? "text-muted-foreground"
+}
+
+const DESTRUCTIVE_POWER_ACTIONS = new Set(["off", "cycle", "reset"])
+
+const POWER_ACTIONS = [
+  { action: "on",    label: "Power On",  confirmWord: null },
+  { action: "off",   label: "Power Off", confirmWord: "off" },
+  { action: "cycle", label: "Power Cycle", confirmWord: "cycle" },
+  { action: "reset", label: "Hard Reset",  confirmWord: "reset" },
+  { action: "soft",  label: "Soft Off",    confirmWord: null },
+] as const
+
+const IPMI_SEL_PAGE_SIZE = 20
+
+// ─── sub-components ───────────────────────────────────────────────────────────
+
+function IpmiSectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1.5">
+      <Zap className="h-3 w-3" />
+      {children}
+    </h3>
+  )
+}
+
+function IpmiSeverityPill({ severity }: { severity: string }) {
+  const s = severity.toLowerCase()
+  const cls =
+    s === "critical" ? "bg-destructive/10 text-destructive border-destructive/30" :
+    s === "warning"  ? "bg-status-warning/10 text-status-warning border-status-warning/30" :
+    "bg-muted/30 text-muted-foreground border-border"
+  return (
+    <span className={cn("inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium", cls)}>
+      {severity}
+    </span>
+  )
+}
+
+// ─── PowerSection ─────────────────────────────────────────────────────────────
+
+function PowerSection({ nodeId }: { nodeId: string }) {
+  const [pendingAction, setPendingAction] = React.useState<string | null>(null)
+  const [confirmInput, setConfirmInput] = React.useState("")
+
+  const mutation = useMutation({
+    mutationFn: (action: string) =>
+      apiFetch(`/api/v1/nodes/${nodeId}/power/${action}`, { method: "POST" }),
+    onSuccess: (_data, action) => {
+      toast({ title: "Power command sent", description: `Action: ${action}` })
+      setPendingAction(null)
+      setConfirmInput("")
+    },
+    onError: (err) => {
+      toast({ variant: "destructive", title: "Power command failed", description: String(err) })
+    },
+  })
+
+  function handleActionClick(action: string) {
+    if (DESTRUCTIVE_POWER_ACTIONS.has(action)) {
+      setPendingAction(action)
+      setConfirmInput("")
+    } else {
+      mutation.mutate(action)
+    }
+  }
+
+  function handleConfirmSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!pendingAction) return
+    if (confirmInput.trim().toLowerCase() === pendingAction.toLowerCase()) {
+      mutation.mutate(pendingAction)
+    }
+  }
+
+  const confirmMatch =
+    pendingAction !== null &&
+    confirmInput.trim().toLowerCase() === pendingAction.toLowerCase()
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-2">
+        {POWER_ACTIONS.map(({ action, label }) => (
+          <Button
+            key={action}
+            size="sm"
+            variant={DESTRUCTIVE_POWER_ACTIONS.has(action) ? "destructive" : "outline"}
+            className="text-xs"
+            disabled={mutation.isPending}
+            onClick={() => handleActionClick(action)}
+          >
+            <Power className="h-3 w-3 mr-1" />
+            {label}
+          </Button>
+        ))}
+      </div>
+
+      {/* Typed-confirm dialog for destructive power actions */}
+      <Dialog
+        open={pendingAction !== null}
+        onOpenChange={(open) => { if (!open) { setPendingAction(null); setConfirmInput("") } }}
+      >
+        <DialogContent className="sm:max-w-sm" data-testid="power-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>Confirm power action</DialogTitle>
+            <DialogDescription>
+              Type <strong>{pendingAction}</strong> to confirm this destructive power action.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleConfirmSubmit} className="space-y-3 mt-1">
+            <Input
+              autoFocus
+              placeholder={pendingAction ?? ""}
+              value={confirmInput}
+              onChange={(e) => setConfirmInput(e.target.value)}
+              data-testid="power-confirm-input"
+            />
+            <div className="flex gap-2">
+              <Button
+                type="submit"
+                variant="destructive"
+                className="flex-1"
+                disabled={!confirmMatch || mutation.isPending}
+                data-testid="power-confirm-submit"
+              >
+                {mutation.isPending ? "Sending…" : "Confirm"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => { setPendingAction(null); setConfirmInput("") }}
+                disabled={mutation.isPending}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+// ─── IpmiSensorsSection ───────────────────────────────────────────────────────
+
+function IpmiSensorsSection({ nodeId }: { nodeId: string }) {
+  const { data, isFetching, refetch } = useQuery<IpmiSensorsResponse>({
+    queryKey: ["ipmi-sensors", nodeId],
+    queryFn: () => apiFetch<IpmiSensorsResponse>(`/api/v1/nodes/${nodeId}/sensors`),
+    staleTime: Infinity,
+    refetchInterval: false,
+    enabled: false,
+  })
+
+  const sensors = data?.sensors ?? []
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="text-xs"
+          disabled={isFetching}
+          onClick={() => refetch()}
+          data-testid="sensors-refresh-btn"
+        >
+          <RefreshCw className={cn("h-3 w-3 mr-1", isFetching && "animate-spin")} />
+          {isFetching ? "Fetching…" : "Pull Sensors"}
+        </Button>
+        {data?.last_checked && (
+          <span className="text-[10px] text-muted-foreground">
+            Last: {new Date(data.last_checked).toLocaleTimeString()}
+          </span>
+        )}
+      </div>
+
+      {sensors.length === 0 && !isFetching && (
+        <p className="text-xs text-muted-foreground py-2">
+          No sensor data. Press &ldquo;Pull Sensors&rdquo; to fetch via IPMI.
+        </p>
+      )}
+
+      {sensors.length > 0 && (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full text-xs" data-testid="sensors-table">
+            <thead>
+              <tr className="border-b border-border bg-muted/30">
+                <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">Sensor</th>
+                <th className="text-right px-3 py-1.5 font-medium text-muted-foreground">Value</th>
+                <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sensors.map((s, i) => (
+                <tr key={i} className="border-b border-border last:border-0 hover:bg-muted/20">
+                  <td className="px-3 py-1.5 font-mono">{s.name}</td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    {s.value}{s.unit ? ` ${s.unit}` : ""}
+                  </td>
+                  <td className={cn("px-3 py-1.5 font-medium", sensorStateClass(s.state))}>
+                    {s.state.toUpperCase()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── IpmiSELSection ───────────────────────────────────────────────────────────
+
+function IpmiSELSection({ nodeId }: { nodeId: string }) {
+  const qc = useQueryClient()
+  const [page, setPage] = React.useState(0)
+  const [expandedRows, setExpandedRows] = React.useState<Set<number>>(new Set())
+  const [clearDialogOpen, setClearDialogOpen] = React.useState(false)
+  const [clearInput, setClearInput] = React.useState("")
+
+  const { data, isFetching, refetch } = useQuery<IpmiSELResponse>({
+    queryKey: ["ipmi-sel", nodeId],
+    queryFn: () => apiFetch<IpmiSELResponse>(`/api/v1/nodes/${nodeId}/sel`),
+    staleTime: Infinity,
+    refetchInterval: false,
+    enabled: false,
+  })
+
+  const clearMutation = useMutation({
+    mutationFn: () =>
+      apiFetch(`/api/v1/nodes/${nodeId}/sel/clear`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ipmi-sel", nodeId] })
+      toast({ title: "SEL cleared", description: `Event log cleared for node ${nodeId}.` })
+      setClearDialogOpen(false)
+      setClearInput("")
+      setPage(0)
+    },
+    onError: (err) => {
+      toast({ variant: "destructive", title: "Failed to clear SEL", description: String(err) })
+    },
+  })
+
+  const allEntries = data?.entries ?? []
+  const totalPages = Math.max(1, Math.ceil(allEntries.length / IPMI_SEL_PAGE_SIZE))
+  const pageEntries = allEntries.slice(page * IPMI_SEL_PAGE_SIZE, (page + 1) * IPMI_SEL_PAGE_SIZE)
+
+  function toggleRow(i: number) {
+    setExpandedRows((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
+
+  const clearMatch = clearInput.trim() === nodeId
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button
+          size="sm"
+          variant="outline"
+          className="text-xs"
+          disabled={isFetching}
+          onClick={() => { setPage(0); refetch() }}
+        >
+          <RefreshCw className={cn("h-3 w-3 mr-1", isFetching && "animate-spin")} />
+          {isFetching ? "Fetching…" : "Pull SEL"}
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          className="text-xs"
+          onClick={() => { setClearDialogOpen(true); setClearInput("") }}
+          data-testid="sel-clear-btn"
+        >
+          <Trash2 className="h-3 w-3 mr-1" />
+          Clear SEL
+        </Button>
+        {data?.last_checked && (
+          <span className="text-[10px] text-muted-foreground">
+            Last: {new Date(data.last_checked).toLocaleTimeString()}
+          </span>
+        )}
+      </div>
+
+      {allEntries.length === 0 && !isFetching && (
+        <p className="text-xs text-muted-foreground py-2">
+          No SEL entries. Press &ldquo;Pull SEL&rdquo; to fetch via IPMI.
+        </p>
+      )}
+
+      {allEntries.length > 0 && (
+        <>
+          <div className="overflow-x-auto rounded border border-border">
+            <table className="w-full text-xs" data-testid="sel-table">
+              <thead>
+                <tr className="border-b border-border bg-muted/30">
+                  <th className="w-4 px-2 py-1.5" />
+                  <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">Time</th>
+                  <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">Sensor</th>
+                  <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">Event</th>
+                  <th className="text-left px-3 py-1.5 font-medium text-muted-foreground">Severity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageEntries.map((entry, i) => {
+                  const absIdx = page * IPMI_SEL_PAGE_SIZE + i
+                  const expanded = expandedRows.has(absIdx)
+                  return (
+                    <React.Fragment key={entry.id ?? absIdx}>
+                      <tr
+                        className="border-b border-border last:border-0 hover:bg-muted/20 cursor-pointer"
+                        onClick={() => toggleRow(absIdx)}
+                        data-testid={`sel-row-${i}`}
+                      >
+                        <td className="px-2 py-1.5 text-muted-foreground">
+                          {expanded
+                            ? <ChevronDown className="h-3 w-3" />
+                            : <ChevronRight className="h-3 w-3" />}
+                        </td>
+                        <td className="px-3 py-1.5 font-mono whitespace-nowrap">
+                          {entry.date} {entry.time}
+                        </td>
+                        <td className="px-3 py-1.5">{entry.sensor}</td>
+                        <td className="px-3 py-1.5">{entry.event}</td>
+                        <td className="px-3 py-1.5">
+                          <IpmiSeverityPill severity={entry.severity} />
+                        </td>
+                      </tr>
+                      {expanded && (
+                        <tr className="border-b border-border bg-muted/10">
+                          <td colSpan={5} className="px-4 py-2">
+                            <span className="text-[10px] text-muted-foreground font-mono break-all">
+                              Raw: {entry.raw}
+                            </span>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-xs h-6 px-2"
+              disabled={page === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              data-testid="sel-prev-btn"
+            >
+              Prev
+            </Button>
+            <span>
+              Page {page + 1} / {totalPages} ({allEntries.length} entries)
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-xs h-6 px-2"
+              disabled={page >= totalPages - 1}
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              data-testid="sel-next-btn"
+            >
+              Next
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* Typed-confirm dialog for SEL clear (type the node ID) */}
+      <Dialog
+        open={clearDialogOpen}
+        onOpenChange={(open) => { if (!open) { setClearDialogOpen(false); setClearInput("") } }}
+      >
+        <DialogContent className="sm:max-w-sm" data-testid="sel-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>Clear System Event Log</DialogTitle>
+            <DialogDescription>
+              This will permanently erase all SEL entries on the BMC. Type the node ID{" "}
+              <strong className="font-mono">{nodeId}</strong> to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => { e.preventDefault(); if (clearMatch) clearMutation.mutate() }}
+            className="space-y-3 mt-1"
+          >
+            <Input
+              autoFocus
+              placeholder={nodeId}
+              value={clearInput}
+              onChange={(e) => setClearInput(e.target.value)}
+              data-testid="sel-confirm-input"
+            />
+            <div className="flex gap-2">
+              <Button
+                type="submit"
+                variant="destructive"
+                className="flex-1"
+                disabled={!clearMatch || clearMutation.isPending}
+                data-testid="sel-confirm-submit"
+              >
+                {clearMutation.isPending ? "Clearing…" : "Clear SEL"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => { setClearDialogOpen(false); setClearInput("") }}
+                disabled={clearMutation.isPending}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// ─── IpmiTab (root export) ────────────────────────────────────────────────────
+
+export function IpmiTab({ nodeId }: { nodeId: string }) {
+  return (
+    <div className="space-y-6 py-2">
+      <section>
+        <IpmiSectionHeading>Power</IpmiSectionHeading>
+        <PowerSection nodeId={nodeId} />
+      </section>
+      <section>
+        <IpmiSectionHeading>Sensor Pull</IpmiSectionHeading>
+        <IpmiSensorsSection nodeId={nodeId} />
+      </section>
+      <section>
+        <IpmiSectionHeading>System Event Log (SEL)</IpmiSectionHeading>
+        <IpmiSELSection nodeId={nodeId} />
+      </section>
     </div>
   )
 }
