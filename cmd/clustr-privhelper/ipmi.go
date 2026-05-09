@@ -96,9 +96,15 @@ func isSafeBMCField(v string) bool {
 }
 
 // commonIPMIArgs builds the per-binary common args from validated
-// credentials. Identical layout to internal/ipmi/freeipmi.go commonArgs() so
-// test parity with the server-side wrapper is straightforward to reason
-// about.
+// credentials.  IMPORTANT: this MUST NOT include the password on argv —
+// freeipmi exposes argv to any local user via /proc/<pid>/cmdline while
+// the helper runs.  The password is supplied to freeipmi out-of-band via a
+// transient password file; see writePasswordFile / commonIPMIArgsWithPwFile.
+//
+// Layout:
+//   -h <host> -u <user> --driver-type=LAN_2_0
+//
+// The password is added separately by callers via the -f flag.
 func commonIPMIArgs(creds ipmiCredentials) []string {
 	if creds.Host == "" {
 		return nil
@@ -107,11 +113,49 @@ func commonIPMIArgs(creds ipmiCredentials) []string {
 	if creds.Username != "" {
 		args = append(args, "-u", creds.Username)
 	}
-	if creds.Password != "" {
-		args = append(args, "-p", creds.Password)
-	}
 	args = append(args, "--driver-type=LAN_2_0")
 	return args
+}
+
+// writePasswordFile writes the BMC password to a 0600 temp file and returns
+// its path.  The caller is responsible for os.Remove on the path after the
+// freeipmi subprocess exits.  An empty password yields an empty file path
+// (caller skips the -f flag); freeipmi will fall through to its default
+// "no password" path which works for in-band/local BMC operations.
+func writePasswordFile(password string) (string, error) {
+	if password == "" {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", "ipmi-pw-*")
+	if err != nil {
+		return "", fmt.Errorf("create pw file: %w", err)
+	}
+	path := f.Name()
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("chmod pw file: %w", err)
+	}
+	if _, err := f.WriteString(password); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write pw file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close pw file: %w", err)
+	}
+	return path, nil
+}
+
+// appendPasswordFlag returns argv with `-f <pwPath>` appended when pwPath is
+// non-empty.  Centralising this keeps the call sites symmetric with the
+// stdin-fed credential model.
+func appendPasswordFlag(argv []string, pwPath string) []string {
+	if pwPath == "" {
+		return argv
+	}
+	return append(argv, "-f", pwPath)
 }
 
 // validateCreds rejects credentials with shell-unsafe characters in the host
@@ -161,10 +205,22 @@ func verbIPMIPower(callerUID int, args []string) int {
 		return 1
 	}
 
+	pwPath, err := writePasswordFile(creds.Password)
+	if err != nil {
+		msg := fmt.Sprintf("ipmi-power: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "ipmi-power", args, 1, msg)
+		return 1
+	}
+	if pwPath != "" {
+		defer os.Remove(pwPath)
+	}
+
 	argv := append([]string{}, commonIPMIArgs(creds)...)
+	argv = appendPasswordFlag(argv, pwPath)
 	argv = append(argv, flag)
 
-	cmd := exec.Command("ipmi-power", argv...) //#nosec G204 -- creds validated, flag from static allowlist
+	cmd := exec.Command("ipmi-power", argv...) //#nosec G204 -- creds validated, flag from static allowlist; password is in 0600 temp file referenced by -f
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -210,7 +266,19 @@ func verbIPMISEL(callerUID int, args []string) int {
 		return 1
 	}
 
+	pwPath, err := writePasswordFile(creds.Password)
+	if err != nil {
+		msg := fmt.Sprintf("ipmi-sel: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "ipmi-sel", args, 1, msg)
+		return 1
+	}
+	if pwPath != "" {
+		defer os.Remove(pwPath)
+	}
+
 	argv := append([]string{}, commonIPMIArgs(creds)...)
+	argv = appendPasswordFlag(argv, pwPath)
 	switch op {
 	case "list":
 		argv = append(argv, "--no-header-output", "--comma-separated-output", "--output-event-state")
@@ -218,7 +286,7 @@ func verbIPMISEL(callerUID int, args []string) int {
 		argv = append(argv, "--clear")
 	}
 
-	cmd := exec.Command("ipmi-sel", argv...) //#nosec G204 -- creds validated, op from static allowlist
+	cmd := exec.Command("ipmi-sel", argv...) //#nosec G204 -- creds validated, op from static allowlist; password is in 0600 temp file referenced by -f
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -257,10 +325,22 @@ func verbIPMISensors(callerUID int, args []string) int {
 		return 1
 	}
 
+	pwPath, err := writePasswordFile(creds.Password)
+	if err != nil {
+		msg := fmt.Sprintf("ipmi-sensors: %v", err)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "ipmi-sensors", args, 1, msg)
+		return 1
+	}
+	if pwPath != "" {
+		defer os.Remove(pwPath)
+	}
+
 	argv := append([]string{}, commonIPMIArgs(creds)...)
+	argv = appendPasswordFlag(argv, pwPath)
 	argv = append(argv, "--no-header-output", "--comma-separated-output", "--output-sensor-state")
 
-	cmd := exec.Command("ipmi-sensors", argv...) //#nosec G204 -- creds validated; flags are fixed literals
+	cmd := exec.Command("ipmi-sensors", argv...) //#nosec G204 -- creds validated; flags are fixed literals; password is in 0600 temp file referenced by -f
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
