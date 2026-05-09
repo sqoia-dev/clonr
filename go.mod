@@ -10,6 +10,7 @@ require (
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/gosnmp/gosnmp v1.42.0
 	github.com/insomniacslk/dhcp v0.0.0-20260407060928-11b94ed970f2
 	github.com/invopop/jsonschema v0.14.0
 	github.com/pin/tftp/v3 v3.2.0

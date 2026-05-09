@@ -1,5 +1,117 @@
 # Changelog
 
+## Unreleased — Sprint 38 Bundle A (PROBE-3 + EXTERNAL-STATS + STAT-EXPIRES)
+
+Three coordinated additions that let clustr-serverd monitor a node before
+it is enrolled, during deploy, and after it is broken — without
+depending on clustr-clientd.
+
+### `PROBE-3` — three reachability probes per node, no clientd required
+
+New `internal/server/stats/external/probes.go`. Each cycle the goroutine
+pool runs three independent probes per node:
+
+- **ping** — shells out to `/usr/bin/ping -c1 -W2 -n` against the
+  primary interface IP. We deliberately avoid the raw-socket
+  `golang.org/x/net/icmp` path so clustr-serverd does not need
+  `CAP_NET_RAW`. Hostname/IP arguments pass through a strict
+  validator before reaching argv (no shell metacharacters, no
+  whitespace, no newlines).
+- **ssh** — pure `net.DialTimeout` to TCP/22 + `bufio.ReadString('\n')`,
+  matching the `SSH-2.0-` (and transitional `SSH-1.99-`) banner
+  prefix. No clients, no key exchange, no auth.
+- **ipmi_mc** — `ipmi-sensors --no-output --session-timeout=2000` over
+  LAN+ to the BMC IP from `bmc_config_encrypted`. We only inspect
+  the exit code; success means "the BMC's mc info handshake worked".
+
+Result is three booleans + a `checked_at` timestamp written to the
+new `node_external_stats` table with `source='probe'`. Each probe is
+independent: a ping failure never short-circuits the SSH or IPMI
+probe.
+
+### `EXTERNAL-STATS` — agent-less BMC + SNMP collectors
+
+Same package, new files:
+
+- `bmc.go` — wraps `internal/ipmi.FreeIPMIClient.Sensors()` so a full
+  `ipmi-sensors` sweep is captured per cycle. Decrypted creds come
+  from `bmc_config_encrypted` via the existing path. Failure is
+  recorded as `payload.error` instead of a missing row.
+- `snmp.go` — gosnmp v1 wrapper. v2c GET against a configurable OID
+  list, two-second per-target timeout. v3 USM and traps are out of
+  scope for this sprint.
+- `pool.go` — the goroutine pool (default 20 workers, 60-second
+  cadence). Buffered job channel sized to `Workers` so a slow node
+  holds at most one slot at a time.
+
+Exposed via `GET /api/v1/nodes/{id}/external_stats`:
+
+```json
+{
+  "probes":  { "ping": true, "ssh": false, "ipmi_mc": true,
+               "checked_at": "2026-05-09T11:59:50Z" },
+  "samples": {
+    "bmc":  { "sensors": { "CPU Temp": { "value": "42", "unit": "C" } } },
+    "snmp": { "samples": { "1.3.6.1.2.1.1.3.0": { "value": "12345", "type": "ticks" } } },
+    "ipmi": null
+  },
+  "last_seen":  "2026-05-09T11:59:55Z",
+  "expires_at": "2026-05-09T13:00:00Z"
+}
+```
+
+A never-polled node returns 200 with all top-level fields nil so the UI
+can render "not yet polled" instead of error-handling a 404.
+
+Tunables (env, read once at startup):
+`CLUSTR_EXTERNAL_POOL_WORKERS`, `CLUSTR_EXTERNAL_POOL_CADENCE_SECONDS`,
+`CLUSTR_EXTERNAL_PROBE_TTL_MINUTES`, `CLUSTR_EXTERNAL_BMC_TTL_MINUTES`,
+`CLUSTR_EXTERNAL_SNMP_TTL_MINUTES`, plus
+`CLUSTR_EXTERNAL_POOL_DISABLE` / `CLUSTR_EXTERNAL_SKIP_BMC` /
+`CLUSTR_EXTERNAL_SKIP_SNMP` / `CLUSTR_EXTERNAL_SKIP_PING`.
+
+### `STAT-EXPIRES` — `expires_at` on stats writes
+
+Migration `106_node_stats_expires_at.sql` adds a nullable
+`expires_at INTEGER` (Unix seconds) column to `node_stats` plus a
+partial index on `expires_at IS NOT NULL`. Migration
+`107_node_external_stats.sql` creates the new `node_external_stats`
+table.
+
+Semantics:
+- `expires_at IS NULL` — the long-standing behaviour for
+  clientd-pushed streaming metrics. Sample is "current" forever, the
+  existing 7-day retention sweeper still wins.
+- `expires_at <= now()` — sample is stale. New `IncludeExpired bool`
+  flag on `QueryNodeStatsParams` defaults to false, so "current"
+  reads (alert engine, per-node UI, Prometheus exposition cache)
+  silently drop the row. Historical reads opt back in.
+
+A daily sweeper (`runExternalStatsSweeper`) deletes both expired
+`node_external_stats` rows and TTL-bounded `node_stats` rows whose
+`expires_at` has elapsed.
+
+### Tests added
+
+- `internal/server/stats/external/probes_test.go` — argv tables for
+  ping + ipmi_mc, banner regex against good/bad/edge SSH banners,
+  partial-failure independence, empty-targets-no-runner-call.
+- `internal/server/stats/external/bmc_test.go` — argv shape, error
+  propagation, freeipmi CSV sensor parsing.
+- `internal/server/handlers/external_stats_test.go` — full-payload
+  round-trip with chi router, empty-state, DB-error 500, expired-row
+  filtering, unknown-source forward-compatibility drop.
+- `internal/db/node_external_stats_test.go` — UPSERT round-trip,
+  invalid-JSON rejection, ListExternalStatsForNode expires-at
+  filter, sweep idempotency, sweep leaves NULL-expires_at node_stats
+  rows alone, `QueryNodeStats` honours the `IncludeExpired` toggle.
+
+### New deps
+
+`github.com/gosnmp/gosnmp v1.42.0`.
+
+---
+
 ## Unreleased — Sprint 34 Bundle A (BOOT-POLICY + BOOT-SETTINGS-MODAL backend + HOSTLIST)
 
 Three cohesive backend additions for Sprint 34:
