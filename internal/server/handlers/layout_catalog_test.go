@@ -34,6 +34,14 @@ func (f *fakeCatalogResolver) GetDiskLayout(_ context.Context, id string) (api.S
 	return dl, nil
 }
 
+func (f *fakeCatalogResolver) ListDiskLayouts(_ context.Context) ([]api.StoredDiskLayout, error) {
+	out := make([]api.StoredDiskLayout, 0, len(f.layouts))
+	for _, dl := range f.layouts {
+		out = append(out, dl)
+	}
+	return out, nil
+}
+
 func newTestLayout(fs string) api.StoredDiskLayout {
 	now := time.Now().UTC()
 	id := uuid.New().String()
@@ -63,7 +71,7 @@ func TestResolve_NeitherSetFallsThrough(t *testing.T) {
 		layouts:           make(map[string]api.StoredDiskLayout),
 	}
 
-	_, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1")
+	_, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1", "")
 	if ok {
 		t.Errorf("ok = true, want false (should fall through to existing logic)")
 	}
@@ -87,7 +95,7 @@ func TestResolve_NodeOverrideUsed(t *testing.T) {
 		},
 	}
 
-	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1")
+	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1", "")
 	if !ok {
 		t.Fatal("ok = false, want true")
 	}
@@ -118,7 +126,7 @@ func TestResolve_GroupDefaultUsedWhenNoNodeOverride(t *testing.T) {
 		},
 	}
 
-	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1")
+	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1", "")
 	if !ok {
 		t.Fatal("ok = false, want true")
 	}
@@ -145,7 +153,7 @@ func TestResolve_NodeOverrideIgnoresGroup(t *testing.T) {
 		},
 	}
 
-	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1")
+	layout, source, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "group-1", "")
 	if !ok {
 		t.Fatal("ok = false, want true")
 	}
@@ -166,7 +174,7 @@ func TestResolve_NodeFKPointsToMissingRecord(t *testing.T) {
 		layouts:           make(map[string]api.StoredDiskLayout),
 	}
 
-	_, _, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "")
+	_, _, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "", "")
 	if ok {
 		t.Error("ok = true, want false for dangling FK (should fall back)")
 	}
@@ -184,7 +192,7 @@ func TestResolve_NoGroupID(t *testing.T) {
 		},
 	}
 
-	_, _, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "")
+	_, _, ok := resolveDiskLayoutFromCatalog(context.Background(), r, "node-1", "", "")
 	if ok {
 		t.Error("ok = true, want false when groupID is empty and no node FK set")
 	}
