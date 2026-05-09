@@ -24,9 +24,9 @@ func (f *fakeFreeIPMIRunner) Run(ctx context.Context, argv ...string) (string, e
 func TestBMCCollectArgv(t *testing.T) {
 	t.Parallel()
 	got := BMCCollectArgv("192.168.1.50", "ADMIN", "secret")
-	// We only assert the binary + the credential markers; the exact
-	// flag list is owned by internal/ipmi.SensorsArgv (covered by its
-	// own unit tests).
+	// We only assert the binary + the non-secret credential markers;
+	// the exact flag list is owned by internal/ipmi.SensorsArgv
+	// (covered by its own unit tests).
 	if len(got) == 0 {
 		t.Fatal("BMCCollectArgv: empty argv")
 	}
@@ -39,8 +39,32 @@ func TestBMCCollectArgv(t *testing.T) {
 	if !containsArgv(got, "ADMIN") {
 		t.Fatalf("BMCCollectArgv missing user: %v", got)
 	}
-	if !containsArgv(got, "secret") {
-		t.Fatalf("BMCCollectArgv missing password: %v", got)
+
+	// SECURITY INVARIANT: the BMC password MUST NEVER appear on argv.
+	// /proc/<pid>/cmdline is world-readable on Linux, so any local
+	// user could observe a -p <password> substring during the
+	// freeipmi process lifetime.  The password is delivered to
+	// freeipmi out-of-band via a 0600 temp file referenced by
+	// --password-file=<path> (see internal/ipmi.runWithPassword).
+	// BMCCollectArgv is the password-free canonical-shape builder
+	// used for logging / inspection — keep it that way.
+	if containsArgv(got, "secret") {
+		t.Fatalf("BMCCollectArgv leaked password into argv: %v", got)
+	}
+	if containsArgv(got, "-p") {
+		t.Fatalf("BMCCollectArgv contains -p flag (password leak risk): %v", got)
+	}
+	for _, a := range got {
+		if strings.Contains(a, "secret") {
+			t.Fatalf("BMCCollectArgv leaked password substring in arg %q: %v", a, got)
+		}
+		// --password-file is the out-of-band channel and is appended
+		// at exec time by runWithPassword, NOT by the argv builder.
+		// Catch any future regression that puts it on the canonical
+		// shape (which would defeat the safe-to-log property).
+		if strings.HasPrefix(a, "--password-file") {
+			t.Fatalf("BMCCollectArgv must not include --password-file (added at exec time): %v", got)
+		}
 	}
 
 	// Empty addr → nil argv (the collector uses this to short-circuit
