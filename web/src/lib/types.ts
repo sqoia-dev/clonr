@@ -37,6 +37,8 @@ export interface NodeConfig {
   ldap_ready_detail?: string
   /** Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "" (unset). */
   provider?: string
+  /** Operating mode controls how the node boots and runs. Default is block_install. */
+  operating_mode?: 'block_install' | 'filesystem_install' | 'stateless_nfs' | 'stateless_ram'
   created_at: string
   updated_at: string
 }
@@ -47,6 +49,22 @@ export const NODE_PROVIDERS = [
   { value: "ipmi",    label: "IPMI" },
   { value: "proxmox", label: "Proxmox" },
 ] as const
+
+/** Valid operating modes for a node. Mirrors node_configs.operating_mode CHECK constraint. */
+export const NODE_OPERATING_MODES = [
+  { value: "block_install",    label: "Block install",      disabled: false },
+  { value: "stateless_nfs",    label: "Stateless NFS",      disabled: false },
+  { value: "filesystem_install", label: "Filesystem install", disabled: true },
+  { value: "stateless_ram",    label: "Stateless RAM",      disabled: true },
+] as const
+
+export type OperatingMode = 'block_install' | 'filesystem_install' | 'stateless_nfs' | 'stateless_ram'
+
+/** Human-readable label for non-default operating modes (used in node list badge). */
+export function operatingModeLabel(mode: OperatingMode | undefined): string | null {
+  if (!mode || mode === "block_install") return null
+  return NODE_OPERATING_MODES.find((m) => m.value === mode)?.label ?? mode
+}
 
 export interface InterfaceConfig {
   name: string

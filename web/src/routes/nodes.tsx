@@ -33,7 +33,7 @@ import { useEventInvalidation } from "@/contexts/connection"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult, EffectiveLayoutResponse } from "@/lib/types"
-import { nodeState, NODE_PROVIDERS } from "@/lib/types"
+import { nodeState, NODE_PROVIDERS, NODE_OPERATING_MODES, operatingModeLabel } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
@@ -1392,7 +1392,18 @@ export function NodesPage() {
                     </button>
                   </TableCell>
                   <TableCell>
-                    <span className="font-mono text-xs">{node.hostname || node.id}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-xs">{node.hostname || node.id}</span>
+                      {operatingModeLabel(node.operating_mode) && (
+                        <span
+                          className="inline-flex items-center rounded border border-blue-300 bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-800 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300"
+                          data-testid={`operating-mode-badge-${node.id}`}
+                          title={`Operating mode: ${operatingModeLabel(node.operating_mode)}`}
+                        >
+                          {operatingModeLabel(node.operating_mode)}
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <StatusDot state={nodeState(node)} />
@@ -1760,6 +1771,9 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                   <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
                 </Section>
 
+                {/* Sprint 37 UI: operating mode picker */}
+                <OperatingModePicker node={node} qc={qc} />
+
                 {node.ldap_ready !== undefined && (
                   <LdapStatusSection node={node} qc={qc} />
                 )}
@@ -1891,6 +1905,120 @@ function EditField({ label, children }: { label: string; children: React.ReactNo
       <label className="text-xs text-muted-foreground">{label}</label>
       {children}
     </div>
+  )
+}
+
+// ─── OperatingModePicker ──────────────────────────────────────────────────────
+// Sprint 37 UI: dropdown that lets the operator change a node's operating mode.
+// Fires PATCH /api/v1/nodes/{id} { operating_mode } on save.
+// Disabled options (filesystem_install, stateless_ram) show a tooltip explaining
+// they are not yet implemented.
+
+const NOT_YET_IMPLEMENTED_TOOLTIP = "Not yet implemented — planned for future release"
+
+interface OperatingModePickerProps {
+  node: NodeConfig
+  qc: ReturnType<typeof useQueryClient>
+}
+
+function OperatingModePicker({ node, qc }: OperatingModePickerProps) {
+  // pendingMode is null when the operator has not changed anything (no dirty state).
+  // When null, we display node.operating_mode which always reflects the latest server value.
+  const [pendingMode, setPendingMode] = React.useState<string | null>(null)
+  const [saving, setSaving] = React.useState(false)
+
+  const serverMode = node.operating_mode ?? "block_install"
+  const displayMode = pendingMode ?? serverMode
+  const isDirty = pendingMode !== null && pendingMode !== serverMode
+
+  async function handleSave() {
+    if (!pendingMode) return
+    setSaving(true)
+    try {
+      await apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ operating_mode: pendingMode }),
+      })
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      toast({ title: "Operating mode saved", description: `Set to ${NODE_OPERATING_MODES.find((m) => m.value === pendingMode)?.label ?? pendingMode}.` })
+      setPendingMode(null)
+    } catch (err) {
+      toast({ variant: "destructive", title: "Failed to save operating mode", description: String(err) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Section title="Operating Mode">
+      <div className="space-y-2">
+        <p className="text-xs text-muted-foreground">
+          Controls how this node boots and runs. Changes take effect on next PXE boot.
+        </p>
+        <TooltipProvider>
+          <div className="space-y-1" data-testid="operating-mode-picker">
+            {NODE_OPERATING_MODES.map((mode) => (
+              <Tooltip key={mode.value}>
+                <TooltipTrigger asChild>
+                  <label
+                    className={cn(
+                      "flex items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer transition-colors",
+                      mode.disabled
+                        ? "opacity-50 cursor-not-allowed"
+                        : "hover:bg-secondary/50",
+                      displayMode === mode.value && !mode.disabled && "bg-secondary/60 font-medium",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name={`operating-mode-${node.id}`}
+                      value={mode.value}
+                      checked={displayMode === mode.value}
+                      disabled={mode.disabled}
+                      onChange={() => !mode.disabled && setPendingMode(mode.value)}
+                      className="accent-primary"
+                      data-testid={`operating-mode-option-${mode.value}`}
+                    />
+                    {mode.label}
+                    {mode.disabled && (
+                      <span className="ml-auto text-xs text-muted-foreground italic">Not yet implemented</span>
+                    )}
+                  </label>
+                </TooltipTrigger>
+                {mode.disabled && (
+                  <TooltipContent side="right" className="text-xs">
+                    {NOT_YET_IMPLEMENTED_TOOLTIP}
+                  </TooltipContent>
+                )}
+              </Tooltip>
+            ))}
+          </div>
+        </TooltipProvider>
+        {isDirty && (
+          <div className="flex gap-1.5 pt-1">
+            <Button
+              size="sm"
+              className="flex-1 h-7 text-xs"
+              onClick={handleSave}
+              disabled={saving}
+              data-testid="operating-mode-save"
+            >
+              {saving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+              {saving ? "Saving…" : "Save"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => setPendingMode(null)}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
+      </div>
+    </Section>
   )
 }
 
