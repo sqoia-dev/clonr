@@ -1173,7 +1173,11 @@ func installKernelInChroot(ctx context.Context, mountRoot, targetDisk string) er
 //
 // The function sets up the bind mounts that grub2-install requires (/proc for
 // device detection, /sys for efivars read, /dev for block device access).
-func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
+//
+// bootOrderPolicy (Sprint 34 BOOT-POLICY) selects the post-install NVRAM
+// reorder semantic: empty / "auto" / "network" preserves the v0.1.22 reactive
+// PXE-first repair; "os" promotes an OS entry to the head of BootOrder.
+func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot, bootOrderPolicy string) error {
 	log := logger()
 
 	// Bind-mount virtual filesystems required by grub2-install inside the chroot.
@@ -1229,19 +1233,26 @@ func runGrub2InstallEFIInChroot(ctx context.Context, mountRoot string) error {
 	}
 	log.Info().Msg("finalize/boot: grub2-install --target=x86_64-efi inside chroot succeeded")
 
-	// FIX-EFI (#225): on UEFI hosts, ensure a PXE entry leads BootOrder so the
-	// next reimage doesn't get blocked by an OS entry left over from a prior
-	// life of the disk.  Best-effort: a failure here NEVER fails an otherwise
-	// successful deploy — the deployed node will boot via the removable-media
-	// path (\EFI\BOOT\BOOTX64.EFI) regardless of NVRAM order, and the worst case
-	// is that the operator has to power-cycle once for PXE to win on next reboot.
-	// On BIOS systems this is a true no-op (RepairBootOrderForReimage exits early
-	// when /sys/firmware/efi is absent).
-	if err := RepairBootOrderForReimage(ctx); err != nil {
-		log.Warn().Err(err).
-			Msg("finalize/boot: RepairBootOrderForReimage failed (non-fatal — node will boot via removable-media path; future reimage may need an extra power-cycle)")
+	// Sprint 34 BOOT-POLICY (#225 follow-up): apply the operator-declared
+	// boot-order policy at the end of the EFI install step.  Behaviour:
+	//
+	//   policy="" / "auto" / "network"  → PXE leads BootOrder (v0.1.22 repair).
+	//   policy="os"                     → OS entry leads, PXE second.
+	//
+	// Best-effort: a failure here NEVER fails an otherwise successful deploy
+	// — the deployed node will boot via the removable-media path
+	// (\EFI\BOOT\BOOTX64.EFI) regardless of NVRAM order.  On BIOS systems
+	// this is a true no-op.
+	policy := bootOrderPolicy
+	if policy == "" {
+		policy = "auto"
+	}
+	if err := ApplyBootOrderPolicy(ctx, policy); err != nil {
+		log.Warn().Err(err).Str("policy", policy).
+			Msg("finalize/boot: ApplyBootOrderPolicy failed (non-fatal — node will boot via removable-media path; future reimage may need an extra power-cycle)")
 	} else {
-		log.Info().Msg("finalize/boot: NVRAM BootOrder repaired (PXE leads or no PXE entry present)")
+		log.Info().Str("policy", policy).
+			Msg("finalize/boot: NVRAM BootOrder applied per policy")
 	}
 	return nil
 }

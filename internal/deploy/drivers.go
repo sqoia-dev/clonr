@@ -69,6 +69,14 @@ type bootloaderCtx struct {
 	// bootloader must be installed via the UEFI path (grub2-install --target=x86_64-efi
 	// inside the deployed chroot). Mutually exclusive with BIOS in practice.
 	IsEFI bool
+
+	// BootOrderPolicy is the per-node boot-order policy from
+	// NodeConfig.BootOrderPolicy (Sprint 34).  One of "auto"/"network"/"os"
+	// or empty (treated as "auto" for back-compat with v0.1.22 deploys).
+	// Threaded through to ApplyBootOrderPolicy at the end of the EFI bootloader
+	// install step so the OS-first policy can replace the v0.1.22 reactive
+	// PXE-first repair without changing call sites that don't care about it.
+	BootOrderPolicy string
 }
 
 // drivers is the registry populated by each driver's init() function.
