@@ -3,10 +3,13 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
@@ -466,5 +469,123 @@ func TestInChrootReconfigure_WithInstructions(t *testing.T) {
 	}
 	if string(got) != "instructions-ran" {
 		t.Errorf("marker = %q, want %q", string(got), "instructions-ran")
+	}
+}
+
+// TestStreamPipeWithFallback_OversizedLineDoesNotHang locks down Codex
+// post-ship review issue #13: bufio.Scanner ErrTooLong used to leave
+// the goroutine wedged after the first oversized line, so the child
+// process eventually blocked on a full pipe and cmd.Wait hung.
+//
+// We feed an io.Pipe a single line that exceeds the (test-shrunk)
+// scanner cap, then close the writer.  The fallback raw-chunk drain
+// must consume the rest, addTail must record the bytes, and the
+// goroutine must exit within a deterministic deadline.
+func TestStreamPipeWithFallback_OversizedLineDoesNotHang(t *testing.T) {
+	// Shrink the scanner caps for the test so we don't allocate 64MB
+	// just to trip ErrTooLong.  Restore on cleanup.
+	origInit := scannerInitBufBytes
+	origMax := scannerMaxTokenBytes
+	scannerInitBufBytes = 4 * 1024
+	scannerMaxTokenBytes = 16 * 1024
+	t.Cleanup(func() {
+		scannerInitBufBytes = origInit
+		scannerMaxTokenBytes = origMax
+	})
+
+	pr, pw := io.Pipe()
+
+	var (
+		mu    sync.Mutex
+		tail  []string
+	)
+	addTail := func(line string) {
+		mu.Lock()
+		tail = append(tail, line)
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	done := make(chan struct{})
+	go func() {
+		streamPipeWithFallback(pr, "stdout", 1, addTail, &wg)
+		close(done)
+	}()
+
+	// 5 MiB single line, no newline — exceeds the 16KiB scanner cap so
+	// the scanner errors and the fallback drain takes over.
+	const lineSize = 5 << 20
+	go func() {
+		buf := make([]byte, lineSize)
+		for i := range buf {
+			buf[i] = 'A' + byte(i%26)
+		}
+		if _, err := pw.Write(buf); err != nil {
+			t.Errorf("write 5MB line: %v", err)
+		}
+		// Close to signal EOF; both scanner and raw-reader paths
+		// terminate cleanly on EOF.
+		_ = pw.Close()
+	}()
+
+	select {
+	case <-done:
+		// happy path
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamPipeWithFallback hung past 5s with an oversized line — issue #13 regression")
+	}
+
+	// addTail must have recorded the bytes via the raw-chunk fallback.
+	mu.Lock()
+	totalBytes := 0
+	for _, t := range tail {
+		totalBytes += len(t)
+	}
+	mu.Unlock()
+	if totalBytes < lineSize {
+		t.Errorf("addTail captured %d bytes, want at least %d (raw fallback dropped data)", totalBytes, lineSize)
+	}
+}
+
+// TestStreamPipeWithFallback_NormalLinesPassThrough covers the no-op
+// path: when no oversized line trips ErrTooLong, the scanner emits
+// one addTail per line and the fallback never engages.
+func TestStreamPipeWithFallback_NormalLinesPassThrough(t *testing.T) {
+	pr, pw := io.Pipe()
+
+	var (
+		mu   sync.Mutex
+		tail []string
+	)
+	addTail := func(line string) {
+		mu.Lock()
+		tail = append(tail, line)
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	done := make(chan struct{})
+	go func() {
+		streamPipeWithFallback(pr, "stdout", 1, addTail, &wg)
+		close(done)
+	}()
+
+	go func() {
+		_, _ = pw.Write([]byte("line1\nline2\nline3\n"))
+		_ = pw.Close()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamPipeWithFallback hung on normal lines")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(tail) != 3 {
+		t.Errorf("captured %d lines, want 3: %+v", len(tail), tail)
 	}
 }
