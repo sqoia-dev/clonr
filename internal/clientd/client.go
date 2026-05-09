@@ -1353,11 +1353,12 @@ func (c *Client) sendStatsBatch(plugin string, samples []stats.Sample) {
 	ss := make([]StatsSample, len(samples))
 	for i, s := range samples {
 		ss[i] = StatsSample{
-			Sensor: s.Sensor,
-			Value:  s.Value,
-			Unit:   s.Unit,
-			Labels: s.Labels,
-			TS:     s.TS,
+			Sensor:     s.Sensor,
+			Value:      s.Value,
+			Unit:       s.Unit,
+			Labels:     s.Labels,
+			TS:         s.TS,
+			MetricName: s.MetricName,
 		}
 	}
 

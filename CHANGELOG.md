@@ -1,5 +1,272 @@
 # Changelog
 
+## Unreleased — Sprint 38 Bundle A (PROBE-3 + EXTERNAL-STATS + STAT-EXPIRES)
+
+Three coordinated additions that let clustr-serverd monitor a node before
+it is enrolled, during deploy, and after it is broken — without
+depending on clustr-clientd.
+
+### `PROBE-3` — three reachability probes per node, no clientd required
+
+New `internal/server/stats/external/probes.go`. Each cycle the goroutine
+pool runs three independent probes per node:
+
+- **ping** — shells out to `/usr/bin/ping -c1 -W2 -n` against the
+  primary interface IP. We deliberately avoid the raw-socket
+  `golang.org/x/net/icmp` path so clustr-serverd does not need
+  `CAP_NET_RAW`. Hostname/IP arguments pass through a strict
+  validator before reaching argv (no shell metacharacters, no
+  whitespace, no newlines).
+- **ssh** — pure `net.DialTimeout` to TCP/22 + `bufio.ReadString('\n')`,
+  matching the `SSH-2.0-` (and transitional `SSH-1.99-`) banner
+  prefix. No clients, no key exchange, no auth.
+- **ipmi_mc** — `ipmi-sensors --no-output --session-timeout=2000` over
+  LAN+ to the BMC IP from `bmc_config_encrypted`. We only inspect
+  the exit code; success means "the BMC's mc info handshake worked".
+
+Result is three booleans + a `checked_at` timestamp written to the
+new `node_external_stats` table with `source='probe'`. Each probe is
+independent: a ping failure never short-circuits the SSH or IPMI
+probe.
+
+### `EXTERNAL-STATS` — agent-less BMC + SNMP collectors
+
+Same package, new files:
+
+- `bmc.go` — wraps `internal/ipmi.FreeIPMIClient.Sensors()` so a full
+  `ipmi-sensors` sweep is captured per cycle. Decrypted creds come
+  from `bmc_config_encrypted` via the existing path. Failure is
+  recorded as `payload.error` instead of a missing row.
+- `snmp.go` — gosnmp v1 wrapper. v2c GET against a configurable OID
+  list, two-second per-target timeout. v3 USM and traps are out of
+  scope for this sprint.
+- `pool.go` — the goroutine pool (default 20 workers, 60-second
+  cadence). Buffered job channel sized to `Workers` so a slow node
+  holds at most one slot at a time.
+
+Exposed via `GET /api/v1/nodes/{id}/external_stats`:
+
+```json
+{
+  "probes":  { "ping": true, "ssh": false, "ipmi_mc": true,
+               "checked_at": "2026-05-09T11:59:50Z" },
+  "samples": {
+    "bmc":  { "sensors": { "CPU Temp": { "value": "42", "unit": "C" } } },
+    "snmp": { "samples": { "1.3.6.1.2.1.1.3.0": { "value": "12345", "type": "ticks" } } },
+    "ipmi": null
+  },
+  "last_seen":  "2026-05-09T11:59:55Z",
+  "expires_at": "2026-05-09T13:00:00Z"
+}
+```
+
+A never-polled node returns 200 with all top-level fields nil so the UI
+can render "not yet polled" instead of error-handling a 404.
+
+Tunables (env, read once at startup):
+`CLUSTR_EXTERNAL_POOL_WORKERS`, `CLUSTR_EXTERNAL_POOL_CADENCE_SECONDS`,
+`CLUSTR_EXTERNAL_PROBE_TTL_MINUTES`, `CLUSTR_EXTERNAL_BMC_TTL_MINUTES`,
+`CLUSTR_EXTERNAL_SNMP_TTL_MINUTES`, plus
+`CLUSTR_EXTERNAL_POOL_DISABLE` / `CLUSTR_EXTERNAL_SKIP_BMC` /
+`CLUSTR_EXTERNAL_SKIP_SNMP` / `CLUSTR_EXTERNAL_SKIP_PING`.
+
+### `STAT-EXPIRES` — `expires_at` on stats writes
+
+Migration `106_node_stats_expires_at.sql` adds a nullable
+`expires_at INTEGER` (Unix seconds) column to `node_stats` plus a
+partial index on `expires_at IS NOT NULL`. Migration
+`107_node_external_stats.sql` creates the new `node_external_stats`
+table.
+
+Semantics:
+- `expires_at IS NULL` — the long-standing behaviour for
+  clientd-pushed streaming metrics. Sample is "current" forever, the
+  existing 7-day retention sweeper still wins.
+- `expires_at <= now()` — sample is stale. New `IncludeExpired bool`
+  flag on `QueryNodeStatsParams` defaults to false, so "current"
+  reads (alert engine, per-node UI, Prometheus exposition cache)
+  silently drop the row. Historical reads opt back in.
+
+A daily sweeper (`runExternalStatsSweeper`) deletes both expired
+`node_external_stats` rows and TTL-bounded `node_stats` rows whose
+`expires_at` has elapsed.
+
+### Tests added
+
+- `internal/server/stats/external/probes_test.go` — argv tables for
+  ping + ipmi_mc, banner regex against good/bad/edge SSH banners,
+  partial-failure independence, empty-targets-no-runner-call.
+- `internal/server/stats/external/bmc_test.go` — argv shape, error
+  propagation, freeipmi CSV sensor parsing.
+- `internal/server/handlers/external_stats_test.go` — full-payload
+  round-trip with chi router, empty-state, DB-error 500, expired-row
+  filtering, unknown-source forward-compatibility drop.
+- `internal/db/node_external_stats_test.go` — UPSERT round-trip,
+  invalid-JSON rejection, ListExternalStatsForNode expires-at
+  filter, sweep idempotency, sweep leaves NULL-expires_at node_stats
+  rows alone, `QueryNodeStats` honours the `IncludeExpired` toggle.
+
+### New deps
+
+`github.com/gosnmp/gosnmp v1.42.0`.
+
+---
+
+## Unreleased — Sprint 38 Bundle B (STAT-REGISTRY + IB/MegaRAID/IntelSSD plugins + SYSTEM-ALERT-FRAMEWORK)
+
+Backend-only landing for the second half of Sprint 38: typed metric registry,
+three new ergonomic stats plugins, and the operator-visible system_alerts
+lifecycle (push/set/unset/expire).
+
+### `STAT-REGISTRY` — typed metric registry
+
+New `internal/clientd/stats/metric_registry.go` exposing
+`Register(typ, name string, opts ...Option)` and a `*MetricRegistry` type.
+
+Public API:
+
+```go
+type MetricType string  // "float" | "int" | "bool"
+type MetricDecl struct {
+    Type, Name, Device, Unit, Title, ChartGroup string
+    Upper float64
+}
+type Option func(*MetricDecl)
+func Device(s string) Option
+func Unit(s string) Option
+func Upper(v float64) Option
+func Title(s string) Option
+func ChartGroup(s string) Option
+
+func NewMetricRegistry() *MetricRegistry
+func (r *MetricRegistry) Register(typ MetricType, name string, opts ...Option) (MetricDecl, error)
+func (r *MetricRegistry) MustRegister(typ MetricType, name string, opts ...Option) MetricDecl
+func (r *MetricRegistry) Get(name, device string) (MetricDecl, bool)
+func (r *MetricRegistry) All() []MetricDecl
+func (r *MetricRegistry) Sample(name, device string, value float64) Sample
+```
+
+Key validation rules:
+- `typ` must be one of `float`, `int`, `bool` -> `ErrMetricInvalidType`
+- `name` required -> `ErrMetricMissingName`
+- `Title(...)` required -> `ErrMetricMissingTitle`
+- `(name, device)` is the unique key; same name + different device is allowed.
+
+`stats.Sample` gains an optional `MetricName` field (`json:"metric_name,omitempty"`)
+and `clientd.StatsSample` mirrors it on the wire.  Plugins that pre-date the
+registry leave `MetricName` empty; the existing emit-by-name path keeps working.
+The server uses `MetricName` to resolve unit/title/chart-group hints from the
+registered `MetricDecl` without a separate dashboard config.
+
+### `IB-PLUGIN` (sysfs variant) — `internal/clientd/stats/plugins/infiniband.go`
+
+Reads `/sys/class/infiniband/<dev>/ports/<n>/{state,rate,link_layer,counters/*}`.
+Six metrics registered under `ChartGroup("InfiniBand")`:
+`ib_state`, `ib_rate_gbps`, `ib_link_layer`, `ib_port_rcv_data_bytes`,
+`ib_port_xmit_data_bytes`, `ib_symbol_errors`.
+
+Co-exists with the legacy ibstat-shelling plugin in `infiniband.go`.  Returns
+nil silently on hosts without IB hardware.
+
+### `MEGARAID-PLUGIN` — `internal/clientd/stats/plugins/megaraid.go`
+
+LSI/Broadcom MegaRAID controller summary via `storcli` or `MegaCli`,
+whichever is on PATH (preference: `storcli` -> `storcli64` -> `MegaCli`
+-> `MegaCli64`).  Seven metrics registered under `ChartGroup("MegaRAID")`.
+Graceful no-op on hosts with neither binary installed.
+
+### `INTELSSD-PLUGIN` — `internal/clientd/stats/plugins/intelssd.go`
+
+Intel enterprise SSD SMART via `isdct` (Intel Datacenter Tool) or `intelmas`
+(rebrand).  Six metrics registered under `ChartGroup("Intel SSD")` including
+the inverted `intel_ssd_media_wear_pct` (0 = unworn, 100 = end-of-life).
+
+### `SYSTEM-ALERT-FRAMEWORK` — operator-visible alerts with TTL
+
+New package `internal/server/alerts/` with `Store` + `Handler`:
+
+```
+POST /api/v1/system_alerts/push                    -- push transient alert
+POST /api/v1/system_alerts/set/{key}/{device}      -- set/upsert durable alert
+POST /api/v1/system_alerts/unset/{key}/{device}    -- clear active alert
+GET  /api/v1/system_alerts                         -- list current
+```
+
+DB migration `108_system_alerts.sql` adds the table (sequenced after Bundle A's
+`106_node_stats_expires_at.sql` and `107_node_external_stats.sql`):
+
+```sql
+CREATE TABLE system_alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    key         TEXT    NOT NULL,
+    device      TEXT    NOT NULL,
+    level       TEXT    NOT NULL,    -- info | warn | critical
+    message     TEXT    NOT NULL,
+    fields_json TEXT,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER,             -- NULL = no expiry (set, not push)
+    cleared_at  INTEGER              -- set on unset/sweep
+);
+CREATE UNIQUE INDEX idx_system_alerts_active_keydev
+    ON system_alerts (key, device) WHERE cleared_at IS NULL;
+```
+
+The unique partial index enforces "one active alert per (key, device)" while
+allowing historical cleared rows for audit.
+
+Wire shape (matches Dinesh's `web/src/lib/types.ts SystemAlert`):
+
+```ts
+{
+  id: number,
+  key: string,
+  device: string,
+  level: "info" | "warn" | "critical",
+  message: string,
+  fields?: Record<string, unknown>,
+  set_at: string,        // RFC3339
+  expires_at?: string    // RFC3339 (only on push)
+}
+```
+
+Lifecycle:
+- `Push` is for fire-and-forget alerts that auto-clear after TTL (default 5m).
+  Repeated Push calls on the same `(key, device)` upsert; the row count does
+  not grow under retry.
+- `Set` is for durable alerts with no expiry (e.g. host_unreachable).
+- `Unset` stamps `cleared_at`.
+- A 30s sweeper goroutine started in `StartBackgroundWorkers` stamps
+  `cleared_at` on rows whose `expires_at` has passed.
+
+Generalises the rule-engine alerts table (#133): `system_alerts` is
+operator-visible state with TTL; the existing `alerts` table stays for
+rule-engine evaluations.
+
+### Tests
+
+- `metric_registry_test.go` — register+lookup roundtrip, duplicate-name-different-device,
+  duplicate-(name,device) collision, missing Title validation, invalid type,
+  empty name, All() ordering, Sample() ergonomics, MustRegister panic paths.
+- `plugins/infiniband_test.go` — fixture-tree parser tests against a mock
+  /sys/class/infiniband, including 2-dev x 2-port cross-product.
+- `plugins/megaraid_test.go` — graceful no-op when no CLI present, storcli
+  JSON parser fixture, MegaCli line-counter fixture, all-metric registration.
+- `plugins/intelssd_test.go` — graceful no-op, JSON-array + JSON-object
+  envelope parsing, unit-suffix stripping, inversion of MediaWearIndicator.
+- `system_alerts_test.go` — push expires after TTL, set->unset roundtrip,
+  push idempotency, different devices stay separate, invalid level / empty
+  key validation, Push->Set->Unset state transition, fields JSON roundtrip.
+
+### Out of scope
+
+- Wiring the new ergonomic plugins into `internal/clientd/client.go` —
+  intentional.  The legacy `infiniband.go` (ibstat) and `megaraid.go`
+  (storcli) plugins continue to drive on-node collection; the new
+  registry-aware plugins are available for plugin authors to opt into.
+- Web UI consumption of `chart_group` and `metric_name` foreign-key — that
+  belongs to Dinesh's parallel UI track.
+- PROBE-3 / EXTERNAL-STATS / STAT-EXPIRES (Bundle A — separate branch).
+
 ## Unreleased — Sprint 34 Bundle A (BOOT-POLICY + BOOT-SETTINGS-MODAL backend + HOSTLIST)
 
 Three cohesive backend additions for Sprint 34:

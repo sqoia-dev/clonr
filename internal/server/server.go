@@ -42,6 +42,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/internal/multicast"
 	"github.com/sqoia-dev/clustr/internal/server/eventbus"
+	systemalerts "github.com/sqoia-dev/clustr/internal/server/alerts"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
 	webui "github.com/sqoia-dev/clustr/internal/server/web"
@@ -114,6 +115,11 @@ type Server struct {
 	alertEngine      *alerts.Engine
 	alertStore       *alerts.StateStore
 	alertDispatcher  *alerts.Dispatcher
+
+	// systemAlertStore is the Sprint 38 SYSTEM-ALERT-FRAMEWORK store
+	// (operator-visible alerts with TTL, addressed by (key, device)).
+	// Distinct from alertStore (rule-engine evaluations).
+	systemAlertStore *systemalerts.Store
 
 	// multicastScheduler is the Sprint 25 #157 UDPCast fleet-reimage scheduler.
 	// Initialised in buildRouter() after the DB is available.
@@ -362,6 +368,14 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// Reaps any api_keys row whose expires_at is in the past so the table doesn't
 	// accumulate dead node-scope tokens (24h TTL each, minted on every PXE boot).
 	go s.runAPIKeySweeper(ctx)
+
+	// Sprint 38 Bundle B SYSTEM-ALERT-FRAMEWORK: sweeper for expired
+	// transient (push-style) system alerts.  30-second tick is enough for
+	// operator dashboards; the List query also filters by current time so
+	// latency from sweep-tick boundary doesn't show stale rows.
+	if s.systemAlertStore != nil {
+		s.systemAlertStore.StartSweeper(ctx, 30*time.Second)
+	}
 }
 
 // runAPIKeySweeper ticks every 5 minutes and DELETEs api_keys rows whose
@@ -1311,6 +1325,12 @@ func (s *Server) buildRouter() chi.Router {
 			}
 		}
 
+		// ─── Sprint 38 SYSTEM-ALERT-FRAMEWORK ────────────────────────────────────────
+		// Operator-visible alerts with TTL.  The sweeper goroutine is started in
+		// StartBackgroundWorkers; the routes are mounted in the auth-gated /api/v1
+		// sub-router below.
+		s.systemAlertStore = systemalerts.NewStore(s.db)
+
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
 		// Admin can access all PI data. operator, readonly, viewer are blocked.
@@ -1835,6 +1855,12 @@ func (s *Server) buildRouter() chi.Router {
 			// #243: SELF-MON — control-plane host status endpoint.
 			cpHandler := &handlers.ControlPlaneHandler{DB: handlers.NewControlPlaneDBAdapter(s.db)}
 			r.Get("/control-plane", cpHandler.ServeHTTP)
+
+			// Sprint 38 SYSTEM-ALERT-FRAMEWORK — operator-visible alerts with TTL.
+			if s.systemAlertStore != nil {
+				saH := &systemalerts.Handler{Store: s.systemAlertStore}
+				saH.Mount(r)
+			}
 
 			// Sprint 22 #133: alert rule engine — query active + recent alerts.
 			if s.alertStore != nil {
