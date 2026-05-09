@@ -167,12 +167,42 @@ func (h *SOLConsoleHandler) HandleSOL(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Single-active-session enforcement: if another bridge is active for
-	// this node, supersede it cleanly before starting ours.
-	h.superseded(nodeID)
-
 	bridgeCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+
+	// Codex post-ship review issue #6: avoid the TOCTOU between
+	// superseded() and the post-Spawn registration.  The previous code
+	// removed the old entry, then ran h.Spawn (which talks to a child
+	// process and can take real wall-clock time), then registered the
+	// new bridge — a concurrent connect arriving in that gap saw no
+	// active session and proceeded, ending up with two simultaneous
+	// SOL bridges to the same BMC.
+	//
+	// Reserve our slot atomically: under one critical section, grab the
+	// previous bridge (if any) and replace it with our placeholder
+	// pointing at our cancel func.  Subsequent connects arriving during
+	// Spawn() will see this placeholder, take the supersede path, and
+	// cancel us before we even finish starting.
+	bridge := &SOLBridge{
+		NodeID:  nodeID,
+		Started: time.Now().UTC(),
+		cancel:  cancel,
+	}
+	h.mu.Lock()
+	prev := h.active[nodeID]
+	h.active[nodeID] = bridge
+	h.mu.Unlock()
+	if prev != nil {
+		log.Info().Str("node_id", nodeID).Msg("sol ws: superseding previous session")
+		prev.cancel()
+	}
+	defer func() {
+		h.mu.Lock()
+		if cur := h.active[nodeID]; cur == bridge {
+			delete(h.active, nodeID)
+		}
+		h.mu.Unlock()
+	}()
 
 	pipe, cmd, err := h.Spawn(bridgeCtx, creds)
 	if err != nil {
@@ -189,44 +219,12 @@ func (h *SOLConsoleHandler) HandleSOL(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	bridge := &SOLBridge{
-		NodeID:  nodeID,
-		Started: time.Now().UTC(),
-		cancel:  cancel,
-	}
-	h.mu.Lock()
-	h.active[nodeID] = bridge
-	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		if cur := h.active[nodeID]; cur == bridge {
-			delete(h.active, nodeID)
-		}
-		h.mu.Unlock()
-	}()
-
 	log.Info().Str("node_id", nodeID).Str("bmc_host", creds.Host).Msg("sol ws: session started")
 
 	exitCode := pumpSOLBridge(bridgeCtx, conn, pipe)
 
 	sendSOLExit(conn, exitCode, "")
 	log.Info().Str("node_id", nodeID).Int("exit_code", exitCode).Msg("sol ws: session ended")
-}
-
-// superseded closes any existing bridge for nodeID and removes it from the
-// active map. Called from HandleSOL before starting a new bridge.
-func (h *SOLConsoleHandler) superseded(nodeID string) {
-	h.mu.Lock()
-	prev, ok := h.active[nodeID]
-	if ok {
-		delete(h.active, nodeID)
-	}
-	h.mu.Unlock()
-	if !ok {
-		return
-	}
-	log.Info().Str("node_id", nodeID).Msg("sol ws: superseding previous session")
-	prev.cancel()
 }
 
 // resolveSOLCreds extracts BMC credentials from the node config for an SOL

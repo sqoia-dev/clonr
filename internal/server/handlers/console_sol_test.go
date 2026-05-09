@@ -207,6 +207,113 @@ func TestSOLBridge_SecondConnectSupersedesFirst(t *testing.T) {
 	}
 }
 
+// TestSOLBridge_RaceyConnectsLandOneActive locks down Codex post-ship
+// review issue #6: HandleSOL previously did
+//
+//   superseded(nodeID)   // remove old entry
+//   ... Spawn(...)        // potentially long
+//   active[nodeID] = bridge
+//
+// A concurrent connect arriving while Spawn was in progress saw an
+// empty active map, took the no-supersede path, and ended up running
+// alongside the first session — two simultaneous bridges to the same
+// BMC.  The fix reserves the slot atomically before Spawn, so a racing
+// connect cancels the previous one even mid-Spawn.
+//
+// We simulate the race by gating the Spawn function on a channel: the
+// first connect blocks inside Spawn until released; while it's blocked
+// we fire the second connect.  Because the slot is reserved BEFORE
+// Spawn, the second connect sees the placeholder, cancels it, and the
+// first connect's Spawn unblocks into a cancelled context.  Net: only
+// the second bridge is ever active.
+func TestSOLBridge_RaceyConnectsLandOneActive(t *testing.T) {
+	subprocess1 := newFakePipe()
+	subprocess2 := newFakePipe()
+
+	// First-spawn release gate.  Spawn #1 blocks on this until we close
+	// the channel — modelling the case where Spawn takes long enough
+	// for a second connect to arrive.
+	releaseSpawn1 := make(chan struct{})
+	spawn1Started := make(chan struct{})
+	spawnCalls := 0
+
+	h := &SOLConsoleHandler{
+		DB: &fakeConsoleDB{
+			nodes: map[string]api.NodeConfig{
+				"node-1": {BMC: &api.BMCNodeConfig{IPAddress: "10.0.0.5", Username: "admin", Password: "p"}},
+			},
+		},
+		active: make(map[string]*SOLBridge),
+		Spawn: func(ctx context.Context, _ solCreds) (io.ReadWriteCloser, *exec.Cmd, error) {
+			spawnCalls++
+			if spawnCalls == 1 {
+				close(spawn1Started)
+				select {
+				case <-releaseSpawn1:
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+				return subprocess1, nil, nil
+			}
+			return subprocess2, nil, nil
+		},
+	}
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/nodes/{id}/console/sol", h.HandleSOL)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/nodes/node-1/console/sol"
+
+	// Fire the first connect.  Don't wait for it to "succeed" — it's
+	// going to block in Spawn.
+	conn1Done := make(chan *websocket.Conn, 1)
+	go func() {
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err == nil {
+			conn1Done <- conn
+		} else {
+			conn1Done <- nil
+		}
+	}()
+
+	// Wait for the first connect to enter Spawn so we know its slot is
+	// reserved (per the fix).
+	<-spawn1Started
+
+	// Fire the second connect while #1 is wedged in Spawn.
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial 2: %v", err)
+	}
+	defer conn2.Close()
+
+	// Give the supersede path a moment to land, then release Spawn 1.
+	time.Sleep(100 * time.Millisecond)
+	close(releaseSpawn1)
+
+	// At steady state we expect exactly one bridge active for node-1
+	// and the FIRST connect's bridge to have been replaced.
+	time.Sleep(200 * time.Millisecond)
+
+	h.mu.Lock()
+	got := len(h.active)
+	h.mu.Unlock()
+	if got != 1 {
+		t.Errorf("expected exactly 1 active bridge after race, got %d", got)
+	}
+
+	// Drain the first connect cleanly so the test goroutine exits.
+	if conn1 := <-conn1Done; conn1 != nil {
+		conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, _ = conn1.ReadMessage()
+		conn1.Close()
+	}
+	_ = subprocess1.Close()
+	_ = subprocess2.Close()
+}
+
 // ─── No BMC = 400 ─────────────────────────────────────────────────────────────
 
 func TestSOLBridge_NodeWithoutBMC_Rejected(t *testing.T) {
