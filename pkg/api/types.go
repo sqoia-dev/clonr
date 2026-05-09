@@ -581,10 +581,43 @@ type NodeConfig struct {
 	// LDAPReady is set by the server when a node phones home via verify-boot and
 	// includes sssd status. nil = not yet checked; true = sssd connected;
 	// false = sssd not ready (see LDAPReadyDetail). Sprint 15 #99.
-	LDAPReady       *bool     `json:"ldap_ready,omitempty"`
-	LDAPReadyDetail string    `json:"ldap_ready_detail,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	LDAPReady       *bool  `json:"ldap_ready,omitempty"`
+	LDAPReadyDetail string `json:"ldap_ready_detail,omitempty"`
+
+	// Sprint 34 BOOT-POLICY (#225 follow-up).
+	//
+	// BootOrderPolicy declares the operator's intent for the on-NVRAM
+	// BootOrder UEFI variable after a successful deploy. One of:
+	//
+	//   "auto"    — back-compat default; finalize uses the v0.1.22 reactive
+	//               repair (PXE first if found, otherwise leave alone).
+	//   "network" — explicit "PXE / network entries lead BootOrder". Used for
+	//               compute nodes that should always be re-imageable.
+	//   "os"      — explicit "OS entries lead, PXE second". Used for login,
+	//               storage, or service nodes that the operator wants to
+	//               cold-boot from disk by default and only PXE on demand.
+	//
+	// Stored in the boot_order_policy column added by migration 105. Empty
+	// string is read as "auto" for forward-compat.
+	BootOrderPolicy string `json:"boot_order_policy,omitempty"`
+
+	// Sprint 34 BOOT-SETTINGS-MODAL (#160 follow-up).
+	//
+	// NetbootMenuEntry, when non-empty, references a row in the boot_entries
+	// catalog (#160). ServeIPXEScript chains to that entry on the next PXE
+	// boot for nodes that are NOT mid-reimage. No FK; a dangling reference
+	// is degraded to "fall back to default disk-boot menu" with a logged
+	// warning.
+	NetbootMenuEntry string `json:"netboot_menu_entry,omitempty"`
+
+	// KernelCmdline, when non-empty, is appended verbatim to the kernel
+	// cmdline of the served boot script. Used for serial console pinning
+	// ("console=ttyS0,115200n8") or temporary debug flags ("nomodeset").
+	// Validation: length cap of 4 KiB, NUL-byte rejection.
+	KernelCmdline string `json:"kernel_cmdline,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // State derives the current lifecycle state of this node from its stored fields.
@@ -833,6 +866,26 @@ type UpdateNodeConfigRequest struct {
 	// ClearVerifyTimeoutOverride, when true, removes any per-node override and reverts
 	// to the global CLUSTR_VERIFY_TIMEOUT setting.
 	ClearVerifyTimeoutOverride bool `json:"clear_verify_timeout_override,omitempty"`
+}
+
+// UpdateNodeBootSettingsRequest is the body for PUT /api/v1/nodes/:id/boot-settings.
+//
+// Sprint 34 BOOT-SETTINGS-MODAL.  All three fields are pointer-typed so the
+// caller can distinguish "leave alone" (omit / null) from "clear" (explicit
+// empty string).  The web modal always sends every field even when the
+// operator only changed one — pointer semantics keep that lossless.
+//
+// Validation (server-side, see internal/server/handlers/nodes.go:UpdateBootSettings):
+//
+//   - BootOrderPolicy: when non-nil, must be one of "auto", "network", "os".
+//     Empty string is treated as "clear → fall back to auto".
+//   - NetbootMenuEntry: when non-nil and non-empty, must reference a row in
+//     boot_entries (looked up at write time; a missing row is a 400).
+//   - KernelCmdline: when non-nil, must be ≤ 4096 bytes and free of NUL.
+type UpdateNodeBootSettingsRequest struct {
+	BootOrderPolicy  *string `json:"boot_order_policy,omitempty"`
+	NetbootMenuEntry *string `json:"netboot_menu_entry,omitempty"`
+	KernelCmdline    *string `json:"kernel_cmdline,omitempty"`
 }
 
 // ─── Node group request types ─────────────────────────────────────────────────
