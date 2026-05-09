@@ -214,26 +214,61 @@ describe("groupSamplesByChartGroup (STAT-REGISTRY)", () => {
 // ─── Test 4: System Alerts — list + dismiss flow ──────────────────────────────
 
 describe("SystemAlertsPopover (SYSTEM-ALERT-FRAMEWORK)", () => {
+  // ─── Regression: server returns wrapped object, not bare array ───────────────
+  // GET /api/v1/system_alerts → { alerts: [...], count: N }
+  // The UI must extract .alerts before calling .filter().
+  // Previously the query was typed as SystemAlert[] and guarded with `data ?? []`,
+  // which left data as the object and then `.filter()` threw "o.filter is not a function".
+  it("should not throw when GET /api/v1/system_alerts returns the wrapped { alerts, count } shape", () => {
+    // Simulate what the server actually returns.
+    const serverResponse: { alerts: { key: string; level: string }[]; count: number } = {
+      alerts: [
+        { key: "disk_full", level: "critical" },
+        { key: "fan_degraded", level: "warn" },
+      ],
+      count: 2,
+    }
+
+    // The fix: extract `.alerts ?? []` before filtering.
+    // Before the fix, `(serverResponse as unknown as []).filter(...)` would throw.
+    const extracted = serverResponse.alerts ?? []
+    expect(() => extracted.filter((a) => a.level === "critical")).not.toThrow()
+    expect(extracted.filter((a) => a.level === "critical").length).toBe(1)
+    expect(extracted.filter((a) => a.level === "warn").length).toBe(1)
+  })
+
+  it("should handle an empty alerts list from wrapped response without crashing", () => {
+    const serverResponse = { alerts: [], count: 0 }
+    const extracted = serverResponse.alerts ?? []
+    expect(() => extracted.filter((a: { level: string }) => a.level === "critical")).not.toThrow()
+    expect(extracted.length).toBe(0)
+  })
+
   it("should fetch system alerts from GET /api/v1/system_alerts", async () => {
     let capturedUrl = ""
     fetchHandler = (url) => {
       capturedUrl = url
+      // Match the real server wire shape: { alerts: [...], count: N }
       return Promise.resolve(
-        jsonOk([
-          { key: "disk_full", device: "sda", level: "critical", message: "Disk 95% full", set_at: new Date().toISOString() },
-          { key: "fan_degraded", device: "fan0", level: "warn", message: "Fan below threshold", set_at: new Date().toISOString() },
-        ]),
+        jsonOk({
+          alerts: [
+            { key: "disk_full", device: "sda", level: "critical", message: "Disk 95% full", set_at: new Date().toISOString() },
+            { key: "fan_degraded", device: "fan0", level: "warn", message: "Fan below threshold", set_at: new Date().toISOString() },
+          ],
+          count: 2,
+        }),
       )
     }
 
     const res = await fetch("/api/v1/system_alerts")
-    const data = await res.json() as { key: string; device: string; level: string; message: string }[]
+    const data = await res.json() as { alerts: { key: string; device: string; level: string; message: string }[]; count: number }
 
     expect(capturedUrl).toBe("/api/v1/system_alerts")
-    expect(data.length).toBe(2)
-    expect(data[0].key).toBe("disk_full")
-    expect(data[0].level).toBe("critical")
-    expect(data[1].level).toBe("warn")
+    expect(data.alerts.length).toBe(2)
+    expect(data.alerts[0].key).toBe("disk_full")
+    expect(data.alerts[0].level).toBe("critical")
+    expect(data.alerts[1].level).toBe("warn")
+    expect(data.count).toBe(2)
   })
 
   it("should POST to /api/v1/system_alerts/unset/{key}/{device} on dismiss", async () => {

@@ -368,15 +368,16 @@ function SystemAlertsPopover() {
   const [open, setOpen] = React.useState(false)
   const ref = React.useRef<HTMLDivElement>(null)
 
-  const { data, isLoading } = useQuery<SystemAlert[]>({
+  // Server returns { alerts: SystemAlert[], count: number } — not a bare array.
+  const { data, isLoading } = useQuery<{ alerts: SystemAlert[]; count: number }>({
     queryKey: ["system-alerts"],
-    queryFn: () => apiFetch<SystemAlert[]>("/api/v1/system_alerts"),
+    queryFn: () => apiFetch<{ alerts: SystemAlert[]; count: number }>("/api/v1/system_alerts"),
     refetchInterval: 30_000,
     staleTime: 25_000,
     retry: false,
   })
 
-  const alerts = data ?? []
+  const alerts = data?.alerts ?? []
   const critCount = alerts.filter((a) => a.level === "critical").length
   const warnCount = alerts.filter((a) => a.level === "warn").length
   const badgeCount = alerts.length
