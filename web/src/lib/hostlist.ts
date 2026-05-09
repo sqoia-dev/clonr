@@ -64,6 +64,13 @@ export function expandHostlist(pattern: string): string[] {
         throw new Error(`malformed hostlist: invalid range "${seg}" in "${pattern}"`)
       }
 
+      // Validate that both tokens are purely digits before parseInt.
+      // parseInt("01a", 10) returns 1, silently accepting malformed input.
+      const digitsOnly = /^\d+$/
+      if (!digitsOnly.test(startStr) || !digitsOnly.test(endStr)) {
+        throw new Error(`malformed hostlist: non-numeric range "${seg}" in "${pattern}"`)
+      }
+
       const startNum = parseInt(startStr, 10)
       const endNum = parseInt(endStr, 10)
 

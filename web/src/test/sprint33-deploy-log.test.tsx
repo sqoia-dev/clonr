@@ -94,7 +94,8 @@ describe("DeployLogTab — empty state (STREAM-LOG-UI)", () => {
     renderTab("12:34:56:78:9a:bc")
     expect(lastFakeES).not.toBeNull()
     expect(lastFakeES!.url).toContain("component=deploy")
-    expect(lastFakeES!.url).toContain("node_mac=12%3A34%3A56%3A78%3A9a%3Abc")
+    expect(lastFakeES!.url).toContain("mac=12%3A34%3A56%3A78%3A9a%3Abc")
+    expect(lastFakeES!.url).not.toContain("node_mac=")
   })
 
   it("should show Live status after the stream opens", async () => {

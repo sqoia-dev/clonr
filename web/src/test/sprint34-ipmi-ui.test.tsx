@@ -154,19 +154,9 @@ describe("IpmiTab — power button typed-confirm (IPMI-TAB-UI)", () => {
     expect(screen.getByTestId("power-confirm-dialog")).toBeInTheDocument()
   })
 
-  it("should fire POST immediately for 'soft off' (not in destructive set)", async () => {
-    const user = userEvent.setup()
-    let capturedUrl = ""
-    makeFetchStub((url) => {
-      capturedUrl = url
-      return Promise.resolve(jsonOk({}))
-    })
-
+  it("should NOT render a Soft Off button (backend does not implement /power/soft)", () => {
     withQC(<IpmiTab nodeId="node-abc" />)
-
-    await user.click(screen.getByRole("button", { name: /soft off/i }))
-    expect(capturedUrl).toContain("/power/soft")
-    expect(screen.queryByTestId("power-confirm-dialog")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /soft off/i })).not.toBeInTheDocument()
   })
 
   it("should require 'cycle' word for Power Cycle confirm", async () => {
