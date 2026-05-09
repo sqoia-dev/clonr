@@ -62,9 +62,16 @@ func TestPowerArgv_Local(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PowerArgv: %v", err)
 	}
-	for _, bad := range []string{"-h", "-u", "-p", "--driver-type"} {
-		if strings.Contains(strings.Join(argv, " "), bad) {
-			t.Errorf("local argv must not contain %q: %v", bad, argv)
+	// In local/in-band mode, none of the remote-flag tokens should appear as
+	// standalone argv entries. Substring matching on the joined string is too
+	// loose because "ipmi-power" itself contains "-p".
+	for _, tok := range argv {
+		switch tok {
+		case "-h", "-u", "-p":
+			t.Errorf("local argv must not contain remote flag %q: %v", tok, argv)
+		}
+		if strings.HasPrefix(tok, "--driver-type") {
+			t.Errorf("local argv must not contain %q: %v", tok, argv)
 		}
 	}
 }
