@@ -35,10 +35,35 @@
 
 set -euo pipefail
 
-CLUSTR_BIN="${1:?Usage: build-initramfs.sh <clustr-binary> [output]}"
+CLUSTR_BIN="${1:?Usage: build-initramfs.sh <clustr-binary> [output] [--mode=<mode>]}"
 OUTPUT="${2:-initramfs-clustr.img}"
 
-# ── Mode selection ────────────────────────────────────────────────────────────
+# ── Boot mode selection ───────────────────────────────────────────────────────
+# --mode=stateless-nfs  builds the stateless NFS pivot initramfs
+# (default)             builds the standard block-install deploy initramfs
+#
+# The --mode flag can appear anywhere in $@ after the binary and output args.
+INITRAMFS_MODE="block-install"
+for _arg in "$@"; do
+    case "$_arg" in
+        --mode=*)
+            INITRAMFS_MODE="${_arg#--mode=}"
+            ;;
+    esac
+done
+
+case "$INITRAMFS_MODE" in
+    block-install|stateless-nfs)
+        : # valid
+        ;;
+    *)
+        echo "ERROR: unknown --mode=$INITRAMFS_MODE (valid: block-install, stateless-nfs)" >&2
+        exit 1
+        ;;
+esac
+echo "[clustr-initramfs] mode: $INITRAMFS_MODE"
+
+# ── Module source mode selection ──────────────────────────────────────────────
 # MODULES_PATH mode: caller provides pre-populated kernel module directory.
 # This decouples the build from any live host and enables reproducible output.
 MODULES_PATH="${MODULES_PATH:-}"
@@ -1301,21 +1326,41 @@ UDHCPC_EOF
 chmod 755 "$WORKDIR/usr/share/udhcpc/default.script"
 
 # init script — runs as PID 1 in the initramfs.
-# The template file (scripts/initramfs-init.sh) uses ${CLUSTR_SERVER} and
-# ${CLUSTR_STATIC_BIN} as placeholders that are substituted here via sed.
-# All other variables (${LOG}, ${CLUSTR_TOKEN}, etc.) are runtime variables
-# resolved inside the initramfs — they are intentionally left as-is.
+# Choose the template based on the build mode.
+#
+#   block-install (default):
+#     Template: scripts/initramfs-init.sh
+#     Substitutes ${CLUSTR_SERVER} and ${CLUSTR_STATIC_BIN} at build time.
+#     The resulting /init runs `clustr deploy --auto` to image the disk.
+#
+#   stateless-nfs:
+#     Template: scripts/initramfs-init-stateless-nfs.sh
+#     No build-time substitutions needed — all configuration comes from the
+#     kernel cmdline (nfsroot=, ip=dhcp) set by ServeIPXEScript.
+#     The resulting /init mounts NFS root and pivots into it.
+#     Does NOT embed the clustr binary — stateless nodes do not deploy.
+#     Does NOT include any disk tools (no wipefs, no grub2-install, no mkfs).
 CLUSTR_STATIC_BIN="$CLUSTR_BIN"
 # WARNING: Default uses plain HTTP on the provisioning network.
 # For environments where provisioning network is not fully trusted,
 # configure TLS on clustr-serverd and set:
 #   CLUSTR_SERVER="https://10.99.0.1:8443"
 # The initramfs curl will need the CA cert embedded — see docs/tls-provisioning.md
-# Substitute runtime variables into init script
-sed -e "s|\${CLUSTR_SERVER}|${CLUSTR_SERVER:-http://10.99.0.1:8080}|g" \
-    -e "s|\${CLUSTR_STATIC_BIN}|${CLUSTR_STATIC_BIN}|g" \
-    "$(dirname "$0")/initramfs-init.sh" > "$WORKDIR/init"
-chmod 755 "$WORKDIR/init"
+
+if [[ "$INITRAMFS_MODE" == "stateless-nfs" ]]; then
+    # Stateless NFS: simpler init — no clustr binary, no disk tools.
+    # The template has no build-time placeholders; copy it directly.
+    cp "$(dirname "$0")/initramfs-init-stateless-nfs.sh" "$WORKDIR/init"
+    chmod 755 "$WORKDIR/init"
+    echo "  [+] Generated stateless-nfs init script (no disk ops, NFS pivot only)"
+else
+    # Standard block-install init: substitute server URL and binary path.
+    sed -e "s|\${CLUSTR_SERVER}|${CLUSTR_SERVER:-http://10.99.0.1:8080}|g" \
+        -e "s|\${CLUSTR_STATIC_BIN}|${CLUSTR_STATIC_BIN}|g" \
+        "$(dirname "$0")/initramfs-init.sh" > "$WORKDIR/init"
+    chmod 755 "$WORKDIR/init"
+    echo "  [+] Generated block-install init script"
+fi
 
 echo "  [+] Generated init script"
 
@@ -1339,9 +1384,9 @@ fi
 echo "Validating initramfs binary coverage..."
 VALIDATION_FAILED=0
 
-# Commands the init script calls, mapped to where they should live in the rootfs.
-# Format: "command:path1,path2,..." — any one match is sufficient.
-REQUIRED_CMDS=(
+# Commands required by the standard block-install init script.
+# stateless-nfs mode only needs the subset that its simpler init uses.
+REQUIRED_CMDS_COMMON=(
     "sh:/bin/sh,/usr/bin/sh"
     "mount:/bin/mount,/usr/sbin/mount"
     "umount:/bin/umount,/usr/sbin/umount"
@@ -1349,15 +1394,7 @@ REQUIRED_CMDS=(
     "cat:/bin/cat"
     "echo:/bin/echo"
     "grep:/bin/grep"
-    "head:/bin/head"
-    "tail:/bin/tail"
-    "tr:/bin/tr"
-    "cut:/bin/cut"
-    "seq:/bin/seq"
-    "touch:/bin/touch"
-    "ln:/bin/ln"
     "ls:/bin/ls"
-    "rm:/bin/rm"
     "sleep:/bin/sleep"
     "uname:/bin/uname"
     "dmesg:/bin/dmesg"
@@ -1365,19 +1402,39 @@ REQUIRED_CMDS=(
     "ifconfig:/bin/ifconfig"
     "udhcpc:/bin/udhcpc"
     "insmod:/bin/insmod"
+    "mdev:/bin/mdev"
+    "basename:/bin/basename"
+)
+
+# Commands only required by the block-install init.
+# stateless-nfs does not deploy, so disk tools and the clustr binary are not
+# expected or validated in that mode.
+REQUIRED_CMDS_BLOCK_INSTALL=(
+    "head:/bin/head"
+    "tail:/bin/tail"
+    "tr:/bin/tr"
+    "cut:/bin/cut"
+    "seq:/bin/seq"
+    "touch:/bin/touch"
+    "ln:/bin/ln"
+    "rm:/bin/rm"
     "ping:/bin/ping"
     "which:/bin/which"
     "sync:/bin/sync"
     "reboot:/bin/reboot"
     "httpd:/bin/httpd"
     "nc:/bin/nc"
-    "mdev:/bin/mdev"
-    "basename:/bin/basename"
     "lsblk:/usr/bin/lsblk"
     "curl:/usr/bin/curl"
     "mdadm:/usr/sbin/mdadm,/sbin/mdadm"
     "clustr:/usr/bin/clustr"
 )
+
+if [[ "$INITRAMFS_MODE" == "stateless-nfs" ]]; then
+    REQUIRED_CMDS=("${REQUIRED_CMDS_COMMON[@]}")
+else
+    REQUIRED_CMDS=("${REQUIRED_CMDS_COMMON[@]}" "${REQUIRED_CMDS_BLOCK_INSTALL[@]}")
+fi
 
 for entry in "${REQUIRED_CMDS[@]}"; do
     cmd="${entry%%:*}"
