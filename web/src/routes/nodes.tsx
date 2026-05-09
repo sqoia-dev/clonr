@@ -5,6 +5,7 @@ import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
   Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
+  Square, CheckSquare, Layers, WifiOff, ImagePlay, Play, GitBranch,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
@@ -38,7 +39,10 @@ import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
 import { BootSettingsModal } from "@/components/BootSettingsModal"
 import { HostlistInput } from "@/components/HostlistInput"
+import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
+import type { InterfaceRow } from "@/components/InterfaceList"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
+import { expandHostlist } from "@/lib/hostlist"
 
 // ─── Sprint 38: PROBE-3 — Reachability dots ──────────────────────────────────
 //
@@ -120,15 +124,20 @@ interface AddNodeSheetProps {
 export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
   const qc = useQueryClient()
   const [hostname, setHostname] = React.useState("")
-  const [mac, setMac] = React.useState("")
-  const [ip, setIp] = React.useState("")
   const [roles, setRoles] = React.useState<string[]>([])
   const [provider, setProvider] = React.useState("")
   const [notes, setNotes] = React.useState("")
   const [errors, setErrors] = React.useState<Record<string, string>>({})
+  // MULTI-NIC-EDITOR: typed per-interface list replaces single MAC/IP fields
+  const [interfaces, setInterfaces] = React.useState<InterfaceRow[]>([
+    { kind: "ethernet", name: "eth0", mac: "", ip: "", vlan: "", is_default_gateway: true },
+  ])
+  const [ifaceErrors, setIfaceErrors] = React.useState<Record<string, string>>({})
 
   function reset() {
-    setHostname(""); setMac(""); setIp(""); setRoles([]); setProvider(""); setNotes(""); setErrors({})
+    setHostname(""); setRoles([]); setProvider(""); setNotes(""); setErrors({})
+    setInterfaces([{ kind: "ethernet", name: "eth0", mac: "", ip: "", vlan: "", is_default_gateway: true }])
+    setIfaceErrors({})
   }
 
   function handleClose() { reset(); onClose() }
@@ -136,11 +145,10 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
   function validate(): boolean {
     const errs: Record<string, string> = {}
     if (!hostnameRe.test(hostname)) errs.hostname = "Lowercase letters, digits, hyphens, 1–63 chars"
-    const normMac = normalizeMAC(mac)
-    if (!macRe.test(normMac)) errs.mac = "Must be a valid MAC address (e.g. bc:24:11:36:e9:2f)"
-    if (ip && !ipv4Re.test(ip)) errs.ip = "Must be a valid IPv4 address or CIDR (e.g. 10.0.0.5)"
     setErrors(errs)
-    return Object.keys(errs).length === 0
+    const iErrs = validateInterfaces(interfaces)
+    setIfaceErrors(iErrs)
+    return Object.keys(errs).length === 0 && Object.keys(iErrs).length === 0
   }
 
   // Fetch base images for base_image_id required by CreateNode.
@@ -156,15 +164,50 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const normMac = normalizeMAC(mac)
+      // Derive primary_mac from first ethernet interface with a MAC
+      const ethIface = interfaces.find((i) => i.kind === "ethernet") as (typeof interfaces[0] & { mac?: string }) | undefined
+      const primaryMac = ethIface ? normalizeMAC((ethIface as { mac: string }).mac) : ""
+
+      // Build wire-format interfaces array
+      const wireInterfaces = interfaces.map((iface) => {
+        if (iface.kind === "ethernet") {
+          return {
+            kind: "ethernet",
+            name: iface.name,
+            mac_address: normalizeMAC(iface.mac),
+            ip_address: iface.ip || undefined,
+            vlan: iface.vlan ? parseInt(iface.vlan, 10) : undefined,
+            is_default_gateway: iface.is_default_gateway,
+          }
+        }
+        if (iface.kind === "fabric") {
+          return {
+            kind: "fabric",
+            name: iface.name,
+            guid: iface.guid,
+            ip_address: iface.ip || undefined,
+            port: iface.port ? parseInt(iface.port, 10) : undefined,
+          }
+        }
+        // ipmi
+        return {
+          kind: "ipmi",
+          name: iface.name,
+          ip_address: iface.ip,
+          channel: parseInt(iface.channel, 10),
+          user: iface.user,
+          password: iface.pass,
+        }
+      })
+
       const body: Record<string, unknown> = {
         hostname,
-        primary_mac: normMac,
+        primary_mac: primaryMac,
         base_image_id: baseImageId || (readyImages[0]?.id ?? ""),
         tags: roles.length ? roles : [],
+        interfaces: wireInterfaces,
       }
       if (provider) body.provider = provider
-      if (ip) body.interfaces = [{ name: "eth0", mac_address: normMac, ip_address: ip }]
       if (notes) body.notes = notes
       return apiFetch<NodeConfig>("/api/v1/nodes", {
         method: "POST",
@@ -178,9 +221,7 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
     },
     onError: (err) => {
       const msg = String(err)
-      // Mirror server field errors verbatim
       if (msg.includes("hostname")) setErrors((e) => ({ ...e, hostname: msg }))
-      else if (msg.includes("mac")) setErrors((e) => ({ ...e, mac: msg }))
       else toast({ variant: "destructive", title: "Failed to add node", description: msg })
     },
   })
@@ -213,7 +254,7 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
           <Tabs value={sheetTab} onValueChange={(v) => setSheetTab(v as "single" | "bulk")}>
             <TabsList className="w-full mb-4">
               <TabsTrigger value="single" className="flex-1">Single</TabsTrigger>
-              <TabsTrigger value="bulk" className="flex-1">Bulk (CSV/YAML)</TabsTrigger>
+              <TabsTrigger value="bulk" className="flex-1">Bulk</TabsTrigger>
             </TabsList>
             <TabsContent value="single">
               <form onSubmit={handleSubmit} className="space-y-4">
@@ -223,24 +264,20 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
                     value={hostname}
                     onChange={(e) => setHostname(e.target.value)}
                     className={cn(errors.hostname && "border-destructive")}
+                    data-testid="add-node-hostname"
                   />
                 </Field>
-                <Field label="MAC Address *" error={errors.mac}>
-                  <Input
-                    placeholder="bc:24:11:36:e9:2f"
-                    value={mac}
-                    onChange={(e) => setMac(e.target.value)}
-                    className={cn(errors.mac && "border-destructive")}
+
+                {/* MULTI-NIC-EDITOR — typed per-interface cards */}
+                <div className="space-y-1">
+                  <label className="text-sm text-muted-foreground">Interfaces</label>
+                  <InterfaceList
+                    value={interfaces}
+                    onChange={setInterfaces}
+                    errors={ifaceErrors}
                   />
-                </Field>
-                <Field label="IP Address (optional — leave blank for DHCP)" error={errors.ip}>
-                  <Input
-                    placeholder="10.99.0.10 or 10.99.0.10/24"
-                    value={ip}
-                    onChange={(e) => setIp(e.target.value)}
-                    className={cn(errors.ip && "border-destructive")}
-                  />
-                </Field>
+                </div>
+
                 <Field label="Base Image">
                   <select
                     className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
@@ -289,7 +326,7 @@ export function AddNodeSheet({ open, onClose }: AddNodeSheetProps) {
                   />
                 </Field>
                 <div className="flex gap-2 pt-2">
-                  <Button type="submit" className="flex-1" disabled={mutation.isPending}>
+                  <Button type="submit" className="flex-1" disabled={mutation.isPending} data-testid="add-node-submit">
                     {mutation.isPending ? "Registering…" : "Register Node"}
                   </Button>
                   <Button type="button" variant="ghost" onClick={handleCloseWithTabReset}>Cancel</Button>
@@ -404,33 +441,57 @@ function validateBulkRow(row: BulkRow): BulkRow {
   return { ...row, mac: normMac }
 }
 
+// HOSTLIST-BULK-ADD: Hostlist is the PRIMARY tab; CSV/YAML is secondary.
 function BulkAddNodes({ onSuccess, readyImages }: { onSuccess: () => void; readyImages: Array<{ id: string; name: string; version: string }> }) {
   const qc = useQueryClient()
+  // Hostlist tab state
+  const [hostlistValue, setHostlistValue] = React.useState("")
+  const [hostlistExpanded, setHostlistExpanded] = React.useState<string[]>([])
+  const [hostlistLoading, setHostlistLoading] = React.useState(false)
+  const [hostlistResults, setHostlistResults] = React.useState<BatchResult[]>([])
+  const [hostlistSubmitted, setHostlistSubmitted] = React.useState(false)
+  const [defaultImageId, setDefaultImageId] = React.useState("")
+  // CSV/YAML tab state
   const [raw, setRaw] = React.useState("")
   const [rows, setRows] = React.useState<BulkRow[]>([])
   const [results, setResults] = React.useState<BatchResult[]>([])
   const [submitted, setSubmitted] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
-  // HOSTLIST: live hostlist preview state for the CSV generator helper
-  const [hostlistHelper, setHostlistHelper] = React.useState("")
-  const [hostlistExpanded, setHostlistExpanded] = React.useState<string[]>([])
+  const [bulkTab, setBulkTab] = React.useState<"hostlist" | "csv">("hostlist")
+
+  // HOSTLIST-BULK-ADD: commit expanded hostnames as nodes without MAC (assign later).
+  async function handleHostlistSubmit() {
+    if (hostlistExpanded.length === 0) return
+    setHostlistLoading(true)
+    try {
+      const resp = await apiFetch<{ results: BatchResult[] }>("/api/v1/nodes/batch", {
+        method: "POST",
+        body: JSON.stringify({
+          nodes: hostlistExpanded.map((hostname) => ({
+            hostname,
+            primary_mac: "",
+            tags: [],
+            base_image_id: defaultImageId || readyImages[0]?.id || "",
+          })),
+        }),
+      })
+      setHostlistResults(resp.results)
+      setHostlistSubmitted(true)
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      const created = resp.results.filter((r) => r.status === "created").length
+      toast({ title: `${created} of ${hostlistExpanded.length} nodes created` })
+      if (created === hostlistExpanded.length) setTimeout(onSuccess, 1200)
+    } catch (err) {
+      toast({ variant: "destructive", title: "Batch failed", description: String(err) })
+    } finally {
+      setHostlistLoading(false)
+    }
+  }
 
   function handlePreview() {
     setResults([])
     setSubmitted(false)
     setRows(parseBulkInput(raw))
-  }
-
-  // Generate stub CSV lines from the hostlist expansion and append to raw.
-  function handleHostlistGenerate() {
-    if (hostlistExpanded.length === 0) return
-    const header = raw.trim() === "" ? "hostname,mac,ip,role\n" : ""
-    const csvLines = hostlistExpanded.map((h) => `${h},,,`).join("\n")
-    setRaw((prev) => (prev.trim() ? prev.trimEnd() + "\n" + csvLines : header + csvLines))
-    setRows([])
-    setResults([])
-    setHostlistHelper("")
-    setHostlistExpanded([])
   }
 
   async function handleSubmit() {
@@ -468,111 +529,170 @@ function BulkAddNodes({ onSuccess, readyImages }: { onSuccess: () => void; ready
 
   return (
     <div className="space-y-4">
-      {/* HOSTLIST: range helper */}
-      <div className="rounded-md border border-border bg-secondary/10 px-3 py-3 space-y-2">
-        <p className="text-xs font-medium text-muted-foreground">Hostlist range helper</p>
-        <p className="text-xs text-muted-foreground">
-          Enter a range pattern (e.g. <code className="font-mono">gpu[001-128]</code>) to generate
-          hostname stubs in the CSV below. Fill in the MAC addresses after.
-        </p>
-        <div className="flex gap-2 items-start">
+      <Tabs value={bulkTab} onValueChange={(v) => setBulkTab(v as "hostlist" | "csv")}>
+        <TabsList className="w-full mb-3">
+          <TabsTrigger value="hostlist" className="flex-1 text-xs">Hostlist</TabsTrigger>
+          <TabsTrigger value="csv" className="flex-1 text-xs">CSV / YAML</TabsTrigger>
+        </TabsList>
+
+        {/* ── HOSTLIST-BULK-ADD: primary tab ── */}
+        <TabsContent value="hostlist" className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Enter a range pattern to register nodes in bulk. MAC addresses can be assigned later.
+          </p>
           <HostlistInput
-            id="bulk-hostlist-helper"
-            value={hostlistHelper}
-            onChange={setHostlistHelper}
+            id="bulk-hostlist-primary"
+            value={hostlistValue}
+            onChange={(v) => { setHostlistValue(v); setHostlistResults([]); setHostlistSubmitted(false) }}
             onExpanded={setHostlistExpanded}
-            placeholder="gpu[001-128] or compute[01-12,20]"
-            className="flex-1"
+            placeholder="compute[001-128] or gpu[001-008]"
+            data-testid="hostlist-primary-input"
           />
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 shrink-0"
-            disabled={hostlistExpanded.length === 0}
-            onClick={handleHostlistGenerate}
-          >
-            Generate CSV
-          </Button>
-        </div>
-      </div>
-      <div className="space-y-1">
-        <label className="text-sm text-muted-foreground">Paste CSV or YAML</label>
-        <textarea
-          className="w-full font-mono text-xs border border-border bg-background rounded-md px-3 py-2 resize-none"
-          rows={7}
-          placeholder={`hostname,mac,ip,role\ncompute-01,bc:24:11:aa:bb:cc,,worker\ncompute-02,bc:24:11:aa:bb:dd,,worker`}
-          value={raw}
-          onChange={(e) => { setRaw(e.target.value); setRows([]); setResults([]) }}
-        />
-        <p className="text-xs text-muted-foreground">
-          CSV header: <code className="font-mono">hostname,mac,ip,role</code> — or YAML list with the same keys.
-        </p>
-      </div>
-
-      {rows.length === 0 && (
-        <Button variant="outline" size="sm" className="w-full" onClick={handlePreview} disabled={!raw.trim()}>
-          Preview
-        </Button>
-      )}
-
-      {rows.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">{rows.length} rows parsed ({validRows.length} valid{hasErrors ? `, ${rows.length - validRows.length} errors` : ""})</p>
-          <div className="rounded-md border border-border overflow-auto max-h-52">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-border bg-secondary/40">
-                  <th className="text-left p-2">Hostname</th>
-                  <th className="text-left p-2">MAC</th>
-                  <th className="text-left p-2">Role</th>
-                  <th className="text-left p-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, i) => {
-                  const result = results[validRows.indexOf(row)]
-                  const hasParseErr = !!row.parseError
-                  return (
-                    <tr key={i} className={cn("border-b border-border", hasParseErr && "bg-destructive/5")}>
-                      <td className="p-2 font-mono">{row.hostname || "—"}</td>
-                      <td className="p-2 font-mono">{row.mac || "—"}</td>
-                      <td className="p-2">{row.role || "—"}</td>
-                      <td className="p-2">
-                        {hasParseErr ? (
-                          <span className="text-destructive">{row.parseError}</span>
-                        ) : result ? (
-                          <span className={result.status === "created" ? "text-status-healthy" : "text-destructive"}>
-                            {result.status}{result.error ? `: ${result.error}` : ""}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">ready</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {!submitted && (
-            <div className="flex gap-2">
-              <Button
-                className="flex-1"
-                size="sm"
-                onClick={handleSubmit}
-                disabled={loading || validRows.length === 0}
+          {readyImages.length > 0 && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Default base image (optional)</label>
+              <select
+                className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+                value={defaultImageId}
+                onChange={(e) => setDefaultImageId(e.target.value)}
               >
-                {loading ? "Creating…" : `Create ${validRows.length} node${validRows.length !== 1 ? "s" : ""}`}
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => { setRows([]); setResults([]) }}>
-                Reset
-              </Button>
+                <option value="">None (assign later)</option>
+                {readyImages.map((img) => (
+                  <option key={img.id} value={img.id}>{img.name} {img.version}</option>
+                ))}
+              </select>
             </div>
           )}
-        </div>
-      )}
+
+          {/* Post-submit results preview */}
+          {hostlistSubmitted && hostlistResults.length > 0 && (
+            <div className="rounded-md border border-border overflow-auto max-h-40">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-secondary/40">
+                    <th className="text-left p-2">Hostname</th>
+                    <th className="text-left p-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hostlistExpanded.map((hostname, i) => {
+                    const r = hostlistResults[i]
+                    return (
+                      <tr key={hostname} className="border-b border-border last:border-0">
+                        <td className="p-2 font-mono">{hostname}</td>
+                        <td className="p-2">
+                          {r ? (
+                            <span className={r.status === "created" ? "text-status-healthy" : "text-destructive"}>
+                              {r.status}{r.error ? `: ${r.error}` : ""}
+                            </span>
+                          ) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {!hostlistSubmitted && (
+            <Button
+              className="w-full"
+              size="sm"
+              onClick={handleHostlistSubmit}
+              disabled={hostlistLoading || hostlistExpanded.length === 0}
+              data-testid="hostlist-bulk-submit"
+            >
+              {hostlistLoading
+                ? "Creating…"
+                : hostlistExpanded.length > 0
+                  ? `Add ${hostlistExpanded.length} node${hostlistExpanded.length !== 1 ? "s" : ""}`
+                  : "Add nodes"}
+            </Button>
+          )}
+        </TabsContent>
+
+        {/* ── CSV / YAML tab (legacy) ── */}
+        <TabsContent value="csv" className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-sm text-muted-foreground">Paste CSV or YAML</label>
+            <textarea
+              className="w-full font-mono text-xs border border-border bg-background rounded-md px-3 py-2 resize-none"
+              rows={7}
+              placeholder={`hostname,mac,ip,role\ncompute-01,bc:24:11:aa:bb:cc,,worker\ncompute-02,bc:24:11:aa:bb:dd,,worker`}
+              value={raw}
+              onChange={(e) => { setRaw(e.target.value); setRows([]); setResults([]) }}
+            />
+            <p className="text-xs text-muted-foreground">
+              CSV header: <code className="font-mono">hostname,mac,ip,role</code> — or YAML list with the same keys.
+            </p>
+          </div>
+
+          {rows.length === 0 && (
+            <Button variant="outline" size="sm" className="w-full" onClick={handlePreview} disabled={!raw.trim()}>
+              Preview
+            </Button>
+          )}
+
+          {rows.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">{rows.length} rows parsed ({validRows.length} valid{hasErrors ? `, ${rows.length - validRows.length} errors` : ""})</p>
+              <div className="rounded-md border border-border overflow-auto max-h-52">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40">
+                      <th className="text-left p-2">Hostname</th>
+                      <th className="text-left p-2">MAC</th>
+                      <th className="text-left p-2">Role</th>
+                      <th className="text-left p-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, i) => {
+                      const result = results[validRows.indexOf(row)]
+                      const hasParseErr = !!row.parseError
+                      return (
+                        <tr key={i} className={cn("border-b border-border", hasParseErr && "bg-destructive/5")}>
+                          <td className="p-2 font-mono">{row.hostname || "—"}</td>
+                          <td className="p-2 font-mono">{row.mac || "—"}</td>
+                          <td className="p-2">{row.role || "—"}</td>
+                          <td className="p-2">
+                            {hasParseErr ? (
+                              <span className="text-destructive">{row.parseError}</span>
+                            ) : result ? (
+                              <span className={result.status === "created" ? "text-status-healthy" : "text-destructive"}>
+                                {result.status}{result.error ? `: ${result.error}` : ""}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">ready</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {!submitted && (
+                <div className="flex gap-2">
+                  <Button
+                    className="flex-1"
+                    size="sm"
+                    onClick={handleSubmit}
+                    disabled={loading || validRows.length === 0}
+                  >
+                    {loading ? "Creating…" : `Create ${validRows.length} node${validRows.length !== 1 ? "s" : ""}`}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => { setRows([]); setResults([]) }}>
+                    Reset
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }
@@ -620,6 +740,12 @@ export function NodesPage() {
   const [advanced, setAdvanced] = React.useState(false)
   const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
   const [addNodeOpen, setAddNodeOpen] = React.useState(false)
+  // BULK-MULTISELECT: row selection state
+  const [selectedNodeIds, setSelectedNodeIds] = React.useState<Set<string>>(new Set())
+  // BULK-POWER / BULK-ACTIONS: confirm dialog
+  const [bulkActionPending, setBulkActionPending] = React.useState<string | null>(null)
+  const [bulkConfirmInput, setBulkConfirmInput] = React.useState("")
+  const [bulkLoading, setBulkLoading] = React.useState(false)
   // GRP-5: open create group sheet from URL param (Cmd-K)
   const [createGroupOpen, setCreateGroupOpen] = React.useState(false)
   React.useEffect(() => {
@@ -699,6 +825,84 @@ export function NodesPage() {
   useEventInvalidation("nodes", ["nodes"])
 
   const nodes = data?.nodes ?? []
+
+  // BULK-MULTISELECT helpers
+  function toggleSelectAll() {
+    if (selectedNodeIds.size === nodes.length && nodes.length > 0) {
+      setSelectedNodeIds(new Set())
+    } else {
+      setSelectedNodeIds(new Set(nodes.map((n) => n.id)))
+    }
+  }
+
+  function toggleSelectNode(id: string) {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // DESTRUCTIVE_ACTIONS require typed count confirm
+  const DESTRUCTIVE_BULK_ACTIONS = new Set(["off", "cycle", "reset", "soft-off", "reimage", "drain"])
+
+  async function executeBulkAction(action: string) {
+    const nodeIds = Array.from(selectedNodeIds)
+    setBulkLoading(true)
+    try {
+      let url: string
+      let body: Record<string, unknown> = { node_ids: nodeIds }
+      if (["on", "off", "cycle", "reset", "soft-off"].includes(action)) {
+        url = `/api/v1/nodes/bulk/power/${action}`
+      } else if (action === "reimage") {
+        url = "/api/v1/nodes/bulk/reimage"
+      } else if (action === "drain") {
+        url = "/api/v1/nodes/bulk/drain"
+      } else if (action === "netboot") {
+        url = "/api/v1/nodes/bulk/power/pxe"
+      } else if (action === "run-command") {
+        url = "/api/v1/exec/bulk"
+        body = { node_ids: nodeIds, command: "" }
+      } else {
+        url = `/api/v1/nodes/bulk/${action}`
+      }
+      const resp = await apiFetch<{ results?: Array<{ node_id: string; ok: boolean; error?: string }> }>(url, {
+        method: "POST",
+        body: JSON.stringify(body),
+      })
+      const results = resp.results ?? []
+      const succeeded = results.filter((r) => r.ok).length
+      const failed = results.length - succeeded
+      if (results.length > 0) {
+        toast({
+          title: failed === 0
+            ? `${succeeded}/${results.length} succeeded`
+            : `${succeeded}/${results.length} succeeded — ${failed} failed`,
+          variant: failed > 0 ? "destructive" : "default",
+        })
+      } else {
+        toast({ title: `Bulk ${action} dispatched for ${nodeIds.length} node${nodeIds.length !== 1 ? "s" : ""}` })
+      }
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      setSelectedNodeIds(new Set())
+    } catch (err) {
+      toast({ variant: "destructive", title: `Bulk ${action} failed`, description: String(err) })
+    } finally {
+      setBulkLoading(false)
+      setBulkActionPending(null)
+      setBulkConfirmInput("")
+    }
+  }
+
+  function handleBulkAction(action: string) {
+    if (DESTRUCTIVE_BULK_ACTIONS.has(action)) {
+      setBulkActionPending(action)
+      setBulkConfirmInput("")
+    } else {
+      executeBulkAction(action)
+    }
+  }
 
   // PAL-2-2: auto-open node sheet when ?openNode=<id> is in the URL.
   React.useEffect(() => {
@@ -930,10 +1134,124 @@ export function NodesPage() {
         ) : nodes.length === 0 ? (
           <EmptyState onAddNode={() => setAddNodeOpen(true)} />
         ) : (
+          <>
+          {/* BULK-MULTISELECT: sticky action bar when nodes are selected */}
+          {selectedNodeIds.size > 0 && (
+            <div className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur px-4 py-2 flex items-center gap-2 flex-wrap" data-testid="bulk-action-bar">
+              <span className="text-xs text-muted-foreground font-medium shrink-0">
+                {selectedNodeIds.size} selected
+              </span>
+              <div className="h-4 w-px bg-border shrink-0" />
+              {/* Power actions */}
+              <span className="text-xs text-muted-foreground shrink-0">Power:</span>
+              {(["on", "off", "cycle", "reset", "soft-off"] as const).map((action) => (
+                <Button
+                  key={action}
+                  size="sm"
+                  variant={DESTRUCTIVE_BULK_ACTIONS.has(action) ? "destructive" : "outline"}
+                  className="h-7 text-xs px-2"
+                  onClick={() => handleBulkAction(action)}
+                  disabled={bulkLoading}
+                  data-testid={`bulk-power-${action}`}
+                >
+                  {action === "on" && <Power className="h-3 w-3 mr-1" />}
+                  {action === "off" && <PowerOff className="h-3 w-3 mr-1" />}
+                  {action === "cycle" && <RefreshCw className="h-3 w-3 mr-1" />}
+                  {action === "reset" && <RotateCcw className="h-3 w-3 mr-1" />}
+                  {action === "soft-off" && <PowerOff className="h-3 w-3 mr-1" />}
+                  {action}
+                </Button>
+              ))}
+              <div className="h-4 w-px bg-border shrink-0" />
+              {/* Bulk action group */}
+              {([
+                { action: "reimage", label: "Reimage", icon: <ImagePlay className="h-3 w-3 mr-1" /> },
+                { action: "drain", label: "Drain", icon: <WifiOff className="h-3 w-3 mr-1" /> },
+                { action: "netboot", label: "Netboot", icon: <Network className="h-3 w-3 mr-1" /> },
+                { action: "run-command", label: "Run Command", icon: <Play className="h-3 w-3 mr-1" /> },
+              ] as const).map(({ action, label, icon }) => (
+                <Button
+                  key={action}
+                  size="sm"
+                  variant={DESTRUCTIVE_BULK_ACTIONS.has(action) ? "destructive" : "outline"}
+                  className="h-7 text-xs px-2"
+                  onClick={() => handleBulkAction(action)}
+                  disabled={bulkLoading}
+                  data-testid={`bulk-action-${action}`}
+                >
+                  {icon}
+                  {label}
+                </Button>
+              ))}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-xs ml-auto"
+                onClick={() => setSelectedNodeIds(new Set())}
+              >
+                Clear
+              </Button>
+            </div>
+          )}
+
+          {/* BULK-MULTISELECT typed-confirm dialog */}
+          {bulkActionPending && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm" data-testid="bulk-confirm-dialog">
+              <div className="w-full max-w-sm rounded-lg border border-border bg-background p-6 shadow-lg space-y-4">
+                <h3 className="text-sm font-semibold">Confirm bulk {bulkActionPending}</h3>
+                <p className="text-sm text-muted-foreground">
+                  Type <code className="font-mono font-semibold text-foreground">{selectedNodeIds.size}</code> to confirm
+                  this action on {selectedNodeIds.size} node{selectedNodeIds.size !== 1 ? "s" : ""}.
+                </p>
+                <Input
+                  autoFocus
+                  className="font-mono text-xs"
+                  placeholder={String(selectedNodeIds.size)}
+                  value={bulkConfirmInput}
+                  onChange={(e) => setBulkConfirmInput(e.target.value)}
+                  data-testid="bulk-confirm-input"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="flex-1"
+                    disabled={bulkConfirmInput !== String(selectedNodeIds.size) || bulkLoading}
+                    onClick={() => executeBulkAction(bulkActionPending)}
+                    data-testid="bulk-confirm-submit"
+                  >
+                    {bulkLoading ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    Confirm
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { setBulkActionPending(null); setBulkConfirmInput("") }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <Table>
             <caption className="sr-only">Registered cluster nodes</caption>
             <TableHeader>
               <TableRow>
+                {/* BULK-MULTISELECT: header checkbox */}
+                <TableHead scope="col" className="w-8" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={toggleSelectAll}
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label="Select all nodes"
+                    data-testid="select-all-checkbox"
+                  >
+                    {selectedNodeIds.size === nodes.length && nodes.length > 0
+                      ? <CheckSquare className="h-4 w-4" />
+                      : <Square className="h-4 w-4" />}
+                  </button>
+                </TableHead>
                 <TableHead scope="col">
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
@@ -976,9 +1294,21 @@ export function NodesPage() {
               {nodes.map((node) => (
                 <TableRow
                   key={node.id}
-                  className="cursor-pointer"
+                  className={cn("cursor-pointer", selectedNodeIds.has(node.id) && "bg-secondary/40")}
                   onClick={() => setSelectedNode(node)}
                 >
+                  {/* BULK-MULTISELECT: row checkbox */}
+                  <TableCell onClick={(e) => { e.stopPropagation(); toggleSelectNode(node.id) }} className="w-8">
+                    <button
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label={`Select ${node.hostname}`}
+                      data-testid={`row-checkbox-${node.id}`}
+                    >
+                      {selectedNodeIds.has(node.id)
+                        ? <CheckSquare className="h-4 w-4 text-primary" />
+                        : <Square className="h-4 w-4" />}
+                    </button>
+                  </TableCell>
                   <TableCell>
                     <span className="font-mono text-xs">{node.hostname || node.id}</span>
                   </TableCell>
@@ -1035,6 +1365,7 @@ export function NodesPage() {
               ))}
             </TableBody>
           </Table>
+          </>
         )}
       </div>
 
@@ -1397,6 +1728,9 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                     <Row label="Updated" value={relativeTime(node.updated_at)} />
                   </Section>
                 )}
+
+                {/* VARIANTS-SYSTEM editor — Sprint 44 */}
+                <VariantsEditor nodeId={node.id} />
 
                 <HardwareSection node={node} />
                 <SudoersSection node={node} />
@@ -2558,6 +2892,268 @@ function CaptureNodeFlow({ node }: { node: NodeConfig }) {
                 </Button>
               </div>
             </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── VariantsEditor — Sprint 44 VARIANTS-SYSTEM ──────────────────────────────
+// Shows applied overlays (variants) for this node and lets operators add/remove them.
+// Wires to: GET /api/v1/nodes/{id}/effective-config, GET /api/v1/variants?node_id={id},
+//           POST /api/v1/variants, DELETE /api/v1/variants/{id}
+
+interface Variant {
+  id: string
+  attribute_path: string
+  scope: "group" | "role" | "node"
+  scope_ref?: string
+  value: string
+  created_at: string
+}
+
+interface EffectiveConfigEntry {
+  attribute_path: string
+  effective_value: string
+  sources: Array<{ scope: string; scope_ref?: string; value: string }>
+}
+
+function VariantsEditor({ nodeId }: { nodeId: string }) {
+  const qc = useQueryClient()
+  const [expanded, setExpanded] = React.useState(false)
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [newPath, setNewPath] = React.useState("")
+  const [newScope, setNewScope] = React.useState<"group" | "role" | "node">("node")
+  const [newScopeRef, setNewScopeRef] = React.useState("")
+  const [newValue, setNewValue] = React.useState("")
+  const [addError, setAddError] = React.useState("")
+  const [removeConfirm, setRemoveConfirm] = React.useState<string | null>(null)
+
+  const { data: variantsData, isLoading: variantsLoading } = useQuery<{ variants: Variant[] }>({
+    queryKey: ["node-variants", nodeId],
+    queryFn: () => apiFetch<{ variants: Variant[] }>(`/api/v1/variants?node_id=${nodeId}`),
+    enabled: expanded,
+    staleTime: 10000,
+  })
+
+  const { data: effectiveData } = useQuery<{ entries: EffectiveConfigEntry[] }>({
+    queryKey: ["node-effective-config", nodeId],
+    queryFn: () => apiFetch<{ entries: EffectiveConfigEntry[] }>(`/api/v1/nodes/${nodeId}/effective-config`),
+    enabled: expanded,
+    staleTime: 15000,
+  })
+
+  const addMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<Variant>("/api/v1/variants", {
+        method: "POST",
+        body: JSON.stringify({
+          node_id: nodeId,
+          attribute_path: newPath,
+          scope: newScope,
+          scope_ref: newScopeRef || undefined,
+          value: newValue,
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["node-variants", nodeId] })
+      qc.invalidateQueries({ queryKey: ["node-effective-config", nodeId] })
+      setAddOpen(false)
+      setNewPath(""); setNewScope("node"); setNewScopeRef(""); setNewValue(""); setAddError("")
+      toast({ title: "Variant added" })
+    },
+    onError: (err) => setAddError(String(err)),
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/v1/variants/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["node-variants", nodeId] })
+      qc.invalidateQueries({ queryKey: ["node-effective-config", nodeId] })
+      setRemoveConfirm(null)
+      toast({ title: "Variant removed" })
+    },
+    onError: (err) => toast({ variant: "destructive", title: "Failed to remove variant", description: String(err) }),
+  })
+
+  const variants = variantsData?.variants ?? []
+  const effectiveEntries = effectiveData?.entries ?? []
+
+  const SCOPE_LABELS: Record<string, string> = { group: "Group", role: "Role", node: "Node-direct" }
+  const SCOPE_BADGE: Record<string, string> = {
+    group: "bg-blue-500/10 text-blue-400",
+    role: "bg-purple-500/10 text-purple-400",
+    node: "bg-green-500/10 text-green-400",
+  }
+
+  return (
+    <div className="rounded-md border border-border" data-testid="variants-editor">
+      <button
+        className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-secondary/40 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        data-testid="variants-expand"
+      >
+        <span className="text-sm font-medium flex items-center gap-2">
+          <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+          Variants
+        </span>
+        <div className="flex items-center gap-2">
+          {variants.length > 0 && <span className="text-xs text-muted-foreground">{variants.length} applied</span>}
+          {expanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border px-3 py-3 space-y-3">
+          {/* Applied variants list */}
+          {variantsLoading ? (
+            <div className="space-y-1.5">
+              <div className="h-4 bg-muted rounded animate-pulse" />
+              <div className="h-4 bg-muted rounded animate-pulse w-2/3" />
+            </div>
+          ) : variants.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No variants applied to this node.</p>
+          ) : (
+            <div className="space-y-1.5" data-testid="variants-list">
+              {variants.map((v) => (
+                <div key={v.id} className="flex items-start gap-2 text-xs rounded border border-border p-2 bg-secondary/10" data-testid={`variant-row-${v.id}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-mono font-medium truncate">{v.attribute_path}</span>
+                      <span className={cn("rounded px-1 py-0.5 text-[10px] font-medium shrink-0", SCOPE_BADGE[v.scope] ?? "")}>
+                        {SCOPE_LABELS[v.scope] ?? v.scope}
+                        {v.scope_ref ? `: ${v.scope_ref}` : ""}
+                      </span>
+                    </div>
+                    <span className="font-mono text-muted-foreground">{v.value}</span>
+                  </div>
+                  {removeConfirm === v.id ? (
+                    <div className="flex gap-1 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={removeMutation.isPending}
+                        onClick={() => removeMutation.mutate(v.id)}
+                      >
+                        Remove
+                      </Button>
+                      <Button size="sm" variant="ghost" className="h-6 px-1" onClick={() => setRemoveConfirm(null)}>
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <button
+                      className="text-muted-foreground hover:text-destructive shrink-0"
+                      onClick={() => setRemoveConfirm(v.id)}
+                      aria-label="Remove variant"
+                      data-testid={`variant-remove-${v.id}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Effective config preview — only show if entries exist */}
+          {effectiveEntries.length > 0 && (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+                Effective config ({effectiveEntries.length} attributes)
+              </summary>
+              <div className="mt-2 space-y-1 max-h-36 overflow-y-auto">
+                {effectiveEntries.map((e) => (
+                  <div key={e.attribute_path} className="flex items-start gap-2">
+                    <span className="font-mono flex-1 truncate text-foreground">{e.attribute_path}</span>
+                    <span className="font-mono text-muted-foreground shrink-0 text-right max-w-[120px] truncate">{e.effective_value}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+
+          {/* Add variant form */}
+          {addOpen ? (
+            <div className="rounded border border-border p-3 space-y-2 bg-secondary/10 mt-2" data-testid="add-variant-form">
+              <p className="text-xs font-medium text-muted-foreground">Add variant</p>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Attribute path</label>
+                <Input
+                  className="text-xs h-7 font-mono"
+                  placeholder="kernel.cmdline"
+                  value={newPath}
+                  onChange={(e) => setNewPath(e.target.value)}
+                  data-testid="variant-attr-path"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-xs text-muted-foreground">Scope</label>
+                  <select
+                    className="w-full text-xs border border-border bg-background rounded-md px-2 py-1.5"
+                    value={newScope}
+                    onChange={(e) => setNewScope(e.target.value as "group" | "role" | "node")}
+                    data-testid="variant-scope"
+                  >
+                    <option value="node">Node-direct</option>
+                    <option value="group">Group</option>
+                    <option value="role">Role</option>
+                  </select>
+                </div>
+                {newScope !== "node" && (
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">{newScope === "group" ? "Group name" : "Role name"}</label>
+                    <Input
+                      className="text-xs h-7 font-mono"
+                      placeholder={newScope === "group" ? "compute" : "gpu"}
+                      value={newScopeRef}
+                      onChange={(e) => setNewScopeRef(e.target.value)}
+                      data-testid="variant-scope-ref"
+                    />
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Value</label>
+                <Input
+                  className="text-xs h-7 font-mono"
+                  placeholder="rd.driver.pre=mlx5_core"
+                  value={newValue}
+                  onChange={(e) => setNewValue(e.target.value)}
+                  data-testid="variant-value"
+                />
+              </div>
+              {addError && <p className="text-xs text-destructive">{addError}</p>}
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1 text-xs"
+                  disabled={!newPath || !newValue || addMutation.isPending}
+                  onClick={() => addMutation.mutate()}
+                  data-testid="variant-add-submit"
+                >
+                  {addMutation.isPending ? "Adding…" : "Add variant"}
+                </Button>
+                <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setAddOpen(false); setAddError("") }}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full text-xs"
+              onClick={() => setAddOpen(true)}
+              data-testid="variants-add-btn"
+            >
+              <Plus className="h-3 w-3 mr-1" />
+              Add variant
+            </Button>
           )}
         </div>
       )}
