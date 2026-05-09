@@ -3103,6 +3103,9 @@
               "kernel_cmdline": {
                 "type": "string"
               },
+              "operating_mode": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -3126,6 +3129,7 @@
               "tags",
               "groups",
               "custom_vars",
+              "operating_mode",
               "created_at",
               "updated_at"
             ]
@@ -4601,6 +4605,9 @@
               "kernel_cmdline": {
                 "type": "string"
               },
+              "operating_mode": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -4624,6 +4631,7 @@
               "tags",
               "groups",
               "custom_vars",
+              "operating_mode",
               "created_at",
               "updated_at"
             ]
@@ -6359,6 +6367,9 @@
               "kernel_cmdline": {
                 "type": "string"
               },
+              "operating_mode": {
+                "type": "string"
+              },
               "created_at": {
                 "type": "string",
                 "format": "date-time"
@@ -6382,6 +6393,7 @@
               "tags",
               "groups",
               "custom_vars",
+              "operating_mode",
               "created_at",
               "updated_at"
             ]
