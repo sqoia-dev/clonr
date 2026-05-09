@@ -181,6 +181,71 @@ func phaseLabel(phase string) string {
 	}
 }
 
+// canonicalPhases is the closed set of phase tags that may be sent
+// upstream to the server's stream-log channel via remoteWriter.SetPhase.
+// The UI groups stream lines by phase; if every ad-hoc deployer message
+// (e.g. "extract complete", "retry attempt 3") landed here verbatim
+// the cardinality would balloon and the UI would render one band per
+// transient string.
+//
+// Codex post-ship review issue #12: the deploy progressFn forwarded
+// every progress callback's phase string verbatim, so backends that
+// emitted ad-hoc text poisoned the phase tag.  We now canonicalise
+// via canonicalPhase before SetPhase; non-canonical strings collapse
+// to "extracting" (parent of most ad-hoc text) or are dropped.
+var canonicalPhases = map[string]struct{}{
+	"hardware":        {},
+	"register":        {},
+	"bios":            {},
+	"wait-for-assign": {},
+	"image-fetch":     {},
+	"preflight":       {},
+	"multicast":       {},
+	"partitioning":    {},
+	"formatting":      {},
+	"downloading":     {},
+	"extracting":      {},
+	"finalizing":      {},
+	"deploy-complete": {},
+}
+
+// canonicalPhase maps a possibly-ad-hoc deployer phase string to the
+// canonical phase enum value, or returns "" when the input doesn't map
+// to anything sensible (caller should skip the SetPhase update).  The
+// matcher is deliberately conservative: an exact membership check first,
+// then a small set of substring heuristics for the well-known
+// progress-style messages we've observed in practice.  Anything else
+// stays "" — old log lines retain whatever phase was most recently set
+// upstream, which is the safe behaviour.
+func canonicalPhase(phase string) string {
+	if phase == "" {
+		return ""
+	}
+	if _, ok := canonicalPhases[phase]; ok {
+		return phase
+	}
+	// Heuristic fallback for known ad-hoc strings emitted by deploy
+	// backends.  Map to the parent phase rather than coining new tags.
+	lc := strings.ToLower(phase)
+	switch {
+	case strings.Contains(lc, "extract"):
+		return "extracting"
+	case strings.Contains(lc, "download") || strings.Contains(lc, "fetch"):
+		return "downloading"
+	case strings.Contains(lc, "partition"):
+		return "partitioning"
+	case strings.Contains(lc, "format"):
+		return "formatting"
+	case strings.Contains(lc, "finaliz") || strings.Contains(lc, "finalis"):
+		return "finalizing"
+	case strings.Contains(lc, "retry") || strings.Contains(lc, "reconnect"):
+		// retries don't transition the phase — caller should leave
+		// the existing phase tag in place.
+		return ""
+	}
+	return ""
+}
+
 // padRight pads s with spaces to exactly length n. Truncates if longer.
 func padRight(s string, n int) string {
 	if len(s) >= n {

@@ -1448,8 +1448,19 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 			// Sprint 33 STREAM-LOG-PHASE: stamp every line emitted from the
 			// deployer (and any subprocess output it spawns) with the current
 			// phase so the UI can colour-group the stream.
-			remoteWriter.SetPhase(phase)
-			deployLog.Info().Str("phase", phase).Msg("deployment phase started")
+			//
+			// Codex post-ship review issue #12: deploy backends emit
+			// ad-hoc text like "extract complete" or retry messages,
+			// which become high-cardinality phase tags if forwarded
+			// verbatim.  canonicalPhase collapses to the closed
+			// enum (or returns "" for retries / nonsense, in which
+			// case we leave the upstream phase tag alone).
+			if cp := canonicalPhase(phase); cp != "" {
+				remoteWriter.SetPhase(cp)
+				deployLog.Info().Str("phase", cp).Msg("deployment phase started")
+			} else {
+				deployLog.Debug().Str("raw_phase", phase).Msg("non-canonical phase callback ignored")
+			}
 		}
 		printProgressBar(phaseLabel(phase), written, total)
 
