@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -591,11 +592,28 @@ func (h *NodesHandler) UpdateBootSettings(w http.ResponseWriter, r *http.Request
 
 	// Validate netboot menu entry references an existing boot_entries row.
 	// Empty string is a "clear" sentinel and skips the lookup.
+	//
+	// Codex post-ship review issue #10: only treat ErrNotFound as a
+	// validation failure (400).  Other DB errors — disk full, IO
+	// timeout, sqlite lock — must surface as 5xx via writeError so
+	// operators see the real failure mode and the operator UI doesn't
+	// blame the user for a server-side problem.
 	if req.NetbootMenuEntry != nil && *req.NetbootMenuEntry != "" {
-		if _, lookupErr := h.DB.GetBootEntry(r.Context(), *req.NetbootMenuEntry); lookupErr != nil {
+		_, lookupErr := h.DB.GetBootEntry(r.Context(), *req.NetbootMenuEntry)
+		switch {
+		case lookupErr == nil:
+			// row exists; validation passes
+		case errors.Is(lookupErr, api.ErrNotFound):
 			writeValidationError(w, fmt.Sprintf(
-				"netboot_menu_entry %q does not reference an existing boot entry: %s",
-				*req.NetbootMenuEntry, lookupErr.Error()))
+				"netboot_menu_entry %q does not reference an existing boot entry",
+				*req.NetbootMenuEntry))
+			return
+		default:
+			log.Error().Err(lookupErr).
+				Str("node_id", id).
+				Str("netboot_menu_entry", *req.NetbootMenuEntry).
+				Msg("netboot_menu_entry: boot-entry lookup failed")
+			writeError(w, lookupErr)
 			return
 		}
 	}

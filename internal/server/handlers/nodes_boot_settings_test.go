@@ -52,6 +52,59 @@ func putBootSettingsRequest(t *testing.T, h *NodesHandler, nodeID string, body a
 	return w
 }
 
+// TestUpdateBootSettings_NetbootMenuEntry_DBError_Returns500 locks
+// down Codex post-ship review issue #10: the boot-settings PUT
+// previously turned every error from h.DB.GetBootEntry into HTTP 400,
+// so a transient DB failure (disk full, sqlite busy, etc.) was reported
+// as a user-input problem.  Only ErrNotFound should be 400; other
+// errors must surface as 5xx.
+//
+// We exercise the "other errors" path by closing the DB before the
+// PUT, which makes any subsequent query return sql.ErrConnDone (or
+// "database is closed") wrapped by the db package — definitely not
+// ErrNotFound.
+func TestUpdateBootSettings_NetbootMenuEntry_DBError_Returns500(t *testing.T) {
+	d := openTestDB(t)
+	makeBootSettingsTestNode(t, d, "node-1", "aa:bb:cc:dd:ee:0a", "n0a")
+	h := newNodesHandler(d)
+
+	// Close the DB to force GetBootEntry to fail with a non-ErrNotFound
+	// error.  The handler must classify this as 5xx, NOT 400.
+	if err := d.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	entry := "some-entry-id"
+	w := putBootSettingsRequest(t, h, "node-1", api.UpdateNodeBootSettingsRequest{
+		NetbootMenuEntry: &entry,
+	})
+	if w.Code == http.StatusBadRequest {
+		t.Fatalf("status = 400; expected 5xx for DB error (issue #10). body=%s", w.Body.String())
+	}
+	if w.Code < 500 || w.Code >= 600 {
+		t.Errorf("status = %d, want 5xx for DB error", w.Code)
+	}
+}
+
+// TestUpdateBootSettings_NetbootMenuEntry_NotFound_Returns400 covers
+// the happy validation path: a dangling reference is still 400.
+func TestUpdateBootSettings_NetbootMenuEntry_NotFound_Returns400(t *testing.T) {
+	d := openTestDB(t)
+	makeBootSettingsTestNode(t, d, "node-1", "aa:bb:cc:dd:ee:0b", "n0b")
+	h := newNodesHandler(d)
+
+	entry := "no-such-entry"
+	w := putBootSettingsRequest(t, h, "node-1", api.UpdateNodeBootSettingsRequest{
+		NetbootMenuEntry: &entry,
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for ErrNotFound; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no-such-entry") {
+		t.Errorf("body should mention the bad id, got %q", w.Body.String())
+	}
+}
+
 // makeBootSettingsTestNode creates a minimal NodeConfig and inserts it.
 func makeBootSettingsTestNode(t *testing.T, d *db.DB, id, mac, hostname string) {
 	t.Helper()
