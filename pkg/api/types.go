@@ -1264,12 +1264,21 @@ type ImageInUseResponse struct {
 // ─── Log types ───────────────────────────────────────────────────────────────
 
 // LogEntry is a single structured log event shipped from a CLI client.
+//
+// Phase, when non-empty, names the deploy phase active at the moment the line
+// was emitted (see ProgressReporter phase names: "preflight", "partitioning",
+// "formatting", "downloading", "extracting", "finalizing", "deploy-complete",
+// plus "hardware", "register", "bios", "image-fetch", "multicast",
+// "wait-for-assign"). The web UI uses this to colour-group the live install
+// log per Sprint 33 STREAM-LOG-PHASE; consumers that don't care about the
+// field can ignore it. Empty for non-deploy log streams.
 type LogEntry struct {
 	ID        string                 `json:"id"`
 	NodeMAC   string                 `json:"node_mac"`
 	Hostname  string                 `json:"hostname,omitempty"`
 	Level     string                 `json:"level"`     // "debug", "info", "warn", "error"
 	Component string                 `json:"component"` // "hardware", "deploy", "chroot", "ipmi", "efiboot"
+	Phase     string                 `json:"phase,omitempty"`
 	Message   string                 `json:"message"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
