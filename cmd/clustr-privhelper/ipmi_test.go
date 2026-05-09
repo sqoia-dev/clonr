@@ -1,18 +1,33 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
 
 // ─── Argv composition ─────────────────────────────────────────────────────────
 
-func TestCommonIPMIArgs_Remote(t *testing.T) {
+// TestCommonIPMIArgs_Remote_NoPasswordOnArgv asserts the freeipmi argv does
+// NOT carry the BMC password.  /proc/<pid>/cmdline is world-readable while
+// the helper runs, so any local user could observe a -p <password>
+// substring.  Codex post-ship review (issue 1) flagged the previous
+// argv-based path; the password now lives in a 0600 temp file passed via
+// -f, populated by writePasswordFile.
+func TestCommonIPMIArgs_Remote_NoPasswordOnArgv(t *testing.T) {
 	args := commonIPMIArgs(ipmiCredentials{Host: "10.0.0.5", Username: "admin", Password: "s3cret"})
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-h 10.0.0.5", "-u admin", "-p s3cret", "--driver-type=LAN_2_0"} {
+	for _, want := range []string{"-h 10.0.0.5", "-u admin", "--driver-type=LAN_2_0"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
+		}
+	}
+	// Critical: the password must NEVER appear on argv.  Two ways the bug
+	// could regress: a literal -p flag, or the password substring
+	// anywhere in the joined argv string.
+	for _, banned := range []string{"-p", "s3cret"} {
+		if strings.Contains(joined, banned) {
+			t.Fatalf("password leaked via argv: %q present in %s", banned, joined)
 		}
 	}
 }
@@ -21,6 +36,56 @@ func TestCommonIPMIArgs_LocalEmpty(t *testing.T) {
 	args := commonIPMIArgs(ipmiCredentials{})
 	if len(args) != 0 {
 		t.Errorf("local creds should produce empty argv, got %v", args)
+	}
+}
+
+// TestWritePasswordFile_Roundtrip verifies the 0600 password file is the
+// out-of-band channel for the BMC password.  Empty password produces an
+// empty path (caller skips -f).
+func TestWritePasswordFile_Roundtrip(t *testing.T) {
+	path, err := writePasswordFile("s3cret")
+	if err != nil {
+		t.Fatalf("writePasswordFile: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected non-empty path for non-empty password")
+	}
+	defer os.Remove(path)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("mode = %o, want 0600", mode)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "s3cret" {
+		t.Errorf("contents = %q, want %q", got, "s3cret")
+	}
+
+	emptyPath, err := writePasswordFile("")
+	if err != nil {
+		t.Fatalf("writePasswordFile(empty): %v", err)
+	}
+	if emptyPath != "" {
+		t.Errorf("empty password should yield empty path, got %q", emptyPath)
+	}
+}
+
+// TestAppendPasswordFlag verifies the -f flag is appended only when a
+// password file is present.
+func TestAppendPasswordFlag(t *testing.T) {
+	got := appendPasswordFlag([]string{"-h", "x"}, "")
+	if len(got) != 2 {
+		t.Errorf("empty pwPath should not append; got %v", got)
+	}
+	got = appendPasswordFlag([]string{"-h", "x"}, "/tmp/pw")
+	if len(got) != 4 || got[2] != "-f" || got[3] != "/tmp/pw" {
+		t.Errorf("expected [-h x -f /tmp/pw], got %v", got)
 	}
 }
 
