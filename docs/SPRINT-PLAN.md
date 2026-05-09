@@ -914,9 +914,9 @@ PATCH /api/v1/nodes/{id}
 
 | ID | Item | Effort | Status |
 |---|---|---|---|
-| `PROBE-3` | Three reachability probes | <1d | TODO |
-| `EXTERNAL-STATS` | Agent-less BMC/IPMI/SNMP probes for unenrolled-or-broken nodes | 2 sprints (~10d) | TODO |
-| `STAT-EXPIRES` | `expires_at` column on stats writes | was 0.5d → 1d | TODO |
+| `PROBE-3` | Three reachability probes | <1d | DONE — `internal/server/stats/external/probes.go` (Bundle A) |
+| `EXTERNAL-STATS` | Agent-less BMC/IPMI/SNMP probes for unenrolled-or-broken nodes | 2 sprints (~10d) | DONE — pool + bmc + snmp + handler + sweeper (Bundle A) |
+| `STAT-EXPIRES` | `expires_at` column on stats writes | was 0.5d → 1d | DONE — migration 106 + InsertStatsBatch + IncludeExpired flag (Bundle A) |
 | `SYSTEM-ALERT-FRAMEWORK` | Push/set/unset/expire lifecycle on alerts | 1d | TODO |
 | `STAT-REGISTRY` | Typed metric registry with chart-grouping hint | 2d | TODO |
 | ~~`IB-PLUGIN`~~ | InfiniBand stats collector | — | DONE — `internal/clientd/stats/infiniband.go` (181 lines), wired in `client.go:98` |

@@ -376,6 +376,10 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	if s.systemAlertStore != nil {
 		s.systemAlertStore.StartSweeper(ctx, 30*time.Second)
 	}
+	// Sprint 38 Bundle A: agent-less collector pool (PROBE-3 + BMC/SNMP)
+	// + the daily sweeper for TTL-bounded stats rows.
+	s.StartExternalCollectorPool(ctx)
+	go s.runExternalStatsSweeper(ctx)
 }
 
 // runAPIKeySweeper ticks every 5 minutes and DELETEs api_keys rows whose
@@ -1851,6 +1855,13 @@ func (s *Server) buildRouter() chi.Router {
 			// Sprint 22 #131: per-node stats query.
 			statsH := &handlers.StatsHandler{DB: NewStatsDBAdapter(s.db)}
 			r.Get("/nodes/{id}/stats", statsH.GetNodeStats)
+
+			// Sprint 38 Bundle A: agent-less external stats — probes
+			// + BMC/SNMP/IPMI samples written by the goroutine pool.
+			extStatsH := &handlers.ExternalStatsHandler{
+				DB: NewExternalStatsDBAdapter(s.db),
+			}
+			r.Get("/nodes/{id}/external_stats", extStatsH.Get)
 
 			// #243: SELF-MON — control-plane host status endpoint.
 			cpHandler := &handlers.ControlPlaneHandler{DB: handlers.NewControlPlaneDBAdapter(s.db)}
