@@ -191,6 +191,88 @@ func TestGenerateDiskBootScript_ExtraEntries(t *testing.T) {
 	}
 }
 
+// TestGenerateDiskBootScript_PersistedEntrySelectsByDefault locks down the
+// fix for Codex post-ship review issue #3: GenerateDiskBootScriptWithSettings
+// previously accepted persistedEntry/persistedKernelCmdline parameters but
+// neither template referenced them, so a node with NetbootMenuEntry set
+// still booted the standard disk default.
+//
+// Verified end-to-end:
+//   - the chosen ExtraEntries row's --default flag fires (selected after
+//     the 5s timeout instead of "disk")
+//   - the choose fallback target matches that entry id
+//   - the persistedKernelCmdline string is appended verbatim to that
+//     entry's kernel line
+func TestGenerateDiskBootScript_PersistedEntrySelectsByDefault(t *testing.T) {
+	rescue := api.BootEntry{
+		ID:        "rescue-id-7",
+		Name:      "Rescue Shell",
+		Kind:      "rescue",
+		KernelURL: "/api/v1/boot/vmlinuz",
+		InitrdURL: "/api/v1/boot/rescue.cpio.gz",
+		Cmdline:   "rd.shell=1",
+		Enabled:   true,
+	}
+	persistedCmdline := "loglevel=7 clustr.debug=1"
+
+	for _, firmware := range []string{"bios", "uefi"} {
+		t.Run(firmware, func(t *testing.T) {
+			script, err := GenerateDiskBootScriptWithSettings(
+				"node-x", firmware, "http://10.0.0.1:8080", "v0.1.0-test",
+				[]api.BootEntry{rescue}, false,
+				&rescue, persistedCmdline,
+			)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			out := string(script)
+
+			// The default disk item must NOT carry --default any more —
+			// the persisted entry takes its place.
+			if strings.Contains(out, "item --default disk") {
+				t.Errorf("disk item kept --default despite persisted entry; got:\n%s", out)
+			}
+			// The persisted entry item line must carry --default.
+			if !strings.Contains(out, "item --default entry_rescue-id-7") {
+				t.Errorf("persisted entry item missing --default; got:\n%s", out)
+			}
+			// `choose --default entry_rescue-id-7` and the fallback goto
+			// must both target the persisted entry.
+			if !strings.Contains(out, "choose --default entry_rescue-id-7") {
+				t.Errorf("choose missing --default entry_rescue-id-7; got:\n%s", out)
+			}
+			if !strings.Contains(out, "goto entry_rescue-id-7") {
+				t.Errorf("fallback goto missing entry_rescue-id-7; got:\n%s", out)
+			}
+			// The persisted kernel cmdline must be appended to the
+			// entry's kernel line in addition to the entry's own cmdline.
+			if !strings.Contains(out, "rd.shell=1 loglevel=7 clustr.debug=1") {
+				t.Errorf("persisted kernel cmdline not appended; got:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestGenerateDiskBootScript_NoPersistedEntryStillDefaultsDisk verifies the
+// no-op path — when nothing is persisted, render output matches the
+// pre-fix shape (disk auto-selected).
+func TestGenerateDiskBootScript_NoPersistedEntryStillDefaultsDisk(t *testing.T) {
+	script, err := GenerateDiskBootScriptWithSettings(
+		"node-y", "uefi", "http://10.0.0.1:8080", "v0.1.0-test",
+		nil, false, nil, "",
+	)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := string(script)
+	if !strings.Contains(out, "item --default disk --timeout 5000 disk") {
+		t.Errorf("disk item lost --default in no-persist case; got:\n%s", out)
+	}
+	if !strings.Contains(out, "choose --default disk --timeout 5000 target") {
+		t.Errorf("choose lost --default disk; got:\n%s", out)
+	}
+}
+
 // TestGenerateDiskBootScript_MulticastMenuItem verifies that the reimage-fleet
 // menu item appears when multicastEnabled=true and is absent when false.
 func TestGenerateDiskBootScript_MulticastMenuItem(t *testing.T) {
