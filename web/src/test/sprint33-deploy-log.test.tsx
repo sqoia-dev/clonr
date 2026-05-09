@@ -115,7 +115,7 @@ describe("DeployLogTab — incoming events (STREAM-LOG-UI)", () => {
     const entry: LogEntry = {
       level: "info",
       message: "sgdisk --zap-all /dev/sda",
-      ts: 1746700000000,
+      timestamp: 1746700000000,
     }
 
     act(() => { lastFakeES!._fireMessage(entry) })
@@ -136,7 +136,7 @@ describe("DeployLogTab — incoming events (STREAM-LOG-UI)", () => {
     const entry: LogEntry = {
       level: "info",
       message: "test timestamp",
-      ts: 1746700000000,
+      timestamp: 1746700000000,
     }
     act(() => { lastFakeES!._fireMessage(entry) })
 
@@ -151,9 +151,9 @@ describe("DeployLogTab — incoming events (STREAM-LOG-UI)", () => {
     act(() => { lastFakeES!._fireOpen() })
 
     const entries: LogEntry[] = [
-      { level: "info",  message: "first line",  ts: 1000 },
-      { level: "warn",  message: "second line", ts: 2000 },
-      { level: "error", message: "third line",  ts: 3000 },
+      { level: "info",  message: "first line",  timestamp: 1000 },
+      { level: "warn",  message: "second line", timestamp: 2000 },
+      { level: "error", message: "third line",  timestamp: 3000 },
     ]
     act(() => {
       for (const e of entries) lastFakeES!._fireMessage(e)
@@ -175,7 +175,7 @@ describe("DeployLogTab — phase badge (STREAM-LOG-UI)", () => {
     const entry: LogEntry = {
       level: "info",
       message: "sgdisk --zap-all /dev/sda",
-      ts: 1000,
+      timestamp: 1000,
       phase: "partitioning",
     }
     act(() => { lastFakeES!._fireMessage(entry) })
@@ -192,7 +192,7 @@ describe("DeployLogTab — phase badge (STREAM-LOG-UI)", () => {
     const entry: LogEntry = {
       level: "info",
       message: "some message without phase",
-      ts: 1000,
+      timestamp: 1000,
     }
     act(() => { lastFakeES!._fireMessage(entry) })
 
@@ -209,8 +209,8 @@ describe("DeployLogTab — phase filter chips (STREAM-LOG-UI)", () => {
     act(() => { lastFakeES!._fireOpen() })
 
     act(() => {
-      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", ts: 1000, phase: "partitioning" })
-      lastFakeES!._fireMessage({ level: "info", message: "downloading log", ts: 2000, phase: "downloading" })
+      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", timestamp: 1000, phase: "partitioning" })
+      lastFakeES!._fireMessage({ level: "info", message: "downloading log", timestamp: 2000, phase: "downloading" })
     })
 
     // "All" + the two phase chips should appear
@@ -225,8 +225,8 @@ describe("DeployLogTab — phase filter chips (STREAM-LOG-UI)", () => {
     act(() => { lastFakeES!._fireOpen() })
 
     act(() => {
-      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", ts: 1000, phase: "partitioning" })
-      lastFakeES!._fireMessage({ level: "info", message: "downloading log", ts: 2000, phase: "downloading" })
+      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", timestamp: 1000, phase: "partitioning" })
+      lastFakeES!._fireMessage({ level: "info", message: "downloading log", timestamp: 2000, phase: "downloading" })
     })
 
     // Click the "partitioning" chip.
@@ -243,8 +243,8 @@ describe("DeployLogTab — phase filter chips (STREAM-LOG-UI)", () => {
     act(() => { lastFakeES!._fireOpen() })
 
     act(() => {
-      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", ts: 1000, phase: "partitioning" })
-      lastFakeES!._fireMessage({ level: "info", message: "downloading log", ts: 2000, phase: "downloading" })
+      lastFakeES!._fireMessage({ level: "info", message: "partitioning log", timestamp: 1000, phase: "partitioning" })
+      lastFakeES!._fireMessage({ level: "info", message: "downloading log", timestamp: 2000, phase: "downloading" })
     })
 
     await user.click(screen.getByRole("button", { name: "partitioning" }))
@@ -265,7 +265,7 @@ describe("DeployLogTab — warn/error indicator (STREAM-LOG-UI)", () => {
     renderTab()
     act(() => { lastFakeES!._fireOpen() })
     act(() => {
-      lastFakeES!._fireMessage({ level: "info", message: "all good", ts: 1000 })
+      lastFakeES!._fireMessage({ level: "info", message: "all good", timestamp: 1000 })
     })
     expect(screen.queryByText("Warnings / errors")).not.toBeInTheDocument()
   })
@@ -274,7 +274,7 @@ describe("DeployLogTab — warn/error indicator (STREAM-LOG-UI)", () => {
     renderTab()
     act(() => { lastFakeES!._fireOpen() })
     act(() => {
-      lastFakeES!._fireMessage({ level: "warn", message: "disk almost full", ts: 1000 })
+      lastFakeES!._fireMessage({ level: "warn", message: "disk almost full", timestamp: 1000 })
     })
     expect(screen.getByText("Warnings / errors")).toBeInTheDocument()
   })
@@ -283,7 +283,7 @@ describe("DeployLogTab — warn/error indicator (STREAM-LOG-UI)", () => {
     renderTab()
     act(() => { lastFakeES!._fireOpen() })
     act(() => {
-      lastFakeES!._fireMessage({ level: "error", message: "mount failed", ts: 1000 })
+      lastFakeES!._fireMessage({ level: "error", message: "mount failed", timestamp: 1000 })
     })
     expect(screen.getByText("Warnings / errors")).toBeInTheDocument()
   })
@@ -296,7 +296,7 @@ describe("DeployLogTab — deduplication (STREAM-LOG-UI)", () => {
     renderTab()
     act(() => { lastFakeES!._fireOpen() })
 
-    const entry: LogEntry = { id: "log-001", level: "info", message: "unique message", ts: 1000 }
+    const entry: LogEntry = { id: "log-001", level: "info", message: "unique message", timestamp: 1000 }
     act(() => {
       lastFakeES!._fireMessage(entry)
       lastFakeES!._fireMessage(entry) // duplicate
