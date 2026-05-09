@@ -385,10 +385,35 @@ func TestBulkReimage_RunnerNotConfigured(t *testing.T) {
 	}
 }
 
-func TestBulkDrain_BuildsScontrolArgs(t *testing.T) {
+// stubDrainer satisfies BulkDrainRunner with a recorded call list and a
+// canned error.
+type stubDrainer struct {
+	mu    sync.Mutex
+	calls []stubDrainCall
+	err   error
+}
+
+type stubDrainCall struct {
+	NodeIDs []string
+	Reason  string
+}
+
+func (s *stubDrainer) DrainNodes(_ context.Context, nodeIDs []string, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, stubDrainCall{NodeIDs: append([]string(nil), nodeIDs...), Reason: reason})
+	return s.err
+}
+
+// TestBulkDrain_DispatchesViaController locks down Codex post-ship
+// review issue #7: HandleBulkDrain previously called Exec.ExecOne per
+// target ("scontrol" on each target node), but the exec runner refuses
+// disconnected targets.  Drain is a slurmctld action — dispatch one
+// RPC to the controller via h.Drain regardless of target connectivity.
+func TestBulkDrain_DispatchesViaController(t *testing.T) {
 	db := makeBulkDB(2)
-	exec := &stubBulkExec{exit: 0}
-	h := &BulkHandler{DB: db, Exec: exec}
+	drainer := &stubDrainer{}
+	h := &BulkHandler{DB: db, Drain: drainer}
 	r := newBulkRouter(h)
 
 	body, _ := json.Marshal(map[string]any{
@@ -398,23 +423,74 @@ func TestBulkDrain_BuildsScontrolArgs(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/nodes/bulk/drain", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if len(exec.calls) != 2 {
-		t.Fatalf("exec calls = %d, want 2", len(exec.calls))
+
+	if len(drainer.calls) != 1 {
+		t.Fatalf("drainer was invoked %d times, want exactly 1 (single controller RPC for the batch)", len(drainer.calls))
 	}
-	for _, c := range exec.calls {
-		if c.Command != "scontrol" {
-			t.Errorf("command = %q, want scontrol", c.Command)
+	got := drainer.calls[0]
+	if got.Reason != "kernel-panic-investigate" {
+		t.Errorf("reason = %q", got.Reason)
+	}
+	if len(got.NodeIDs) != 2 || got.NodeIDs[0] != "node-00" || got.NodeIDs[1] != "node-01" {
+		t.Errorf("node ids = %v", got.NodeIDs)
+	}
+
+	// Per-node response entries must still be emitted so the UI can
+	// render one row per selected node.
+	var resp BulkResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(resp.Results))
+	}
+	for _, row := range resp.Results {
+		if !row.OK {
+			t.Errorf("row %s: ok=false (%s)", row.NodeID, row.Error)
 		}
-		if len(c.Args) != 4 {
-			t.Errorf("args len = %d, want 4: %+v", len(c.Args), c.Args)
-		}
-		if c.Args[0] != "update" || c.Args[2] != "state=DRAIN" || c.Args[3] != "reason=kernel-panic-investigate" {
-			t.Errorf("scontrol args = %v", c.Args)
-		}
+	}
+}
+
+// TestBulkDrain_OfflineTargetsStillDrained — the whole point of issue
+// #7 is that operators want to drain nodes that aren't connected to
+// the clientd hub.  The new path dispatches via the controller, so
+// target connectivity is irrelevant.  We exercise that by NOT wiring an
+// Exec runner (the old path required it) and confirming drain still
+// works through h.Drain.
+func TestBulkDrain_OfflineTargetsStillDrained(t *testing.T) {
+	db := makeBulkDB(1)
+	drainer := &stubDrainer{}
+	h := &BulkHandler{DB: db, Drain: drainer /* Exec deliberately nil */}
+	r := newBulkRouter(h)
+
+	body, _ := json.Marshal(map[string]any{"node_ids": []string{"node-00"}})
+	req := httptest.NewRequest("POST", "/api/v1/nodes/bulk/drain", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(drainer.calls) != 1 {
+		t.Fatalf("drain not dispatched (target was offline but should not block controller path)")
+	}
+}
+
+// TestBulkDrain_NoRunnerWired503 verifies the operator-friendly 503
+// response when the slurm manager isn't configured (no controller
+// node, brand-new install, etc.).
+func TestBulkDrain_NoRunnerWired503(t *testing.T) {
+	db := makeBulkDB(1)
+	h := &BulkHandler{DB: db /* Drain deliberately nil */}
+	r := newBulkRouter(h)
+	body, _ := json.Marshal(map[string]any{"node_ids": []string{"node-00"}})
+	req := httptest.NewRequest("POST", "/api/v1/nodes/bulk/drain", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status=%d, want 503", w.Code)
 	}
 }
 

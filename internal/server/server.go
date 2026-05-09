@@ -1178,6 +1178,11 @@ func (s *Server) buildRouter() chi.Router {
 		Registry: s.powerRegistry,
 		Reimage:  handlers.NewReimageRunner(s.db, s.reimageOrchestrator),
 		Exec:     handlers.NewExecRunner(s.clientdHub),
+		// Sprint 44 BULK-MULTISELECT-ACTIONS: drain dispatches via the
+		// slurm controller's clientd connection (not per-target
+		// ExecOne) so offline nodes can still be drained.  Codex
+		// post-ship review issue #7.
+		Drain: handlers.NewDrainRunner(s.slurmMgr),
 	}
 	// Sprint 44 MULTI-NIC-EDITOR — typed interface read/write.
 	interfacesH := handlers.NewInterfacesHandler(s.db)

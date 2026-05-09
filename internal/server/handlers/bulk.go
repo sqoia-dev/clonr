@@ -107,6 +107,11 @@ type BulkHandler struct {
 	Reimage BulkReimageRunner
 	// Exec, when non-nil, is used by HandleExec.
 	Exec BulkExecRunner
+	// Drain, when non-nil, is used by HandleBulkDrain.  Decoupled from
+	// Exec because drain is dispatched via slurmctld on the controller
+	// node, not via per-target ExecOne — see Codex post-ship review
+	// issue #7 and internal/slurm/drain.go.
+	Drain BulkDrainRunner
 	// ProviderFactory, when non-nil, is used in place of Registry to build a
 	// power.Provider for a given NodeConfig. Tests inject a stub here so they
 	// don't have to register fake provider types in the global registry.
@@ -122,6 +127,14 @@ type BulkReimageRunner interface {
 // BulkExecRunner runs a single command on one node.
 type BulkExecRunner interface {
 	ExecOne(ctx context.Context, nodeID, command string, args []string, timeoutSec int) (exitCode int, output string, err error)
+}
+
+// BulkDrainRunner drains a set of clustr nodes from the slurm
+// controller's perspective.  Implementations resolve the controller
+// node and dispatch one scontrol RPC there, regardless of whether the
+// targets are connected to clustr-serverd's clientd hub.
+type BulkDrainRunner interface {
+	DrainNodes(ctx context.Context, nodeIDs []string, reason string) error
 }
 
 // ─── Concurrency-bounded fan-out ──────────────────────────────────────────────
@@ -347,14 +360,21 @@ type bulkDrainRequest struct {
 }
 
 // HandleBulkDrain runs `scontrol update nodename=<name> state=DRAIN
-// reason=<reason>` on the head node for each selected node. The Slurm head
-// must be reachable to the clustr server via the head-exec hook (configured
-// elsewhere). When Exec is nil, this returns 503 — operators get a clear
-// "drain not wired" signal rather than a silent no-op.
+// reason=<reason>` for the selected node IDs.
 //
-// Implementation note: this calls h.Exec.ExecOne with command="scontrol" so a
-// future #220 group-drain RPC can swap the runner without touching this
-// endpoint's wire shape.
+// Codex post-ship review issue #7: this previously fanned out via
+// Exec.ExecOne(nodeID, "scontrol", ...), which routed the command to
+// the TARGET node's clientd connection.  But the exec runner refuses
+// disconnected targets and operators want to drain offline nodes — that's
+// the whole reason to mark a node down to slurmctld.  Drain is a
+// slurmctld action; we now dispatch one drain RPC to the cluster's
+// controller node via h.Drain.  When Drain is nil we return 503 with a
+// clear "not wired" signal.
+//
+// Wire shape unchanged: per-node BulkNodeResult entries.  Because the
+// controller dispatches the whole batch atomically we mark every entry
+// ok=true on a successful slurmctld ack and ok=false (with the same
+// error string) on failure.
 func (h *BulkHandler) HandleBulkDrain(w http.ResponseWriter, r *http.Request) {
 	var req bulkDrainRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -371,32 +391,25 @@ func (h *BulkHandler) HandleBulkDrain(w http.ResponseWriter, r *http.Request) {
 		reason = "clustr-bulk-drain"
 	}
 
-	if h.Exec == nil {
+	if h.Drain == nil {
 		writeJSON(w, http.StatusServiceUnavailable, api.ErrorResponse{
-			Error: "exec runner not configured (drain requires slurm-head-exec)",
+			Error: "slurm drain runner not configured (no controller node?)",
 			Code:  "not_implemented",
 		})
 		return
 	}
 
-	results := fanOut(r.Context(), ids, bulkConcurrency(), func(ctx context.Context, nodeID string) (map[string]any, error) {
-		hostname, err := h.hostnameFor(ctx, nodeID)
-		if err != nil {
-			return nil, err
+	drainErr := h.Drain.DrainNodes(r.Context(), ids, reason)
+	results := make([]BulkNodeResult, 0, len(ids))
+	for _, id := range ids {
+		row := BulkNodeResult{NodeID: id, OK: drainErr == nil}
+		if drainErr != nil {
+			row.Error = drainErr.Error()
 		}
-		args := []string{"update", fmt.Sprintf("nodename=%s", hostname),
-			"state=DRAIN", fmt.Sprintf("reason=%s", reason)}
-		exit, out, runErr := h.Exec.ExecOne(ctx, nodeID, "scontrol", args, 30)
-		if runErr != nil {
-			return nil, runErr
-		}
-		if exit != 0 {
-			return nil, fmt.Errorf("scontrol exit %d: %s", exit, strings.TrimSpace(out))
-		}
-		return map[string]any{"hostname": hostname}, nil
-	})
+		results = append(results, row)
+	}
 
-	log.Info().Int("targets", len(ids)).Int("ok", countOK(results)).Msg("bulk drain: complete")
+	log.Info().Int("targets", len(ids)).Int("ok", countOK(results)).Bool("via_controller", true).Msg("bulk drain: complete")
 	writeJSON(w, http.StatusOK, BulkResponse{Results: results})
 }
 
