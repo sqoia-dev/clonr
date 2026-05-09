@@ -103,6 +103,12 @@ depends:
   - screen             # EPEL — interactive shell fallback in initramfs console
   # ── SELF-MON (#243) ───────────────────────────────────────────────────────
   - chrony             # chronyc binary required by the NTP metric collector
+  # ── Sprint 37 DISKLESS stateless_nfs ──────────────────────────────────────
+  # nfs-utils provides exportfs(8) and the NFS kernel server support (nfsd).
+  # Required for the stateless_nfs operating mode: clustr-privhelper nfs-export
+  # writes /etc/exports entries and runs `exportfs -ra` to reload the daemon.
+  # Operator must also enable nfs-server.service; see the post-install note.
+  - nfs-utils          # NFSv4 server (exportfs, rpc.nfsd) for stateless_nfs mode
 
 rpm:
   group: System Environment/Daemons

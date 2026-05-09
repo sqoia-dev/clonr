@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,24 +158,47 @@ func (h *BootHandler) ServeIPXEScript(w http.ResponseWriter, r *http.Request) {
 				Str("mode", operatingMode).
 				Msg("boot: serving iPXE for node")
 
-			// Sprint 37 DISKLESS Bundle A: schema-and-protocol foundation only.
-			// Modes other than block_install have no end-to-end wiring yet —
-			// Bundle B delivers initramfs variants, NFS exports, and the
-			// cluster image-pointer mechanism. Until then we serve a TODO
-			// sentinel iPXE script that exits with a clear error message so
-			// the protocol is observable in lab without a half-broken boot
-			// path stranding a node mid-deploy.
+			// Sprint 37 DISKLESS Bundle B: stateless_nfs is now fully wired.
+			// filesystem_install and stateless_ram remain as TODO sentinels —
+			// they are reserved enum slots for future sprints.
 			//
 			// block_install (default) falls through to the existing state
 			// machine below — bit-for-bit unchanged behavior for every node
 			// that already exists at upgrade time.
-			if operatingMode != api.OperatingModeBlockInstall {
+			switch operatingMode {
+			case api.OperatingModeStatelessNFS:
+				// Stateless NFS: serve the full iPXE script that loads a
+				// stateless initramfs and mounts the NFS rootfs.
+				script, genErr := h.generateStatelessNFSScript(r, &nodeCfg)
+				if genErr != nil {
+					log.Error().Err(genErr).
+						Str("mac", mac).
+						Str("node", nodeCfg.ID).
+						Msg("boot: generate stateless_nfs iPXE script")
+					http.Error(w, "failed to generate stateless_nfs boot script", http.StatusInternalServerError)
+					return
+				}
+				log.Info().
+					Str("mac", mac).
+					Str("hostname", nodeCfg.Hostname).
+					Str("node", nodeCfg.ID).
+					Str("image_id", nodeCfg.BaseImageID).
+					Msg("boot: serving stateless_nfs iPXE script")
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(script))
+				return
+
+			case api.OperatingModeFilesystemInstall, api.OperatingModeStatelessRAM:
+				// TODO sentinel — these modes are not yet wired. Serve a
+				// clearly labelled failure script so the node drops to iPXE
+				// shell rather than looping silently.
 				log.Warn().
 					Str("mac", mac).
 					Str("hostname", nodeCfg.Hostname).
 					Str("node", nodeCfg.ID).
 					Str("operating_mode", operatingMode).
-					Msg("boot: operating_mode not yet wired (Bundle B pending) — serving TODO sentinel")
+					Msg("boot: operating_mode not yet wired (future sprint) — serving TODO sentinel")
 				script := fmt.Sprintf(
 					"#!ipxe\n"+
 						"echo clustr: operating_mode %s not yet wired -- Bundle B pending\n"+
@@ -573,6 +597,85 @@ func (h *BootHandler) ServeIPXEEFI(w http.ResponseWriter, r *http.Request) {
 // ServeUndionlyKPXE handles GET /api/v1/boot/undionly.kpxe.
 func (h *BootHandler) ServeUndionlyKPXE(w http.ResponseWriter, r *http.Request) {
 	h.serveFile(w, r, filepath.Join(h.TFTPDir, "undionly.kpxe"), "application/octet-stream")
+}
+
+// generateStatelessNFSScript returns the iPXE script for a node in
+// stateless_nfs operating mode.
+//
+// The script tells iPXE to:
+//  1. Load vmlinuz from the clustr boot endpoint.
+//  2. Load the stateless initramfs image (<imageID>-stateless.img) — built by
+//     build-initramfs.sh --mode=stateless-nfs and served from BootDir.
+//  3. Pass kernel args so the initramfs mounts the NFS rootfs and pivots:
+//     root=/dev/nfs nfsroot=<cloner-ip>:/var/lib/clustr/images/<id>/rootfs,ro,vers=4 ip=dhcp rw
+//
+// The cloner IP is extracted from h.ServerURL (the public base URL, e.g.
+// "http://10.99.0.1:8080"). We parse the host part — callers should never pass
+// a bare IP without scheme; the standard config always includes "http://".
+//
+// If the node has no BaseImageID set we cannot construct an nfsroot path;
+// the returned error causes the handler to return HTTP 500 so the operator
+// is notified rather than the node looping in iPXE indefinitely.
+func (h *BootHandler) generateStatelessNFSScript(r *http.Request, node *api.NodeConfig) (string, error) {
+	if node.BaseImageID == "" {
+		return "", fmt.Errorf("node %s (%s) has no base_image_id set for stateless_nfs boot", node.ID, node.Hostname)
+	}
+
+	// Extract the host (IP or hostname, without port) from ServerURL.
+	// Used as the NFS server address in nfsroot=.
+	clonerHost, err := hostFromURL(h.ServerURL)
+	if err != nil {
+		return "", fmt.Errorf("parse ServerURL %q: %w", h.ServerURL, err)
+	}
+
+	// NFS root path on the cloner host.
+	nfsRootPath := fmt.Sprintf("/var/lib/clustr/images/%s/rootfs", node.BaseImageID)
+
+	// Kernel cmdline for stateless NFS root.
+	// - root=/dev/nfs    : tells the kernel to mount an NFS root
+	// - nfsroot=          : specifies the NFS server and path
+	// - ro,vers=4         : read-only mount, NFSv4
+	// - ip=dhcp          : kernel configures networking via DHCP before NFS mount
+	// - rw               : required by NFSv4 client even for ro exports
+	nfsroot := fmt.Sprintf("%s:%s,ro,vers=4", clonerHost, nfsRootPath)
+	kernelArgs := fmt.Sprintf("root=/dev/nfs nfsroot=%s ip=dhcp rw console=ttyS0,115200n8 console=tty0", nfsroot)
+
+	// The stateless initramfs image is served from the same boot endpoint as
+	// the standard initramfs, under the name "<imageID>-stateless.img".
+	// This allows multiple stateless images to coexist in BootDir.
+	script := fmt.Sprintf(
+		"#!ipxe\n"+
+			"kernel %s/api/v1/boot/vmlinuz\n"+
+			"initrd %s/api/v1/boot/%s-stateless.img\n"+
+			"imgargs vmlinuz %s\n"+
+			"boot\n",
+		h.ServerURL,
+		h.ServerURL,
+		node.BaseImageID,
+		kernelArgs,
+	)
+	return script, nil
+}
+
+// hostFromURL parses u (e.g. "http://10.99.0.1:8080") and returns the
+// hostname/IP without port (e.g. "10.99.0.1"). Used to build the NFS server
+// address for stateless_nfs kernel cmdline. Returns an error only when u is
+// not parseable at all; a missing scheme is treated as a host-only URL.
+func hostFromURL(u string) (string, error) {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return "", fmt.Errorf("url.Parse: %w", err)
+	}
+	h := parsed.Hostname() // strips port; empty when scheme-less
+	if h == "" {
+		// Scheme-less fallback: treat entire u as a host[:port] pair.
+		host, _, found := strings.Cut(u, ":")
+		if found {
+			return host, nil
+		}
+		return u, nil
+	}
+	return h, nil
 }
 
 func (h *BootHandler) serveFile(w http.ResponseWriter, r *http.Request, path, contentType string) {
