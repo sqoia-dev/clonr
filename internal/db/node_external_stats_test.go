@@ -236,6 +236,25 @@ func TestSweepExpiredNodeStats_LeavesNullExpiresAtAlone(t *testing.T) {
 	}
 }
 
+// TestQueryNodeStats_HistoricalWindowReturnsExpiredRowsTooBundle is
+// the time-range counterpart kept here next to its inserter for
+// Sprint 38 STAT-EXPIRES regression coverage.
+//
+// Codex post-ship review issue #5 reversed the semantics for
+// time-range queries: the TTL filter is a "current values" concept,
+// so callers who pass an explicit Since/Until window now see expired
+// rows in that window regardless of IncludeExpired.  The Prometheus
+// scrape path (QueryLatestNodeStats) keeps the filter, since "latest
+// per (plugin,sensor)" is the view the TTL was designed for.
+//
+// This test asserts BOTH branches of the new behaviour:
+//   - Time-range query (Since/Until set, IncludeExpired=false) returns
+//     both rows: the expired one is in the window, so it surfaces.
+//   - IncludeExpired=true is the same shape (both rows) — the flag is
+//     effectively a no-op once the time-range guard is engaged.
+//
+// QueryLatestNodeStats's filter is exercised by the dedicated
+// "TestQueryLatestNodeStats_*" tests elsewhere in this package.
 func TestQueryNodeStats_FiltersExpiresAtByDefault(t *testing.T) {
 	t.Parallel()
 	d := openExternalDB(t)
@@ -259,17 +278,17 @@ func TestQueryNodeStats_FiltersExpiresAtByDefault(t *testing.T) {
 		t.Fatalf("InsertStatsBatch: %v", err)
 	}
 
+	// Issue #5 semantics: time-range query returns BOTH rows, even
+	// with IncludeExpired=false, because the caller asked for a
+	// historical window.
 	rows, _, err := d.QueryNodeStats(ctx, db.QueryNodeStatsParams{
 		NodeID: "n1", Since: now.Add(-time.Hour), Until: now, Limit: 100,
 	})
 	if err != nil {
 		t.Fatalf("QueryNodeStats: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("default query (filter on): got %d rows, want 1", len(rows))
-	}
-	if rows[0].Plugin != "cpu" {
-		t.Fatalf("expired row leaked through: %q", rows[0].Plugin)
+	if len(rows) != 2 {
+		t.Fatalf("time-range query: got %d rows, want 2 (both rows must surface in a historical window — issue #5)", len(rows))
 	}
 
 	rows, _, err = d.QueryNodeStats(ctx, db.QueryNodeStatsParams{
