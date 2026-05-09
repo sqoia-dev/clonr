@@ -238,4 +238,54 @@ func TestBuildExternalStatsResponse_UnknownSourceDropped(t *testing.T) {
 	if resp.Samples.BMC != nil || resp.Samples.SNMP != nil || resp.Samples.IPMI != nil {
 		t.Fatal("samples: should all be nil for unknown source")
 	}
+	// Codex post-ship review issue #11: the envelope timestamps must
+	// also be nil — an unknown-source row used to update last_seen /
+	// expires_at before being silently dropped, so the UI's freshness
+	// indicator reflected data the client couldn't actually surface.
+	if resp.LastSeen != nil {
+		t.Errorf("LastSeen contributed by unknown source: %v", resp.LastSeen)
+	}
+	if resp.ExpiresAt != nil {
+		t.Errorf("ExpiresAt contributed by unknown source: %v", resp.ExpiresAt)
+	}
+}
+
+// TestBuildExternalStatsResponse_UnknownSourceMixedWithKnown verifies
+// the partial-recognition case: a known source contributes to the
+// envelope, an unknown source must NOT.
+func TestBuildExternalStatsResponse_UnknownSourceMixedWithKnown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	rows := []db.NodeExternalStatRow{
+		{
+			NodeID:     "n1",
+			Source:     db.ExternalSourceBMC,
+			Payload:    json.RawMessage(`{"sensors":{}}`),
+			LastSeenAt: now.Add(-time.Minute),
+			ExpiresAt:  now.Add(time.Hour),
+		},
+		{
+			NodeID: "n1",
+			Source: db.ExternalStatsSource("future_source_for_bundle_b"),
+			// LastSeenAt is more recent than the BMC row — without
+			// the fix, the envelope's last_seen would have pinned to
+			// this stale unknown timestamp.
+			Payload:    json.RawMessage(`{"a":1}`),
+			LastSeenAt: now.Add(-1 * time.Second),
+			// ExpiresAt is earlier than the BMC row — without the
+			// fix, the envelope's expires_at would have pinned here.
+			ExpiresAt: now.Add(5 * time.Minute),
+		},
+	}
+	resp := buildExternalStatsResponse(rows)
+
+	if resp.Samples.BMC == nil {
+		t.Fatal("BMC sample dropped")
+	}
+	if resp.LastSeen == nil || !resp.LastSeen.Equal(now.Add(-time.Minute)) {
+		t.Errorf("LastSeen = %v, want BMC row's last_seen (%v)", resp.LastSeen, now.Add(-time.Minute))
+	}
+	if resp.ExpiresAt == nil || !resp.ExpiresAt.Equal(now.Add(time.Hour)) {
+		t.Errorf("ExpiresAt = %v, want BMC row's expires_at (%v)", resp.ExpiresAt, now.Add(time.Hour))
+	}
 }
