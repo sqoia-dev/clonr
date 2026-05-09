@@ -2,7 +2,9 @@ package alerts
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -130,11 +132,21 @@ func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 // normaliseDeviceParam translates the URL "-" sentinel back to "" so callers
 // can issue a no-device unset via /system_alerts/unset/raid_degraded/-
 // without ambiguity.  Chi requires every URL segment to be non-empty.
+//
+// Codex post-ship review issue #9: chi does NOT decode percent-encoded
+// slashes inside path segments — devices like "ctrl0/vd1" arrive
+// percent-encoded ("ctrl0%2Fvd1") and would be persisted with the
+// %2F intact, mismatching the operator's text in subsequent lookups.
+// We url.PathUnescape on the device segment before persistence and
+// comparison.  Errors from PathUnescape (malformed %xx) leave the
+// segment as-is — the validation downstream will catch it.
 func normaliseDeviceParam(s string) string {
 	if s == "-" {
 		return ""
 	}
-	// URL-encoded slashes (e.g. "ctrl0%2Fvd1") are decoded by chi; pass through.
+	if dec, err := url.PathUnescape(s); err == nil {
+		return dec
+	}
 	return s
 }
 
@@ -153,27 +165,21 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeStoreError maps store-level errors to HTTP status codes.
+//
+// Codex post-ship review issue #8: the previous implementation matched
+// any error with the literal "system_alerts:" prefix as a validation
+// error.  Every fmt.Errorf wrap inside the store carried that prefix
+// too — store/DB failures turned into HTTP 400.  We now use errors.Is
+// against the typed ErrValidation sentinel, so only validation errors
+// surface as 400; everything else is logged and returned 500.
 func writeStoreError(w http.ResponseWriter, err error) {
-	switch err {
-	case ErrEmptyKey:
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-	default:
-		// ErrInvalidLevel is wrapped via fmt.Errorf, so direct compare misses it.
-		// Use the underlying type to detect.
-		if isValidationError(err) {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		log.Error().Err(err).Msg("system_alerts: store error")
-		writeJSONError(w, http.StatusInternalServerError, "internal error")
-	}
-}
-
-func isValidationError(err error) bool {
 	if err == nil {
-		return false
+		return
 	}
-	// Cheap: match on the prefix our validators use.
-	s := err.Error()
-	return len(s) >= len("system_alerts:") && s[:len("system_alerts:")] == "system_alerts:"
+	if errors.Is(err, ErrValidation) {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Error().Err(err).Msg("system_alerts: store error")
+	writeJSONError(w, http.StatusInternalServerError, "internal error")
 }
