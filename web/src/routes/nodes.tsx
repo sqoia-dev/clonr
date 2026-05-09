@@ -4,9 +4,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
 } from "lucide-react"
-import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab } from "@/routes/node-detail-tabs"
+import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -31,7 +31,7 @@ import { StatusDot } from "@/components/StatusDot"
 import { useEventInvalidation } from "@/contexts/connection"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult } from "@/lib/types"
 import { nodeState, NODE_PROVIDERS } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
@@ -39,6 +39,67 @@ import { UserPicker } from "@/components/UserPicker"
 import { BootSettingsModal } from "@/components/BootSettingsModal"
 import { HostlistInput } from "@/components/HostlistInput"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
+
+// ─── Sprint 38: PROBE-3 — Reachability dots ──────────────────────────────────
+//
+// Each node row shows three compact dots: ping / ssh / bmc.
+// Dots are green (reachable), red (unreachable), or grey (not yet probed).
+// Tooltip shows the last-probed timestamp.
+// Source: GET /api/v1/nodes/{id}/probes   (Richard Bundle A)
+// The probe result is fetched per-node lazily when the row is first rendered
+// and cached for 60s (the server collects every 60s).
+
+const PROBE_LABELS = [
+  { key: "ping", label: "Ping" },
+  { key: "ssh",  label: "SSH"  },
+  { key: "bmc",  label: "BMC"  },
+] as const
+
+type ProbeKey = typeof PROBE_LABELS[number]["key"]
+
+function ReachabilityDots({ nodeId }: { nodeId: string }) {
+  const { data } = useQuery<ProbeResult>({
+    queryKey: ["node-probes", nodeId],
+    queryFn: () => apiFetch<ProbeResult>(`/api/v1/nodes/${nodeId}/probes`),
+    refetchInterval: 60_000,
+    staleTime: 55_000,
+    // Swallow 404/errors — not all nodes have probes configured.
+    retry: false,
+  })
+
+  const checkedAt = data?.checked_at
+    ? new Date(data.checked_at).toLocaleTimeString()
+    : null
+
+  return (
+    <TooltipProvider>
+      <div className="flex items-center gap-1" data-testid={`reachability-${nodeId}`}>
+        {PROBE_LABELS.map(({ key, label }) => {
+          const val: boolean | undefined = data ? (data[key as ProbeKey] as boolean) : undefined
+          const color =
+            val === true  ? "bg-status-healthy" :
+            val === false ? "bg-status-error" :
+            "bg-muted-foreground/30"
+          const tip = checkedAt
+            ? `${label}: ${val === true ? "up" : val === false ? "down" : "unknown"} (${checkedAt})`
+            : `${label}: not probed`
+          return (
+            <Tooltip key={key}>
+              <TooltipTrigger asChild>
+                <span
+                  className={`h-2 w-2 rounded-full shrink-0 ${color}`}
+                  aria-label={tip}
+                  data-testid={`probe-dot-${key}`}
+                />
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">{tip}</TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </div>
+    </TooltipProvider>
+  )
+}
 
 // ─── Zod-like validation helpers (no extra dep) ──────────────────────────────
 const hostnameRe = /^[a-z0-9-]{1,63}$/
@@ -899,6 +960,8 @@ export function NodesPage() {
                   </button>
                 </TableHead>
                 <TableHead scope="col">Image</TableHead>
+                {/* PROBE-3: reachability column */}
+                <TableHead scope="col" aria-label="Reachability probes (ping/ssh/bmc)">Reachability</TableHead>
                 {/* PWR-LIST-1: power column */}
                 <TableHead scope="col" aria-label="Power actions">Power</TableHead>
                 {advanced && (
@@ -949,6 +1012,10 @@ export function NodesPage() {
                         <span className="font-mono text-muted-foreground">{node.base_image_id.slice(0, 8)}</span>
                       )
                     })()}
+                  </TableCell>
+                  {/* PROBE-3: per-row reachability dots */}
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <ReachabilityDots nodeId={node.id} />
                   </TableCell>
                   {/* PWR-LIST-1..2: per-row power action icons */}
                   <TableCell onClick={(e) => e.stopPropagation()}>
@@ -1071,7 +1138,7 @@ interface NodeSheetProps {
 // ─── NodeSheet ────────────────────────────────────────────────────────────────
 // Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
 
-type NodeDetailTab = "overview" | "sensors" | "eventlog" | "console" | "deploylog" | "ipmi"
+type NodeDetailTab = "overview" | "sensors" | "extstats" | "eventlog" | "console" | "deploylog" | "ipmi"
 
 function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete }: NodeSheetProps) {
   const qc = useQueryClient()
@@ -1251,6 +1318,10 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                   <ScrollText className="h-3 w-3" />
                   Install Log
                 </TabsTrigger>
+                <TabsTrigger value="extstats" className="flex-1 text-xs gap-1">
+                  <Radio className="h-3 w-3" />
+                  Ext Stats
+                </TabsTrigger>
                 <TabsTrigger value="ipmi" className="flex-1 text-xs gap-1">
                   <Zap className="h-3 w-3" />
                   IPMI
@@ -1367,6 +1438,11 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
               {/* ── Install Log tab (STREAM-LOG-UI) ── */}
               <TabsContent value="deploylog" className="mt-2">
                 <DeployLogTab nodeId={node.id} primaryMac={node.primary_mac} />
+              </TabsContent>
+
+              {/* ── External Stats tab (Sprint 38 EXTERNAL-STATS) ── */}
+              <TabsContent value="extstats" className="mt-2">
+                <ExternalStatsTab nodeId={node.id} />
               </TabsContent>
 
               {/* ── IPMI tab (Sprint 34 UI B) ── */}
