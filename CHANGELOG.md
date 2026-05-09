@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased — Sprint 33 STREAM-LOG-PHASE
+
+Phase-tagged install-log streaming so the web UI's live tail can colour-group
+/ filter by deploy phase. The hardened sprint plan (`docs/SPRINT-PLAN.md`
+Sprint 33) confirmed both the on-node POST pipe (`pkg/client/logger.go` →
+`POST /api/v1/logs`) and the SSE broadcaster
+(`internal/server/handlers/logs.go` → `GET /api/v1/logs/stream`) already
+exist. The actual gap was per-line phase metadata: every entry shipped
+phase-blind, so the UI had no signal to group on. This change adds that
+missing field, threads it through every existing phase-transition site in
+the deploy CLI, and keeps the wire 100% backward-compat (`omitempty`).
+
+### Added
+
+- **`api.LogEntry.Phase` field** (`pkg/api/types.go`): new `Phase string` on
+  the wire, `omitempty`. Older servers / clients that don't know about it
+  ignore it; newer consumers (Dinesh's Install Log tab) colour-group the
+  live stream on it.
+- **`RemoteLogWriter.SetPhase()` / `Phase()`** (`pkg/client/logger.go`):
+  mirrors the existing `SetComponent` / `SetHostname` / `SetNodeMAC` pattern.
+  Stamps every subsequent zerolog line with the supplied phase. Buffer is
+  not retroactively rewritten — only lines emitted *after* the call get the
+  new phase, matching the UX expectation that the phase reflects "what was
+  happening when this log was emitted".
+- **Inline `phase` field override** (`pkg/client/logger.go:parseZerologLine`):
+  a `phase` field present on the zerolog JSON line takes precedence over the
+  writer-level phase. Mirrors the existing `component` precedence so callers
+  can override per-line via `deployLog.Info().Str("phase","X").Msg(…)`
+  without touching `SetPhase()` (the deploy `progressFn` already emits this).
+- **Phase wiring in `cmd/clustr/main.go`**: `runAutoDeployMode` and
+  `runAutoDeployImage` now call `remoteWriter.SetPhase(...)` at every phase
+  boundary — `hardware`, `register`, `bios`, `wait-for-assign`, `image-fetch`,
+  `preflight`, `multicast`, the deployer-emitted `partitioning` /
+  `formatting` / `downloading` / `extracting`, plus `finalizing` and
+  `deploy-complete`. The non-auto interactive deploy path uses the existing
+  inline `Str("phase", phase)` pattern in `progressFn`, which the new
+  override-precedence rule above picks up automatically.
+
+### Tests
+
+- `pkg/client/logger_test.go` (new): unit-level coverage of the phase-tagging
+  contract via `httptest.NewServer` standing in for the real `POST
+  /api/v1/logs` endpoint. Covers (a) the hardened-plan acceptance test
+  (`SetPhase("partitioning") → Phase=="partitioning"`), (b) phase
+  transitions across multiple Writes, (c) inline-phase override, (d) empty
+  phase by default for non-deploy contexts, (e) concurrent SetPhase / Write
+  with no race, (f) phase survives the WARN/ERROR urgent-flush path.
+
+### Wire shape (for Dinesh's UI consumer)
+
+The SSE event payload at
+`GET /api/v1/logs/stream?component=deploy&mac=<primary-mac>` is now:
+
+```jsonc
+data: {
+  "id": "<uuid>",
+  "node_mac": "aa:bb:cc:dd:ee:ff",
+  "hostname": "compute-01",
+  "level": "info",
+  "component": "deploy",
+  "phase": "partitioning",       // NEW — empty for pre-Sprint-33 streams
+  "message": "sgdisk --zap-all",
+  "fields": { ... },
+  "timestamp": "2026-05-09T..."
+}
+```
+
+`phase` is `omitempty` so the UI must treat empty/missing as "unknown / no
+group". Phase strings the UI should expect (today): `hardware`, `register`,
+`bios`, `wait-for-assign`, `image-fetch`, `preflight`, `multicast`,
+`partitioning`, `formatting`, `downloading`, `extracting`, `finalizing`,
+`deploy-complete`. The set is fixed-but-extensible — UI should treat unknown
+phases as a default colour rather than discard them.
+
+### Out of scope
+
+- DRACUT-REGEN, MULTICAST-JITTER, PRE-ZERO — separate Sprint 33 dispatch
+  (Richard's `feat/sprint-33-deploy-trio` branch).
+- The web-side log viewer (Dinesh's parallel branch).
+- Durable per-line phase persistence in `node_logs` — phase rides on the
+  in-memory broker only; durable rows stay phase-blind for now (the UI
+  consumes the live SSE stream, not the historical query). Cheap to add a
+  column later if we need it; deferring keeps the migration surface small.
+
 ## v0.1.22 — 2026-05-08
 
 LDAP readiness staleness fix. v0.1.21 made LDAP work end-to-end on

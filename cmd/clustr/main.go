@@ -918,6 +918,11 @@ func runAutoDeployMode() error {
 	// Set up remote log writer once we have the MAC.
 	remoteWriter := client.NewRemoteLogWriter(c, primaryMAC, hw.Hostname, client.WithComponent("deploy"))
 	defer remoteWriter.Close()
+	// Sprint 33 STREAM-LOG-PHASE: tag every shipped log line with the current
+	// deploy phase so the web UI can group/colour by phase. The discovery
+	// step has already run synchronously above; mark the post-discovery
+	// state explicitly so the first lines through the writer carry context.
+	remoteWriter.SetPhase("hardware")
 	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr}, remoteWriter)
 	deployLog := zerolog.New(multi).With().Timestamp().Logger()
 	// Wire the deploy package so subprocess output goes through the same logger.
@@ -932,6 +937,7 @@ func runAutoDeployMode() error {
 		return fmt.Errorf("marshal hardware profile: %w", err)
 	}
 
+	remoteWriter.SetPhase("register")
 	printPhase(phaseInProgress, "Registering with server")
 	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{
 		HardwareProfile:  hwJSON,
@@ -968,6 +974,7 @@ func runAutoDeployMode() error {
 	// has nothing else to do) but only a warning for normal deploys.
 	var biosApplyErr error
 	if regResp.BiosProfile != nil {
+		remoteWriter.SetPhase("bios")
 		biosApplyErr = applyBiosProfileInInitramfs(ctx, regResp.BiosProfile, deployLog)
 		if biosApplyErr != nil && regResp.Action != "bios_only" {
 			// Non-fatal for normal deploys — continue with image.
@@ -1011,6 +1018,7 @@ func runAutoDeployMode() error {
 		return runAutoDeployImage(ctx, c, *regResp.NodeConfig, deployLog, remoteWriter)
 
 	case "wait":
+		remoteWriter.SetPhase("wait-for-assign")
 		printDeployHeader(nodeName, "waiting for assignment", cfg.ServerURL)
 		printPhase(phaseInProgress, "Waiting for admin to assign an image (polling every 30s)")
 		deployLog.Info().Msg("entering wait loop — assign an image via the clustr UI or API")
@@ -1278,6 +1286,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	defer reporter.Complete()
 
 	// Fetch image details.
+	remoteWriter.SetPhase("image-fetch")
 	reporter.SetMessage("Fetching image details")
 	printPhase(phaseInProgress, "Fetching image details")
 	img, err := c.GetImage(ctx, nodeCfg.BaseImageID)
@@ -1304,6 +1313,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		Str("format", string(img.Format)).Msg("image details fetched")
 
 	// Resolve hardware for preflight.
+	remoteWriter.SetPhase("hardware")
 	reporter.SetMessage("Discovering hardware")
 	printPhase(phaseInProgress, "Discovering hardware")
 	hw, err := hardware.Discover()
@@ -1371,6 +1381,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 		}
 	}
 
+	remoteWriter.SetPhase("preflight")
 	reporter.SetMessage("Running preflight checks")
 	printPhase(phaseInProgress, "Running preflight checks")
 	deployLog.Info().Msg("running preflight checks")
@@ -1403,6 +1414,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	var multicastSessionID string
 	multicastEnabled := os.Getenv("CLUSTR_MULTICAST_ENABLED") == "1"
 	if multicastEnabled {
+		remoteWriter.SetPhase("multicast")
 		imageStream, multicastSessionID = attemptMulticastReceive(ctx, c, img.ID, nodeCfg, deployLog)
 	}
 	defer func() {
@@ -1432,6 +1444,10 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 				printPhase(phaseDone, phaseLabel(lastPhase))
 			}
 			lastPhase = phase
+			// Sprint 33 STREAM-LOG-PHASE: stamp every line emitted from the
+			// deployer (and any subprocess output it spawns) with the current
+			// phase so the UI can colour-group the stream.
+			remoteWriter.SetPhase(phase)
 			deployLog.Info().Str("phase", phase).Msg("deployment phase started")
 		}
 		printProgressBar(phaseLabel(phase), written, total)
@@ -1517,6 +1533,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	elapsed := time.Since(start).Round(time.Second)
 	deployLog.Info().Str("duration", elapsed.String()).Msg("image write complete")
 
+	remoteWriter.SetPhase("finalizing")
 	printPhase(phaseInProgress, "Finalizing node (hostname, network, SSH keys, bootloader)")
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).Msg("applying node configuration (hostname, network, SSH keys)")
 	reporter.StartPhase("finalizing", 0)
@@ -1620,6 +1637,7 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	//
 	// This replaces the old FlipToDisk/SetNextBoot(disk) approach: the PXE
 	// server handles boot routing, no BMC interaction required.
+	remoteWriter.SetPhase("deploy-complete")
 	printPhase(phaseInProgress, "Reporting deploy-complete to server")
 	reporter.StartPhase("deploy-complete", 0)
 	deployLog.Info().Str("hostname", nodeCfg.Hostname).

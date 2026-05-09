@@ -37,8 +37,13 @@ type RemoteLogWriter struct {
 	bufferSize  int
 	flushEvery  time.Duration
 
-	mu      sync.Mutex
-	buffer  []api.LogEntry
+	mu     sync.Mutex
+	buffer []api.LogEntry
+	// phase is the deploy phase active at the moment Write() is called.
+	// Stamped onto every emitted LogEntry so the web UI can group/colour by
+	// phase (Sprint 33 STREAM-LOG-PHASE). Callers update this via SetPhase()
+	// — typically immediately before each ProgressReporter.StartPhase() call.
+	phase string
 
 	flushCh chan struct{}
 	done    chan struct{}
@@ -114,6 +119,28 @@ func (w *RemoteLogWriter) SetHostname(hostname string) {
 	w.mu.Unlock()
 }
 
+// SetPhase updates the deploy-phase tag stamped on future log entries
+// (Sprint 33 STREAM-LOG-PHASE). Pass "" to clear. Safe to call from any
+// goroutine; the existing buffer is not retroactively rewritten — the next
+// Write() call picks up the new phase.
+//
+// Typical wiring: call this immediately before each
+// ProgressReporter.StartPhase() so the next batch of log lines carries the
+// matching phase string the UI can colour-group on.
+func (w *RemoteLogWriter) SetPhase(phase string) {
+	w.mu.Lock()
+	w.phase = phase
+	w.mu.Unlock()
+}
+
+// Phase returns the currently-stamped deploy phase. Useful in tests and for
+// audit logging at phase-transition boundaries. Safe for concurrent use.
+func (w *RemoteLogWriter) Phase() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.phase
+}
+
 // Write implements io.Writer. Each call is expected to be a single zerolog
 // JSON line. Non-JSON input is shipped as a raw "info" message.
 //
@@ -129,9 +156,10 @@ func (w *RemoteLogWriter) Write(p []byte) (int, error) {
 	mac := w.nodeMAC
 	host := w.hostname
 	comp := w.component
+	phase := w.phase
 	w.mu.Unlock()
 
-	entry := w.parseZerologLine(p, mac, host, comp)
+	entry := w.parseZerologLine(p, mac, host, comp, phase)
 	if entry == nil {
 		return n, nil
 	}
@@ -253,8 +281,9 @@ func (w *RemoteLogWriter) flusher() {
 
 // parseZerologLine parses a zerolog JSON line into a LogEntry. Returns nil for
 // lines that cannot be parsed or that are clearly not log events.
-// mac, hostname, and component are pre-snapshotted identity values from the caller.
-func (w *RemoteLogWriter) parseZerologLine(p []byte, mac, hostname, component string) *api.LogEntry {
+// mac, hostname, component, and phase are pre-snapshotted identity values
+// from the caller. phase may be "" for non-deploy contexts.
+func (w *RemoteLogWriter) parseZerologLine(p []byte, mac, hostname, component, phase string) *api.LogEntry {
 	line := bytes.TrimSpace(p)
 	if len(line) == 0 || line[0] != '{' {
 		return nil
@@ -271,6 +300,7 @@ func (w *RemoteLogWriter) parseZerologLine(p []byte, mac, hostname, component st
 		NodeMAC:   mac,
 		Hostname:  hostname,
 		Component: component,
+		Phase:     phase,
 		Timestamp: time.Now().UTC(),
 		Fields:    make(map[string]interface{}),
 	}
@@ -295,6 +325,14 @@ func (w *RemoteLogWriter) parseZerologLine(p []byte, mac, hostname, component st
 			_ = json.Unmarshal(v, &s)
 			if s != "" {
 				entry.Component = s
+			}
+		case "phase":
+			// A "phase" field on the log line takes precedence over the writer default.
+			// Mirrors the "component" precedence: callers can override per-line via
+			// `deployLog.Info().Str("phase", "X").Msg(...)` without touching SetPhase().
+			_ = json.Unmarshal(v, &s)
+			if s != "" {
+				entry.Phase = s
 			}
 		default:
 			// All other fields go into Fields map — keep it sparse.
