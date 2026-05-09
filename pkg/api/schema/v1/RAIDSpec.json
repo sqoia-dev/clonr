@@ -25,6 +25,12 @@
         },
         "force_software": {
           "type": "boolean"
+        },
+        "raid_type": {
+          "type": "string"
+        },
+        "imsm_container": {
+          "type": "string"
         }
       },
       "additionalProperties": false,

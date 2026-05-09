@@ -132,6 +132,12 @@
         },
         "force_software": {
           "type": "boolean"
+        },
+        "raid_type": {
+          "type": "string"
+        },
+        "imsm_container": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
@@ -160,6 +166,9 @@
         "layout": {
           "$ref": "#/$defs/DiskLayout"
         },
+        "firmware_kind": {
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -176,6 +185,7 @@
         "name",
         "captured_at",
         "layout",
+        "firmware_kind",
         "created_at",
         "updated_at"
       ]
