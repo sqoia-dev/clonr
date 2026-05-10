@@ -5,12 +5,51 @@
  *   1. Nodes table rows have data-testid="node-row-<id>" (proves click target wired to navigate)
  *   2. NodeDetailPage renders node identity + back link when node loads successfully
  *   3. NodeDetailPage shows error state when fetch fails
+ *   4. NodeDetailPage shows no hostname while loading
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import * as React from "react"
 import type { NodeConfig, ListNodesResponse } from "../lib/types"
+
+// ─── Mock useEventInvalidation so ConnectionProvider is not needed ────────────
+//
+// NodesPage and NodeDetailPage both call useEventInvalidation which requires
+// ConnectionProvider context. We mock the entire contexts/connection module so
+// every hook is a no-op — these tests only care about fetch / render behaviour,
+// not SSE event delivery.
+
+vi.mock("../contexts/connection", () => ({
+  ConnectionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useConnectionStatus: () => ({ status: "open", paused: false, retry: () => {} }),
+  useEventSubscription: () => {},
+  useEventInvalidation: () => {},
+  useConnection: () => ({
+    status: "open",
+    paused: false,
+    retry: () => {},
+    subscribe: () => () => {},
+  }),
+}))
+
+// ─── Mock router hooks at module level ────────────────────────────────────────
+
+const NODE_ID = "node-abc-001"
+const mockNavigate = vi.fn()
+
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>()
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+    useSearch: () => ({}),
+    useParams: () => ({ nodeId: NODE_ID }),
+    Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; [k: string]: unknown }) =>
+      <a href={String(to)} {...(rest as React.HTMLAttributes<HTMLAnchorElement>)}>{children}</a>,
+  }
+})
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -18,6 +57,14 @@ function makeQC() {
   return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+}
+
+function withProviders(ui: React.ReactElement) {
+  return render(
+    <QueryClientProvider client={makeQC()}>
+      {ui}
+    </QueryClientProvider>
+  )
 }
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>
@@ -48,7 +95,7 @@ afterEach(() => {
 
 function makeNode(overrides: Partial<NodeConfig> = {}): NodeConfig {
   return {
-    id: "node-abc-001",
+    id: NODE_ID,
     hostname: "compute-01",
     hostname_auto: false,
     fqdn: "compute-01.cluster.local",
@@ -70,20 +117,6 @@ function makeNode(overrides: Partial<NodeConfig> = {}): NodeConfig {
 
 const sampleNode = makeNode()
 
-// ─── Mock router hooks at module level ────────────────────────────────────────
-
-vi.mock("@tanstack/react-router", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@tanstack/react-router")>()
-  return {
-    ...actual,
-    useNavigate: () => vi.fn(),
-    useSearch: () => ({}),
-    useParams: () => ({ nodeId: sampleNode.id }),
-    Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string; [k: string]: unknown }) =>
-      <a href={to} {...rest}>{children}</a>,
-  }
-})
-
 // ─── Test 1: Nodes table rows have data-testid for click targeting ────────────
 
 describe("Nodes list — row click wiring", () => {
@@ -94,7 +127,7 @@ describe("Nodes list — row click wiring", () => {
     }
 
     fetchHandler = (url) => {
-      if (url.includes("/api/v1/nodes") && !url.includes(`/api/v1/nodes/${sampleNode.id}`)) {
+      if (url.includes("/api/v1/nodes") && !url.includes(`/api/v1/nodes/${NODE_ID}`)) {
         return Promise.resolve(jsonOk(nodesResp))
       }
       if (url.includes("/api/v1/images")) {
@@ -105,18 +138,14 @@ describe("Nodes list — row click wiring", () => {
 
     const { NodesPage } = await import("../routes/nodes")
 
-    render(
-      <QueryClientProvider client={makeQC()}>
-        <NodesPage />
-      </QueryClientProvider>
-    )
+    withProviders(<NodesPage />)
 
     await waitFor(() => {
       expect(screen.getByText("compute-01")).toBeInTheDocument()
     })
 
     // Each node row must have the testid so tests can assert click targeting.
-    const row = screen.getByTestId(`node-row-${sampleNode.id}`)
+    const row = screen.getByTestId(`node-row-${NODE_ID}`)
     expect(row).toBeInTheDocument()
   })
 })
@@ -126,7 +155,7 @@ describe("Nodes list — row click wiring", () => {
 describe("NodeDetailPage — renders node identity", () => {
   it("should render hostname and back link after fetching node", async () => {
     fetchHandler = (url) => {
-      if (url.includes(`/api/v1/nodes/${sampleNode.id}`)) {
+      if (url.includes(`/api/v1/nodes/${NODE_ID}`)) {
         return Promise.resolve(jsonOk(sampleNode))
       }
       if (url.includes("/api/v1/images")) {
@@ -140,11 +169,7 @@ describe("NodeDetailPage — renders node identity", () => {
 
     const { NodeDetailPage } = await import("../routes/nodes")
 
-    render(
-      <QueryClientProvider client={makeQC()}>
-        <NodeDetailPage />
-      </QueryClientProvider>
-    )
+    withProviders(<NodeDetailPage />)
 
     await waitFor(() => {
       expect(screen.getByText("compute-01")).toBeInTheDocument()
@@ -156,7 +181,7 @@ describe("NodeDetailPage — renders node identity", () => {
 
   it("should show error message when node fetch fails", async () => {
     fetchHandler = (url) => {
-      if (url.includes(`/api/v1/nodes/${sampleNode.id}`)) {
+      if (url.includes(`/api/v1/nodes/${NODE_ID}`)) {
         return Promise.resolve(
           new Response(JSON.stringify({ error: "not found" }), { status: 404 })
         )
@@ -166,11 +191,7 @@ describe("NodeDetailPage — renders node identity", () => {
 
     const { NodeDetailPage } = await import("../routes/nodes")
 
-    render(
-      <QueryClientProvider client={makeQC()}>
-        <NodeDetailPage />
-      </QueryClientProvider>
-    )
+    withProviders(<NodeDetailPage />)
 
     await waitFor(() => {
       expect(screen.getByText(/failed to load node/i)).toBeInTheDocument()
@@ -181,17 +202,13 @@ describe("NodeDetailPage — renders node identity", () => {
 // ─── Test 3: NodeDetailPage loading state ─────────────────────────────────────
 
 describe("NodeDetailPage — loading skeleton", () => {
-  it("should not show hostname while loading", () => {
+  it("should not show hostname while loading", async () => {
     // Never resolve — keeps loading state
     fetchHandler = () => new Promise(() => {})
 
-    const { NodeDetailPage } = require("../routes/nodes")
+    const { NodeDetailPage } = await import("../routes/nodes")
 
-    render(
-      <QueryClientProvider client={makeQC()}>
-        <NodeDetailPage />
-      </QueryClientProvider>
-    )
+    withProviders(<NodeDetailPage />)
 
     // During load the hostname is not yet rendered
     expect(screen.queryByText("compute-01")).not.toBeInTheDocument()

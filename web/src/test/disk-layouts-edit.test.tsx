@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { DiskLayoutsPage } from "../routes/disk-layouts"
@@ -285,9 +285,8 @@ describe("DiskLayoutsPage — edit JSON validation", () => {
 
     const jsonArea = await screen.findByTestId("edit-layout-json")
 
-    // Replace with invalid JSON
-    await user.clear(jsonArea)
-    await user.type(jsonArea, "{ invalid json }")
+    // Replace with invalid JSON — fireEvent.change avoids userEvent curly-brace descriptor issue
+    fireEvent.change(jsonArea, { target: { value: "{ invalid json }" } })
 
     const saveBtn = screen.getByTestId("edit-layout-save")
     await user.click(saveBtn)
