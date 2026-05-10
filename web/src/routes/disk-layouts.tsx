@@ -63,6 +63,29 @@ interface DuplicateState {
   sourceName: string
 }
 
+// ── buildCopyName ─────────────────────────────────────────────────────────────
+
+/**
+ * Generate a non-colliding copy name given the set of existing layout names.
+ *
+ * Algorithm:
+ *  1. Strip any trailing " (copy N)" or " (copy)" suffix from the source name
+ *     so duplicating a copy doesn't produce "Foo (copy) (copy)".
+ *  2. Try "<base> (copy)".  If that already exists in the catalog, increment:
+ *     "<base> (copy 2)", "<base> (copy 3)", …
+ *
+ * Exported for unit testing.
+ */
+export function buildCopyName(sourceName: string, existingNames: Set<string>): string {
+  const base = sourceName.replace(/ \(copy(?: \d+)?\)$/, "")
+  const candidate = `${base} (copy)`
+  if (!existingNames.has(candidate)) return candidate
+  for (let n = 2; ; n++) {
+    const numbered = `${base} (copy ${n})`
+    if (!existingNames.has(numbered)) return numbered
+  }
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function DiskLayoutsPage() {
@@ -102,10 +125,13 @@ export function DiskLayoutsPage() {
         `/api/v1/disk-layouts/${sourceId}`
       )
       const src = resp.disk_layout
+      // Build a non-colliding name using the catalog snapshot already loaded.
+      const existingNames = new Set((data?.layouts ?? []).map((l) => l.name))
+      const copyName = buildCopyName(sourceName, existingNames)
       return apiFetch<{ disk_layout: StoredDiskLayout }>("/api/v1/disk-layouts", {
         method: "POST",
         body: JSON.stringify({
-          name: `${sourceName} (copy)`,
+          name: copyName,
           firmware_kind: src.firmware_kind,
           layout_json: JSON.stringify(src.layout),
         }),

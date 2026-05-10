@@ -8,13 +8,14 @@
  *   4. DiskLayoutPicker shows all on an "any"-firmware node
  *   5. Duplicate flow — POST body shape asserts name suffix and firmware_kind
  *   6. Override flow: set override → effective source = "node"; clear → returns to catalog
+ *   7. buildCopyName — non-colliding duplicate name generation (CODEX-FIX-4 Issue #3)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { DiskLayoutsPage } from "../routes/disk-layouts"
+import { DiskLayoutsPage, buildCopyName } from "../routes/disk-layouts"
 import { DiskLayoutPicker } from "../components/DiskLayoutPicker"
 import type { StoredDiskLayout, ListDiskLayoutsResponse } from "../lib/types"
 
@@ -328,5 +329,41 @@ describe("DiskLayoutSection — clear override via PUT", () => {
     const body = JSON.parse(clearedBodies[0])
     expect(body.clear_layout_override).toBe(true)
     expect(body.layout).toBeUndefined()
+  })
+})
+
+// ─── Test 7: buildCopyName — CODEX-FIX-4 Issue #3 ────────────────────────────
+
+describe("buildCopyName — non-colliding duplicate name generation", () => {
+  it("should return '<src> (copy)' when no copy exists yet", () => {
+    const existing = new Set(["my-layout", "other-layout"])
+    expect(buildCopyName("my-layout", existing)).toBe("my-layout (copy)")
+  })
+
+  it("should return '<src> (copy 2)' when '<src> (copy)' already exists", () => {
+    const existing = new Set(["my-layout", "my-layout (copy)"])
+    expect(buildCopyName("my-layout", existing)).toBe("my-layout (copy 2)")
+  })
+
+  it("should return '<src> (copy 3)' when copy and copy 2 already exist", () => {
+    const existing = new Set(["my-layout", "my-layout (copy)", "my-layout (copy 2)"])
+    expect(buildCopyName("my-layout", existing)).toBe("my-layout (copy 3)")
+  })
+
+  it("duplicating '<src> (copy)' should yield '<src> (copy 2)', not '<src> (copy) (copy)'", () => {
+    // This is the key double-copy regression: duplicating an existing copy must
+    // strip the " (copy)" suffix and increment from the base name.
+    const existing = new Set(["my-layout", "my-layout (copy)"])
+    expect(buildCopyName("my-layout (copy)", existing)).toBe("my-layout (copy 2)")
+  })
+
+  it("duplicating '<src> (copy 2)' should yield '<src> (copy 3)'", () => {
+    const existing = new Set(["my-layout", "my-layout (copy)", "my-layout (copy 2)"])
+    expect(buildCopyName("my-layout (copy 2)", existing)).toBe("my-layout (copy 3)")
+  })
+
+  it("should handle names with no prior copies gracefully", () => {
+    const existing = new Set<string>()
+    expect(buildCopyName("brand-new-layout", existing)).toBe("brand-new-layout (copy)")
   })
 })
