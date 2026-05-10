@@ -3,7 +3,7 @@ import { AppShell } from "@/components/AppShell"
 import { LoginPage } from "@/routes/login"
 import { SetupPage } from "@/routes/setup"
 import { SetPasswordPage } from "@/routes/set-password"
-import { NodesPage } from "@/routes/nodes"
+import { NodesPage, NodeDetailPage } from "@/routes/nodes"
 import { ImagesPage } from "@/routes/images"
 import { ActivityPage } from "@/routes/activity"
 import { SettingsPage } from "@/routes/settings"
@@ -166,6 +166,16 @@ const diskLayoutsRoute = createRoute({
   component: DiskLayoutsPage,
 })
 
+const nodeDetailRoute = createRoute({
+  getParentRoute: () => protectedLayout,
+  path: "/nodes/$nodeId",
+  component: NodeDetailPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    reimage: typeof search.reimage === "string" ? search.reimage : undefined,
+    deleteNode: typeof search.deleteNode === "string" ? search.deleteNode : undefined,
+  }),
+})
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   setupRoute,
@@ -173,6 +183,7 @@ const routeTree = rootRoute.addChildren([
   protectedLayout.addChildren([
     indexRoute,
     nodesRoute,
+    nodeDetailRoute,
     imagesRoute,
     activityRoute,
     settingsRoute,
