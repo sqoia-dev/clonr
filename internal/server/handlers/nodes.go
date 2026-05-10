@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -510,15 +511,37 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sprint 36 Day 2: reactive-config observer notification.
+	// Sprint 36 Day 2–3: reactive-config observer notifications.
 	// Fire after the DB write so the observer renders against committed state.
-	// Only hostname is wired for Day 2; further keys follow in Day 3.
-	if h.ConfigObserverNotify != nil && existing.Hostname != cfg.Hostname {
-		h.ConfigObserverNotify(
-			[]string{"nodes.*.hostname"},
-			id,
-			cfg,
-		)
+	if h.ConfigObserverNotify != nil {
+		// hostname plugin: fires when hostname changes.
+		if existing.Hostname != cfg.Hostname {
+			h.ConfigObserverNotify(
+				[]string{"nodes.*.hostname"},
+				id,
+				cfg,
+			)
+		}
+		// hosts plugin: fires when hostname changes (the cluster-wide hostname→IP
+		// mapping changes, so every connected node's /etc/hosts block is stale).
+		// Note: a full AllNodes push for every node is handled server-side in
+		// pushHostsPlugin; the notify here marks the cluster_hosts key dirty for
+		// the observer's hash-tracking pass.
+		if existing.Hostname != cfg.Hostname {
+			h.ConfigObserverNotify(
+				[]string{"nodes.*.cluster_hosts"},
+				id,
+				cfg,
+			)
+		}
+		// limits plugin: fires when node tags change (role-based limit profiles).
+		if !reflect.DeepEqual(existing.Tags, cfg.Tags) {
+			h.ConfigObserverNotify(
+				[]string{"nodes.*.tags"},
+				id,
+				cfg,
+			)
+		}
 	}
 
 	// S6-6: If the group assignment changed, propagate through node_group_memberships.

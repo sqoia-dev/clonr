@@ -1104,17 +1104,33 @@ func (s *Server) buildRouter() chi.Router {
 		LookupDHCPLease: s.lookupDHCPLease,
 		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
 		ServerIP:        s.cfg.PXE.ServerIP,
-		// Sprint 36 Day 2: reactive-config observer notification.
-		// Fires after a successful hostname DB write; renders the hostname
-		// plugin inline and pushes a targeted config_push to the node.
-		// Also calls config.Notify for hash tracking via the observer.
+		// Sprint 36 Day 2–3: reactive-config observer notification.
+		// Fires after a successful node DB write; renders and pushes the
+		// affected plugins inline. config.Notify drives hash tracking via the
+		// observer; the push* methods deliver the WS config_push message.
 		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
 			state := config.ClusterState{
 				NodeID:     nodeID,
 				NodeConfig: cfg,
 			}
 			config.Notify(changed, state)
-			s.pushHostnamePlugin(nodeID, cfg)
+
+			// Dispatch to the appropriate plugin push based on which key changed.
+			for _, key := range changed {
+				switch key {
+				case "nodes.*.hostname":
+					s.pushHostnamePlugin(nodeID, cfg)
+				case "nodes.*.cluster_hosts":
+					// hosts plugin needs the full node roster for the cluster-wide
+					// /etc/hosts block. List all nodes from the DB and push to the
+					// changed node. Non-fatal on DB error — node picks up on next deploy.
+					if allNodes, err := s.db.ListNodeConfigs(context.Background(), ""); err == nil {
+						s.pushHostsPlugin(nodeID, cfg, allNodes)
+					}
+				case "nodes.*.tags":
+					s.pushLimitsPlugin(nodeID, cfg)
+				}
+			}
 		},
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{
@@ -1381,6 +1397,10 @@ func (s *Server) buildRouter() chi.Router {
 		reactiveConfigPluginsOnce.Do(func() {
 			config.SetAlertWriter(s.systemAlertStore)
 			config.Register(plugins.HostnamePlugin{})
+			// Sprint 36 Day 3: convert sssd, hosts, limits to Plugin interface.
+			config.Register(plugins.SSSDPlugin{})
+			config.Register(plugins.HostsPlugin{})
+			config.Register(plugins.LimitsPlugin{})
 		})
 
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
