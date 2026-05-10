@@ -487,11 +487,36 @@ func withChiParam(r *http.Request, name, value string) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 }
 
+// makeTestImageUUID creates a BaseImage with a valid UUID as its ID (required for
+// handlers that validate imageID against the UUID regexp, e.g. ServeStatelessInitramfs).
+func makeTestImageUUID(t *testing.T, d *db.DB, firmware api.ImageFirmware) string {
+	t.Helper()
+	// Use a fixed, well-formed UUID so the handler's UUID regexp accepts it.
+	imgID := "6b875781-aaaa-bbbb-cccc-ddddeeeeffff"
+	img := api.BaseImage{
+		ID:        imgID,
+		Name:      "test-stateless-image-" + string(firmware),
+		Version:   "1.0",
+		OS:        "rocky",
+		Arch:      "x86_64",
+		Status:    api.ImageStatusReady,
+		Format:    api.ImageFormatFilesystem,
+		Firmware:  firmware,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := d.CreateBaseImage(t.Context(), img); err != nil {
+		t.Fatalf("makeTestImageUUID CreateBaseImage: %v", err)
+	}
+	return imgID
+}
+
 // TestStatelessInitrdRouteServes200ForKnownImage verifies that a GET for a known
 // image's stateless initramfs returns 200 and a non-empty body.
 func TestStatelessInitrdRouteServes200ForKnownImage(t *testing.T) {
 	d := openTestDB(t)
-	imgID := makeTestImage(t, d, api.FirmwareUEFI)
+	// Must use a UUID-format imageID because ServeStatelessInitramfs validates it
+	// against the UUID regexp before DB lookup.
+	imgID := makeTestImageUUID(t, d, api.FirmwareUEFI)
 
 	// Write a stub stateless initramfs file into a temp BootDir.
 	bootDir := t.TempDir()
