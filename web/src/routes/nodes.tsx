@@ -1472,7 +1472,9 @@ export function NodesPage() {
           autoReimage={autoReimage}
           autoDelete={autoDelete}
           onOperatingModeSaved={(mode) =>
-            setSelectedNode((prev) => (prev ? { ...prev, operating_mode: mode } : prev))
+            setSelectedNode((prev) =>
+              prev ? { ...prev, operating_mode: mode as NodeConfig["operating_mode"] } : prev
+            )
           }
         />
       )}
