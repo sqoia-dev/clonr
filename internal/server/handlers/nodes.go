@@ -149,6 +149,20 @@ type NodesHandler struct {
 	// WebhookDispatcher, when non-nil, is called to fan out webhook events on
 	// deploy-complete, deploy-failed, and verify-boot callbacks (S4-2).
 	WebhookDispatcher *webhook.Dispatcher
+
+	// ConfigObserverNotify, when non-nil, is called after a successful node
+	// config update to fire the reactive-config observer for changed keys.
+	//
+	// Sprint 36 Day 2: wired by server.go to config.Notify + hostname push so
+	// a hostname change triggers a targeted config_push to the node.
+	//
+	// Arguments:
+	//   changed — the config-tree paths that changed (e.g. "nodes.*.hostname")
+	//   nodeID  — the ID of the updated node
+	//   cfg     — the new NodeConfig snapshot for nodeID
+	//
+	// Nil when the reactive-config observer is not running.
+	ConfigObserverNotify func(changed []string, nodeID string, cfg api.NodeConfig)
 }
 
 // sanitizeNodeConfig returns cfg with sensitive fields in PowerProvider and BMC
@@ -494,6 +508,17 @@ func (h *NodesHandler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("update node config")
 		writeError(w, err)
 		return
+	}
+
+	// Sprint 36 Day 2: reactive-config observer notification.
+	// Fire after the DB write so the observer renders against committed state.
+	// Only hostname is wired for Day 2; further keys follow in Day 3.
+	if h.ConfigObserverNotify != nil && existing.Hostname != cfg.Hostname {
+		h.ConfigObserverNotify(
+			[]string{"nodes.*.hostname"},
+			id,
+			cfg,
+		)
 	}
 
 	// S6-6: If the group assignment changed, propagate through node_group_memberships.

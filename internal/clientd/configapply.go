@@ -24,8 +24,12 @@ type configTarget struct {
 // Only targets listed here may be written by a config_push message.
 // Paths are relative to the filesystem root so they compose cleanly with any rootDir.
 var configTargets = map[string]configTarget{
-	"hosts":  {relPath: "etc/hosts", mode: 0644, applyAction: nil},
-	"sssd":   {relPath: "etc/sssd/sssd.conf", mode: 0600, applyAction: restartService("sssd")},
+	// Sprint 36 Day 2: hostname target for the reactive-config observer push.
+	// No restart needed — /etc/hostname is read at boot; live hostname is not
+	// changed by this write (that's a separate sysctl/hostnamectl concern).
+	"hostname": {relPath: "etc/hostname", mode: 0644, applyAction: nil},
+	"hosts":    {relPath: "etc/hosts", mode: 0644, applyAction: nil},
+	"sssd":     {relPath: "etc/sssd/sssd.conf", mode: 0600, applyAction: restartService("sssd")},
 	"chrony": {relPath: "etc/chrony.conf", mode: 0644, applyAction: restartService("chronyd")},
 	"ntp":    {relPath: "etc/ntp.conf", mode: 0644, applyAction: restartService("ntpd")},
 	"resolv": {relPath: "etc/resolv.conf", mode: 0644, applyAction: nil},
