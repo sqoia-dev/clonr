@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/config"
+	"github.com/sqoia-dev/clustr/internal/config/plugins"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/image"
 	ldapmodule "github.com/sqoia-dev/clustr/internal/ldap"
@@ -1097,6 +1098,18 @@ func (s *Server) buildRouter() chi.Router {
 		LookupDHCPLease: s.lookupDHCPLease,
 		DHCPSubnetCIDR:  s.cfg.PXE.SubnetCIDR,
 		ServerIP:        s.cfg.PXE.ServerIP,
+		// Sprint 36 Day 2: reactive-config observer notification.
+		// Fires after a successful hostname DB write; renders the hostname
+		// plugin inline and pushes a targeted config_push to the node.
+		// Also calls config.Notify for hash tracking via the observer.
+		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
+			state := config.ClusterState{
+				NodeID:     nodeID,
+				NodeConfig: cfg,
+			}
+			config.Notify(changed, state)
+			s.pushHostnamePlugin(nodeID, cfg)
+		},
 	}
 	nodeGroups := &handlers.NodeGroupsHandler{
 		DB:                 s.db,
@@ -1353,6 +1366,13 @@ func (s *Server) buildRouter() chi.Router {
 		// StartBackgroundWorkers; the routes are mounted in the auth-gated /api/v1
 		// sub-router below.
 		s.systemAlertStore = systemalerts.NewStore(s.db)
+
+		// ─── Sprint 36: reactive-config plugin registration ──────────────────────
+		// Must run after systemAlertStore is initialised so alert-writing is
+		// available to the observer goroutines. buildRouter is called once (from
+		// New), so Register does not panic from duplicate-name collision.
+		config.SetAlertWriter(s.systemAlertStore)
+		config.Register(plugins.HostnamePlugin{})
 
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
