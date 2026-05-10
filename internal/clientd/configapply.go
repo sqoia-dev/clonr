@@ -30,6 +30,10 @@ var configTargets = map[string]configTarget{
 	"hostname": {relPath: "etc/hostname", mode: 0644, applyAction: nil},
 	"hosts":    {relPath: "etc/hosts", mode: 0644, applyAction: nil},
 	"sssd":     {relPath: "etc/sssd/sssd.conf", mode: 0600, applyAction: restartService("sssd")},
+	// Sprint 36 Day 3: limits plugin — anchored writes to /etc/security/limits.conf.
+	// No restart needed: PAM reads limits.conf on each login, so changes take effect
+	// at next session open without requiring any service restart.
+	"limits": {relPath: "etc/security/limits.conf", mode: 0644, applyAction: nil},
 	"chrony": {relPath: "etc/chrony.conf", mode: 0644, applyAction: restartService("chronyd")},
 	"ntp":    {relPath: "etc/ntp.conf", mode: 0644, applyAction: restartService("ntpd")},
 	"resolv": {relPath: "etc/resolv.conf", mode: 0644, applyAction: nil},

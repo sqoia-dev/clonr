@@ -1,13 +1,14 @@
 package handlers
 
-// nodes_observer_test.go — Sprint 36 Day 2
+// nodes_observer_test.go — Sprint 36 Day 2–3
 //
 // Tests that UpdateNode fires ConfigObserverNotify with the correct arguments
-// when a hostname changes, and that it does NOT fire when the hostname is
-// unchanged.
+// when a hostname or tags change, and that it does NOT fire when the relevant
+// fields are unchanged.
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,12 +33,10 @@ func (c *captureNotifyArgs) notify(changed []string, nodeID string, cfg api.Node
 }
 
 // TestUpdateNodeConfig_FiresNotifyForHostnameChange verifies that UpdateNode
-// calls ConfigObserverNotify with:
-//   - the hostname watch-key ("nodes.*.hostname")
-//   - the correct node ID
-//   - the updated cfg with the new hostname
-//
-// when the PUT request changes the node's hostname.
+// calls ConfigObserverNotify at least once with the hostname watch-key when
+// the PUT request changes the node's hostname. Day 3 note: a hostname change
+// now fires a second call for the cluster_hosts watch-key (hosts plugin), so
+// this test asserts "at least once" rather than "exactly once".
 func TestUpdateNodeConfig_FiresNotifyForHostnameChange(t *testing.T) {
 	d := openTestDB(t)
 
@@ -49,10 +48,23 @@ func TestUpdateNodeConfig_FiresNotifyForHostnameChange(t *testing.T) {
 	)
 	node := makeTestNode(t, d, mac, oldHostname)
 
-	cap := &captureNotifyArgs{}
+	// Track all notified keys.
+	var mu sync.Mutex
+	allNotifiedKeys := []string{}
+	var notifyCalled atomic.Int32
+	var lastNodeID string
+	var lastCfg api.NodeConfig
+
 	h := &NodesHandler{
-		DB:                   d,
-		ConfigObserverNotify: cap.notify,
+		DB: d,
+		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
+			notifyCalled.Add(1)
+			mu.Lock()
+			defer mu.Unlock()
+			allNotifiedKeys = append(allNotifiedKeys, changed...)
+			lastNodeID = nodeID
+			lastCfg = cfg
+		},
 	}
 
 	w := putNodeRequest(t, h, node.ID, map[string]any{
@@ -64,25 +76,35 @@ func TestUpdateNodeConfig_FiresNotifyForHostnameChange(t *testing.T) {
 		t.Fatalf("UpdateNode: expected 200, got %d; body: %s", w.Code, w.Body.String())
 	}
 
-	// ConfigObserverNotify must have been called exactly once.
-	if got := cap.called.Load(); got != 1 {
-		t.Fatalf("ConfigObserverNotify called %d times, want 1", got)
+	// ConfigObserverNotify must have been called at least once.
+	if got := notifyCalled.Load(); got == 0 {
+		t.Fatal("ConfigObserverNotify was not called for a hostname change")
 	}
 
-	// Verify the watch key matches the hostname plugin's registered key.
+	mu.Lock()
+	defer mu.Unlock()
+
+	// The hostname watch-key must appear in the notified keys.
 	wantKey := plugins.WatchKey()
-	if len(cap.changed) != 1 || cap.changed[0] != wantKey {
-		t.Errorf("changed keys = %v, want [%q]", cap.changed, wantKey)
+	found := false
+	for _, k := range allNotifiedKeys {
+		if k == wantKey {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("hostname watch-key %q not in notified keys: %v", wantKey, allNotifiedKeys)
 	}
 
 	// Verify the node ID is correct.
-	if cap.nodeID != node.ID {
-		t.Errorf("nodeID = %q, want %q", cap.nodeID, node.ID)
+	if lastNodeID != node.ID {
+		t.Errorf("nodeID = %q, want %q", lastNodeID, node.ID)
 	}
 
 	// Verify the cfg carries the new hostname.
-	if cap.cfg.Hostname != newHostname {
-		t.Errorf("cfg.Hostname = %q, want %q", cap.cfg.Hostname, newHostname)
+	if lastCfg.Hostname != newHostname {
+		t.Errorf("cfg.Hostname = %q, want %q", lastCfg.Hostname, newHostname)
 	}
 }
 
@@ -147,5 +169,194 @@ func TestUpdateNodeConfig_FiresNotifyNilSafe(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("UpdateNode: expected 200 with nil ConfigObserverNotify, got %d; body: %s",
 			w.Code, w.Body.String())
+	}
+}
+
+// ─── Sprint 36 Day 3: sssd, hosts, limits plugin observer tests ──────────────
+
+// TestUpdateNodeConfig_FiresHostsNotifyOnHostnameChange verifies that
+// UpdateNode fires ConfigObserverNotify with the cluster_hosts watch-key
+// when the hostname changes (since hostname changes alter the cluster-wide
+// host map that /etc/hosts is built from).
+func TestUpdateNodeConfig_FiresHostsNotifyOnHostnameChange(t *testing.T) {
+	d := openTestDB(t)
+
+	const (
+		mac         = "cc:dd:ee:ff:00:01"
+		oldHostname = "hosts-before"
+		newHostname = "hosts-after"
+	)
+	node := makeTestNode(t, d, mac, oldHostname)
+
+	// Track all notify calls: keys may appear multiple times (hostname + hosts).
+	var mu sync.Mutex // protect notifiedKeys
+	notifiedKeys := map[string]bool{}
+	h := &NodesHandler{
+		DB: d,
+		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
+			mu.Lock()
+			defer mu.Unlock()
+			for _, k := range changed {
+				notifiedKeys[k] = true
+			}
+		},
+	}
+
+	w := putNodeRequest(t, h, node.ID, map[string]any{
+		"hostname":    newHostname,
+		"primary_mac": mac,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateNode: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	wantKey := plugins.HostsWatchKey()
+	if !notifiedKeys[wantKey] {
+		t.Errorf("hosts watch-key %q was not notified; got keys: %v", wantKey, notifiedKeys)
+	}
+}
+
+// TestUpdateNodeConfig_FiresLimitsNotifyOnTagsChange verifies that UpdateNode
+// fires ConfigObserverNotify with the limits watch-key when node tags change.
+func TestUpdateNodeConfig_FiresLimitsNotifyOnTagsChange(t *testing.T) {
+	d := openTestDB(t)
+
+	const (
+		mac      = "cc:dd:ee:ff:00:02"
+		hostname = "limits-test-node"
+	)
+	node := makeTestNode(t, d, mac, hostname)
+
+	cap := &captureNotifyArgs{}
+	h := &NodesHandler{
+		DB:                   d,
+		ConfigObserverNotify: cap.notify,
+	}
+
+	// PUT with new tags — simulates changing the node role from "compute" to "gpu".
+	w := putNodeRequest(t, h, node.ID, map[string]any{
+		"hostname":    hostname,
+		"primary_mac": mac,
+		"tags":        []string{"gpu"},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateNode: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	if got := cap.called.Load(); got == 0 {
+		t.Fatal("ConfigObserverNotify was not called for a tags change")
+	}
+
+	wantKey := plugins.LimitsWatchKey()
+	found := false
+	for _, k := range cap.changed {
+		if k == wantKey {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("limits watch-key %q not in notified keys: %v", wantKey, cap.changed)
+	}
+}
+
+// TestUpdateNodeConfig_DoesNotFireLimitsWhenTagsUnchanged verifies that
+// ConfigObserverNotify is NOT called with the limits key when the PUT
+// request does not change the node's tags.
+func TestUpdateNodeConfig_DoesNotFireLimitsWhenTagsUnchanged(t *testing.T) {
+	d := openTestDB(t)
+
+	const (
+		mac      = "cc:dd:ee:ff:00:03"
+		hostname = "limits-stable"
+	)
+	node := makeTestNode(t, d, mac, hostname)
+
+	// Track only limits-key notifications.
+	limitsNotified := &atomic.Int32{}
+	h := &NodesHandler{
+		DB: d,
+		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
+			for _, k := range changed {
+				if k == plugins.LimitsWatchKey() {
+					limitsNotified.Add(1)
+				}
+			}
+		},
+	}
+
+	// PUT with the same (empty) tags and a hostname change only.
+	w := putNodeRequest(t, h, node.ID, map[string]any{
+		"hostname":    hostname + "-new",
+		"primary_mac": mac,
+		// tags omitted → defaults to [] on both sides → no change
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateNode: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	if got := limitsNotified.Load(); got != 0 {
+		t.Errorf("limits observer notified %d times for unchanged tags, want 0", got)
+	}
+}
+
+// TestUpdateNodeConfig_DoesNotFireHostsOrLimitsForUnrelatedChange verifies
+// that an update to a field unrelated to hosts or limits (e.g. kernel_args)
+// does NOT trigger those plugins' watch-keys.
+func TestUpdateNodeConfig_DoesNotFireHostsOrLimitsForUnrelatedChange(t *testing.T) {
+	d := openTestDB(t)
+
+	const (
+		mac      = "cc:dd:ee:ff:00:04"
+		hostname = "unrelated-change"
+	)
+	node := makeTestNode(t, d, mac, hostname)
+
+	// Collect all notified keys.
+	var mu sync.Mutex
+	var notifiedKeys []string
+	h := &NodesHandler{
+		DB: d,
+		ConfigObserverNotify: func(changed []string, nodeID string, cfg api.NodeConfig) {
+			mu.Lock()
+			defer mu.Unlock()
+			notifiedKeys = append(notifiedKeys, changed...)
+		},
+	}
+
+	// PUT changing only kernel_args — hostname and tags are unchanged.
+	w := putNodeRequest(t, h, node.ID, map[string]any{
+		"hostname":    hostname,
+		"primary_mac": mac,
+		"kernel_args": "console=ttyS0",
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateNode: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, k := range notifiedKeys {
+		if k == plugins.HostsWatchKey() {
+			t.Errorf("hosts watch-key fired unexpectedly for a kernel_args-only change")
+		}
+		if k == plugins.LimitsWatchKey() {
+			t.Errorf("limits watch-key fired unexpectedly for a kernel_args-only change")
+		}
+		if k == plugins.SSSDWatchKey() {
+			t.Errorf("sssd watch-key fired unexpectedly — sssd is not wired through UpdateNode")
+		}
 	}
 }
