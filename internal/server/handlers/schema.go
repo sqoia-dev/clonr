@@ -27,7 +27,13 @@ type SchemaHandler struct {
 func NewSchemaHandler() *SchemaHandler {
 	sub, err := fs.Sub(api.SchemaFS, "schema/v1")
 	if err != nil {
-		// Programming error — wrong embed path. Panic at startup so it's caught early.
+		// Fires when: the embed path "schema/v1" does not exist in api.SchemaFS,
+		// which can only happen if the go:embed directive in pkg/api/ was changed
+		// or the generated schema directory was deleted before compilation.
+		// Why panic vs error-return: this is a build-time invariant; if it fires the
+		// binary cannot serve any schema route and returning nil would silently corrupt
+		// every /api/v1/schemas/* response.  Panic at init time surfaces the mistake
+		// immediately during development and is impossible to trigger at steady-state.
 		panic("schema: sub FS: " + err.Error())
 	}
 	return &SchemaHandler{schemaFS: sub}
