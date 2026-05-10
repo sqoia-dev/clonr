@@ -87,12 +87,24 @@ type FilesystemDeployer struct {
 	// to apply after applyNodeConfig and before bootloader installation. Set via
 	// SetInstallInstructions before Finalize. Nil/empty means no-op.
 	InstallInstructions []api.InstallInstruction
+
+	// LegacyConfigApply controls whether hostname and hosts are written via the
+	// imperative path during Finalize. When false (default), these plugins are
+	// managed by the Sprint 36 reactive observer and their imperative writes are
+	// skipped. Set via SetLegacyConfigApply before Finalize.
+	LegacyConfigApply bool
 }
 
 // SetInstallInstructions implements InstallInstructionsSetter. Call before
 // Finalize to apply per-image install instructions during the in-chroot phase.
 func (d *FilesystemDeployer) SetInstallInstructions(instrs []api.InstallInstruction) {
 	d.InstallInstructions = instrs
+}
+
+// SetLegacyConfigApply implements LegacyConfigApplySetter. Call before Finalize
+// to force imperative hostname/hosts writes (Sprint 36 --legacy-config-apply flag).
+func (d *FilesystemDeployer) SetLegacyConfigApply(v bool) {
+	d.LegacyConfigApply = v
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -697,7 +709,7 @@ func (d *FilesystemDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, m
 
 	logPhase("In-chroot reconfigure")
 	reportStep("Applying node identity to target filesystem (hostname, network, users)")
-	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions); err != nil {
+	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions, d.LegacyConfigApply); err != nil {
 		return err
 	}
 

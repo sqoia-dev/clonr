@@ -1476,6 +1476,14 @@ type RegisterRequest struct {
 	// Accepted values: "auto" (default), "off", "require".
 	// Empty string is treated as "auto" by the server for backward compatibility.
 	MulticastMode string `json:"multicast_mode,omitempty"`
+	// LegacyConfigApply, when true, instructs the deploy agent to re-apply
+	// hostname, sssd, hosts, and limits via the imperative path during Finalize.
+	// By default (false) these four plugins are managed by the reactive observer
+	// (Sprint 36) and are skipped during the in-chroot finalize step.
+	// Set by --legacy-config-apply on the deploy CLI.
+	// Backward-compatible: omitempty means older servers receive no field and
+	// treat it as false (default behaviour unchanged).
+	LegacyConfigApply bool `json:"legacy_config_apply,omitempty"`
 }
 
 // RegisterResponse is the response body for POST /api/v1/nodes/register.

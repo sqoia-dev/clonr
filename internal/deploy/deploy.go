@@ -256,6 +256,19 @@ type InstallInstructionsSetter interface {
 	SetInstallInstructions(instrs []api.InstallInstruction)
 }
 
+// LegacyConfigApplySetter is an optional interface implemented by Deployers
+// that support the Sprint 36 --legacy-config-apply escape hatch. When set to
+// true, the Deployer writes hostname and hosts via the imperative path during
+// Finalize, matching pre-Sprint-36 behaviour. When false (the default), these
+// plugins are managed by the reactive observer and their in-chroot writes are
+// skipped.
+//
+// Callers check for this interface via type assertion and call
+// SetLegacyConfigApply before Finalize.
+type LegacyConfigApplySetter interface {
+	SetLegacyConfigApply(v bool)
+}
+
 // runCmd executes a command and streams its output through the package logger.
 // Returns an error (including tail of output) if the process exits non-zero.
 func runCmd(ctx context.Context, name string, args ...string) error {

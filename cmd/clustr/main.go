@@ -49,6 +49,11 @@ var (
 	// newDeployCmd and read by runAutoDeployMode so the initramfs auto-deploy
 	// path can participate in multicast sessions (#157).
 	flagMulticastMode string
+	// flagLegacyConfigApply is the package-level value of --legacy-config-apply,
+	// set by newDeployCmd and read by runAutoDeployMode / runAutoDeployImage.
+	// When true, the deploy uses the imperative config-apply path for
+	// hostname/sssd/hosts/limits. Default false: reactive observer owns them.
+	flagLegacyConfigApply bool
 )
 
 func main() {
@@ -815,6 +820,16 @@ PXE-booted nodes running from initramfs.`,
 			if is, ok := deployer.(deploy.InstallInstructionsSetter); ok {
 				is.SetInstallInstructions(img.InstallInstructions)
 			}
+			// Wire Sprint 36 legacy-config-apply flag. When false (default),
+			// hostname and hosts writes are skipped during in-chroot finalize —
+			// the reactive observer manages these plugins on running nodes.
+			if lca, ok := deployer.(deploy.LegacyConfigApplySetter); ok {
+				lca.SetLegacyConfigApply(flagLegacyConfigApply)
+			}
+			if !flagLegacyConfigApply {
+				deployLog.Info().Str("component", "deploy").
+					Msg("deploy: skipping legacy config-apply for {hostname, sssd, hosts, limits} — reactive observer owns these (use --legacy-config-apply to force)")
+			}
 			// Switch the console callback label from "Deploying" to "Finalizing"
 			// now that we are entering the finalize phase. Progress is already set.
 			if fd, ok := deployer.(*deploy.FilesystemDeployer); ok {
@@ -873,6 +888,10 @@ PXE-booted nodes running from initramfs.`,
 		"Maximum time allowed for the entire deployment (env: CLUSTR_DEPLOY_TIMEOUT, e.g. 30m, 1h)")
 	cmd.Flags().StringVar(&flagMulticastMode, "multicast", "auto",
 		"Multicast mode: auto (default), off (force unicast), or require (error if multicast unavailable)")
+	cmd.Flags().BoolVar(&flagLegacyConfigApply, "legacy-config-apply", false,
+		"Re-apply hostname, sssd, hosts, and limits via the imperative path during deploy. "+
+			"By default these are managed by the reactive observer (Sprint 36). "+
+			"Use this flag if reactive push is misbehaving and you want a full reapply.")
 
 	return cmd
 }
@@ -941,9 +960,10 @@ func runAutoDeployMode() error {
 	remoteWriter.SetPhase("register")
 	printPhase(phaseInProgress, "Registering with server")
 	regResp, err := c.RegisterNode(ctx, api.RegisterRequest{
-		HardwareProfile:  hwJSON,
-		DetectedFirmware: hw.Firmware,
-		MulticastMode:    flagMulticastMode,
+		HardwareProfile:   hwJSON,
+		DetectedFirmware:  hw.Firmware,
+		MulticastMode:     flagMulticastMode,
+		LegacyConfigApply: flagLegacyConfigApply,
 	})
 	if err != nil {
 		printPhase(phaseFailed, "Registration")
@@ -1567,6 +1587,16 @@ func runAutoDeployImage(ctx context.Context, c *client.Client, nodeCfg api.NodeC
 	// Wire per-image install instructions into the deployer.
 	if is, ok := deployer.(deploy.InstallInstructionsSetter); ok {
 		is.SetInstallInstructions(img.InstallInstructions)
+	}
+	// Wire Sprint 36 legacy-config-apply flag. When false (default),
+	// hostname and hosts writes are skipped during in-chroot finalize —
+	// the reactive observer manages these plugins on running nodes.
+	if lca, ok := deployer.(deploy.LegacyConfigApplySetter); ok {
+		lca.SetLegacyConfigApply(flagLegacyConfigApply)
+	}
+	if !flagLegacyConfigApply {
+		deployLog.Info().Str("component", "deploy").
+			Msg("deploy: skipping legacy config-apply for {hostname, sssd, hosts, limits} — reactive observer owns these (use --legacy-config-apply to force)")
 	}
 	// Switch the console callback label from "Deploying" to "Finalizing"
 	// now that we are entering the finalize phase. Progress is already set.

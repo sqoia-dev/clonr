@@ -54,6 +54,12 @@ type BlockDeployer struct {
 	// to apply after applyNodeConfig and before any post-write checks. Set via
 	// SetInstallInstructions before Finalize. Nil/empty means no-op.
 	InstallInstructions []api.InstallInstruction
+
+	// LegacyConfigApply controls whether hostname and hosts are written via the
+	// imperative path during Finalize. When false (default), these plugins are
+	// managed by the Sprint 36 reactive observer and their imperative writes are
+	// skipped. Set via SetLegacyConfigApply before Finalize.
+	LegacyConfigApply bool
 }
 
 // ResolvedDisk returns the target disk path resolved by Preflight.
@@ -83,6 +89,12 @@ func (d *BlockDeployer) SetClientdBinPath(p string) {
 // Finalize to apply per-image install instructions during the in-chroot phase.
 func (d *BlockDeployer) SetInstallInstructions(instrs []api.InstallInstruction) {
 	d.InstallInstructions = instrs
+}
+
+// SetLegacyConfigApply implements LegacyConfigApplySetter. Call before Finalize
+// to force imperative hostname/hosts writes (Sprint 36 --legacy-config-apply flag).
+func (d *BlockDeployer) SetLegacyConfigApply(v bool) {
+	d.LegacyConfigApply = v
 }
 
 // Preflight validates that a suitable target disk exists and resolves its path.
@@ -441,7 +453,7 @@ func (d *BlockDeployer) Finalize(ctx context.Context, cfg api.NodeConfig, mountR
 		_ = exec.Command("umount", mountRoot).Run()
 	}()
 
-	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions); err != nil {
+	if err := inChrootReconfigure(ctx, cfg, mountRoot, d.InstallInstructions, d.LegacyConfigApply); err != nil {
 		return err
 	}
 

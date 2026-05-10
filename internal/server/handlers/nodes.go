@@ -1198,6 +1198,34 @@ func (h *NodesHandler) DeployComplete(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().Str("node_id", id).Msg("deploy-complete: node marked deployed")
 
+	// Sprint 36 Day 4: log per-plugin render hash for the four reactive-config
+	// plugins. A missing row means the observer has not fired for that plugin
+	// since registration — the node may not have current config via the reactive
+	// path (soft warning only; does not fail the deploy-complete response).
+	reactivePlugins := []string{"hostname", "sssd", "hosts", "limits"}
+	for _, pluginName := range reactivePlugins {
+		hash, err := h.DB.GetRenderHash(r.Context(), id, pluginName)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("node_id", id).
+				Str("plugin", pluginName).
+				Msg("deploy-complete: could not read config_render_state (non-fatal)")
+			continue
+		}
+		if hash == "" {
+			log.Warn().
+				Str("node_id", id).
+				Str("plugin", pluginName).
+				Msg("deploy-complete: no render hash for plugin — reactive observer has not fired since registration; node may not have current config for this plugin")
+		} else {
+			log.Info().
+				Str("node_id", id).
+				Str("plugin", pluginName).
+				Str("rendered_hash", hash).
+				Msg("deploy-complete: reactive plugin render hash")
+		}
+	}
+
 	// S4-2: Fire webhook for deploy.complete.
 	if h.WebhookDispatcher != nil {
 		nodeForWebhook, _ := h.DB.GetNodeConfig(r.Context(), id)

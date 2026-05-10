@@ -174,12 +174,29 @@ func writeDistroSystemFiles(mountRoot string, cfg api.NodeConfig) error {
 	return drv.WriteSystemFiles(mountRoot, cfg)
 }
 
+// convertedPlugins is the set of plugins that have been converted to the
+// reactive observer in Sprint 36. During a default (non-legacy) deploy, the
+// imperative writes for these plugins are skipped in applyNodeConfig because
+// the reactive observer has already pushed (or will push on next config change).
+// Use --legacy-config-apply to force the imperative path.
+var convertedPlugins = map[string]bool{
+	"hostname": true,
+	"sssd":     true,
+	"hosts":    true,
+	"limits":   true,
+}
+
 // applyNodeConfig writes all node-specific identity into the deployed filesystem
 // rooted at mountRoot. This function is called by both FilesystemDeployer and
 // BlockDeployer after the image is on disk.
 //
+// legacyConfigApply controls whether hostname, sssd, hosts, and limits are
+// written via the imperative path. When false (default), these four plugins are
+// owned by the Sprint 36 reactive observer and are skipped here. Pass true
+// (--legacy-config-apply) to revert to the pre-Sprint-36 full-reapply behaviour.
+//
 // Order of operations:
-//  1. Hostname
+//  1. Hostname (gated on legacyConfigApply for Sprint 36 reactive plugins)
 //  2. Network config (NetworkManager keyfiles)
 //  3. SSH authorized_keys for root
 //  4. /etc/fstab UUID update
@@ -188,23 +205,33 @@ func writeDistroSystemFiles(mountRoot string, cfg api.NodeConfig) error {
 //  7. InfiniBand / IPoIB config (if cfg.IBConfig is set)
 //  8. System accounts (groups then users, idempotent via getent check in chroot)
 //  9. Network config (bond NM keyfiles, IPoIB keyfile, opensm.conf if head node)
-func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) error {
+func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string, legacyConfigApply bool) error {
 	log := logger()
 
-	log.Info().Str("hostname", cfg.Hostname).Msg("finalize: writing /etc/hostname")
-	if err := writeHostname(mountRoot, cfg.Hostname, cfg.FQDN); err != nil {
-		return fmt.Errorf("finalize: hostname: %w", err)
+	if legacyConfigApply || !convertedPlugins["hostname"] {
+		log.Info().Str("hostname", cfg.Hostname).Msg("finalize: writing /etc/hostname")
+		if err := writeHostname(mountRoot, cfg.Hostname, cfg.FQDN); err != nil {
+			return fmt.Errorf("finalize: hostname: %w", err)
+		}
+		log.Info().Str("hostname", cfg.Hostname).Msg("finalize: wrote /etc/hostname")
+	} else {
+		log.Info().Str("hostname", cfg.Hostname).
+			Msg("finalize: skipping /etc/hostname write — reactive observer owns hostname plugin (use --legacy-config-apply to force)")
 	}
-	log.Info().Str("hostname", cfg.Hostname).Msg("finalize: wrote /etc/hostname")
 
 	if len(cfg.ClusterHosts) > 0 {
-		log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: writing cluster hosts to /etc/hosts")
-		if err := writeClusterHosts(mountRoot, cfg.ClusterHosts); err != nil {
-			// Non-fatal: LDAP and other services may still work via broadcast or
-			// manual /etc/hosts. Log prominently so the operator knows to investigate.
-			log.Warn().Err(err).Msg("WARNING: finalize: cluster hosts write failed (non-fatal)")
+		if legacyConfigApply || !convertedPlugins["hosts"] {
+			log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: writing cluster hosts to /etc/hosts")
+			if err := writeClusterHosts(mountRoot, cfg.ClusterHosts); err != nil {
+				// Non-fatal: LDAP and other services may still work via broadcast or
+				// manual /etc/hosts. Log prominently so the operator knows to investigate.
+				log.Warn().Err(err).Msg("WARNING: finalize: cluster hosts write failed (non-fatal)")
+			} else {
+				log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: wrote cluster hosts to /etc/hosts")
+			}
 		} else {
-			log.Info().Int("entries", len(cfg.ClusterHosts)).Msg("finalize: wrote cluster hosts to /etc/hosts")
+			log.Info().Int("entries", len(cfg.ClusterHosts)).
+				Msg("finalize: skipping /etc/hosts write — reactive observer owns hosts plugin (use --legacy-config-apply to force)")
 		}
 	}
 
@@ -294,6 +321,18 @@ func applyNodeConfig(ctx context.Context, cfg api.NodeConfig, mountRoot string) 
 
 	// LDAP module — write sssd.conf, ldap.conf, and CA bundle into the deployed
 	// filesystem so the node can authenticate users via the clustr LDAP server.
+	//
+	// writeLDAPConfig is NOT gated on legacyConfigApply even though the sssd
+	// plugin is managed by the reactive observer (Sprint 36). The reason:
+	// writeLDAPConfig sets up CA certificates, ldap.conf, authselect, and enables
+	// sssd.service — these are first-deploy bootstrapping steps that the sssd
+	// reactive plugin does not cover (the plugin only manages sssd.conf on a
+	// running node). Skipping writeLDAPConfig on fresh image deploys would leave
+	// the node unable to authenticate until a manual reimage.
+	//
+	// sssd.conf is written here AND then overwritten by the reactive observer on
+	// first clientd connect (idempotent; the content is identical if config has
+	// not changed). This is the dual-write pattern from reactive-config.md §9.
 	if cfg.LDAPConfig != nil {
 		log.Info().Str("base_dn", cfg.LDAPConfig.BaseDN).Msg("finalize: writing LDAP client configuration")
 		if err := writeLDAPConfig(ctx, mountRoot, cfg.LDAPConfig); err != nil {

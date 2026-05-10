@@ -40,11 +40,14 @@ import (
 // messages. The in-chroot pass is idempotent and a safety net — the node
 // is already identity-correct when clientd first connects, and clientd
 // re-applies any configs that may have changed between deploy and first boot.
-func inChrootReconfigure(ctx context.Context, cfg api.NodeConfig, mountRoot string, instrs []api.InstallInstruction) error {
+//
+// legacyConfigApply is forwarded to applyNodeConfig to gate the hostname and
+// hosts writes (Sprint 36 reactive-config.md §9 — Day 4 deprecation flag).
+func inChrootReconfigure(ctx context.Context, cfg api.NodeConfig, mountRoot string, instrs []api.InstallInstruction, legacyConfigApply bool) error {
 	log := deployLogger(nil)
 	log.Info().Str("mountRoot", mountRoot).Msg("inChrootReconfigure: applying node identity to target filesystem")
 
-	if err := applyNodeConfig(ctx, cfg, mountRoot); err != nil {
+	if err := applyNodeConfig(ctx, cfg, mountRoot, legacyConfigApply); err != nil {
 		return fmt.Errorf("inChrootReconfigure: %w", err)
 	}
 
