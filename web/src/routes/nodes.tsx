@@ -1376,7 +1376,7 @@ export function NodesPage() {
                 <TableRow
                   key={node.id}
                   className={cn("cursor-pointer", selectedNodeIds.has(node.id) && "bg-secondary/40")}
-                  onClick={() => navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
+                  onClick={() => navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id }, search: {} })}
                   data-testid={`node-row-${node.id}`}
                 >
                   {/* BULK-MULTISELECT: row checkbox */}
@@ -1553,7 +1553,8 @@ interface NodeSheetProps {
 
 type NodeDetailTab = "overview" | "sensors" | "extstats" | "eventlog" | "console" | "deploylog" | "ipmi"
 
-function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete, onOperatingModeSaved }: NodeSheetProps) {
+// NodeSheet is retained for reference; row-clicks now navigate to NodeDetailPage.
+function _NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete, onOperatingModeSaved }: NodeSheetProps) {
   const qc = useQueryClient()
   const state = nodeState(node)
   const [editing, setEditing] = React.useState(false)
@@ -3631,6 +3632,7 @@ export function NodeDetailPage() {
       <div className="p-6 space-y-4">
         <Link
           to="/nodes"
+          search={{}}
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -3648,6 +3650,7 @@ export function NodeDetailPage() {
       {/* Breadcrumb */}
       <Link
         to="/nodes"
+        search={{}}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         data-testid="back-to-nodes"
       >
@@ -3678,7 +3681,7 @@ export function NodeDetailPage() {
           // Invalidate the single-node query so the header badge refreshes.
           qc.invalidateQueries({ queryKey: ["node", nodeId] })
         }}
-        onDeleted={() => navigate({ to: "/nodes" })}
+        onDeleted={() => navigate({ to: "/nodes", search: {} })}
       />
     </div>
   )
