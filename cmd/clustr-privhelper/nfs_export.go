@@ -111,9 +111,17 @@ func verbNFSExport(callerUID int, args []string) int {
 	}
 
 	// 4. Build /etc/exports content.
+	// Only ignore a missing-file error — any other read failure (transient I/O,
+	// SELinux denial, permission change) must abort rather than silently overwriting
+	// /etc/exports with a fresh file that drops all operator-managed exports.
 	existing := ""
 	if data, readErr := os.ReadFile(nfsExportsPath); readErr == nil { //#nosec G304 -- reading system /etc/exports; path is a fixed constant
 		existing = string(data)
+	} else if !os.IsNotExist(readErr) {
+		msg := fmt.Sprintf("nfs-export: read %s: %v", nfsExportsPath, readErr)
+		fmt.Fprintln(os.Stderr, msg)
+		writeAudit(callerUID, "nfs-export", args, 2, msg)
+		return 2
 	}
 	// If the file doesn't exist yet, existing remains "".
 

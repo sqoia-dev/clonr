@@ -1591,6 +1591,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/boot/extra/memtest", boot.ServeMemtest)
 		r.Get("/boot/ipxe.efi", boot.ServeIPXEEFI)
 		r.Get("/boot/undionly.kpxe", boot.ServeUndionlyKPXE)
+		// Per-image stateless NFS initramfs — referenced by the iPXE script generated
+		// for stateless_nfs nodes. Pattern: /boot/{imageID}-stateless.img
+		// The imageID segment includes the suffix so chi routes it unambiguously.
+		r.Get("/boot/{imageIDStateless}", boot.ServeStatelessInitramfs)
 
 		// JSON Schema + OpenAPI 3.1 (#161) — publicly readable, no auth required.
 		schemaH := handlers.NewSchemaHandler()
