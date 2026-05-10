@@ -1494,17 +1494,29 @@ echo "  [+] All required binaries present in initramfs rootfs"
 #
 # Reproducibility requirements (verified by CI "Verify reproducible initramfs" step):
 #   1. File list is sorted deterministically (find . | sort).
-#   2. cpio --reproducible zeros all timestamps, inode numbers, and device IDs
-#      so the archive bytes are identical across runs on the same input.
-#   3. gzip -n strips the embedded filename and timestamp header fields.
-#   4. SOURCE_DATE_EPOCH=0 pins the gzip mtime field to the Unix epoch.
+#   2. All file and directory mtimes are zeroed to the Unix epoch (1970-01-01
+#      00:00 UTC) with touch before cpio runs.  cpio --reproducible (GNU cpio
+#      2.13) zeroes inode numbers and device IDs but does NOT zero mtimes —
+#      each build assigns wall-clock mtimes, producing non-identical archives.
+#      Explicit normalisation via find+touch is the portable fix.
+#   3. cpio --reproducible zeros inode numbers and device IDs.
+#   4. gzip -n strips the embedded filename and timestamp header fields.
+#   5. SOURCE_DATE_EPOCH=0 pins the gzip mtime field to the Unix epoch.
 #      Some gzip builds honour this env var; -n covers those that don't.
 #
-# The manifest is already sorted (see above).  Together these four measures
+# The manifest is already sorted (see above).  Together these five measures
 # produce bit-identical output for a given input file set.
 echo "Packing cpio archive (reproducible)..."
 (
     cd "$WORKDIR"
+    # Step 1: normalise all mtimes to epoch 0.
+    # -h: modify the symlink itself (not the target) — without -h, touch follows
+    #     the symlink and fails on read-only targets like /bin/busybox, leaving the
+    #     symlink mtime unchanged and breaking reproducibility.
+    # 197001010000.00: POSIX timestamp for 1970-01-01 00:00:00 UTC (epoch 0).
+    # -exec ... + batches arguments for efficiency.
+    find . -exec touch -h -t 197001010000.00 {} + 2>/dev/null || true
+    # Step 2: sort + cpio + gzip.
     find . | sort | cpio --quiet --reproducible -H newc -o 2>/dev/null
 ) | SOURCE_DATE_EPOCH=0 gzip -9 -n > "$OUTPUT"
 
