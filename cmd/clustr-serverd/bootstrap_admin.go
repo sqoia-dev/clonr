@@ -230,8 +230,7 @@ func runBootstrapAdmin(username, password string, force, replaceDefault, bypassC
 			}
 			// Explicit --username X with a name that already exists.
 			return fmt.Errorf(
-				"user %q already exists.\n"+
-					"  Use --force to remove all users and recreate, or choose a different username.",
+				"user %q already exists; use --force to remove all users and recreate, or choose a different username",
 				username,
 			)
 		}

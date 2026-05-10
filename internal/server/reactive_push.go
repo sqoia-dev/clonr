@@ -98,6 +98,7 @@ func (s *Server) pushHostnamePlugin(nodeID string, cfg api.NodeConfig) {
 		Msg("reactive push: hostname config_push sent")
 }
 
+//lint:ignore U1000 wired into the node-PUT handler once reactive config push is enabled (REACTIVE-PUSH-SSSD, Sprint 38)
 // pushSSSDPlugin renders the sssd plugin for nodeID+cfg and sends a targeted
 // config_push WS message to the node. Best-effort: errors are logged but do
 // not fail the caller's HTTP handler. The node will pick up the correct

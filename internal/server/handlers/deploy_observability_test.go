@@ -185,6 +185,7 @@ func TestDeploy_LegacyFlagSet_RegisterRequest_FieldSet(t *testing.T) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
+//lint:ignore U1000 test helper for Sprint 36 reactive-config tests not yet written; retained to avoid re-implementing
 // seedConfigRenderState is a test helper that inserts a config_render_state row
 // directly via db.UpsertRenderHash, bypassing the observer.
 func seedConfigRenderState(t *testing.T, d *db.DB, nodeID, pluginName, hash string) {

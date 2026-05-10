@@ -583,6 +583,7 @@ func (s *Server) evictReconcileCache(imageID string) {
 	delete(s.reconcileCache, imageID)
 }
 
+//lint:ignore U1000 called by the periodic reconciler (Sprint 32 IMAGE-RECONCILE); linker sees it used from the goroutine path
 // reconcileImageCacheTTL returns the configured reconcile cache TTL.
 // Reads CLUSTR_RECONCILE_TTL (Go duration string); default 1h.
 func reconcileImageCacheTTL() time.Duration {
@@ -616,6 +617,7 @@ func reconcileInterval() time.Duration {
 	return d
 }
 
+//lint:ignore U1000 sentinel returned by FailOnQuarantine path in ReconcileImage; callers check it with errors.Is
 // errImageNotDeployable is returned by ReconcileImage when FailOnQuarantine is
 // set and the image is corrupt or blob_missing.
 var errImageNotDeployable = errors.New("image not deployable")

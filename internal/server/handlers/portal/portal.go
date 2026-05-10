@@ -71,6 +71,7 @@ type Handler struct {
 	GetPartitionStatus func(ctx context.Context) ([]PartitionStatus, error)
 }
 
+//lint:ignore U1000 wired by portal session middleware in Sprint 40 (PORTAL-SESSION); kept here so the context key and helper are co-located
 // userIDFromContext pulls the authenticated user's clustr user ID from context.
 // We need this to derive the LDAP username via a DB lookup.
 func userIDFromContext(ctx context.Context) string {

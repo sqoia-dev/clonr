@@ -116,6 +116,7 @@ Examples:
 	return cmd
 }
 
+//lint:ignore U1000 type mirrors server execSSEEvent; retained for CLI json-output mode planned in Sprint 43 (EXEC-JSON-OUT)
 // execSSEPayload mirrors the server-side execSSEEvent for JSON format.
 type execSSEPayload struct {
 	NodeID   string `json:"node,omitempty"`

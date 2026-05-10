@@ -403,6 +403,7 @@ func resolveGroupID(ctx context.Context, c interface{ GetJSON(context.Context, s
 	return "", fmt.Errorf("group %q not found", nameOrID)
 }
 
+//lint:ignore U1000 helper retained for upcoming `clustr group node-move` command (GROUPS-NODE-MOVE)
 // resolveNodeID maps a hostname or node ID to a canonical UUID.
 func resolveNodeID(ctx context.Context, c interface{ GetJSON(context.Context, string, interface{}) error }, nameOrID string) (string, error) {
 	if len(nameOrID) == 36 && strings.Count(nameOrID, "-") == 4 {

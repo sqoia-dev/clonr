@@ -248,6 +248,7 @@ func TestVerbNFSExport_MissingArgs(t *testing.T) {
 	}
 }
 
+//lint:ignore U1000 helper retained for NFS rootfs setup tests planned in Sprint 42 (DISKLESS-NFS)
 // makeNFSTestRootfs creates a temporary directory tree and returns the temp
 // directory path to use as nfsImagesBase for isolation.
 func makeNFSTestRootfs(t *testing.T, imageID string) string {

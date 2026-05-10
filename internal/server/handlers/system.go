@@ -193,6 +193,7 @@ func (h *SystemHandler) WaitForAllActive(ctx context.Context) {
 	// the autodeploy defer loop handles those by retrying.
 }
 
+//lint:ignore U1000 used in system_test.go idle-state assertions; linker tree-shakes it from prod binary
 // activeJobCount returns the total number of active jobs across all categories.
 // Used internally and in tests to assert idle state.
 func (h *SystemHandler) activeJobCount(ctx context.Context) int {
@@ -232,6 +233,7 @@ func (h *SystemHandler) activeJobCount(ctx context.Context) int {
 	return n
 }
 
+//lint:ignore U1000 used in system_test.go build-ID assertions; linker tree-shakes from prod binary
 // formatInitramfsID returns the label used in initramfs_builds entries.
 // Extracted for use in tests.
 func formatInitramfsID(buildID string) string {

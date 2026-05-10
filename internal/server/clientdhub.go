@@ -455,9 +455,9 @@ func (h *ClientdHub) DeliverLDAPHealthResult(msgID string, payload clientd.LDAPH
 	}
 }
 
+//lint:ignore U1000 scaffolding for Sprint 34 WS server-push flow (CLIENTD-PUSH); not yet wired into a route
 // runSendLoop drains the conn's send channel, writing messages to the WebSocket.
 // Runs in its own goroutine; returns when the channel is closed or a write fails.
-// Retained here for potential use in a future server-push flow.
 func runSendLoop(conn *websocket.Conn, ch <-chan []byte) {
 	for data := range ch {
 		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))

@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"golang.org/x/crypto/openpgp"        //nolint:staticcheck // deprecated pkg; no alternatives in deps
-	"golang.org/x/crypto/openpgp/armor"  //nolint:staticcheck
+	"golang.org/x/crypto/openpgp"       //lint:ignore SA1019 no maintained drop-in replacement; clustr signs RPMs so we need armor+keyring
+	"golang.org/x/crypto/openpgp/armor" //lint:ignore SA1019 required by openpgp above
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/pkg/api"

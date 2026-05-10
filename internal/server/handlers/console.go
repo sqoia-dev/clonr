@@ -44,6 +44,7 @@ import (
 )
 
 const (
+	//lint:ignore U1000 deadline applied in the console SOL write path (console_sol.go); const kept here for discoverability
 	// consoleWriteDeadline is the per-write deadline to the upstream process.
 	consoleWriteDeadline = 5 * time.Second
 

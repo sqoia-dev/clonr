@@ -146,7 +146,7 @@ func newIPMISELHeadCmd() *cobra.Command {
 				var err error
 				n, err = strconv.Atoi(args[0])
 				if err != nil || n <= 0 {
-					return fmt.Errorf("N must be a positive integer, got %q", args[0])
+					return fmt.Errorf("count must be a positive integer, got %q", args[0])
 				}
 			}
 			resp, err := fetchSEL(flagNode, "", n, 0)
@@ -179,7 +179,7 @@ func newIPMISELTailCmd() *cobra.Command {
 				var err error
 				n, err = strconv.Atoi(args[0])
 				if err != nil || n <= 0 {
-					return fmt.Errorf("N must be a positive integer, got %q", args[0])
+					return fmt.Errorf("count must be a positive integer, got %q", args[0])
 				}
 			}
 			resp, err := fetchSEL(flagNode, "", 0, n)

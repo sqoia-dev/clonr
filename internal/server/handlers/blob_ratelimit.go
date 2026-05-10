@@ -145,12 +145,11 @@ func blobMaxBPS() int64 {
 
 // ── Concurrency env helper ────────────────────────────────────────────────────
 
-// globalBlobSem is the shared concurrency semaphore for all blob streams.
-// It is initialised once via globalBlobSemOnce.
-var (
-	globalBlobSem     chan struct{}
-	globalBlobSemOnce sync.Once
-)
+//lint:ignore U1000 semaphore channel wired in Sprint 34 blob-concurrency rework (BLOB-CONC)
+var globalBlobSem chan struct{}
+
+//lint:ignore U1000 once guard for globalBlobSem; wired together with BLOB-CONC
+var globalBlobSemOnce sync.Once
 
 // blobConcurrencyLimit returns the effective concurrency cap.
 // Checks CLUSTR_BLOB_MAX_CONCURRENCY (new name) then falls back to
