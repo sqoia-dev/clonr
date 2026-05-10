@@ -1171,13 +1171,27 @@ func (db *DB) UpdateNodeConfig(ctx context.Context, cfg api.NodeConfig) error {
 		verifyTimeoutOverrideSQL = *cfg.VerifyTimeoutOverride
 	}
 
-	// Migration 111 (Sprint 37 DISKLESS Bundle A): default operating_mode to
-	// 'block_install' when caller hasn't set it. Symmetric with the create
-	// path — empty on the wire is normalized to the explicit default before
-	// the SQLite CHECK constraint sees it.
+	// Migration 111 (Sprint 37 DISKLESS Bundle A): resolve operating_mode.
+	//
+	// PUT /api/v1/nodes/:id builds NodeConfig from UpdateNodeConfigRequest which
+	// has no operating_mode field, so cfg.OperatingMode arrives empty.  Coercing
+	// an empty value to block_install silently resets any non-default mode (e.g.
+	// stateless_nfs) on every unrelated PUT (hostname rename, SSH key change …).
+	//
+	// Fix: when the caller sends an empty value, fetch the current persisted value
+	// and preserve it.  Only fall back to block_install when the DB row genuinely
+	// has no value (shouldn't happen given the NOT NULL DEFAULT constraint, but
+	// defensive).  An explicit non-empty value from the caller always wins.
 	operatingMode := cfg.OperatingMode
 	if operatingMode == "" {
-		operatingMode = api.OperatingModeBlockInstall
+		var current string
+		row := db.sql.QueryRowContext(ctx,
+			`SELECT operating_mode FROM node_configs WHERE id = ?`, cfg.ID)
+		if err := row.Scan(&current); err == nil && current != "" {
+			operatingMode = current
+		} else {
+			operatingMode = api.OperatingModeBlockInstall
+		}
 	}
 
 	res, err := db.sql.ExecContext(ctx, `

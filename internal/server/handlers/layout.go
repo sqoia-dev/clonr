@@ -243,15 +243,45 @@ func (h *LayoutHandler) GetEffectiveLayout(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// ── Precedence levels 1, 2, 3: named disk layout from the catalog ─────────
-	// Level 3 is the firmware-aware fallback added in Sprint 35 (#255).
-	effective, source, catalogHit := resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID, node.DetectedFirmware)
+	// Effective layout resolution — correct precedence (highest → lowest):
+	//
+	//   1. node.disk_layout_id          — named catalog record, per-node FK
+	//   2. node_groups.disk_layout_id   — named catalog record, per-group FK
+	//   3. node.DiskLayoutOverride      — inline JSON override, per-node
+	//   4. group.DiskLayoutOverride     — inline JSON override, per-group
+	//   5. firmware-catalog pick        — PickLayoutForFirmware(detected_firmware)
+	//   6. image default / zero layout  — fallback
+	//
+	// Bug fixed here (CODEX-FIX-4 Issue #2): the original code passed
+	// node.DetectedFirmware into resolveDiskLayoutFromCatalog on the first
+	// call, which caused the level-3 firmware pick inside that function to run
+	// before inline overrides (levels 3-4) were ever consulted.  Any node with
+	// a known firmware type and at least one catalog entry would always resolve
+	// from the firmware pick, making PUT /nodes/{id}/layout-override a no-op.
+	//
+	// Fix: suppress firmware on the first call (levels 1+2 only).  If no FK
+	// hit, check inline overrides next (levels 3+4 via EffectiveLayout).  Only
+	// if neither matched do we try the firmware-catalog pick (level 5).
+	//
+	// ── Levels 1+2: named catalog FKs ─────────────────────────────────────────
+	effective, source, catalogHit := resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID, "")
 
-	// ── Precedence levels 3-5: existing inline / image-default path ───────────
 	if !catalogHit {
-		// Neither catalog level matched — use existing inline/image logic.
-		effective = node.EffectiveLayout(img, group)
-		source = node.EffectiveLayoutSource(img, group)
+		// ── Levels 3+4: inline JSON overrides ─────────────────────────────────
+		if node.DiskLayoutOverride != nil || (group != nil && group.DiskLayoutOverride != nil) {
+			effective = node.EffectiveLayout(img, group)
+			source = node.EffectiveLayoutSource(img, group)
+		} else {
+			// ── Level 5: firmware-catalog pick ────────────────────────────────
+			// Only runs when no FK and no inline override — preserving the new
+			// Sprint 35 behaviour for nodes without any explicit override.
+			effective, source, catalogHit = resolveDiskLayoutFromCatalog(r.Context(), h.DB, id, node.GroupID, node.DetectedFirmware)
+			if !catalogHit {
+				// ── Level 6: image default / zero layout ──────────────────────
+				effective = node.EffectiveLayout(img, group)
+				source = node.EffectiveLayoutSource(img, group)
+			}
+		}
 	}
 
 	// Auto-correct layout when:
