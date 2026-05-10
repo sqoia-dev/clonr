@@ -286,14 +286,20 @@ func (h *InitramfsHandler) RebuildInitramfs(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Deferred panic guard: if anything in this handler panics after the DB
-	// record was created, mark the build as failed so it does not stay 'pending'
-	// forever. The panic is re-raised after the DB write so the server still
-	// crashes (and the operator sees the panic in the journal).
+	// Deferred panic guard: if any code between here and archive creation panics,
+	// mark the build as failed so it does not stay 'pending' forever.
+	// Fires when: an unexpected panic occurs anywhere in the initramfs build goroutine
+	// after the DB record is committed (e.g. a nil-ptr in a library path).
+	// Why panic vs error-return: the panic originates from code we do not own
+	// (script exec, cpio spawn); re-raising it ensures the server's outer recovery
+	// middleware logs the full stack trace and returns a 500 — the operator sees
+	// exactly what crashed rather than a silent failure.
 	defer func() {
 		if r := recover(); r != nil {
 			h.failBuild(buildID, fmt.Errorf("panic during rebuild: %v", r))
-			panic(r) // re-raise so the server's default recovery middleware handles it
+			// Re-raise: the server's panicRecovery middleware in middleware.go will
+			// write the 500 response and log the stack — do not suppress here.
+			panic(r)
 		}
 	}()
 
