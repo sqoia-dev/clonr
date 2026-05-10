@@ -155,7 +155,22 @@ describe("Nodes list — row click wiring", () => {
 describe("NodeDetailPage — renders node identity", () => {
   it("should render hostname and back link after fetching node", async () => {
     fetchHandler = (url) => {
-      if (url.includes(`/api/v1/nodes/${NODE_ID}`)) {
+      // Sub-resource endpoints for this node — must match before the bare node route
+      if (url.includes(`/api/v1/nodes/${NODE_ID}/effective-layout`)) {
+        // effectiveData must have a valid source string or the component crashes on source.startsWith()
+        return Promise.resolve(jsonOk({ source: "image", layout: null }))
+      }
+      if (url.includes(`/api/v1/nodes/${NODE_ID}/sudoers`)) {
+        return Promise.resolve(jsonOk({ sudoers: [], total: 0 }))
+      }
+      if (url.includes(`/api/v1/nodes/${NODE_ID}/slurm`)) {
+        return Promise.resolve(jsonOk({ node: null }))
+      }
+      if (url.includes(`/api/v1/nodes/${NODE_ID}/hardware`)) {
+        return Promise.resolve(jsonOk({ hardware: null }))
+      }
+      // Bare node fetch
+      if (url.endsWith(`/api/v1/nodes/${NODE_ID}`)) {
         return Promise.resolve(jsonOk(sampleNode))
       }
       if (url.includes("/api/v1/images")) {
