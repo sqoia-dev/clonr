@@ -187,7 +187,8 @@ describe("NodeDetailPage — renders node identity", () => {
     withProviders(<NodeDetailPage />)
 
     await waitFor(() => {
-      expect(screen.getByText("compute-01")).toBeInTheDocument()
+      // hostname appears in multiple elements (h1 + detail row); use getAllByText
+      expect(screen.getAllByText("compute-01").length).toBeGreaterThan(0)
     })
 
     // Back link should be present with the correct testid
