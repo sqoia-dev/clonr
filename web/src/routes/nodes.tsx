@@ -3562,7 +3562,8 @@ function SudoersSection({ node }: { node: NodeConfig }) {
 // Displays the resolved effective layout source, any node-level override, and
 // "Set override…" / "Clear override" actions.
 
-function sourceLabel(source: string): string {
+function sourceLabel(source: string | undefined): string {
+  if (!source) return "—"
   if (source === "node") return "node override"
   if (source === "group") return "group default"
   if (source === "image") return "image default"
