@@ -3,6 +3,22 @@
   "$id": "https://github.com/sqoia-dev/clustr/pkg/api/base-image",
   "$ref": "#/$defs/BaseImage",
   "$defs": {
+    "AnchorPair": {
+      "properties": {
+        "begin": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "begin",
+        "end"
+      ]
+    },
     "BaseImage": {
       "properties": {
         "id": {
@@ -156,6 +172,9 @@
         },
         "payload": {
           "type": "string"
+        },
+        "anchors": {
+          "$ref": "#/$defs/AnchorPair"
         }
       },
       "additionalProperties": false,

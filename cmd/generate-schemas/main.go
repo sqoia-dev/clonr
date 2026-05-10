@@ -87,6 +87,9 @@ var schemaTypes = []reflect.Type{
 	reflect.TypeOf(api.ListBiosProfilesResponse{}),
 	reflect.TypeOf(api.NodeBiosProfileResponse{}),
 	reflect.TypeOf(api.BiosProviderVerifyResponse{}),
+	// Sprint 36: reactive config ANCHORS types.
+	reflect.TypeOf(api.InstallInstruction{}),
+	reflect.TypeOf(api.AnchorPair{}),
 }
 
 func main() {

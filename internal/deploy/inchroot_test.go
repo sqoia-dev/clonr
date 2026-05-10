@@ -597,3 +597,201 @@ func TestStreamPipeWithFallback_NormalLinesPassThrough(t *testing.T) {
 		t.Errorf("captured %d lines, want 3: %+v", len(tail), tail)
 	}
 }
+
+// ─── ANCHORS tests (Sprint 36 Bundle A) ──────────────────────────────────────
+
+// TestInstallInstruction_Overwrite_Anchors_TwoPluginsCoexist is the
+// design-doc-required test (reactive-config.md §8.3). It verifies that two
+// separate plugins can each own a distinct region of the same target file via
+// AnchorPair, without clobbering each other's content.
+func TestInstallInstruction_Overwrite_Anchors_TwoPluginsCoexist(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc", "security"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := "/etc/security/limits.conf"
+
+	// Step 1: apply limits-slurm plugin's region.
+	slurm1 := api.InstallInstruction{
+		Opcode:  "overwrite",
+		Target:  target,
+		Payload: "@slurm soft memlock unlimited",
+		Anchors: &api.AnchorPair{
+			Begin: "# BEGIN clustr/limits-slurm",
+			End:   "# END clustr/limits-slurm",
+		},
+	}
+	if err := applyInstallInstructions(context.Background(), root, []api.InstallInstruction{slurm1}); err != nil {
+		t.Fatalf("step 1 (limits-slurm apply): %v", err)
+	}
+
+	// Step 2: apply limits-pam plugin's region (different anchors, same file).
+	pam1 := api.InstallInstruction{
+		Opcode:  "overwrite",
+		Target:  target,
+		Payload: "* hard nofile 65536",
+		Anchors: &api.AnchorPair{
+			Begin: "# BEGIN clustr/limits-pam",
+			End:   "# END clustr/limits-pam",
+		},
+	}
+	if err := applyInstallInstructions(context.Background(), root, []api.InstallInstruction{pam1}); err != nil {
+		t.Fatalf("step 2 (limits-pam apply): %v", err)
+	}
+
+	// Step 3: assert both regions are present.
+	content, err := os.ReadFile(filepath.Join(root, "etc", "security", "limits.conf"))
+	if err != nil {
+		t.Fatalf("read after step 2: %v", err)
+	}
+	got := string(content)
+	for _, want := range []string{
+		"# BEGIN clustr/limits-slurm",
+		"@slurm soft memlock unlimited",
+		"# END clustr/limits-slurm",
+		"# BEGIN clustr/limits-pam",
+		"* hard nofile 65536",
+		"# END clustr/limits-pam",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("after step 2: file does not contain %q\nfile:\n%s", want, got)
+		}
+	}
+
+	// Step 4: re-apply limits-slurm with a new payload.
+	slurm2 := api.InstallInstruction{
+		Opcode:  "overwrite",
+		Target:  target,
+		Payload: "@slurm soft memlock 1048576",
+		Anchors: &api.AnchorPair{
+			Begin: "# BEGIN clustr/limits-slurm",
+			End:   "# END clustr/limits-slurm",
+		},
+	}
+	if err := applyInstallInstructions(context.Background(), root, []api.InstallInstruction{slurm2}); err != nil {
+		t.Fatalf("step 4 (limits-slurm update): %v", err)
+	}
+
+	// Step 5: assert limits-slurm updated, limits-pam untouched.
+	content, err = os.ReadFile(filepath.Join(root, "etc", "security", "limits.conf"))
+	if err != nil {
+		t.Fatalf("read after step 4: %v", err)
+	}
+	got = string(content)
+	if strings.Contains(got, "@slurm soft memlock unlimited") {
+		t.Error("step 5: old limits-slurm payload still present after update")
+	}
+	if !strings.Contains(got, "@slurm soft memlock 1048576") {
+		t.Error("step 5: new limits-slurm payload not found after update")
+	}
+	if !strings.Contains(got, "* hard nofile 65536") {
+		t.Error("step 5: limits-pam region was corrupted by limits-slurm update")
+	}
+
+	// Step 6: re-apply limits-pam with empty payload.
+	pam2 := api.InstallInstruction{
+		Opcode:  "overwrite",
+		Target:  target,
+		Payload: "",
+		Anchors: &api.AnchorPair{
+			Begin: "# BEGIN clustr/limits-pam",
+			End:   "# END clustr/limits-pam",
+		},
+	}
+	if err := applyInstallInstructions(context.Background(), root, []api.InstallInstruction{pam2}); err != nil {
+		t.Fatalf("step 6 (limits-pam empty): %v", err)
+	}
+
+	// Step 7: assert limits-pam markers still present (empty body), limits-slurm untouched.
+	content, err = os.ReadFile(filepath.Join(root, "etc", "security", "limits.conf"))
+	if err != nil {
+		t.Fatalf("read after step 6: %v", err)
+	}
+	got = string(content)
+	if !strings.Contains(got, "# BEGIN clustr/limits-pam") {
+		t.Error("step 7: limits-pam begin marker missing after empty-payload apply")
+	}
+	if !strings.Contains(got, "# END clustr/limits-pam") {
+		t.Error("step 7: limits-pam end marker missing after empty-payload apply")
+	}
+	if strings.Contains(got, "* hard nofile 65536") {
+		t.Error("step 7: old limits-pam payload still present after empty-payload apply")
+	}
+	if !strings.Contains(got, "@slurm soft memlock 1048576") {
+		t.Error("step 7: limits-slurm region was corrupted by limits-pam empty-payload apply")
+	}
+}
+
+// TestApplyOverwrite_AnchorPair_HalfPresent_Fails asserts that a file with
+// only the begin marker (no end marker) causes an error instead of corruption.
+func TestApplyOverwrite_AnchorPair_HalfPresent_Fails(t *testing.T) {
+	existing := "# BEGIN clustr/limits-slurm\n@slurm soft memlock unlimited\n"
+	_, err := applyAnchorRegion(existing, "new content", "# BEGIN clustr/limits-slurm", "# END clustr/limits-slurm")
+	if err == nil {
+		t.Fatal("expected error for half-present anchor pair (begin without end), got nil")
+	}
+	if !strings.Contains(err.Error(), "without matching") {
+		t.Errorf("error message should mention 'without matching', got: %v", err)
+	}
+}
+
+// TestApplyOverwrite_AnchorPair_EndWithoutBegin_Fails asserts the inverse:
+// only an end marker present also causes an error.
+func TestApplyOverwrite_AnchorPair_EndWithoutBegin_Fails(t *testing.T) {
+	existing := "@slurm soft memlock unlimited\n# END clustr/limits-slurm\n"
+	_, err := applyAnchorRegion(existing, "new content", "# BEGIN clustr/limits-slurm", "# END clustr/limits-slurm")
+	if err == nil {
+		t.Fatal("expected error for half-present anchor pair (end without begin), got nil")
+	}
+	if !strings.Contains(err.Error(), "without matching") {
+		t.Errorf("error message should mention 'without matching', got: %v", err)
+	}
+}
+
+// TestApplyOverwrite_AnchorPair_OutOfOrder_Fails asserts that a file where the
+// end marker appears before the begin marker is rejected.
+func TestApplyOverwrite_AnchorPair_OutOfOrder_Fails(t *testing.T) {
+	existing := "# END clustr/limits-slurm\n# BEGIN clustr/limits-slurm\n"
+	_, err := applyAnchorRegion(existing, "new content", "# BEGIN clustr/limits-slurm", "# END clustr/limits-slurm")
+	if err == nil {
+		t.Fatal("expected error for out-of-order anchor pair, got nil")
+	}
+	if !strings.Contains(err.Error(), "out of order") {
+		t.Errorf("error message should mention 'out of order', got: %v", err)
+	}
+}
+
+// TestApplyOverwrite_AnchorPair_NoTrailingNewline asserts that appending to a
+// file that doesn't end with a newline still produces well-formed output.
+func TestApplyOverwrite_AnchorPair_NoTrailingNewline(t *testing.T) {
+	existing := "# some existing content" // no trailing newline
+	result, err := applyAnchorRegion(existing, "@slurm soft memlock unlimited",
+		"# BEGIN clustr/limits-slurm", "# END clustr/limits-slurm")
+	if err != nil {
+		t.Fatalf("applyAnchorRegion: %v", err)
+	}
+	// The separator newline must be inserted before the block.
+	if !strings.Contains(result, "# some existing content\n# BEGIN") {
+		t.Errorf("expected separator newline before BEGIN marker\nresult:\n%s", result)
+	}
+	if !strings.Contains(result, "@slurm soft memlock unlimited") {
+		t.Errorf("expected payload in result\nresult:\n%s", result)
+	}
+	if !strings.Contains(result, "# END clustr/limits-slurm") {
+		t.Errorf("expected END marker in result\nresult:\n%s", result)
+	}
+}
+
+// TestApplyOverwrite_AnchorPair_EmptyFile asserts that applying to a
+// non-existent (empty) file appends the block cleanly.
+func TestApplyOverwrite_AnchorPair_EmptyFile(t *testing.T) {
+	result, err := applyAnchorRegion("", "payload line",
+		"# BEGIN clustr/plugin", "# END clustr/plugin")
+	if err != nil {
+		t.Fatalf("applyAnchorRegion on empty file: %v", err)
+	}
+	want := "# BEGIN clustr/plugin\npayload line\n# END clustr/plugin\n"
+	if result != want {
+		t.Errorf("result = %q, want %q", result, want)
+	}
+}

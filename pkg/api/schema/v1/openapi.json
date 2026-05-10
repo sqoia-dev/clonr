@@ -7,6 +7,29 @@
   },
   "components": {
     "schemas": {
+      "AnchorPair": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/anchor-pair",
+        "$ref": "#/$defs/AnchorPair",
+        "$defs": {
+          "AnchorPair": {
+            "properties": {
+              "begin": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "begin",
+              "end"
+            ]
+          }
+        }
+      },
       "AssignBiosProfileRequest": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/assign-bios-profile-request",
@@ -66,6 +89,22 @@
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/base-image",
         "$ref": "#/$defs/BaseImage",
         "$defs": {
+          "AnchorPair": {
+            "properties": {
+              "begin": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "begin",
+              "end"
+            ]
+          },
           "BaseImage": {
             "properties": {
               "id": {
@@ -219,6 +258,9 @@
               },
               "payload": {
                 "type": "string"
+              },
+              "anchors": {
+                "$ref": "#/$defs/AnchorPair"
               }
             },
             "additionalProperties": false,
@@ -1345,6 +1387,52 @@
           }
         }
       },
+      "InstallInstruction": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/sqoia-dev/clustr/pkg/api/install-instruction",
+        "$ref": "#/$defs/InstallInstruction",
+        "$defs": {
+          "AnchorPair": {
+            "properties": {
+              "begin": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "begin",
+              "end"
+            ]
+          },
+          "InstallInstruction": {
+            "properties": {
+              "opcode": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              },
+              "payload": {
+                "type": "string"
+              },
+              "anchors": {
+                "$ref": "#/$defs/AnchorPair"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "opcode",
+              "target",
+              "payload"
+            ]
+          }
+        }
+      },
       "InterfaceConfig": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/interface-config",
@@ -1888,6 +1976,22 @@
         "$id": "https://github.com/sqoia-dev/clustr/pkg/api/list-images-response",
         "$ref": "#/$defs/ListImagesResponse",
         "$defs": {
+          "AnchorPair": {
+            "properties": {
+              "begin": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "begin",
+              "end"
+            ]
+          },
           "BaseImage": {
             "properties": {
               "id": {
@@ -2041,6 +2145,9 @@
               },
               "payload": {
                 "type": "string"
+              },
+              "anchors": {
+                "$ref": "#/$defs/AnchorPair"
               }
             },
             "additionalProperties": false,

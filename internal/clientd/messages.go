@@ -128,6 +128,22 @@ type ConfigPushPayload struct {
 	// Checksum is "sha256:<hex>" computed by the server over Content.
 	// The node validates this before writing.
 	Checksum string `json:"checksum"`
+	// Plugin is the reactive-config plugin name that produced this push
+	// (e.g. "hostname"). Empty string means a legacy full-reapply push —
+	// clientd applies it identically to pre-Sprint-36 behaviour. Non-empty
+	// means the push originated from the observer; clientd will emit a
+	// config_push_ack carrying plugin + rendered_hash so the server can
+	// update the config_render_state row.
+	//
+	// Backward-compatible: clients that do not know about this field ignore it
+	// and apply the payload as usual.
+	Plugin string `json:"plugin,omitempty"`
+	// RenderedHash is the SHA-256 hex digest of the instruction set that
+	// produced this push (see config.HashInstructions). The server echoes
+	// this back so the ack can update the config_render_state row without a
+	// separate DB lookup.
+	// Empty for legacy (Plugin == "") pushes.
+	RenderedHash string `json:"rendered_hash,omitempty"`
 }
 
 // LogPullStartPayload is the payload for the "log_pull_start" server→node message.
