@@ -95,6 +95,7 @@ func BMCCollectArgv(addr, user, pass string) []string {
 	return ipmi.SensorsArgv(cli)
 }
 
+//lint:ignore U1000 sentinel for external BMC callers to errors.Is against; tree-shaken when BMC collector is disabled
 // errMissingBMC is returned by Collect when no BMC address is set.
 // Exported as a package-level var so callers can errors.Is against it.
 var errMissingBMC = fmt.Errorf("bmc collector: no BMC address configured")

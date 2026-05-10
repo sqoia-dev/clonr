@@ -291,6 +291,7 @@ func TestPIUtilizationQuery(t *testing.T) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+//lint:ignore U1000 test helper retained for PI RBAC mutation tests planned in Sprint 40 (PI-RBAC-WRITE)
 func mustMarshal(t *testing.T, v interface{}) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -300,6 +301,7 @@ func mustMarshal(t *testing.T, v interface{}) []byte {
 	return b
 }
 
+//lint:ignore U1000 test helper retained for PI RBAC mutation tests planned in Sprint 40 (PI-RBAC-WRITE)
 func newJSONRequest(method, path string, body interface{}) *http.Request {
 	var buf bytes.Buffer
 	if body != nil {

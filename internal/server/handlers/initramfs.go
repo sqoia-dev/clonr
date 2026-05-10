@@ -1446,6 +1446,7 @@ func ensureKernelPlaced(bootDir string) (kver string, placed bool, err error) {
 	return kver, true, nil
 }
 
+//lint:ignore U1000 used by the CLI initramfs-rebuild poll path (INITRAMFS-POLL) not yet landed
 // parseInitramfsBuildInfo is a helper to unmarshal the rebuild response.
 func parseInitramfsBuildInfo(body []byte) (sha256sum, kernelVersion string, err error) {
 	var resp struct {

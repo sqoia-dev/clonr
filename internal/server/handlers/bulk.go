@@ -513,6 +513,7 @@ func (h *BulkHandler) HandleBulkExec(w http.ResponseWriter, r *http.Request) {
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
 
+//lint:ignore U1000 used by upcoming bulk-SSH command (BULK-SSH) in Sprint 35; kept with the bulk handler for locality
 func (h *BulkHandler) hostnameFor(ctx context.Context, nodeID string) (string, error) {
 	cfg, err := h.DB.GetNodeConfig(ctx, nodeID)
 	if err != nil {

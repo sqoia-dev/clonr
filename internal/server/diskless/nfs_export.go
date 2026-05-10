@@ -53,9 +53,6 @@ const (
 	// imagesBase is where clustr stores image root filesystems on the host.
 	imagesBase = "/var/lib/clustr/images"
 
-	// exportsPath is the NFS exports configuration file.
-	exportsPath = "/etc/exports"
-
 	// anchorBegin and anchorEnd bracket the clustr-managed block in /etc/exports.
 	anchorBegin = "# BEGIN clustr-managed NFS exports — do not edit between these lines"
 	anchorEnd   = "# END clustr-managed NFS exports"

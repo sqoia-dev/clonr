@@ -14,6 +14,7 @@ import (
 // 10 minutes is a slow-path background check; these signals evolve over weeks.
 const techTrigTickInterval = 10 * time.Minute
 
+//lint:ignore U1000 used by the tech-trigger contention checker once SQLITE_BUSY instrumentation lands (TECHTRIG-CONTENTION)
 // contentionWindow is the window over which SQLITE_BUSY events are counted for T1.
 // 5 minutes of sustained contention (>=5/sec = 300 events in 5 min) fires the trigger.
 const contentionWindow = 5 * time.Minute

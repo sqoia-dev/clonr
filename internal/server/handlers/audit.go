@@ -129,7 +129,7 @@ func (h *AuditHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:    rec.CreatedAt.UTC().Format(time.RFC3339),
 		}
 	}
-	if out == nil {
+	if len(out) == 0 {
 		out = []auditRecordResponse{}
 	}
 

@@ -44,6 +44,15 @@ jobs:
       - name: go vet
         run: go vet -tags webdist ./...
 
+      # CI-1: staticcheck — catches dead code, deprecated APIs, and correctness
+      # issues that go vet misses.  Scoped to the three packages with the most
+      # active churn so the initial scope is reviewable; widen to ./... once
+      # all violations across the full tree are addressed (TODO: CI-1-widen).
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./internal/config/... ./internal/server/... ./cmd/...
+
       - name: go build (verify compilation)
         run: go build -tags webdist ./...
 

@@ -141,6 +141,7 @@ func (h *NodeHealthHandler) GetClusterHealth(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, resp)
 }
 
+//lint:ignore U1000 legacy ?selector= filter used by external monitors; retained for backward compat when the param is re-enabled
 // nodeHealthMatchesSelector returns true when n.ID or n.Hostname matches sel.
 // Used for the legacy ?selector= parameter.
 func nodeHealthMatchesSelector(n api.NodeConfig, sel string) bool {

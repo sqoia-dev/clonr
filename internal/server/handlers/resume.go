@@ -86,6 +86,7 @@ func (h *ResumeHandler) ResumeImageBuild(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusAccepted, updated)
 }
 
+//lint:ignore U1000 wired when resumable image builds land (IMAGES-RESUME-PHASE); kept here to keep factory coupling isolated
 // ResumeFromPhase re-enters the build pipeline at the given phase.
 // This is the factory method wired from the resume handler.
 // It is defined here to avoid circular imports — we need access to image.Factory.
@@ -94,6 +95,7 @@ func resumeFromPhase(f *image.Factory, imageID string, img api.BaseImage, phase 
 	f.ResumeFromPhase(imageID, img, phase)
 }
 
+//lint:ignore U1000 called by resume handler UI phase annotation (IMAGES-RESUME-PHASE); not yet wired into the handler
 // inspectResumePhase reads the on-disk build-state.json for an image and
 // returns the last recorded phase. Used by the UI to annotate the resume button.
 func inspectResumePhase(imageDir, imageID string) string {

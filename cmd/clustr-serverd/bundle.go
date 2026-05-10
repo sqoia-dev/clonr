@@ -591,7 +591,7 @@ func extractBundle(srcPath, destDir string) (*manifest, error) {
 			if err := os.MkdirAll(destPath, 0o755); err != nil {
 				return nil, fmt.Errorf("mkdir %s: %w", destPath, err)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 				return nil, fmt.Errorf("mkdir parent for %s: %w", destPath, err)
 			}

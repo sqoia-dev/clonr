@@ -20,6 +20,7 @@ import (
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
+//lint:ignore U1000 test fixture for GPG import round-trip test planned in Sprint 38 (GPG-IMPORT-TEST)
 // minimalTestKey is a small but valid ASCII-armored PGP public key block
 // generated with a test key (no passphrase, RSA 1024 — test use only).
 // This must be a real parseable key for the handler's openpgp.ReadKeyRing call.

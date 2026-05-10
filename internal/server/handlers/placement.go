@@ -21,6 +21,7 @@ import (
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
+//lint:ignore U1000 re-applied when legacy rack-position endpoints are re-enabled with their Sunset header (PLACEMENT-SUNSET)
 // placementSunsetDate is the RFC 1123 date after which the deprecated
 // PUT/DELETE /api/v1/racks/{id}/positions/{node_id} endpoints will be removed.
 const placementSunsetDate = "Mon, 01 Dec 2026 00:00:00 GMT"
@@ -150,6 +151,7 @@ func (h *PlacementHandler) DeletePlacement(w http.ResponseWriter, r *http.Reques
 
 // ─── Sunset header helper ─────────────────────────────────────────────────────
 
+//lint:ignore U1000 called by legacy rack-position endpoints when re-enabled with Sunset signalling (PLACEMENT-SUNSET)
 // setPlacementSunsetHeader adds the RFC 8594 Sunset header to legacy rack-position
 // endpoint responses, signalling the deprecation of those endpoints.
 func setPlacementSunsetHeader(w http.ResponseWriter) {

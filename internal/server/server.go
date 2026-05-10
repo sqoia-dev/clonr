@@ -1791,7 +1791,8 @@ func (s *Server) buildRouter() chi.Router {
 			// GET /images/{id} and GET /images/{id}/blob are registered above with
 			// requireImageAccess so node keys can also reach them.
 			// SSE-1: image lifecycle event stream — must be registered before /images/{id}.
-			r.Get("/images/events", images.StreamImageEvents)
+			// Retained for backward compatibility with external consumers (see UX-4 deprecation notice).
+			r.Get("/images/events", images.StreamImageEvents) //lint:ignore SA1019 backward compat; remove once all callers migrate to /api/v1/events
 			r.Get("/images", images.ListImages)
 			r.Post("/images", images.CreateImage)
 			// IMG-URL-1: download image from URL (Sprint 4).
@@ -1827,7 +1828,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/images/from-local-file", factory.FromLocalFile)
 
 			// ISO build observability — stream must come before plain snapshot route.
-			r.Get("/images/{id}/build-progress/stream", buildProgressH.StreamBuildProgress)
+			r.Get("/images/{id}/build-progress/stream", buildProgressH.StreamBuildProgress) //lint:ignore SA1019 backward compat; remove once all callers migrate to /api/v1/events
 			r.Get("/images/{id}/build-progress", buildProgressH.GetBuildProgress)
 			r.Get("/images/{id}/build-log", buildProgressH.GetBuildLog)
 			r.Get("/images/{id}/build-manifest", buildProgressH.GetBuildManifest)
@@ -2108,7 +2109,7 @@ func (s *Server) buildRouter() chi.Router {
 			// Rolling group reimage — requires admin or group-scoped operator access.
 			r.With(requireGroupAccessByGroupID("id", s.db)).Post("/node-groups/{id}/reimage", nodeGroups.ReimageGroup)
 			// Group reimage SSE event stream — GET /api/v1/node-groups/{id}/reimage/events?job_id=<jid>
-			r.Get("/node-groups/{id}/reimage/events", nodeGroups.StreamGroupReimageEvents)
+			r.Get("/node-groups/{id}/reimage/events", nodeGroups.StreamGroupReimageEvents) //lint:ignore SA1019 backward compat; remove once all callers migrate to /api/v1/events
 			// Group reimage job status polling.
 			r.Get("/reimages/jobs/{jobID}", nodeGroups.GetGroupReimageJob)
 			r.Post("/reimages/jobs/{jobID}/resume", nodeGroups.ResumeGroupReimageJob)
@@ -2199,11 +2200,11 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/reimages", reimageH.List)
 
 			// Logs — stream must be registered before plain /logs.
-			r.Get("/logs/stream", logs.StreamLogs)
+			r.Get("/logs/stream", logs.StreamLogs) //lint:ignore SA1019 backward compat; remove once all callers migrate to /api/v1/events
 			r.Get("/logs", logs.QueryLogs)
 
 			// Deployment progress — stream must be registered before plain routes.
-			r.Get("/deploy/progress/stream", progress.StreamProgress)
+			r.Get("/deploy/progress/stream", progress.StreamProgress) //lint:ignore SA1019 backward compat; remove once all callers migrate to /api/v1/events
 			r.Get("/deploy/progress/{mac}", progress.GetProgress)
 			r.Get("/deploy/progress", progress.ListProgress)
 
