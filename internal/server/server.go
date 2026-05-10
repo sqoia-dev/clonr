@@ -50,6 +50,12 @@ import (
 	"github.com/sqoia-dev/clustr/internal/webhook"
 )
 
+// reactiveConfigPluginsOnce guards the one-time registration of reactive-config
+// plugins into the package-level config registry. The registry is global and
+// panics on duplicate names, so we must register exactly once across all
+// server.New calls (multiple calls occur in tests).
+var reactiveConfigPluginsOnce sync.Once
+
 // BuildInfo holds build-time metadata injected via -ldflags.
 type BuildInfo struct {
 	Version   string
@@ -1369,10 +1375,13 @@ func (s *Server) buildRouter() chi.Router {
 
 		// ─── Sprint 36: reactive-config plugin registration ──────────────────────
 		// Must run after systemAlertStore is initialised so alert-writing is
-		// available to the observer goroutines. buildRouter is called once (from
-		// New), so Register does not panic from duplicate-name collision.
-		config.SetAlertWriter(s.systemAlertStore)
-		config.Register(plugins.HostnamePlugin{})
+		// available to the observer goroutines. reactiveConfigPluginsOnce ensures
+		// registration happens exactly once even when server.New is called multiple
+		// times (e.g. in tests) — config.Register panics on duplicate names.
+		reactiveConfigPluginsOnce.Do(func() {
+			config.SetAlertWriter(s.systemAlertStore)
+			config.Register(plugins.HostnamePlugin{})
+		})
 
 		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
 		// PI-scoped routes: PI can only access their own NodeGroups.
