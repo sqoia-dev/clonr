@@ -1376,7 +1376,7 @@ export function NodesPage() {
                 <TableRow
                   key={node.id}
                   className={cn("cursor-pointer", selectedNodeIds.has(node.id) && "bg-secondary/40")}
-                  onClick={() => navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id }, search: {} })}
+                  onClick={() => navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id }, search: { reimage: undefined, deleteNode: undefined } })}
                   data-testid={`node-row-${node.id}`}
                 >
                   {/* BULK-MULTISELECT: row checkbox */}
@@ -1538,356 +1538,7 @@ function EmptyState({ onAddNode }: { onAddNode: () => void }) {
   )
 }
 
-interface NodeSheetProps {
-  node: NodeConfig
-  onClose: () => void
-  advanced: boolean
-  relativeTime: (iso?: string) => string
-  autoReimage?: boolean
-  autoDelete?: boolean
-  onOperatingModeSaved?: (mode: string) => void
-}
-
-// ─── NodeSheet ────────────────────────────────────────────────────────────────
-// Sprint 4: EDIT-NODE-2/3 (inline edit mode) + TAG-3/5 (tag management)
-
 type NodeDetailTab = "overview" | "sensors" | "extstats" | "eventlog" | "console" | "deploylog" | "ipmi"
-
-// NodeSheet is retained for reference; row-clicks now navigate to NodeDetailPage.
-function _NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete, onOperatingModeSaved }: NodeSheetProps) {
-  const qc = useQueryClient()
-  const state = nodeState(node)
-  const [editing, setEditing] = React.useState(false)
-  const [editHostname, setEditHostname] = React.useState(node.hostname)
-  const [editFqdn, setEditFqdn] = React.useState(node.fqdn || "")
-  const [editTags, setEditTags] = React.useState<string[]>(node.tags ?? [])
-  const [editProvider, setEditProvider] = React.useState(node.provider ?? "")
-  const [editRoleConfirm, setEditRoleConfirm] = React.useState("")
-  const [editError, setEditError] = React.useState("")
-  // TAG-3/5: inline tag add
-  const [tagInput, setTagInput] = React.useState("")
-  // #152: per-node detail tabs
-  const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
-  // BOOT-SETTINGS-MODAL: controls the boot settings dialog
-  const [bootSettingsOpen, setBootSettingsOpen] = React.useState(false)
-
-  const isController = node.tags?.includes("controller")
-  const editRemovesController = isController && !editTags.includes("controller")
-
-  const editMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          hostname: editHostname || undefined,
-          fqdn: editFqdn || undefined,
-          tags: editTags,
-          provider: editProvider,
-        }),
-      }),
-    onSuccess: (updated) => {
-      qc.setQueryData<{ nodes: NodeConfig[] }>(["nodes"], (old) => {
-        if (!old) return old
-        return { ...old, nodes: old.nodes.map((n) => n.id === updated.id ? updated : n) }
-      })
-      qc.invalidateQueries({ queryKey: ["nodes"] })
-      toast({ title: "Node updated", description: `${updated.hostname} saved.` })
-      setEditing(false)
-      setEditError("")
-      setEditRoleConfirm("")
-    },
-    onError: (err) => {
-      setEditError(String(err))
-    },
-  })
-
-  function handleSave() {
-    if (editRemovesController && editRoleConfirm !== node.hostname) {
-      setEditError(`Type the node hostname "${node.hostname}" to confirm removing controller role`)
-      return
-    }
-    setEditError("")
-    editMutation.mutate()
-  }
-
-  function addTag(tag: string) {
-    const trimmed = tag.trim()
-    if (!trimmed || editTags.includes(trimmed)) return
-    setEditTags((prev) => [...prev, trimmed])
-    setTagInput("")
-  }
-
-  function removeTag(tag: string) {
-    setEditTags((prev) => prev.filter((t) => t !== tag))
-  }
-
-  return (
-    <>
-    <Sheet open onOpenChange={(v) => !v && onClose()}>
-      <SheetContent side="right" className="w-full sm:max-w-xl overflow-y-auto">
-        <SheetHeader>
-          <div className="flex items-center justify-between">
-            <SheetTitle className="font-mono">{node.hostname || node.id}</SheetTitle>
-            {!editing && (
-              <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2">
-                <Pencil className="h-3.5 w-3.5 mr-1" />
-                Edit
-              </Button>
-            )}
-          </div>
-          <SheetDescription>
-            <StatusDot state={state} />
-          </SheetDescription>
-        </SheetHeader>
-
-        <div className="mt-6 space-y-4">
-          {editing ? (
-            /* ── Inline edit form (EDIT-NODE-2) ── */
-            <div className="space-y-4 rounded-md border border-border p-4">
-              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Editing node</h3>
-              <EditField label="Hostname">
-                <Input value={editHostname} onChange={(e) => setEditHostname(e.target.value)} className="font-mono text-xs" />
-              </EditField>
-              <EditField label="FQDN (optional)">
-                <Input value={editFqdn} onChange={(e) => setEditFqdn(e.target.value)} className="font-mono text-xs" />
-              </EditField>
-              {/* TAG-5: tag management in edit mode */}
-              <EditField label="Tags">
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {editTags.map((t) => (
-                    <span key={t} className="flex items-center gap-0.5 rounded bg-secondary px-2 py-0.5 text-xs font-mono">
-                      {t}
-                      <button onClick={() => removeTag(t)} className="ml-0.5 hover:text-destructive" aria-label={`Remove tag ${t}`}>
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="add tag…"
-                    value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTag(tagInput) } }}
-                    className="text-xs flex-1"
-                  />
-                  <Button type="button" variant="outline" size="sm" onClick={() => addTag(tagInput)}>
-                    <Plus className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              </EditField>
-              <EditField label="Provider">
-                <select
-                  className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
-                  value={editProvider}
-                  onChange={(e) => setEditProvider(e.target.value)}
-                >
-                  {NODE_PROVIDERS.map((p) => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
-              </EditField>
-              {/* EDIT-NODE-3: typed confirm for controller demotion */}
-              {editRemovesController && (
-                <EditField label={`Type "${node.hostname}" to confirm removing controller role:`}>
-                  <Input
-                    placeholder={node.hostname}
-                    value={editRoleConfirm}
-                    onChange={(e) => setEditRoleConfirm(e.target.value)}
-                    className="font-mono text-xs border-status-warning"
-                  />
-                </EditField>
-              )}
-              {editError && <p className="text-xs text-destructive">{editError}</p>}
-              <div className="flex gap-2 pt-1">
-                <Button size="sm" className="flex-1" onClick={handleSave} disabled={editMutation.isPending}>
-                  {editMutation.isPending ? "Saving…" : "Save"}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setEditError(""); setEditHostname(node.hostname); setEditFqdn(node.fqdn || ""); setEditTags(node.tags ?? []); setEditProvider(node.provider ?? "") }}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : (
-            /* ── #152: tabbed detail view ── */
-            <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v as NodeDetailTab)}>
-              <TabsList className="w-full">
-                <TabsTrigger value="overview" className="flex-1 text-xs gap-1">
-                  <Cpu className="h-3 w-3" />
-                  Overview
-                </TabsTrigger>
-                <TabsTrigger value="sensors" className="flex-1 text-xs gap-1">
-                  <Activity className="h-3 w-3" />
-                  Sensors
-                </TabsTrigger>
-                <TabsTrigger value="eventlog" className="flex-1 text-xs gap-1">
-                  <BookOpen className="h-3 w-3" />
-                  Event Log
-                </TabsTrigger>
-                <TabsTrigger value="console" className="flex-1 text-xs gap-1">
-                  <Terminal className="h-3 w-3" />
-                  Console
-                </TabsTrigger>
-                <TabsTrigger value="deploylog" className="flex-1 text-xs gap-1">
-                  <ScrollText className="h-3 w-3" />
-                  Install Log
-                </TabsTrigger>
-                <TabsTrigger value="extstats" className="flex-1 text-xs gap-1">
-                  <Radio className="h-3 w-3" />
-                  Ext Stats
-                </TabsTrigger>
-                <TabsTrigger value="ipmi" className="flex-1 text-xs gap-1">
-                  <Zap className="h-3 w-3" />
-                  IPMI
-                </TabsTrigger>
-              </TabsList>
-
-              {/* ── Overview tab (existing content) ── */}
-              <TabsContent value="overview" className="mt-4 space-y-4">
-                <Section title="Identity">
-                  <Row label="ID" value={node.id} mono />
-                  <Row label="Hostname" value={node.hostname} />
-                  <Row label="FQDN" value={node.fqdn || "—"} />
-                  <Row label="MAC" value={node.primary_mac} mono />
-                  <Row label="Firmware" value={node.detected_firmware || "—"} />
-                  <Row label="Provider" value={NODE_PROVIDERS.find((p) => p.value === (node.provider ?? ""))?.label ?? "—"} />
-                </Section>
-
-                <Section title="Deployment">
-                  <ImageAssignRow node={node} qc={qc} />
-                  <Row label="State" value={state} />
-                  <Row label="Last seen" value={relativeTime(node.last_seen_at ?? node.deploy_verified_booted_at)} />
-                  <Row label="Deploy complete" value={relativeTime(node.deploy_completed_preboot_at)} />
-                  <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
-                </Section>
-
-                {/* Sprint 37 UI: operating mode picker */}
-                <OperatingModePicker node={node} qc={qc} onSaved={onOperatingModeSaved} />
-
-                {node.ldap_ready !== undefined && (
-                  <LdapStatusSection node={node} qc={qc} />
-                )}
-
-                {/* TAG-5: tag display + inline add in view mode */}
-                <Section title="Tags">
-                  <div className="flex flex-wrap gap-1.5">
-                    {(node.tags ?? []).map((t) => (
-                      <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
-                        {t}
-                      </span>
-                    ))}
-                    {(node.tags ?? []).length === 0 && (
-                      <span className="text-xs text-muted-foreground">No tags</span>
-                    )}
-                  </div>
-                  <div className="flex gap-2 mt-2">
-                    <Input
-                      placeholder="add tag…"
-                      value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault()
-                          const trimmed = tagInput.trim()
-                          if (!trimmed) return
-                          const newTags = [...(node.tags ?? []).filter((t) => t !== trimmed), trimmed]
-                          apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ tags: newTags }),
-                          }).then(() => {
-                            qc.invalidateQueries({ queryKey: ["nodes"] })
-                            setTagInput("")
-                            toast({ title: "Tag added", description: trimmed })
-                          }).catch((err) => toast({ variant: "destructive", title: "Failed to add tag", description: String(err) }))
-                        }
-                      }}
-                      className="text-xs flex-1 h-7"
-                    />
-                    <Tag className="h-3.5 w-3.5 mt-1.5 text-muted-foreground" />
-                  </div>
-                </Section>
-
-                {advanced && (
-                  <Section title="Advanced">
-                    <Row label="Group" value={node.group_id || "—"} mono />
-                    <Row label="Created" value={relativeTime(node.created_at)} />
-                    <Row label="Updated" value={relativeTime(node.updated_at)} />
-                  </Section>
-                )}
-
-                {/* VARIANTS-SYSTEM editor — Sprint 44 */}
-                <VariantsEditor nodeId={node.id} />
-
-                <HardwareSection node={node} />
-
-                {/* DISK-LAYOUT-PICKER — Sprint 35 */}
-                <DiskLayoutSection node={node} />
-
-                <SudoersSection node={node} />
-                <SlurmNodeSection node={node} />
-                <ReimageFlow node={node} autoExpand={autoReimage} />
-                <CaptureNodeFlow node={node} />
-
-                {/* BOOT-SETTINGS-MODAL: inline trigger */}
-                <div className="pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full gap-1.5 text-xs"
-                    onClick={() => setBootSettingsOpen(true)}
-                  >
-                    <Settings2 className="h-3.5 w-3.5" />
-                    Change Boot Settings…
-                  </Button>
-                </div>
-
-                <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onClose} />
-              </TabsContent>
-
-              {/* ── Sensors tab ── */}
-              <TabsContent value="sensors" className="mt-2">
-                <SensorsTab nodeId={node.id} />
-              </TabsContent>
-
-              {/* ── Event Log tab ── */}
-              <TabsContent value="eventlog" className="mt-2">
-                <EventLogTab nodeId={node.id} />
-              </TabsContent>
-
-              {/* ── Console tab ── */}
-              <TabsContent value="console" className="mt-2">
-                <ConsoleTab nodeId={node.id} />
-              </TabsContent>
-
-              {/* ── Install Log tab (STREAM-LOG-UI) ── */}
-              <TabsContent value="deploylog" className="mt-2">
-                <DeployLogTab nodeId={node.id} primaryMac={node.primary_mac} />
-              </TabsContent>
-
-              {/* ── External Stats tab (Sprint 38 EXTERNAL-STATS) ── */}
-              <TabsContent value="extstats" className="mt-2">
-                <ExternalStatsTab nodeId={node.id} />
-              </TabsContent>
-
-              {/* ── IPMI tab (Sprint 34 UI B) ── */}
-              <TabsContent value="ipmi" className="mt-2">
-                <IpmiTab nodeId={node.id} />
-              </TabsContent>
-            </Tabs>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
-
-    {/* BOOT-SETTINGS-MODAL */}
-    <BootSettingsModal
-      open={bootSettingsOpen}
-      onClose={() => setBootSettingsOpen(false)}
-      node={node}
-    />
-    </>
-  )
-}
 
 function EditField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -3632,7 +3283,7 @@ export function NodeDetailPage() {
       <div className="p-6 space-y-4">
         <Link
           to="/nodes"
-          search={{}}
+          search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined }}
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -3650,7 +3301,7 @@ export function NodeDetailPage() {
       {/* Breadcrumb */}
       <Link
         to="/nodes"
-        search={{}}
+        search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined }}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         data-testid="back-to-nodes"
       >
@@ -3681,7 +3332,7 @@ export function NodeDetailPage() {
           // Invalidate the single-node query so the header badge refreshes.
           qc.invalidateQueries({ queryKey: ["node", nodeId] })
         }}
-        onDeleted={() => navigate({ to: "/nodes", search: {} })}
+        onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })}
       />
     </div>
   )
