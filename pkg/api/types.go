@@ -193,6 +193,20 @@ type Bootloader struct {
 	Target string `json:"target"` // "x86_64-efi", "i386-pc"
 }
 
+// AnchorPair marks a named region within a target file so that two plugins
+// can each own a distinct section of the same file without overwriting each
+// other. Both Begin and End are matched on whole-line equality (no substring
+// matching). Setting Anchors on any opcode other than "overwrite" is a
+// deploy-time error.
+type AnchorPair struct {
+	// Begin is the exact line that marks the start of the managed region,
+	// e.g. "# BEGIN clustr/limits-slurm".
+	Begin string `json:"begin"`
+	// End is the exact line that marks the end of the managed region,
+	// e.g. "# END clustr/limits-slurm".
+	End string `json:"end"`
+}
+
 // InstallInstruction is a single step run inside the deployed filesystem during
 // the in-chroot phase of every deploy, AFTER node-identity config is applied
 // and BEFORE bootloader installation. Instructions are run in order; the image
@@ -208,14 +222,17 @@ type Bootloader struct {
 //     Mode 0644 is used unless the file already exists with a
 //     different mode (in which case the existing mode is preserved).
 //     Target's parent directory must already exist.
+//     When Anchors is non-nil, only the region between the anchor lines is
+//     replaced; content outside the markers is preserved byte-for-byte.
 //
 //   - "script"    — write Payload as a POSIX shell script to a temp file and
 //     run it inside the target via chroot(2). Fails the deploy if
 //     the script exits non-zero.
 type InstallInstruction struct {
-	Opcode  string `json:"opcode"`  // "modify" | "overwrite" | "script"
-	Target  string `json:"target"`  // path within the chrooted target root
-	Payload string `json:"payload"` // semantics depend on opcode
+	Opcode  string      `json:"opcode"`            // "modify" | "overwrite" | "script"
+	Target  string      `json:"target"`            // path within the chrooted target root
+	Payload string      `json:"payload"`           // semantics depend on opcode
+	Anchors *AnchorPair `json:"anchors,omitempty"` // optional; only honoured for opcode "overwrite"
 }
 
 // BaseImage is a deployable OS image, stripped of all node-specific identity.

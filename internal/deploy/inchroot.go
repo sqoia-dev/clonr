@@ -132,6 +132,10 @@ func applyModify(mountRoot string, instr api.InstallInstruction) error {
 // applyOverwrite writes instr.Payload as text to instr.Target within mountRoot.
 // If the file already exists, its existing mode is preserved; otherwise 0644 is
 // used. The parent directory must already exist.
+//
+// When instr.Anchors is non-nil, only the region between the anchor lines is
+// replaced — content outside the markers is preserved byte-for-byte. See
+// applyAnchoredOverwrite for the full algorithm.
 func applyOverwrite(mountRoot string, instr api.InstallInstruction) error {
 	if instr.Target == "" {
 		return fmt.Errorf("target is required")
@@ -153,10 +157,141 @@ func applyOverwrite(mountRoot string, instr api.InstallInstruction) error {
 		mode = info.Mode()
 	}
 
+	if instr.Anchors != nil {
+		return applyAnchoredOverwrite(hostPath, instr.Payload, instr.Anchors, mode)
+	}
+
 	if err := os.WriteFile(hostPath, []byte(instr.Payload), mode); err != nil {
 		return fmt.Errorf("write %s: %w", instr.Target, err)
 	}
 	return nil
+}
+
+// applyAnchoredOverwrite replaces the region between instr.Anchors.Begin and
+// instr.Anchors.End in the file at hostPath with payload. Markers are matched
+// on whole-line equality (no substring matching) to prevent collisions with
+// payload content that happens to contain the marker text on a longer line.
+//
+// Algorithm:
+//
+//  1. Read the existing file (empty string if absent).
+//  2. Locate the Begin and End marker lines.
+//  3. If both present: replace the inclusive region (markers + body) with
+//     Begin\n<payload>\nEnd\n.
+//  4. If neither present: append the block at end-of-file, adding a newline
+//     separator if the file does not already end with one.
+//  5. If exactly one is present: return an error — the file is malformed
+//     (e.g. a previous partial write or operator hand-edit).
+func applyAnchoredOverwrite(hostPath, payload string, anchors *api.AnchorPair, mode fs.FileMode) error {
+	// Read existing content (empty string if file is absent).
+	existing := ""
+	data, err := os.ReadFile(hostPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("anchors: read %s: %w", hostPath, err)
+	}
+	if err == nil {
+		existing = string(data)
+	}
+
+	newContent, err := applyAnchorRegion(existing, payload, anchors.Begin, anchors.End)
+	if err != nil {
+		return fmt.Errorf("anchors: %w", err)
+	}
+
+	if err := os.WriteFile(hostPath, []byte(newContent), mode); err != nil {
+		return fmt.Errorf("anchors: write %s: %w", hostPath, err)
+	}
+	return nil
+}
+
+// applyAnchorRegion implements the pure string manipulation part of the
+// anchor algorithm. It is a separate function to make unit testing easy
+// without filesystem I/O.
+//
+// Returns the new file content with the anchor region applied.
+func applyAnchorRegion(existing, payload, begin, end string) (string, error) {
+	lines := splitLines(existing)
+
+	beginIdx := -1
+	endIdx := -1
+	for i, line := range lines {
+		if line == begin {
+			beginIdx = i
+		} else if line == end {
+			endIdx = i
+		}
+	}
+
+	hasBegin := beginIdx >= 0
+	hasEnd := endIdx >= 0
+
+	switch {
+	case hasBegin && hasEnd:
+		if beginIdx > endIdx {
+			return "", fmt.Errorf("anchor pair out of order in existing file: %q appears after %q", begin, end)
+		}
+		// Replace the inclusive region [beginIdx, endIdx].
+		block := buildBlock(begin, payload, end)
+		var out []string
+		out = append(out, lines[:beginIdx]...)
+		out = append(out, block...)
+		out = append(out, lines[endIdx+1:]...)
+		return joinLines(out), nil
+
+	case !hasBegin && !hasEnd:
+		// Neither marker present — append the block at end-of-file.
+		block := buildBlock(begin, payload, end)
+		// If the existing content is non-empty and does not end with a newline,
+		// add one before the block so the begin marker starts on its own line.
+		prefix := existing
+		if len(prefix) > 0 && !strings.HasSuffix(prefix, "\n") {
+			prefix += "\n"
+		}
+		// joinLines already terminates with a trailing newline — do not add another.
+		return prefix + joinLines(block), nil
+
+	case hasBegin && !hasEnd:
+		return "", fmt.Errorf("malformed file: found begin marker %q without matching end marker %q — refusing to mutate", begin, end)
+
+	default: // !hasBegin && hasEnd
+		return "", fmt.Errorf("malformed file: found end marker %q without matching begin marker %q — refusing to mutate", end, begin)
+	}
+}
+
+// buildBlock returns the lines [begin, ...payloadLines, end].
+// Blank payload is allowed (the region will contain only the marker lines).
+func buildBlock(begin, payload, end string) []string {
+	block := []string{begin}
+	if payload != "" {
+		block = append(block, splitLines(payload)...)
+	}
+	block = append(block, end)
+	return block
+}
+
+// splitLines splits s into lines without trailing newlines. An empty string
+// returns an empty slice. A single trailing newline does NOT produce an empty
+// final element — the standard split convention used throughout this file.
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	// strings.Split on "" returns [""], which would break the loop below.
+	raw := strings.Split(s, "\n")
+	// Trim a single empty element caused by a trailing newline.
+	if len(raw) > 0 && raw[len(raw)-1] == "" {
+		raw = raw[:len(raw)-1]
+	}
+	return raw
+}
+
+// joinLines joins lines with "\n" and appends a final newline.
+func joinLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	result := strings.Join(lines, "\n")
+	return result + "\n"
 }
 
 // applyScript writes instr.Payload as a POSIX shell script to a temp file,
