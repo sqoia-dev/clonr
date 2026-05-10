@@ -1,11 +1,11 @@
 import * as React from "react"
-import { useNavigate, useSearch } from "@tanstack/react-router"
+import { useNavigate, useSearch, useParams, Link } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
   Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
-  Square, CheckSquare, WifiOff, ImagePlay, Play, GitBranch,
+  Square, CheckSquare, WifiOff, ImagePlay, Play, GitBranch, ArrowLeft,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
 import { Input } from "@/components/ui/input"
@@ -770,7 +770,6 @@ export function NodesPage() {
   // GRP-2: current view tab (nodes | groups)
   const view = search.view ?? "nodes"
   const [advanced, setAdvanced] = React.useState(false)
-  const [selectedNode, setSelectedNode] = React.useState<NodeConfig | null>(null)
   const [addNodeOpen, setAddNodeOpen] = React.useState(false)
   // BULK-MULTISELECT: row selection state
   const [selectedNodeIds, setSelectedNodeIds] = React.useState<Set<string>>(new Set())
@@ -944,20 +943,20 @@ export function NodesPage() {
     }
   }
 
-  // PAL-2-2: auto-open node sheet when ?openNode=<id> is in the URL.
+  // PAL-2-2: auto-navigate to full-page node detail when ?openNode=<id> is in the URL.
+  // Used by Cmd-K "Reimage node…" / "Delete node…" — navigates then lets the detail
+  // page handle autoReimage / autoDelete from its own search params.
   React.useEffect(() => {
-    if (!openNodeId || nodes.length === 0) return
-    const target = nodes.find((n) => n.id === openNodeId)
-    if (target && !selectedNode) {
-      setSelectedNode(target)
-      // Clear the param so back-navigation doesn't re-open.
-      navigate({
-        to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined },
-        replace: true,
-      })
-    }
-  }, [openNodeId, nodes, selectedNode, navigate, q, search.status, sortCol, sortDir])
+    if (!openNodeId) return
+    navigate({
+      to: "/nodes/$nodeId",
+      params: { nodeId: openNodeId },
+      search: {
+        reimage: autoReimage ? "1" : undefined,
+        deleteNode: autoDelete ? "1" : undefined,
+      },
+    })
+  }, [openNodeId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleSort(col: string) {
     if (sortCol === col) {
@@ -1377,7 +1376,8 @@ export function NodesPage() {
                 <TableRow
                   key={node.id}
                   className={cn("cursor-pointer", selectedNodeIds.has(node.id) && "bg-secondary/40")}
-                  onClick={() => setSelectedNode(node)}
+                  onClick={() => navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
+                  data-testid={`node-row-${node.id}`}
                 >
                   {/* BULK-MULTISELECT: row checkbox */}
                   <TableCell onClick={(e) => { e.stopPropagation(); toggleSelectNode(node.id) }} className="w-8">
@@ -1461,23 +1461,6 @@ export function NodesPage() {
           </>
         )}
       </div>
-
-      {/* Node detail sheet */}
-      {selectedNode && (
-        <NodeSheet
-          node={selectedNode}
-          onClose={() => setSelectedNode(null)}
-          advanced={advanced}
-          relativeTime={relativeTime}
-          autoReimage={autoReimage}
-          autoDelete={autoDelete}
-          onOperatingModeSaved={(mode) =>
-            setSelectedNode((prev) =>
-              prev ? { ...prev, operating_mode: mode as NodeConfig["operating_mode"] } : prev
-            )
-          }
-        />
-      )}
 
       {/* Add Node sheet (NODE-CREATE-2) */}
       <AddNodeSheet open={addNodeOpen} onClose={() => setAddNodeOpen(false)} />
@@ -3593,6 +3576,431 @@ function sourceLabel(source: string): string {
   if (source.startsWith("layout_catalog:group")) return "catalog (group pin)"
   if (source.startsWith("layout_catalog")) return "catalog"
   return source
+}
+
+// ─── NodeDetailPage — full-width node detail route (/nodes/$nodeId) ──────────
+// Replaces the NodeSheet drawer with a full-viewport page.
+// Fetches the node by ID and renders the same tabbed content.
+
+export function NodeDetailPage() {
+  const { nodeId } = useParams({ strict: false }) as { nodeId: string }
+  const navigate = useNavigate()
+  const search = useSearch({ strict: false }) as { reimage?: string; deleteNode?: string }
+  const qc = useQueryClient()
+
+  const { data: nodeData, isLoading, isError } = useQuery<NodeConfig>({
+    queryKey: ["node", nodeId],
+    queryFn: () => apiFetch<NodeConfig>(`/api/v1/nodes/${nodeId}`),
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+  })
+
+  // Keep the nodes list cache warm so navigating back shows fresh data.
+  useEventInvalidation("nodes", ["nodes"])
+
+  const autoReimage = search.reimage === "1"
+  const autoDelete = search.deleteNode === "1"
+
+  function relativeTime(iso?: string) {
+    if (!iso) return "—"
+    try {
+      return formatDistanceToNow(new Date(iso), { addSuffix: true })
+    } catch {
+      return "—"
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-4 w-32" />
+        </div>
+        <div className="space-y-2">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-8 w-full" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (isError || !nodeData) {
+    return (
+      <div className="p-6 space-y-4">
+        <Link
+          to="/nodes"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Nodes
+        </Link>
+        <p className="text-sm text-destructive">Failed to load node. It may have been deleted.</p>
+      </div>
+    )
+  }
+
+  const node = nodeData
+
+  return (
+    <div className="p-6 space-y-4 max-w-4xl">
+      {/* Breadcrumb */}
+      <Link
+        to="/nodes"
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        data-testid="back-to-nodes"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Back to Nodes
+      </Link>
+
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <h1 className="text-xl font-semibold font-mono">{node.hostname || node.id}</h1>
+        <StatusDot state={nodeState(node)} />
+        {operatingModeLabel(node.operating_mode) && (
+          <span className="inline-flex items-center rounded border border-blue-300 bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-800 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">
+            {operatingModeLabel(node.operating_mode)}
+          </span>
+        )}
+      </div>
+
+      {/* Full-width node detail — same content as NodeSheet, without the drawer chrome */}
+      <NodeDetailContent
+        node={node}
+        qc={qc}
+        advanced={false}
+        relativeTime={relativeTime}
+        autoReimage={autoReimage}
+        autoDelete={autoDelete}
+        onOperatingModeSaved={() => {
+          // Invalidate the single-node query so the header badge refreshes.
+          qc.invalidateQueries({ queryKey: ["node", nodeId] })
+        }}
+        onDeleted={() => navigate({ to: "/nodes" })}
+      />
+    </div>
+  )
+}
+
+// ─── NodeDetailContent ────────────────────────────────────────────────────────
+// Extracted tabbed body shared by NodeDetailPage (full-page) and NodeSheet (drawer).
+// Keeps both surfaces in sync without duplication.
+
+interface NodeDetailContentProps {
+  node: NodeConfig
+  qc: ReturnType<typeof useQueryClient>
+  advanced: boolean
+  relativeTime: (iso?: string) => string
+  autoReimage?: boolean
+  autoDelete?: boolean
+  onOperatingModeSaved?: (mode: string) => void
+  onDeleted: () => void
+}
+
+function NodeDetailContent({
+  node,
+  qc,
+  advanced,
+  relativeTime,
+  autoReimage,
+  autoDelete,
+  onOperatingModeSaved,
+  onDeleted,
+}: NodeDetailContentProps) {
+  const [editing, setEditing] = React.useState(false)
+  const [editHostname, setEditHostname] = React.useState(node.hostname)
+  const [editFqdn, setEditFqdn] = React.useState(node.fqdn || "")
+  const [editTags, setEditTags] = React.useState<string[]>(node.tags ?? [])
+  const [editProvider, setEditProvider] = React.useState(node.provider ?? "")
+  const [editRoleConfirm, setEditRoleConfirm] = React.useState("")
+  const [editError, setEditError] = React.useState("")
+  const [tagInput, setTagInput] = React.useState("")
+  const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
+  const [bootSettingsOpen, setBootSettingsOpen] = React.useState(false)
+
+  const isController = node.tags?.includes("controller")
+  const editRemovesController = isController && !editTags.includes("controller")
+
+  const editMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          hostname: editHostname || undefined,
+          fqdn: editFqdn || undefined,
+          tags: editTags,
+          provider: editProvider,
+        }),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData<{ nodes: NodeConfig[] }>(["nodes"], (old) => {
+        if (!old) return old
+        return { ...old, nodes: old.nodes.map((n) => n.id === updated.id ? updated : n) }
+      })
+      qc.invalidateQueries({ queryKey: ["nodes"] })
+      qc.invalidateQueries({ queryKey: ["node", node.id] })
+      toast({ title: "Node updated", description: `${updated.hostname} saved.` })
+      setEditing(false)
+      setEditError("")
+      setEditRoleConfirm("")
+    },
+    onError: (err) => {
+      setEditError(String(err))
+    },
+  })
+
+  function handleSave() {
+    if (editRemovesController && editRoleConfirm !== node.hostname) {
+      setEditError(`Type the node hostname "${node.hostname}" to confirm removing controller role`)
+      return
+    }
+    setEditError("")
+    editMutation.mutate()
+  }
+
+  function addTag(tag: string) {
+    const trimmed = tag.trim()
+    if (!trimmed || editTags.includes(trimmed)) return
+    setEditTags((prev) => [...prev, trimmed])
+    setTagInput("")
+  }
+
+  function removeTag(tag: string) {
+    setEditTags((prev) => prev.filter((t) => t !== tag))
+  }
+
+  return (
+    <>
+      <div className="space-y-4">
+        {editing ? (
+          <div className="space-y-4 rounded-md border border-border p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Editing node</h3>
+              <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => { setEditing(false); setEditError(""); setEditHostname(node.hostname); setEditFqdn(node.fqdn || ""); setEditTags(node.tags ?? []); setEditProvider(node.provider ?? "") }}>
+                Cancel
+              </Button>
+            </div>
+            <EditField label="Hostname">
+              <Input value={editHostname} onChange={(e) => setEditHostname(e.target.value)} className="font-mono text-xs" />
+            </EditField>
+            <EditField label="FQDN (optional)">
+              <Input value={editFqdn} onChange={(e) => setEditFqdn(e.target.value)} className="font-mono text-xs" />
+            </EditField>
+            <EditField label="Tags">
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {editTags.map((t) => (
+                  <span key={t} className="flex items-center gap-0.5 rounded bg-secondary px-2 py-0.5 text-xs font-mono">
+                    {t}
+                    <button onClick={() => removeTag(t)} className="ml-0.5 hover:text-destructive" aria-label={`Remove tag ${t}`}>
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="add tag…"
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTag(tagInput) } }}
+                  className="text-xs flex-1"
+                />
+                <Button type="button" variant="outline" size="sm" onClick={() => addTag(tagInput)}>
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </EditField>
+            <EditField label="Provider">
+              <select
+                className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
+                value={editProvider}
+                onChange={(e) => setEditProvider(e.target.value)}
+              >
+                {NODE_PROVIDERS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </EditField>
+            {editRemovesController && (
+              <EditField label={`Type "${node.hostname}" to confirm removing controller role:`}>
+                <Input
+                  placeholder={node.hostname}
+                  value={editRoleConfirm}
+                  onChange={(e) => setEditRoleConfirm(e.target.value)}
+                  className="font-mono text-xs border-status-warning"
+                />
+              </EditField>
+            )}
+            {editError && <p className="text-xs text-destructive">{editError}</p>}
+            <div className="flex gap-2 pt-1">
+              <Button size="sm" className="flex-1" onClick={handleSave} disabled={editMutation.isPending}>
+                {editMutation.isPending ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v as NodeDetailTab)}>
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <TabsList>
+                <TabsTrigger value="overview" className="text-xs gap-1">
+                  <Cpu className="h-3 w-3" />
+                  Overview
+                </TabsTrigger>
+                <TabsTrigger value="sensors" className="text-xs gap-1">
+                  <Activity className="h-3 w-3" />
+                  Sensors
+                </TabsTrigger>
+                <TabsTrigger value="eventlog" className="text-xs gap-1">
+                  <BookOpen className="h-3 w-3" />
+                  Event Log
+                </TabsTrigger>
+                <TabsTrigger value="console" className="text-xs gap-1">
+                  <Terminal className="h-3 w-3" />
+                  Console
+                </TabsTrigger>
+                <TabsTrigger value="deploylog" className="text-xs gap-1">
+                  <ScrollText className="h-3 w-3" />
+                  Install Log
+                </TabsTrigger>
+                <TabsTrigger value="extstats" className="text-xs gap-1">
+                  <Radio className="h-3 w-3" />
+                  Ext Stats
+                </TabsTrigger>
+                <TabsTrigger value="ipmi" className="text-xs gap-1">
+                  <Zap className="h-3 w-3" />
+                  IPMI
+                </TabsTrigger>
+              </TabsList>
+              <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2 shrink-0">
+                <Pencil className="h-3.5 w-3.5 mr-1" />
+                Edit
+              </Button>
+            </div>
+
+            <TabsContent value="overview" className="mt-0 space-y-4">
+              <Section title="Identity">
+                <Row label="ID" value={node.id} mono />
+                <Row label="Hostname" value={node.hostname} />
+                <Row label="FQDN" value={node.fqdn || "—"} />
+                <Row label="MAC" value={node.primary_mac} mono />
+                <Row label="Firmware" value={node.detected_firmware || "—"} />
+                <Row label="Provider" value={NODE_PROVIDERS.find((p) => p.value === (node.provider ?? ""))?.label ?? "—"} />
+              </Section>
+
+              <Section title="Deployment">
+                <ImageAssignRow node={node} qc={qc} />
+                <Row label="State" value={nodeState(node)} />
+                <Row label="Last seen" value={relativeTime(node.last_seen_at ?? node.deploy_verified_booted_at)} />
+                <Row label="Deploy complete" value={relativeTime(node.deploy_completed_preboot_at)} />
+                <Row label="Verified boot" value={relativeTime(node.deploy_verified_booted_at)} />
+              </Section>
+
+              <OperatingModePicker node={node} qc={qc} onSaved={onOperatingModeSaved} />
+
+              {node.ldap_ready !== undefined && (
+                <LdapStatusSection node={node} qc={qc} />
+              )}
+
+              <Section title="Tags">
+                <div className="flex flex-wrap gap-1.5">
+                  {(node.tags ?? []).map((t) => (
+                    <span key={t} className="rounded bg-secondary px-2 py-0.5 text-xs font-mono">
+                      {t}
+                    </span>
+                  ))}
+                  {(node.tags ?? []).length === 0 && (
+                    <span className="text-xs text-muted-foreground">No tags</span>
+                  )}
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <Input
+                    placeholder="add tag…"
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault()
+                        const trimmed = tagInput.trim()
+                        if (!trimmed) return
+                        const newTags = [...(node.tags ?? []).filter((t) => t !== trimmed), trimmed]
+                        apiFetch<NodeConfig>(`/api/v1/nodes/${node.id}`, {
+                          method: "PATCH",
+                          body: JSON.stringify({ tags: newTags }),
+                        }).then(() => {
+                          qc.invalidateQueries({ queryKey: ["nodes"] })
+                          qc.invalidateQueries({ queryKey: ["node", node.id] })
+                          setTagInput("")
+                          toast({ title: "Tag added", description: trimmed })
+                        }).catch((err) => toast({ variant: "destructive", title: "Failed to add tag", description: String(err) }))
+                      }
+                    }}
+                    className="text-xs flex-1 h-7"
+                  />
+                  <Tag className="h-3.5 w-3.5 mt-1.5 text-muted-foreground" />
+                </div>
+              </Section>
+
+              {advanced && (
+                <Section title="Advanced">
+                  <Row label="Group" value={node.group_id || "—"} mono />
+                  <Row label="Created" value={relativeTime(node.created_at)} />
+                  <Row label="Updated" value={relativeTime(node.updated_at)} />
+                </Section>
+              )}
+
+              <VariantsEditor nodeId={node.id} />
+              <HardwareSection node={node} />
+              <DiskLayoutSection node={node} />
+              <SudoersSection node={node} />
+              <SlurmNodeSection node={node} />
+              <ReimageFlow node={node} autoExpand={autoReimage} />
+              <CaptureNodeFlow node={node} />
+
+              <div className="pt-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full gap-1.5 text-xs"
+                  onClick={() => setBootSettingsOpen(true)}
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                  Change Boot Settings…
+                </Button>
+              </div>
+
+              <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onDeleted} />
+            </TabsContent>
+
+            <TabsContent value="sensors" className="mt-2">
+              <SensorsTab nodeId={node.id} />
+            </TabsContent>
+            <TabsContent value="eventlog" className="mt-2">
+              <EventLogTab nodeId={node.id} />
+            </TabsContent>
+            <TabsContent value="console" className="mt-2">
+              <ConsoleTab nodeId={node.id} />
+            </TabsContent>
+            <TabsContent value="deploylog" className="mt-2">
+              <DeployLogTab nodeId={node.id} primaryMac={node.primary_mac} />
+            </TabsContent>
+            <TabsContent value="extstats" className="mt-2">
+              <ExternalStatsTab nodeId={node.id} />
+            </TabsContent>
+            <TabsContent value="ipmi" className="mt-2">
+              <IpmiTab nodeId={node.id} />
+            </TabsContent>
+          </Tabs>
+        )}
+      </div>
+
+      <BootSettingsModal
+        open={bootSettingsOpen}
+        onClose={() => setBootSettingsOpen(false)}
+        node={node}
+      />
+    </>
+  )
 }
 
 function DiskLayoutSection({ node }: { node: NodeConfig }) {

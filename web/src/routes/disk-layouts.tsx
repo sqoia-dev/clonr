@@ -1,14 +1,17 @@
-// disk-layouts.tsx — Disk Layout Catalog (Sprint 35 UEFI-WEBAPP + DISK-LAYOUT-DUPLICATE)
+// disk-layouts.tsx — Disk Layout Catalog (Sprint 35 UEFI-WEBAPP + DISK-LAYOUT-DUPLICATE + edit flow)
 //
 // Features:
 //   - List all layouts with firmware_kind badge per row
 //   - Filter dropdown: All / BIOS / UEFI / Any
 //   - "Duplicate this layout" action → POST /api/v1/disk-layouts with name suffix (copy)
+//   - "Edit layout" action → PUT /api/v1/disk-layouts/{id} (name + layout_json)
+//     Built-in seed rows (clustr-default-uefi, clustr-default-bios) show a disabled
+//     edit button with a "Built-in layout, cannot be edited" tooltip.
 
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
-import { HardDrive, Copy, Trash2, ChevronDown, Plus, Search } from "lucide-react"
+import { HardDrive, Copy, Trash2, ChevronDown, Plus, Search, Pencil } from "lucide-react"
 import {
   Table,
   TableHeader,
@@ -20,11 +23,15 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { FirmwareBadge } from "@/components/DiskLayoutPicker"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import type { StoredDiskLayout, ListDiskLayoutsResponse, FirmwareKind } from "@/lib/types"
 import { cn } from "@/lib/utils"
+
+// Seed layout names that cannot be edited (seeded by migration 110).
+const SEED_LAYOUT_NAMES = new Set(["clustr-default-uefi", "clustr-default-bios"])
 
 // ── Filter values ─────────────────────────────────────────────────────────────
 
@@ -63,6 +70,12 @@ interface DuplicateState {
   sourceName: string
 }
 
+// ── Edit dialog state ─────────────────────────────────────────────────────────
+
+interface EditState {
+  layout: StoredDiskLayout
+}
+
 // ── buildCopyName ─────────────────────────────────────────────────────────────
 
 /**
@@ -95,6 +108,7 @@ export function DiskLayoutsPage() {
   const [q, setQ] = React.useState("")
   const [duplicating, setDuplicating] = React.useState<DuplicateState | null>(null)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
+  const [editingLayout, setEditingLayout] = React.useState<EditState | null>(null)
 
   const { data, isLoading, isError } = useQuery<ListDiskLayoutsResponse>({
     queryKey: ["disk-layouts"],
@@ -158,6 +172,23 @@ export function DiskLayoutsPage() {
     onError: (err) => {
       toast({ variant: "destructive", title: "Delete failed", description: String(err) })
       setDeletingId(null)
+    },
+  })
+
+  const editMutation = useMutation({
+    mutationFn: ({ id, name, layoutJson }: { id: string; name: string; layoutJson: string }) =>
+      apiFetch<{ disk_layout: StoredDiskLayout }>(`/api/v1/disk-layouts/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ name, layout_json: layoutJson }),
+      }),
+    onSuccess: (resp) => {
+      qc.invalidateQueries({ queryKey: ["disk-layouts"] })
+      toast({ title: "Layout saved", description: resp.disk_layout.name })
+      setEditingLayout(null)
+    },
+    onError: (err) => {
+      // Keep dialog open on error so operator can correct — toast shows the reason.
+      toast({ variant: "destructive", title: "Save failed", description: String(err) })
     },
   })
 
@@ -270,6 +301,7 @@ export function DiskLayoutsPage() {
                     setDuplicating({ sourceId: layout.id, sourceName: layout.name })
                   }
                   onDelete={() => setDeletingId(layout.id)}
+                  onEdit={() => setEditingLayout({ layout })}
                 />
               ))}
             </TableBody>
@@ -298,6 +330,18 @@ export function DiskLayoutsPage() {
           onCancel={() => setDeletingId(null)}
         />
       )}
+
+      {/* Edit dialog */}
+      {editingLayout && (
+        <EditLayoutDialog
+          layout={editingLayout.layout}
+          isPending={editMutation.isPending}
+          onSave={(name, layoutJson) =>
+            editMutation.mutate({ id: editingLayout.layout.id, name, layoutJson })
+          }
+          onCancel={() => setEditingLayout(null)}
+        />
+      )}
     </div>
   )
 }
@@ -308,11 +352,15 @@ function LayoutRow({
   layout,
   onDuplicate,
   onDelete,
+  onEdit,
 }: {
   layout: StoredDiskLayout
   onDuplicate: () => void
   onDelete: () => void
+  onEdit: () => void
 }) {
+  const isSeed = SEED_LAYOUT_NAMES.has(layout.name)
+
   return (
     <TableRow>
       <TableCell className="text-sm font-medium">{layout.name}</TableCell>
@@ -326,26 +374,60 @@ function LayoutRow({
         {relativeTime(layout.created_at)}
       </TableCell>
       <TableCell className="text-right">
-        <div className="flex items-center justify-end gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0"
-            title="Duplicate layout"
-            onClick={onDuplicate}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-            title="Delete layout"
-            onClick={onDelete}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+        <TooltipProvider>
+          <div className="flex items-center justify-end gap-1">
+            {isSeed ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 opacity-40 cursor-not-allowed"
+                      disabled
+                      aria-label="Edit layout (disabled)"
+                      data-testid={`edit-layout-disabled-${layout.id}`}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs">
+                  Built-in layout, cannot be edited
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                title="Edit layout"
+                onClick={onEdit}
+                data-testid={`edit-layout-${layout.id}`}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              title="Duplicate layout"
+              onClick={onDuplicate}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+              title="Delete layout"
+              onClick={onDelete}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </TooltipProvider>
       </TableCell>
     </TableRow>
   )
@@ -420,6 +502,102 @@ function DeleteConfirmDialog({
           </Button>
           <Button variant="destructive" size="sm" onClick={onConfirm} disabled={isPending}>
             {isPending ? "Deleting…" : "Delete"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── EditLayoutDialog ──────────────────────────────────────────────────────────
+// Lets the operator rename a layout and edit its JSON body.
+// firmware_kind is displayed read-only — the PUT endpoint does not accept it.
+
+function EditLayoutDialog({
+  layout,
+  isPending,
+  onSave,
+  onCancel,
+}: {
+  layout: StoredDiskLayout
+  isPending: boolean
+  onSave: (name: string, layoutJson: string) => void
+  onCancel: () => void
+}) {
+  const [name, setName] = React.useState(layout.name)
+  const [layoutJson, setLayoutJson] = React.useState(
+    JSON.stringify(layout.layout, null, 2)
+  )
+  const [jsonError, setJsonError] = React.useState("")
+
+  function handleSave() {
+    // Validate JSON before submitting.
+    try {
+      JSON.parse(layoutJson)
+      setJsonError("")
+    } catch (e) {
+      setJsonError(`Invalid JSON: ${(e as Error).message}`)
+      return
+    }
+    if (!name.trim()) {
+      setJsonError("Name is required")
+      return
+    }
+    onSave(name.trim(), layoutJson)
+  }
+
+  const firmwareLabel = layout.firmware_kind === "bios"
+    ? "BIOS"
+    : layout.firmware_kind === "uefi"
+      ? "UEFI"
+      : "Any"
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-background rounded-lg border shadow-lg p-5 w-full max-w-lg space-y-4">
+        <div className="flex items-center gap-2">
+          <Pencil className="h-4 w-4 text-primary" />
+          <h3 className="font-semibold text-sm">Edit disk layout</h3>
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Name</label>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="text-sm"
+            placeholder="my-layout"
+            data-testid="edit-layout-name"
+          />
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Firmware (read-only — contact support to change)</label>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-border bg-secondary/30 text-sm text-muted-foreground">
+            {firmwareLabel}
+          </div>
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Layout JSON</label>
+          <textarea
+            className="w-full font-mono text-xs border border-border bg-background rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+            rows={10}
+            value={layoutJson}
+            onChange={(e) => { setLayoutJson(e.target.value); setJsonError("") }}
+            data-testid="edit-layout-json"
+          />
+          {jsonError && (
+            <p className="text-xs text-destructive" data-testid="edit-layout-json-error">{jsonError}</p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" size="sm" onClick={onCancel} disabled={isPending}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={handleSave} disabled={isPending} data-testid="edit-layout-save">
+            {isPending ? "Saving…" : "Save changes"}
           </Button>
         </div>
       </div>
