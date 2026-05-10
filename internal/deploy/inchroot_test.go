@@ -42,7 +42,7 @@ func TestInChrootReconfigure_WritesHostname(t *testing.T) {
 		FQDN:     "compute-01.cluster.local",
 	}
 
-	if err := inChrootReconfigure(context.Background(), cfg, root, nil); err != nil {
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, true); err != nil {
 		// applyNodeConfig has non-fatal code paths; a missing NM dir etc. is warned
 		// but the function returns nil. A hard error here is a real failure.
 		t.Fatalf("inChrootReconfigure: %v", err)
@@ -80,7 +80,7 @@ func TestInChrootReconfigure_WritesHosts(t *testing.T) {
 		},
 	}
 
-	if err := inChrootReconfigure(context.Background(), cfg, root, nil); err != nil {
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, true); err != nil {
 		t.Fatalf("inChrootReconfigure: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestInChrootReconfigure_NetworkConfig(t *testing.T) {
 		},
 	}
 
-	if err := inChrootReconfigure(context.Background(), cfg, root, nil); err != nil {
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, true); err != nil {
 		t.Fatalf("inChrootReconfigure: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestInChrootReconfigure_FilesLandInRoot(t *testing.T) {
 		},
 	}
 
-	if err := inChrootReconfigure(context.Background(), cfg, root, nil); err != nil {
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, true); err != nil {
 		t.Fatalf("inChrootReconfigure: %v", err)
 	}
 
@@ -459,7 +459,7 @@ func TestInChrootReconfigure_WithInstructions(t *testing.T) {
 		{Opcode: "overwrite", Target: "/etc/clustr-test-marker", Payload: "instructions-ran"},
 	}
 
-	if err := inChrootReconfigure(context.Background(), cfg, root, instrs); err != nil {
+	if err := inChrootReconfigure(context.Background(), cfg, root, instrs, true); err != nil {
 		t.Fatalf("inChrootReconfigure: %v", err)
 	}
 
@@ -793,5 +793,82 @@ func TestApplyOverwrite_AnchorPair_EmptyFile(t *testing.T) {
 	want := "# BEGIN clustr/plugin\npayload line\n# END clustr/plugin\n"
 	if result != want {
 		t.Errorf("result = %q, want %q", result, want)
+	}
+}
+
+// ─── Sprint 36 Day 4: --legacy-config-apply gating tests ─────────────────────
+
+// TestDeploy_DefaultPath_SkipsConvertedPlugins verifies that with
+// legacyConfigApply=false (the default), inChrootReconfigure does NOT write
+// /etc/hostname and /etc/hosts. These are owned by the reactive observer.
+func TestDeploy_DefaultPath_SkipsConvertedPlugins(t *testing.T) {
+	root := buildMinimalChroot(t)
+
+	cfg := api.NodeConfig{
+		Hostname: "compute-99",
+		FQDN:     "compute-99.cluster.local",
+		ClusterHosts: []api.HostEntry{
+			{IP: "10.0.0.1", Hostname: "head-01"},
+		},
+	}
+
+	// legacyConfigApply=false — reactive path.
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, false); err != nil {
+		t.Fatalf("inChrootReconfigure (reactive): %v", err)
+	}
+
+	// /etc/hostname must NOT have been written in reactive mode.
+	hostnameFile := filepath.Join(root, "etc", "hostname")
+	if _, err := os.Stat(hostnameFile); !os.IsNotExist(err) {
+		content, _ := os.ReadFile(hostnameFile)
+		t.Errorf("reactive deploy must NOT write /etc/hostname; found content: %q", string(content))
+	}
+
+	// /etc/hosts must NOT have been written in reactive mode.
+	hostsFile := filepath.Join(root, "etc", "hosts")
+	if _, err := os.Stat(hostsFile); !os.IsNotExist(err) {
+		content, _ := os.ReadFile(hostsFile)
+		t.Errorf("reactive deploy must NOT write /etc/hosts cluster entries; found content: %q", string(content))
+	}
+}
+
+// TestDeploy_LegacyFlagSet_RunsImperativeApply verifies that with
+// legacyConfigApply=true, inChrootReconfigure writes /etc/hostname and
+// /etc/hosts exactly as it did before Sprint 36 (legacy behaviour preserved).
+func TestDeploy_LegacyFlagSet_RunsImperativeApply(t *testing.T) {
+	root := buildMinimalChroot(t)
+
+	cfg := api.NodeConfig{
+		Hostname: "compute-77",
+		FQDN:     "compute-77.cluster.local",
+		ClusterHosts: []api.HostEntry{
+			{IP: "10.0.0.1", Hostname: "head-01"},
+			{IP: "10.0.0.77", Hostname: "compute-77"},
+		},
+	}
+
+	// legacyConfigApply=true — imperative path.
+	if err := inChrootReconfigure(context.Background(), cfg, root, nil, true); err != nil {
+		t.Fatalf("inChrootReconfigure (legacy): %v", err)
+	}
+
+	// /etc/hostname MUST have been written.
+	hostnameFile := filepath.Join(root, "etc", "hostname")
+	got, err := os.ReadFile(hostnameFile)
+	if err != nil {
+		t.Fatalf("legacy deploy must write /etc/hostname; read error: %v", err)
+	}
+	if !strings.Contains(string(got), "compute-77") {
+		t.Errorf("/etc/hostname = %q, want content containing %q", string(got), "compute-77")
+	}
+
+	// /etc/hosts MUST contain cluster entries.
+	hostsFile := filepath.Join(root, "etc", "hosts")
+	hostsContent, err := os.ReadFile(hostsFile)
+	if err != nil {
+		t.Fatalf("legacy deploy must write /etc/hosts; read error: %v", err)
+	}
+	if !strings.Contains(string(hostsContent), "10.0.0.1") {
+		t.Errorf("/etc/hosts missing cluster entry 10.0.0.1; content:\n%s", hostsContent)
 	}
 }

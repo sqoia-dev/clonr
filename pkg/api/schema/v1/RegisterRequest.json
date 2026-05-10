@@ -11,6 +11,9 @@
         },
         "multicast_mode": {
           "type": "string"
+        },
+        "legacy_config_apply": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
