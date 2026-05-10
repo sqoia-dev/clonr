@@ -955,6 +955,7 @@ export function NodesPage() {
         reimage: autoReimage ? "1" : undefined,
         deleteNode: autoDelete ? "1" : undefined,
       },
+      replace: true,
     })
   }, [openNodeId]) // eslint-disable-line react-hooks/exhaustive-deps
 
