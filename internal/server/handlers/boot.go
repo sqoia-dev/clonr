@@ -8,9 +8,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/bootassets"
@@ -18,6 +20,10 @@ import (
 	"github.com/sqoia-dev/clustr/internal/pxe"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
+
+// statelessInitrdImageIDRe validates the imageID path segment for the stateless
+// initrd route. Accepts the standard lowercase UUID form (8-4-4-4-12 hex digits).
+var statelessInitrdImageIDRe = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
 
 // BootHandler serves boot assets and dynamic iPXE scripts over HTTP.
@@ -576,6 +582,56 @@ func (h *BootHandler) ServeInitramfs(w http.ResponseWriter, r *http.Request) {
 	log.Warn().Str("served", legacyPath).Str("expected_live", livePath).
 		Msg("boot: serving legacy initramfs.img — initramfs-clustr.img missing; rebuild via /api/v1/initramfs/rebuild")
 	h.serveFile(w, r, legacyPath, "application/octet-stream")
+}
+
+// ServeStatelessInitramfs handles GET /api/v1/boot/{imageID}-stateless.img.
+//
+// Serves the per-image stateless NFS initramfs built by
+// `build-initramfs.sh --mode=stateless-nfs`. The generated iPXE script for
+// stateless_nfs nodes references this URL; without a registered route the client
+// receives 404 and the boot fails silently.
+//
+// The handler validates imageID strictly against the UUID regexp to block any
+// path-traversal attempt, looks up the image in the DB to confirm it exists,
+// then streams the file from BootDir/<imageID>-stateless.img.
+//
+// Route pattern (registered via chi URL param): /boot/{imageIDStateless}
+// where the URL segment has the suffix "-stateless.img" stripped before lookup.
+func (h *BootHandler) ServeStatelessInitramfs(w http.ResponseWriter, r *http.Request) {
+	// chi URL param is e.g. "6b875781-aaaa-bbbb-cccc-ddddeeeeffff-stateless.img"
+	param := chi.URLParam(r, "imageIDStateless")
+
+	const suffix = "-stateless.img"
+	if !strings.HasSuffix(param, suffix) {
+		http.Error(w, "bad request: path must end in -stateless.img", http.StatusBadRequest)
+		return
+	}
+	imageID := strings.TrimSuffix(param, suffix)
+
+	// Validate imageID against UUID pattern — blocks path traversal and junk input.
+	if !statelessInitrdImageIDRe.MatchString(imageID) {
+		http.Error(w, "bad request: invalid image ID", http.StatusBadRequest)
+		return
+	}
+
+	// Confirm the image exists in the DB (avoids serving stale build artifacts for
+	// deleted images and gives a clean 404 to callers with a typo in the imageID).
+	if h.DB != nil {
+		if _, err := h.DB.GetBaseImage(r.Context(), imageID); err != nil {
+			if errors.Is(err, api.ErrNotFound) {
+				log.Warn().Str("image_id", imageID).Msg("boot: stateless initrd requested for unknown image")
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			log.Error().Err(err).Str("image_id", imageID).Msg("boot: DB lookup for stateless initrd")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	filePath := filepath.Join(h.BootDir, imageID+suffix)
+	log.Info().Str("image_id", imageID).Str("path", filePath).Msg("boot: serving stateless initramfs")
+	h.serveFile(w, r, filePath, "application/octet-stream")
 }
 
 // ServeIPXEEFI handles GET /api/v1/boot/ipxe.efi.

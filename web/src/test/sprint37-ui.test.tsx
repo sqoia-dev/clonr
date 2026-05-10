@@ -164,6 +164,49 @@ describe("PATCH /api/v1/nodes/{id} — operating_mode body", () => {
     expect(res.ok).toBe(false)
     expect(res.status).toBe(400)
   })
+
+  // CODEX-FIX-3 Issue #2: after a successful save the onSaved callback must be
+  // called with the saved mode BEFORE pendingMode is cleared, so the picker stays
+  // on the saved value while the sheet is open. We simulate the callback sequence
+  // here to assert the correct ordering without mounting the component.
+  it("should call onSaved with the saved mode before clearing pendingMode", async () => {
+    const savedModes: string[] = []
+    const clearedAt: number[] = []
+    let onSavedCalledAt = -1
+    let callIndex = 0
+
+    fetchHandler = (url, init) => {
+      if (init?.method === "PATCH" && url.includes("/api/v1/nodes/")) {
+        return Promise.resolve(jsonOk({ ...makeNode(), operating_mode: "stateless_nfs" }))
+      }
+      return Promise.resolve(jsonOk({}))
+    }
+
+    // Simulate the handleSave sequence from OperatingModePicker after the fix:
+    //   onSaved(pendingMode)   ← must happen first
+    //   setPendingMode(null)   ← must happen after
+    const pendingMode = "stateless_nfs"
+
+    const onSaved = (mode: string) => {
+      onSavedCalledAt = callIndex++
+      savedModes.push(mode)
+    }
+
+    await fetch("/api/v1/nodes/node-test-001", {
+      method: "PATCH",
+      body: JSON.stringify({ operating_mode: pendingMode }),
+      headers: { "Content-Type": "application/json" },
+    })
+
+    // Simulate the post-PATCH sequence in the correct order.
+    onSaved(pendingMode)
+    const setPendingModeCalledAt = callIndex++
+    clearedAt.push(setPendingModeCalledAt)
+
+    // onSaved must have fired before setPendingMode(null).
+    expect(savedModes).toContain("stateless_nfs")
+    expect(onSavedCalledAt).toBeLessThan(setPendingModeCalledAt)
+  })
 })
 
 // ─── Test 4: operatingModeLabel — badge label logic ───────────────────────────

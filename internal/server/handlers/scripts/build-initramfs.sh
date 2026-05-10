@@ -4,7 +4,8 @@
 # 'clustr deploy --auto' to register with the server and deploy an image.
 #
 # Usage:
-#   ./scripts/build-initramfs.sh <clustr-binary> [output-path]
+#   ./scripts/build-initramfs.sh <clustr-binary> [output-path] [--mode=<mode>]
+#   ./scripts/build-initramfs.sh <clustr-binary> --mode=stateless-nfs   (output defaults to initramfs-clustr.img)
 #
 # Prerequisites:
 #   - clustr binary must be statically compiled (CGO_ENABLED=0)
@@ -36,21 +37,29 @@
 set -euo pipefail
 
 CLUSTR_BIN="${1:?Usage: build-initramfs.sh <clustr-binary> [output] [--mode=<mode>]}"
-OUTPUT="${2:-initramfs-clustr.img}"
+shift
 
 # ── Boot mode selection ───────────────────────────────────────────────────────
 # --mode=stateless-nfs  builds the stateless NFS pivot initramfs
 # (default)             builds the standard block-install deploy initramfs
 #
-# The --mode flag can appear anywhere in $@ after the binary and output args.
+# Parse --mode=* flags out of the remaining args BEFORE binding the output path
+# so that invoking as `build-initramfs.sh <bin> --mode=stateless-nfs` does not
+# treat the mode flag as the output filename.  Positional args (everything that
+# is not a flag) are collected into positionals[]; OUTPUT comes from positionals[0].
 INITRAMFS_MODE="block-install"
+positionals=()
 for _arg in "$@"; do
     case "$_arg" in
         --mode=*)
             INITRAMFS_MODE="${_arg#--mode=}"
             ;;
+        *)
+            positionals+=("$_arg")
+            ;;
     esac
 done
+OUTPUT="${positionals[0]:-initramfs-clustr.img}"
 
 case "$INITRAMFS_MODE" in
     block-install|stateless-nfs)

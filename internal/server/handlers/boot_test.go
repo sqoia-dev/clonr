@@ -1,16 +1,19 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sqoia-dev/clustr/pkg/api"
+	"github.com/go-chi/chi/v5"
 	"github.com/sqoia-dev/clustr/internal/bootassets"
 	"github.com/sqoia-dev/clustr/internal/db"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // TestServeIPXEEFI_EmbeddedBinary verifies that GET /api/v1/boot/ipxe.efi
@@ -474,6 +477,98 @@ func makeTestImage(t *testing.T, d *db.DB, firmware api.ImageFirmware) string {
 		t.Fatalf("makeTestImage CreateBaseImage(%s): %v", firmware, err)
 	}
 	return imgID
+}
+
+// withChiParam injects a chi URL param into r's context so handlers that call
+// chi.URLParam(r, name) work without a real chi router in unit tests.
+func withChiParam(r *http.Request, name, value string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add(name, value)
+	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+}
+
+// TestStatelessInitrdRouteServes200ForKnownImage verifies that a GET for a known
+// image's stateless initramfs returns 200 and a non-empty body.
+func TestStatelessInitrdRouteServes200ForKnownImage(t *testing.T) {
+	d := openTestDB(t)
+	imgID := makeTestImage(t, d, api.FirmwareUEFI)
+
+	// Write a stub stateless initramfs file into a temp BootDir.
+	bootDir := t.TempDir()
+	stubContent := []byte("stub-stateless-initramfs-payload")
+	imgFile := filepath.Join(bootDir, imgID+"-stateless.img")
+	if err := os.WriteFile(imgFile, stubContent, 0644); err != nil {
+		t.Fatalf("write stub initramfs: %v", err)
+	}
+
+	h := &BootHandler{
+		BootDir:   bootDir,
+		ServerURL: "http://10.99.0.1:8080",
+		DB:        d,
+	}
+
+	param := imgID + "-stateless.img"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/"+param, nil)
+	req = withChiParam(req, "imageIDStateless", param)
+	w := httptest.NewRecorder()
+	h.ServeStatelessInitramfs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("ServeStatelessInitramfs: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if w.Body.Len() == 0 {
+		t.Error("ServeStatelessInitramfs: expected non-empty body for known image")
+	}
+}
+
+// TestStatelessInitrdRouteReturns404ForUnknownImage verifies that a bogus but
+// well-formed UUID returns 404.
+func TestStatelessInitrdRouteReturns404ForUnknownImage(t *testing.T) {
+	d := openTestDB(t)
+	h := &BootHandler{
+		BootDir:   t.TempDir(),
+		ServerURL: "http://10.99.0.1:8080",
+		DB:        d,
+	}
+
+	bogusID := "deadbeef-0000-0000-0000-000000000000"
+	param := bogusID + "-stateless.img"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/"+param, nil)
+	req = withChiParam(req, "imageIDStateless", param)
+	w := httptest.NewRecorder()
+	h.ServeStatelessInitramfs(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("ServeStatelessInitramfs unknown image: got %d, want 404; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestStatelessInitrdRouteRejectsBadImageID verifies that a non-UUID imageID path
+// returns 400, not a 404 or a file-open attempt.
+func TestStatelessInitrdRouteRejectsBadImageID(t *testing.T) {
+	d := openTestDB(t)
+	h := &BootHandler{
+		BootDir:   t.TempDir(),
+		ServerURL: "http://10.99.0.1:8080",
+		DB:        d,
+	}
+
+	for _, bad := range []string{
+		"not-a-uuid-stateless.img",
+		"../../etc/passwd-stateless.img",
+		"-stateless.img",
+		"DEADBEEF-0000-0000-0000-000000000000-stateless.img", // uppercase
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/boot/"+bad, nil)
+		req = withChiParam(req, "imageIDStateless", bad)
+		w := httptest.NewRecorder()
+		h.ServeStatelessInitramfs(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("ServeStatelessInitramfs bad ID %q: got %d, want 400; body: %s",
+				bad, w.Code, w.Body.String())
+		}
+	}
 }
 
 // makeDeployedNodeWithImage creates a deployed+verified node linked to an image.

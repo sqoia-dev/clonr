@@ -1471,6 +1471,9 @@ export function NodesPage() {
           relativeTime={relativeTime}
           autoReimage={autoReimage}
           autoDelete={autoDelete}
+          onOperatingModeSaved={(mode) =>
+            setSelectedNode((prev) => (prev ? { ...prev, operating_mode: mode } : prev))
+          }
         />
       )}
 
@@ -1557,6 +1560,7 @@ interface NodeSheetProps {
   relativeTime: (iso?: string) => string
   autoReimage?: boolean
   autoDelete?: boolean
+  onOperatingModeSaved?: (mode: string) => void
 }
 
 // ─── NodeSheet ────────────────────────────────────────────────────────────────
@@ -1564,7 +1568,7 @@ interface NodeSheetProps {
 
 type NodeDetailTab = "overview" | "sensors" | "extstats" | "eventlog" | "console" | "deploylog" | "ipmi"
 
-function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete }: NodeSheetProps) {
+function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDelete, onOperatingModeSaved }: NodeSheetProps) {
   const qc = useQueryClient()
   const state = nodeState(node)
   const [editing, setEditing] = React.useState(false)
@@ -1772,7 +1776,7 @@ function NodeSheet({ node, onClose, advanced, relativeTime, autoReimage, autoDel
                 </Section>
 
                 {/* Sprint 37 UI: operating mode picker */}
-                <OperatingModePicker node={node} qc={qc} />
+                <OperatingModePicker node={node} qc={qc} onSaved={onOperatingModeSaved} />
 
                 {node.ldap_ready !== undefined && (
                   <LdapStatusSection node={node} qc={qc} />
@@ -1919,9 +1923,15 @@ const NOT_YET_IMPLEMENTED_TOOLTIP = "Not yet implemented — planned for future 
 interface OperatingModePickerProps {
   node: NodeConfig
   qc: ReturnType<typeof useQueryClient>
+  // onSaved is called with the newly confirmed mode after a successful PATCH so
+  // the parent can update its selectedNode snapshot before pendingMode is cleared.
+  // Without this, invalidateQueries races against setPendingMode(null): the picker
+  // falls back to the stale node.operating_mode from the snapshot while the sheet
+  // is still open, making it look like the save failed even though it succeeded.
+  onSaved?: (mode: string) => void
 }
 
-function OperatingModePicker({ node, qc }: OperatingModePickerProps) {
+function OperatingModePicker({ node, qc, onSaved }: OperatingModePickerProps) {
   // pendingMode is null when the operator has not changed anything (no dirty state).
   // When null, we display node.operating_mode which always reflects the latest server value.
   const [pendingMode, setPendingMode] = React.useState<string | null>(null)
@@ -1941,6 +1951,11 @@ function OperatingModePicker({ node, qc }: OperatingModePickerProps) {
       })
       qc.invalidateQueries({ queryKey: ["nodes"] })
       toast({ title: "Operating mode saved", description: `Set to ${NODE_OPERATING_MODES.find((m) => m.value === pendingMode)?.label ?? pendingMode}.` })
+      // Update the parent's selectedNode snapshot BEFORE clearing pendingMode so
+      // the picker stays on the saved value while the sheet is open. If we clear
+      // pendingMode first, displayMode falls back to node.operating_mode from the
+      // stale snapshot and the picker appears to revert to the old mode.
+      onSaved?.(pendingMode)
       setPendingMode(null)
     } catch (err) {
       toast({ variant: "destructive", title: "Failed to save operating mode", description: String(err) })
