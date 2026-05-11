@@ -54,6 +54,9 @@ type DangerousPushDBIface interface {
 	GetPendingDangerousPush(ctx context.Context, id string) (*db.PendingDangerousPush, error)
 	IncrementDangerousPushAttempts(ctx context.Context, id string, maxAttempts int) (int, error)
 	ConsumePendingDangerousPush(ctx context.Context, id string) error
+	// InsertPluginBackup records the pre-render snapshot row when the plugin
+	// declares a BackupSpec. Called on successful confirm, before WS delivery.
+	InsertPluginBackup(ctx context.Context, b db.PluginBackup) error
 }
 
 // DangerousPushHandler handles the two staged-confirmation endpoints.
@@ -346,6 +349,50 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Sprint 41 Day 4: if the plugin declares a BackupSpec, attach a
+	// BackupDirective to the push payload so clientd takes a pre-apply snapshot,
+	// and record the expected backup in plugin_backups with a FK to this
+	// pending push ID so `clustr restore replay --pending-id` can find it.
+	backupID := ""
+	if meta, ok := h.PluginMetadata(staged.PluginName); ok && meta.Backup != nil {
+		spec := meta.Backup
+		retainN := spec.RetainN
+		if retainN <= 0 {
+			retainN = 3
+		}
+		if retainN > 16 {
+			retainN = 16
+		}
+		nowUnix := time.Now().Unix()
+		storedAt := fmt.Sprintf("/var/lib/clustr/backups/%s/%s/%d/", staged.NodeID, staged.PluginName, nowUnix)
+		tarballs := storedAt + "snapshot.tar.gz"
+
+		pushPayload.Backup = &clientd.BackupDirective{
+			Paths:    spec.Paths,
+			RetainN:  retainN,
+			StoredAt: storedAt,
+			Manifest: "manifest.json",
+		}
+
+		backupID = fmt.Sprintf("pb-%d", time.Now().UnixNano())
+		backupRow := db.PluginBackup{
+			ID:                     backupID,
+			NodeID:                 staged.NodeID,
+			PluginName:             staged.PluginName,
+			BlobPath:               tarballs,
+			TakenAt:                time.Now().UTC(),
+			PendingDangerousPushID: pendingID,
+		}
+		if insertErr := h.DB.InsertPluginBackup(r.Context(), backupRow); insertErr != nil {
+			// Non-fatal: log and continue — a missing DB row does not block delivery.
+			log.Error().Err(insertErr).
+				Str("pending_id", pendingID).
+				Str("plugin", staged.PluginName).
+				Msg("dangerous push confirm: insert plugin_backups row failed (non-fatal)")
+			backupID = ""
+		}
+	}
+
 	msgID := uuid.New().String()
 	payloadBytes, err := json.Marshal(pushPayload)
 	if err != nil {
@@ -385,6 +432,15 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 	// Audit the confirmed event.
 	actorID, actorLabel := h.GetActorInfo(r)
 	if h.Audit != nil {
+		newVal := map[string]interface{}{
+			"plugin":    staged.PluginName,
+			"node_id":   staged.NodeID,
+			"applied":   true,
+			"msg_id":    msgID,
+		}
+		if backupID != "" {
+			newVal["backup_id"] = backupID
+		}
 		h.Audit.Record(r.Context(), actorID, actorLabel,
 			db.AuditActionConfigDangerousConfirmed,
 			"config_push", pendingID,
@@ -393,12 +449,7 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 				"plugin":        staged.PluginName,
 				"staged_reason": staged.Reason,
 			},
-			map[string]interface{}{
-				"plugin":  staged.PluginName,
-				"node_id": staged.NodeID,
-				"applied": true,
-				"msg_id":  msgID,
-			},
+			newVal,
 		)
 	}
 

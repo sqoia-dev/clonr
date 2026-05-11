@@ -155,6 +155,10 @@ func (f *fakeDangerousDB) ConsumePendingDangerousPush(_ context.Context, id stri
 	return nil
 }
 
+func (f *fakeDangerousDB) InsertPluginBackup(_ context.Context, _ db.PluginBackup) error {
+	return nil
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func buildDangerousHandler(fdb *fakeDangerousDB, hub *fakeHubDangerous, clusterName string) *DangerousPushHandler {

@@ -2302,6 +2302,19 @@ func (s *Server) buildRouter() chi.Router {
 				Post("/config/dangerous-push/{pending_id}/confirm", dangerousPushH.HandleConfirm)
 			log.Info().Msg("dangerous-push gate enabled (CLUSTR_DANGEROUS_GATE_ENABLED=1)")
 		}
+
+		// ─── Sprint 41 Day 4 — plugin backup list + restore ──────────────────────
+		// GET  /api/v1/backups                  — list backups (backup.list)
+		// POST /api/v1/backups/{id}/restore     — initiate restore (backup.restore)
+		// GET  /api/v1/backups/{id}/restore-status — poll restore job status
+		backupsH := handlers.NewBackupsHandler(s.db, s.clientdHub, s.audit, getActorInfo)
+		r.With(requireScope(false)).With(requirePermission(s.db, "backup.list")).
+			Get("/backups", backupsH.HandleList)
+		r.With(requireScope(true)).With(requirePermission(s.db, "backup.restore")).
+			Post("/backups/{id}/restore", backupsH.HandleRestore)
+		// restore-status is readable by anyone who can initiate a restore (same verb).
+		r.With(requireScope(true)).With(requirePermission(s.db, "backup.restore")).
+			Get("/backups/{id}/restore-status", backupsH.HandleRestoreStatus)
 	})
 
 	return r
