@@ -108,6 +108,38 @@ func writeValidationError(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: msg, Code: "validation_error"})
 }
 
+// ValidationViolation is a single schema or semantic violation in a MULTI-ERROR-ROLLUP
+// 400 response.  It mirrors the shape used by the JSON-SCHEMA middleware in the server
+// package so all validation error responses have a consistent structure.
+type ValidationViolation struct {
+	// Path is a field path within the request body (e.g. "config.ldap_uri").
+	Path string `json:"path"`
+	// Message is a human-readable description of the violated constraint.
+	Message string `json:"message"`
+	// Code is a machine-readable keyword (e.g. "invalid_uri", "required").
+	Code string `json:"code"`
+}
+
+// validationErrorResponse is the 400 body returned by writeValidationViolations.
+type validationErrorResponse struct {
+	Error      string                `json:"error"`
+	Violations []ValidationViolation `json:"violations"`
+}
+
+// writeValidationViolations writes a 400 with the MULTI-ERROR-ROLLUP shape.
+// Used by handlers that accumulate semantic (non-schema) violations and want
+// the same structured response format as the JSON-SCHEMA middleware.
+func writeValidationViolations(w http.ResponseWriter, violations []ValidationViolation) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	if encErr := json.NewEncoder(w).Encode(validationErrorResponse{
+		Error:      "validation_failed",
+		Violations: violations,
+	}); encErr != nil {
+		log.Error().Err(encErr).Msg("handlers: failed to encode validation violations")
+	}
+}
+
 // mergeGroupExtraMounts returns a copy of cfg with ExtraMounts replaced by
 // the effective merged list (group base + node overrides). Used to pre-compute
 // the deploy-time mount list before returning a NodeConfig to the client.

@@ -78,6 +78,11 @@ type DangerousPushHandler struct {
 	// RenderPlugin renders the named plugin for the given cluster state and returns
 	// the first instruction plus its rendered hash. Wired in server.go.
 	RenderPlugin func(ctx context.Context, pluginName string, nodeID string) (api.InstallInstruction, string, error)
+	// LookupPlugin returns the Plugin instance for the named plugin.  Used by
+	// HandleStage to call ValidatePayload (Sprint 42 Day 3).  Wired to
+	// config.PluginByName in server.go.  May be nil — in that case semantic
+	// validation is skipped and only JSON-SCHEMA structural validation runs.
+	LookupPlugin func(pluginName string) (config.Plugin, bool)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -137,6 +142,35 @@ func (h *DangerousPushHandler) HandleStage(w http.ResponseWriter, r *http.Reques
 			Code:  "plugin_not_dangerous",
 		})
 		return
+	}
+
+	// Sprint 42 Day 3 — Phase 1 semantic validation.
+	// If the plugin implements PayloadValidator and the stage request carries a
+	// "payload" field, run ValidatePayload now.  Semantic violations are returned
+	// as a 400 MULTI-ERROR-ROLLUP before staging; the push is never persisted.
+	if h.LookupPlugin != nil && len(req.Payload) > 0 {
+		if plugin, ok := h.LookupPlugin(req.PluginName); ok {
+			if pv, ok := plugin.(config.PayloadValidator); ok {
+				if violations := pv.ValidatePayload(req.Payload); len(violations) > 0 {
+					// Translate config.PayloadValidationError → server.ValidationViolation.
+					httpViolations := make([]ValidationViolation, len(violations))
+					for i, v := range violations {
+						httpViolations[i] = ValidationViolation{
+							Path:    v.Path,
+							Message: v.Message,
+							Code:    v.Code,
+						}
+					}
+					log.Warn().
+						Str("plugin", req.PluginName).
+						Str("node_id", req.NodeID).
+						Int("violations", len(violations)).
+						Msg("dangerous push: semantic validation failed at stage")
+					writeValidationViolations(w, httpViolations)
+					return
+				}
+			}
+		}
 	}
 
 	// Render the plugin to produce the payload that will be sent on confirm.
@@ -372,7 +406,56 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Match — fire the push.
+	// Match — Sprint 42 Day 3 Phase 2: re-resolve + re-validate before firing.
+	// Between stage and confirm the plugin could have been unregistered (e.g.
+	// a disabled module hot-reload, a server restart with a different plugin set).
+	// Re-run semantic validation with the original staged payload so we don't
+	// deliver a push for a plugin that is now broken or gone.
+	if h.LookupPlugin != nil {
+		plugin, pluginStillPresent := h.LookupPlugin(staged.PluginName)
+		if !pluginStillPresent {
+			// Plugin no longer registered — invalidate the pending row so it
+			// can't be retried in this state.
+			if consumeErr := h.DB.ConsumePendingDangerousPush(r.Context(), pendingID); consumeErr != nil {
+				log.Error().Err(consumeErr).Str("pending_id", pendingID).
+					Msg("dangerous push confirm: consume after plugin-gone failed")
+			}
+			log.Warn().
+				Str("pending_id", pendingID).
+				Str("plugin", staged.PluginName).
+				Msg("dangerous push confirm: plugin no longer registered; pending push invalidated")
+			writeJSON(w, http.StatusConflict, api.ErrorResponse{
+				Error: fmt.Sprintf("plugin %q is no longer registered; pending push invalidated — re-stage", staged.PluginName),
+				Code:  "pending_invalidated",
+			})
+			return
+		}
+		// Re-run semantic validation against the originally staged payload bytes.
+		// staged.PayloadJSON holds the *push* payload (ConfigPushPayload), not the
+		// raw stage-request payload.  We re-validate using the plugin's current
+		// state: if the plugin is present but now returns errors, treat as invalidated.
+		if pv, ok := plugin.(config.PayloadValidator); ok {
+			// Use the stored PayloadJSON as the bytes to re-validate.
+			if violations := pv.ValidatePayload([]byte(staged.PayloadJSON)); len(violations) > 0 {
+				if consumeErr := h.DB.ConsumePendingDangerousPush(r.Context(), pendingID); consumeErr != nil {
+					log.Error().Err(consumeErr).Str("pending_id", pendingID).
+						Msg("dangerous push confirm: consume after re-validation-failed failed")
+				}
+				log.Warn().
+					Str("pending_id", pendingID).
+					Str("plugin", staged.PluginName).
+					Int("violations", len(violations)).
+					Msg("dangerous push confirm: re-validation failed; pending push invalidated")
+				writeJSON(w, http.StatusConflict, api.ErrorResponse{
+					Error: "pending push invalidated: re-stage (plugin re-validation failed after staging)",
+					Code:  "pending_invalidated",
+				})
+				return
+			}
+		}
+	}
+
+	// Fire the push.
 	var pushPayload clientd.ConfigPushPayload
 	if err := json.Unmarshal([]byte(staged.PayloadJSON), &pushPayload); err != nil {
 		log.Error().Err(err).Str("pending_id", pendingID).
