@@ -33,7 +33,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/internal/auth"
 	"github.com/sqoia-dev/clustr/internal/clientd"
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
@@ -447,14 +446,4 @@ func IsDangerousPlugin(pluginMetadata func(string) (config.PluginMetadata, bool)
 	return meta.Dangerous
 }
 
-// resolveActorInfo is the signature used by GetActorInfo in DangerousPushHandler.
-// Redeclared here so tests can provide a stub without importing the server package.
-type resolveActorInfo func(r *http.Request) (actorID, actorLabel string)
 
-// ─── RBAC permission check helper ────────────────────────────────────────────
-
-// RequireConfigDangerousPush returns the auth.VerbConfigDangerousPush string
-// so callers can reference it without importing the auth package directly.
-func RequireConfigDangerousPush() string {
-	return auth.VerbConfigDangerousPush
-}
