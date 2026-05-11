@@ -122,7 +122,8 @@ func TestValidatePluginMetadata_Invalid(t *testing.T) {
 }
 
 // TestConvertedPlugins_Metadata verifies all four Sprint 36 plugins declare the
-// §2.2 priorities, Dangerous=false, and Backup=nil on Day 1.
+// §2.2 priorities and Backup=nil on Day 3.
+// SSSD is Dangerous=true from Sprint 41 Day 3; the rest remain Dangerous=false.
 func TestConvertedPlugins_Metadata(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -146,10 +147,13 @@ func TestConvertedPlugins_Metadata(t *testing.T) {
 			wantBackupNil: true,
 		},
 		{
+			// Sprint 41 Day 3: SSSD is now Dangerous=true (gate live).
+			// See internal/config/plugins/sssd.go Metadata() and
+			// docs/design/sprint-41-auth-safety.md §2.2.
 			name:          "sssd",
 			plugin:        plugins.SSSDPlugin{},
 			wantPriority:  80,
-			wantDangerous: false,
+			wantDangerous: true,
 			wantBackupNil: true,
 		},
 		{

@@ -98,6 +98,17 @@ type ClientdHandler struct {
 	// BiosDB provides BIOS profile lookups for BiosApplyOnNode.
 	// When nil, BiosApplyOnNode returns 503.
 	BiosDB ClientdBiosDBIface
+
+	// Sprint 41 Day 3 — dangerous-push gate.
+	// DangerousGateEnabled, when true, causes ConfigPush to reject requests
+	// whose Target matches a plugin with Metadata().Dangerous == true with
+	// 409 Conflict. Operators must use POST /config/dangerous-push instead.
+	// Set by the server when CLUSTR_DANGEROUS_GATE_ENABLED=1.
+	DangerousGateEnabled bool
+	// IsPluginDangerous, when non-nil, is called by ConfigPush to check whether
+	// the push target is a dangerous plugin. Wired to config.PluginMetadataByName
+	// in server.go. When nil, no plugin-danger check is performed.
+	IsPluginDangerous func(target string) bool
 }
 
 // biosLookup is a package-level var wrapping bios.Lookup to allow test stubbing.
@@ -518,14 +529,6 @@ func (h *ClientdHandler) ConfigPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.Hub.IsConnected(nodeID) {
-		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
-			Error: "node is not connected (clustr-clientd offline)",
-			Code:  "node_offline",
-		})
-		return
-	}
-
 	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)) // 2 MB read limit
 	if err != nil {
 		writeValidationError(w, "failed to read request body")
@@ -543,6 +546,26 @@ func (h *ClientdHandler) ConfigPush(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Content) > 1<<20 {
 		writeValidationError(w, "content exceeds 1 MB limit")
+		return
+	}
+
+	// Sprint 41 Day 3 — dangerous-gate check.
+	// When the gate is enabled, reject pushes that target a dangerous plugin.
+	// The operator must use POST /api/v1/config/dangerous-push instead, which
+	// enforces the typed-confirm-string handshake before delivery.
+	if h.DangerousGateEnabled && h.IsPluginDangerous != nil && h.IsPluginDangerous(req.Target) {
+		writeJSON(w, http.StatusConflict, api.ErrorResponse{
+			Error: "plugin is marked dangerous; use POST /api/v1/config/dangerous-push to stage the push and confirm it with the typed cluster name",
+			Code:  "use_dangerous_push",
+		})
+		return
+	}
+
+	if !h.Hub.IsConnected(nodeID) {
+		writeJSON(w, http.StatusBadGateway, api.ErrorResponse{
+			Error: "node is not connected (clustr-clientd offline)",
+			Code:  "node_offline",
+		})
 		return
 	}
 

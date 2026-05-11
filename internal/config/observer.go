@@ -21,12 +21,14 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	sysalerts "github.com/sqoia-dev/clustr/internal/server/alerts"
+	"github.com/sqoia-dev/clustr/pkg/api"
 )
 
 // coalesceWindow is the debounce duration between a Notify call and the
@@ -266,6 +268,46 @@ func sortedByPriority(qs []*pluginQueue) []*pluginQueue {
 		return out[i].regOrder < out[j].regOrder
 	})
 	return out
+}
+
+// RenderByName calls the registered plugin with the given name against state
+// and returns the rendered instructions plus their hash. Returns an error when
+// no plugin with that name is registered or the plugin's Render fails.
+//
+// This is the hook used by the dangerous-push handler (Sprint 41 Day 3) to
+// produce the staged payload without going through the full observer pipeline.
+func RenderByName(ctx context.Context, name string, state ClusterState) ([]api.InstallInstruction, string, error) {
+	registryMu.RLock()
+	q, ok := plugins[name]
+	registryMu.RUnlock()
+	if !ok {
+		return nil, "", fmt.Errorf("config.RenderByName: plugin %q is not registered", name)
+	}
+
+	instrs, err := q.plugin.Render(state)
+	if err != nil {
+		return nil, "", fmt.Errorf("config.RenderByName: plugin %q Render failed: %w", name, err)
+	}
+
+	hash, err := HashInstructions(instrs)
+	if err != nil {
+		return nil, "", fmt.Errorf("config.RenderByName: HashInstructions for plugin %q failed: %w", name, err)
+	}
+	return instrs, hash, nil
+}
+
+// PluginMetadataByName returns the Metadata() of a registered plugin by its
+// name, or (PluginMetadata{}, false) if no plugin with that name is registered.
+// Safe for concurrent use. Used by the dangerous-push handler to verify that a
+// plugin is registered and check its Dangerous flag at request time.
+func PluginMetadataByName(name string) (PluginMetadata, bool) {
+	registryMu.RLock()
+	q, ok := plugins[name]
+	registryMu.RUnlock()
+	if !ok {
+		return PluginMetadata{}, false
+	}
+	return q.plugin.Metadata(), true
 }
 
 // SortPluginsByPriorityForTest sorts a slice of Plugin values by ascending
