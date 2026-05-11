@@ -1,12 +1,14 @@
 package config_test
 
-// plugin_test.go — Sprint 41 Day 1
+// plugin_test.go — Sprint 41 Day 1 / Day 4
 //
 // Asserts that:
 //   1. The PluginMetadata zero value has the expected defaults.
 //   2. Each of the four converted Sprint 36 plugins returns the §2.2 priorities.
-//   3. All four plugins return Dangerous=false on Day 1.
-//   4. All four plugins return Backup=nil on Day 1.
+//   3. All four plugins return Dangerous=false on Day 1 (except SSSD, which is
+//      Dangerous=true from Day 3).
+//   4. hostname/hosts/limits return Backup=nil; SSSD returns a populated
+//      BackupSpec from Day 4.
 //   5. ValidatePluginMetadata accepts valid metadata and rejects invalid cases.
 //   6. EffectivePriority returns DefaultPriority for zero-value Priority.
 
@@ -122,15 +124,15 @@ func TestValidatePluginMetadata_Invalid(t *testing.T) {
 }
 
 // TestConvertedPlugins_Metadata verifies all four Sprint 36 plugins declare the
-// §2.2 priorities and Backup=nil on Day 3.
-// SSSD is Dangerous=true from Sprint 41 Day 3; the rest remain Dangerous=false.
+// §2.2 priorities. SSSD is Dangerous=true from Day 3 and has a populated
+// BackupSpec from Day 4; all others remain Dangerous=false with Backup=nil.
 func TestConvertedPlugins_Metadata(t *testing.T) {
 	cases := []struct {
-		name             string
-		plugin           config.Plugin
-		wantPriority     int
-		wantDangerous    bool
-		wantBackupNil    bool
+		name          string
+		plugin        config.Plugin
+		wantPriority  int
+		wantDangerous bool
+		wantBackupNil bool
 	}{
 		{
 			name:          "hostname",
@@ -148,13 +150,14 @@ func TestConvertedPlugins_Metadata(t *testing.T) {
 		},
 		{
 			// Sprint 41 Day 3: SSSD is now Dangerous=true (gate live).
+			// Sprint 41 Day 4: SSSD now has BackupSpec wired (wantBackupNil=false).
 			// See internal/config/plugins/sssd.go Metadata() and
-			// docs/design/sprint-41-auth-safety.md §2.2.
+			// docs/design/sprint-41-auth-safety.md §2.2 and §5.
 			name:          "sssd",
 			plugin:        plugins.SSSDPlugin{},
 			wantPriority:  80,
 			wantDangerous: true,
-			wantBackupNil: true,
+			wantBackupNil: false,
 		},
 		{
 			name:          "limits",
@@ -176,7 +179,20 @@ func TestConvertedPlugins_Metadata(t *testing.T) {
 				t.Errorf("plugin %q: Dangerous = %v, want %v", tc.name, m.Dangerous, tc.wantDangerous)
 			}
 			if tc.wantBackupNil && m.Backup != nil {
-				t.Errorf("plugin %q: Backup = %v, want nil (Day 1)", tc.name, m.Backup)
+				t.Errorf("plugin %q: Backup = %v, want nil", tc.name, m.Backup)
+			}
+			if !tc.wantBackupNil && m.Backup == nil {
+				t.Errorf("plugin %q: Backup = nil, want non-nil BackupSpec (Day 4)", tc.name)
+			}
+
+			// For SSSD specifically: verify the backup paths include the key dirs.
+			if tc.name == "sssd" && m.Backup != nil {
+				if len(m.Backup.Paths) == 0 {
+					t.Error("sssd BackupSpec.Paths must not be empty")
+				}
+				if m.Backup.RetainN <= 0 {
+					t.Errorf("sssd BackupSpec.RetainN = %d, want > 0", m.Backup.RetainN)
+				}
 			}
 
 			// Confirm metadata passes validation (would panic at Register otherwise).
