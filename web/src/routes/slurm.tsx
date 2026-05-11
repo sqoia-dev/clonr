@@ -38,6 +38,8 @@ import { apiFetch, sseUrl } from "@/lib/api"
 import { SectionErrorBoundary } from "@/components/ErrorBoundary"
 import { toast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
+import { useNavigate, useSearch } from "@tanstack/react-router"
+import { parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
 import type {
   SlurmStatus,
   ListSlurmConfigsResponse,
@@ -1798,11 +1800,30 @@ function UpgradesSection() {
 // ─── TAIL-3: Dep matrix viewer section ───────────────────────────────────────
 
 function DepMatrixSection() {
+  const navigate = useNavigate()
+  const search = useSearch({ strict: false }) as { deps_page?: number; deps_per_page?: number }
+  const page = parsePage({ page: search.deps_page })
+  const pageSize = parsePageSize({ per_page: search.deps_per_page })
+
   const { data, isLoading } = useQuery<SlurmDepMatrixResponse>({
     queryKey: ["slurm-dep-matrix"],
     queryFn: () => apiFetch<SlurmDepMatrixResponse>("/api/v1/slurm/deps/matrix"),
     staleTime: 60000,
   })
+
+  const allRows = data?.matrix ?? []
+  const total = allRows.length
+  const start = (page - 1) * pageSize
+  const end = Math.min(start + pageSize, total)
+  const pageRows = allRows.slice(start, end)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+
+  function setPage(p: number) {
+    navigate({ to: "/slurm", search: { ...search, deps_page: p === 1 ? undefined : p }, replace: true })
+  }
+  function setPageSize(ps: number) {
+    navigate({ to: "/slurm", search: { ...search, deps_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, deps_page: undefined }, replace: true })
+  }
 
   return (
     <Section id="deps" icon={<Table2 className="h-4 w-4 text-muted-foreground" />} title="Dependency matrix">
@@ -1811,34 +1832,59 @@ function DepMatrixSection() {
       </p>
       {isLoading ? (
         <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
-      ) : (data?.matrix ?? []).length === 0 ? (
+      ) : total === 0 ? (
         <p className="text-sm text-muted-foreground">No dependency matrix entries.</p>
       ) : (
-        <div className="overflow-auto rounded border border-border">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-secondary/30">
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Slurm range</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dependency</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dep version range</th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">Source</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {(data?.matrix ?? []).map((row) => (
-                <tr key={row.id} className="hover:bg-secondary/20">
-                  <td className="px-3 py-2 font-mono">
-                    {row.slurm_version_min}–{row.slurm_version_max}
-                  </td>
-                  <td className="px-3 py-2 font-medium">{row.dep_name}</td>
-                  <td className="px-3 py-2 font-mono text-muted-foreground">
-                    {row.dep_version_min}–{row.dep_version_max}
-                  </td>
-                  <td className="px-3 py-2 text-muted-foreground">{row.source}</td>
+        <div className="space-y-2">
+          <div className="overflow-auto rounded border border-border">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border bg-secondary/30">
+                  <th className="px-3 py-2 text-left font-medium text-muted-foreground">Slurm range</th>
+                  <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dependency</th>
+                  <th className="px-3 py-2 text-left font-medium text-muted-foreground">Dep version range</th>
+                  <th className="px-3 py-2 text-left font-medium text-muted-foreground">Source</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {pageRows.map((row) => (
+                  <tr key={row.id} className="hover:bg-secondary/20">
+                    <td className="px-3 py-2 font-mono">
+                      {row.slurm_version_min}–{row.slurm_version_max}
+                    </td>
+                    <td className="px-3 py-2 font-medium">{row.dep_name}</td>
+                    <td className="px-3 py-2 font-mono text-muted-foreground">
+                      {row.dep_version_min}–{row.dep_version_max}
+                    </td>
+                    <td className="px-3 py-2 text-muted-foreground">{row.source}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {total > pageSize && (
+            <div className="flex items-center justify-between gap-4 px-1 text-xs text-muted-foreground">
+              <div className="flex items-center gap-1.5">
+                <span>Rows per page:</span>
+                <div className="flex items-center gap-0.5">
+                  {[10, 25, 50, 100].map((opt) => (
+                    <button
+                      key={opt}
+                      onClick={() => { setPageSize(opt); setPage(1) }}
+                      className={cn("px-1.5 py-0.5 rounded text-xs transition-colors", pageSize === opt ? "bg-primary/10 text-primary font-medium" : "hover:bg-secondary/60")}
+                      data-testid={`deps-page-size-${opt}`}
+                      aria-pressed={pageSize === opt}
+                    >{opt}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span data-testid="deps-page-label">Page {page} of {totalPages} ({total} total)</span>
+                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setPage(page - 1)} disabled={page <= 1} data-testid="deps-prev-page">Prev</Button>
+                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setPage(page + 1)} disabled={page >= totalPages} data-testid="deps-next-page">Next</Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Section>

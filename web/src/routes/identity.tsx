@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useNavigate, useSearch } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Search, Plus, Pencil, Trash2, X, Eye, EyeOff, ShieldCheck, Users, Settings, Database, AlertTriangle, CheckCircle2, ToggleLeft, ToggleRight, KeyRound, Loader2, Server, ExternalLink } from "lucide-react"
 import { Input } from "@/components/ui/input"
@@ -9,6 +10,7 @@ import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
 import { UserPicker } from "@/components/UserPicker"
 import { cn } from "@/lib/utils"
+import { parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
 import type {
   LDAPUser,
   LDAPConfigResponse,
@@ -30,7 +32,35 @@ import type {
 } from "@/lib/types"
 // ─── Identity page ────────────────────────────────────────────────────────────
 
+interface IdentitySearch {
+  users_page?: number
+  users_per_page?: number
+  groups_page?: number
+  groups_per_page?: number
+}
+
 export function IdentityPage() {
+  const navigate = useNavigate()
+  const search = useSearch({ strict: false }) as IdentitySearch
+
+  const usersPage = parsePage({ page: search.users_page })
+  const usersPageSize = parsePageSize({ per_page: search.users_per_page })
+  const groupsPage = parsePage({ page: search.groups_page })
+  const groupsPageSize = parsePageSize({ per_page: search.groups_per_page })
+
+  function setUsersPage(p: number) {
+    navigate({ to: "/identity", search: { ...search, users_page: p === 1 ? undefined : p }, replace: true })
+  }
+  function setUsersPageSize(ps: number) {
+    navigate({ to: "/identity", search: { ...search, users_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, users_page: undefined }, replace: true })
+  }
+  function setGroupsPage(p: number) {
+    navigate({ to: "/identity", search: { ...search, groups_page: p === 1 ? undefined : p }, replace: true })
+  }
+  function setGroupsPageSize(ps: number) {
+    navigate({ to: "/identity", search: { ...search, groups_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, groups_page: undefined }, replace: true })
+  }
+
   return (
     <div className="max-w-3xl mx-auto p-8 space-y-12">
       <div>
@@ -44,8 +74,8 @@ export function IdentityPage() {
       </div>
 
       {/* Anchored sections in prescribed order: Users / Groups / System accounts / LDAP config */}
-      <UsersSection />
-      <GroupsSection />
+      <UsersSection page={usersPage} pageSize={usersPageSize} onPageChange={setUsersPage} onPageSizeChange={setUsersPageSize} />
+      <GroupsSection page={groupsPage} pageSize={groupsPageSize} onPageChange={setGroupsPage} onPageSizeChange={setGroupsPageSize} />
       <SystemAccountsSection />
       <LDAPConfigSection />
     </div>
@@ -68,10 +98,17 @@ function Section({ title, icon: Icon, id, children }: { title: string; icon: Rea
 
 // ─── Users section (USERS-1..4) — LDAP directory users only ──────────────────
 
-function UsersSection() {
+interface PaginationProps {
+  page: number
+  pageSize: number
+  onPageChange: (p: number) => void
+  onPageSizeChange: (ps: number) => void
+}
+
+function UsersSection({ page, pageSize, onPageChange, onPageSizeChange }: PaginationProps) {
   return (
     <Section title="Users" icon={Users} id="users">
-      <LDAPUsersCard />
+      <LDAPUsersCard page={page} pageSize={pageSize} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} />
     </Section>
   )
 }
@@ -110,7 +147,7 @@ function WriteModeBanner({ config }: { config?: LDAPConfigResponse }) {
 
 // ─── LDAP Users Card (WRITE-USER-5, Sprint 13 #93+#94+#95) ──────────────────
 
-function LDAPUsersCard() {
+function LDAPUsersCard({ page, pageSize, onPageChange, onPageSizeChange }: PaginationProps) {
   const qc = useQueryClient()
   const [q, setQ] = React.useState("")
   const [addOpen, setAddOpen] = React.useState(false)
@@ -222,7 +259,11 @@ function LDAPUsersCard() {
 
   function handleSearch() { refetch() }
 
-  const users = data?.users ?? []
+  const allUsers = data?.users ?? []
+  const totalUsers = allUsers.length
+  const userStart = (page - 1) * pageSize
+  const userEnd = Math.min(userStart + pageSize, totalUsers)
+  const users = allUsers.slice(userStart, userEnd)
   const writeCapable = configData?.write_capable ?? false
 
   return (
@@ -358,7 +399,7 @@ function LDAPUsersCard() {
           <p className="text-xs text-muted-foreground">No users found in directory. Try a different search.</p>
         )}
 
-        {users.length > 0 && (
+        {allUsers.length > 0 && (
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border">
@@ -416,6 +457,30 @@ function LDAPUsersCard() {
               ))}
             </tbody>
           </table>
+        )}
+        {/* Pagination controls for users */}
+        {totalUsers > pageSize && (
+          <div className="flex items-center justify-between gap-4 pt-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <span>Rows per page:</span>
+              <div className="flex items-center gap-0.5">
+                {[10, 25, 50, 100].map((opt) => (
+                  <button
+                    key={opt}
+                    onClick={() => { onPageSizeChange(opt); onPageChange(1) }}
+                    className={cn("px-1.5 py-0.5 rounded text-xs transition-colors", pageSize === opt ? "bg-primary/10 text-primary font-medium" : "hover:bg-secondary/60")}
+                    data-testid={`users-page-size-${opt}`}
+                    aria-pressed={pageSize === opt}
+                  >{opt}</button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span data-testid="users-page-label">Page {page} of {Math.max(1, Math.ceil(totalUsers / pageSize))} ({totalUsers} total)</span>
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onPageChange(page - 1)} disabled={page <= 1} data-testid="users-prev-page">Prev</Button>
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onPageChange(page + 1)} disabled={page >= Math.max(1, Math.ceil(totalUsers / pageSize))} data-testid="users-next-page">Next</Button>
+            </div>
+          </div>
         )}
       </div>
 
@@ -613,7 +678,7 @@ function LDAPUserEditSheet({
 
 // ─── Groups section (GRP-*) ────────────────────────────────────────────────────
 
-function GroupsSection() {
+function GroupsSection({ page, pageSize, onPageChange, onPageSizeChange }: PaginationProps) {
   const [tab, setTab] = React.useState<"ldap" | "specialty">("ldap")
   return (
     <Section title="Groups" icon={Users} id="groups">
@@ -631,12 +696,12 @@ function GroupsSection() {
           Specialty groups
         </button>
       </div>
-      {tab === "ldap" ? <LDAPGroupsCard /> : <SpecialtyGroupsCard />}
+      {tab === "ldap" ? <LDAPGroupsCard page={page} pageSize={pageSize} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} /> : <SpecialtyGroupsCard />}
     </Section>
   )
 }
 
-function LDAPGroupsCard() {
+function LDAPGroupsCard({ page, pageSize, onPageChange, onPageSizeChange }: PaginationProps) {
   const qc = useQueryClient()
   const [expandedCN, setExpandedCN] = React.useState<string | null>(null)
   const [addGroupOpen, setAddGroupOpen] = React.useState(false)
@@ -689,7 +754,11 @@ function LDAPGroupsCard() {
     onError: (err) => toast({ variant: "destructive", title: "Delete failed", description: String(err) }),
   })
 
-  const groups = data?.groups ?? []
+  const allGroups2 = data?.groups ?? []
+  const totalGroups = allGroups2.length
+  const groupStart = (page - 1) * pageSize
+  const groupEnd = Math.min(groupStart + pageSize, totalGroups)
+  const groups = allGroups2.slice(groupStart, groupEnd)
 
   return (
     <div className="rounded-md border border-border bg-card">
@@ -794,6 +863,30 @@ function LDAPGroupsCard() {
             ))}
           </tbody>
         </table>
+      )}
+      {/* Pagination controls for groups */}
+      {totalGroups > pageSize && (
+        <div className="flex items-center justify-between gap-4 px-4 py-2 border-t border-border text-xs text-muted-foreground">
+          <div className="flex items-center gap-1.5">
+            <span>Rows per page:</span>
+            <div className="flex items-center gap-0.5">
+              {[10, 25, 50, 100].map((opt) => (
+                <button
+                  key={opt}
+                  onClick={() => { onPageSizeChange(opt); onPageChange(1) }}
+                  className={cn("px-1.5 py-0.5 rounded text-xs transition-colors", pageSize === opt ? "bg-primary/10 text-primary font-medium" : "hover:bg-secondary/60")}
+                  data-testid={`groups-page-size-${opt}`}
+                  aria-pressed={pageSize === opt}
+                >{opt}</button>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span data-testid="groups-page-label">Page {page} of {Math.max(1, Math.ceil(totalGroups / pageSize))} ({totalGroups} total)</span>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onPageChange(page - 1)} disabled={page <= 1} data-testid="groups-prev-page">Prev</Button>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onPageChange(page + 1)} disabled={page >= Math.max(1, Math.ceil(totalGroups / pageSize))} data-testid="groups-next-page">Next</Button>
+          </div>
+        </div>
       )}
     </div>
   )

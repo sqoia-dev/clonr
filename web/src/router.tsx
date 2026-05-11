@@ -59,7 +59,7 @@ const indexRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/",
   beforeLoad: () => {
-    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })
+    throw redirect({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })
   },
 })
 
@@ -97,6 +97,9 @@ const nodesRoute = createRoute({
         : undefined,
     // GRP-5: open create group sheet from Cmd-K
     createGroup: typeof search.createGroup === "string" ? search.createGroup : undefined,
+    // Pagination
+    page: typeof search.page === "number" ? search.page : (typeof search.page === "string" ? parseInt(search.page, 10) || 1 : undefined),
+    per_page: typeof search.per_page === "number" ? search.per_page : (typeof search.per_page === "string" ? parseInt(search.per_page, 10) || undefined : undefined),
   }),
 })
 
@@ -121,6 +124,8 @@ const activityRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) => ({
     q: typeof search.q === "string" ? search.q : undefined,
     kind: typeof search.kind === "string" ? search.kind : undefined,
+    page: typeof search.page === "number" ? search.page : (typeof search.page === "string" ? parseInt(search.page, 10) || 1 : undefined),
+    per_page: typeof search.per_page === "number" ? search.per_page : (typeof search.per_page === "string" ? parseInt(search.per_page, 10) || undefined : undefined),
   }),
 })
 
@@ -134,12 +139,22 @@ const identityRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/identity",
   component: IdentityPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    users_page: typeof search.users_page === "number" ? search.users_page : (typeof search.users_page === "string" ? parseInt(search.users_page, 10) || 1 : undefined),
+    users_per_page: typeof search.users_per_page === "number" ? search.users_per_page : (typeof search.users_per_page === "string" ? parseInt(search.users_per_page, 10) || undefined : undefined),
+    groups_page: typeof search.groups_page === "number" ? search.groups_page : (typeof search.groups_page === "string" ? parseInt(search.groups_page, 10) || 1 : undefined),
+    groups_per_page: typeof search.groups_per_page === "number" ? search.groups_per_page : (typeof search.groups_per_page === "string" ? parseInt(search.groups_per_page, 10) || undefined : undefined),
+  }),
 })
 
 const slurmRoute = createRoute({
   getParentRoute: () => protectedLayout,
   path: "/slurm",
   component: SlurmPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    deps_page: typeof search.deps_page === "number" ? search.deps_page : (typeof search.deps_page === "string" ? parseInt(search.deps_page, 10) || 1 : undefined),
+    deps_per_page: typeof search.deps_per_page === "number" ? search.deps_per_page : (typeof search.deps_per_page === "string" ? parseInt(search.deps_per_page, 10) || undefined : undefined),
+  }),
 })
 
 const alertsRoute = createRoute({
