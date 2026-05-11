@@ -60,17 +60,6 @@ type restoreStatusResponse struct {
 	DoneAt    *string `json:"done_at,omitempty"`
 }
 
-// resolvePendingIDResponse is the wire type for the backup looked up by
-// pending dangerous push ID.
-type resolvedBackupForPending struct {
-	ID                     string  `json:"id"`
-	NodeID                 string  `json:"node_id"`
-	PluginName             string  `json:"plugin_name"`
-	BlobPath               string  `json:"blob_path"`
-	TakenAt                string  `json:"taken_at"`
-	PendingDangerousPushID *string `json:"pending_dangerous_push_id,omitempty"`
-}
-
 // ─── command wiring ──────────────────────────────────────────────────────────
 
 func init() {
