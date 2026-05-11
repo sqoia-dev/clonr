@@ -71,6 +71,25 @@ func LimitsWatchKey() string { return limitsWatchKey }
 func LimitsAnchorBegin() string { return limitsAnchorBegin }
 func LimitsAnchorEnd() string   { return limitsAnchorEnd }
 
+// Metadata returns the execution and safety invariants for the limits plugin.
+//
+// Priority 110: limits.conf is consulted by PAM at session-establishment time,
+// but a malformed entry is silently ignored — the worst case is "limits don't
+// apply on next login," not "no one can log in." Priority 110 puts it in the
+// Applications band (101–150), after auth middleware has settled.
+//
+// Dangerous=false: malformed limits.conf entries are silently ignored by PAM;
+// the blast radius is misconfigured resource limits, not lockout. No console
+// access required for recovery.
+//
+// Backup=nil on Day 1; wired in Sprint 41 Day 4.
+func (LimitsPlugin) Metadata() config.PluginMetadata {
+	return config.PluginMetadata{
+		Priority:  110,
+		Dangerous: false,
+	}
+}
+
 // Render returns a single InstallInstruction that writes the clustr-managed
 // block into /etc/security/limits.conf for the node identified by state.NodeID.
 //

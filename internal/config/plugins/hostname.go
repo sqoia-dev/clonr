@@ -52,6 +52,23 @@ func (HostnamePlugin) WatchedKeys() []string {
 // tests) can reference it without importing the unexported constant.
 func WatchKey() string { return hostnameWatchKey }
 
+// Metadata returns the execution and safety invariants for the hostname plugin.
+//
+// Priority 20: hostname must be set before anything that resolves it (/etc/hosts,
+// sssd, slurmctld config all read the hostname). Priority 20 puts it in the
+// Foundation band (0–50), well before the default tier (100).
+//
+// Dangerous=false: a bad hostname is disruptive but not lockout-class. Recovery
+// is straightforward — re-render with the correct hostname.
+//
+// Backup=nil on Day 1; wired in Sprint 41 Day 4.
+func (HostnamePlugin) Metadata() config.PluginMetadata {
+	return config.PluginMetadata{
+		Priority:  20,
+		Dangerous: false,
+	}
+}
+
 // Render returns a single InstallInstruction that writes /etc/hostname for
 // the node identified by state.NodeID.
 //

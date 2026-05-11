@@ -83,6 +83,7 @@ func SetAlertWriter(aw AlertWriter) {
 // Register adds p to the observer registry and starts its coalesce goroutine.
 // Must be called once per plugin at server startup, before any Notify calls.
 // Calling Register with a duplicate Name() panics to catch programmer error.
+// Calling Register with invalid Metadata() panics to catch misconfigured plugins.
 func Register(p Plugin) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
@@ -90,6 +91,11 @@ func Register(p Plugin) {
 	name := p.Name()
 	if _, dup := plugins[name]; dup {
 		panic("config.Register: duplicate plugin name: " + name)
+	}
+
+	// Validate metadata at registration time — caught at startup, not in production.
+	if err := ValidatePluginMetadata(name, p.Metadata()); err != nil {
+		panic("config.Register: " + err.Error())
 	}
 
 	q := &pluginQueue{
@@ -231,11 +237,13 @@ func (q *pluginQueue) render(ctx context.Context, state ClusterState) {
 		_, _ = q.alerts.Unset(ctx, "config_render_failed", state.NodeID)
 	}
 
-	// Log the successful render for visibility during Day 1 (no push yet —
-	// plugins will hook into the push path on Day 2+).
+	// Log the successful render for visibility. The Priority field is included
+	// for observability; batch sorting by priority is wired in Day 2.
+	meta := q.plugin.Metadata()
 	log.Debug().
 		Str("plugin", name).
 		Str("node_id", state.NodeID).
 		Int("instruction_count", len(instrs)).
+		Int("priority", EffectivePriority(meta)).
 		Msg("config.observer: Render succeeded (push path not yet wired — Day 2)")
 }

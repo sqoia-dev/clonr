@@ -67,6 +67,23 @@ func HostsWatchKey() string { return hostsWatchKey }
 func HostsAnchorBegin() string { return hostsAnchorBegin }
 func HostsAnchorEnd() string   { return hostsAnchorEnd }
 
+// Metadata returns the execution and safety invariants for the hosts plugin.
+//
+// Priority 30: must run after hostname (P=20, so the local-host entry is
+// correct) but before any service that resolves cluster peers (slurm, sssd).
+// Sits in the Foundation band (0–50).
+//
+// Dangerous=false: the managed block is bounded by ANCHORS and is
+// human-readable. A bad render is recoverable without console access.
+//
+// Backup=nil on Day 1; wired in Sprint 41 Day 4.
+func (HostsPlugin) Metadata() config.PluginMetadata {
+	return config.PluginMetadata{
+		Priority:  30,
+		Dangerous: false,
+	}
+}
+
 // Render returns a single InstallInstruction that writes the clustr-managed
 // block into /etc/hosts for the node identified by state.NodeID.
 //
