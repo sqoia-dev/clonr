@@ -16,11 +16,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "logs",
-        "total"
-      ]
+      "type": "object"
     },
     "LogEntry": {
       "properties": {
@@ -54,15 +50,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "node_mac",
-        "level",
-        "component",
-        "message",
-        "timestamp"
-      ]
+      "type": "object"
     }
   }
 }

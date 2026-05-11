@@ -23,11 +23,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "node_id",
-        "profile_id"
-      ]
+      "type": "object"
     },
     "NodeBiosProfileResponse": {
       "properties": {
@@ -36,10 +32,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "binding"
-      ]
+      "type": "object"
     }
   }
 }

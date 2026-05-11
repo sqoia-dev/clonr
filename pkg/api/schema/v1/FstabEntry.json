@@ -31,16 +31,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source",
-        "mount_point",
-        "fs_type",
-        "options",
-        "dump",
-        "pass",
-        "auto_mkdir"
-      ]
+      "type": "object"
     }
   }
 }

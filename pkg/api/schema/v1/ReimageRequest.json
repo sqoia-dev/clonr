@@ -66,15 +66,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "node_id",
-        "image_id",
-        "status",
-        "requested_by",
-        "created_at"
-      ]
+      "type": "object"
     }
   }
 }

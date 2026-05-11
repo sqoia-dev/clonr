@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/dangerous-push-stage-request",
+  "$ref": "#/$defs/DangerousPushStageRequest",
+  "$defs": {
+    "DangerousPushStageRequest": {
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "plugin_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {
+          "description": "Reserved for future use"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node_id",
+        "plugin_name"
+      ]
+    }
+  }
+}

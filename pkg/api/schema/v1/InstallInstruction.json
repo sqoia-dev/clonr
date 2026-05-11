@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "begin",
-        "end"
-      ]
+      "type": "object"
     },
     "InstallInstruction": {
       "properties": {
@@ -35,12 +31,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "opcode",
-        "target",
-        "payload"
-      ]
+      "type": "object"
     }
   }
 }

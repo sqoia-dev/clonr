@@ -30,15 +30,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "vendor",
-        "settings_json",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "ListBiosProfilesResponse": {
       "properties": {
@@ -53,11 +45,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "profiles",
-        "total"
-      ]
+      "type": "object"
     }
   }
 }

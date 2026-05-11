@@ -36,16 +36,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "kind",
-        "kernel_url",
-        "enabled",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     }
   }
 }

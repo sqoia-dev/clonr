@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     },
     "DiskLayout": {
       "properties": {
@@ -47,11 +43,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "partitions",
-        "bootloader"
-      ]
+      "type": "object"
     },
     "FstabEntry": {
       "properties": {
@@ -81,16 +73,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source",
-        "mount_point",
-        "fs_type",
-        "options",
-        "dump",
-        "pass",
-        "auto_mkdir"
-      ]
+      "type": "object"
     },
     "NodeGroup": {
       "properties": {
@@ -129,14 +112,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "description",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "PartitionSpec": {
       "properties": {
@@ -166,15 +142,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     },
     "RAIDSpec": {
       "properties": {
@@ -207,12 +175,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     },
     "ZFSPool": {
       "properties": {
@@ -239,13 +202,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vdev_type",
-        "members",
-        "mountpoint"
-      ]
+      "type": "object"
     }
   }
 }

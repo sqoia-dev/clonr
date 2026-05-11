@@ -33,15 +33,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "node_id",
-        "hostname",
-        "mac",
-        "ip",
-        "deploy_state",
-        "first_seen_at"
-      ]
+      "type": "object"
     },
     "DHCPLeasesResponse": {
       "properties": {
@@ -56,11 +48,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "leases",
-        "count"
-      ]
+      "type": "object"
     }
   }
 }

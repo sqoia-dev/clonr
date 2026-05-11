@@ -22,14 +22,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "ip_address",
-        "netmask",
-        "gateway",
-        "username",
-        "password"
-      ]
+      "type": "object"
     }
   }
 }

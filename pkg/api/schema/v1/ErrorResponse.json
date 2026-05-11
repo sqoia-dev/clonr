@@ -13,10 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "error"
-      ]
+      "type": "object"
     }
   }
 }

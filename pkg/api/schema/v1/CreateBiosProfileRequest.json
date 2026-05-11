@@ -19,12 +19,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vendor",
-        "settings_json"
-      ]
+      "type": "object"
     }
   }
 }

@@ -22,10 +22,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "status"
-      ]
+      "type": "object"
     }
   }
 }

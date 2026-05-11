@@ -23,13 +23,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "fingerprint",
-        "owner",
-        "source",
-        "created_at"
-      ]
+      "type": "object"
     },
     "ListGPGKeysResponse": {
       "properties": {
@@ -41,10 +35,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "keys"
-      ]
+      "type": "object"
     }
   }
 }

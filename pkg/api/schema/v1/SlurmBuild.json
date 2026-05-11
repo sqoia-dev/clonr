@@ -46,15 +46,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "version",
-        "arch",
-        "status",
-        "started_at",
-        "is_active"
-      ]
+      "type": "object"
     }
   }
 }

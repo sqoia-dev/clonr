@@ -31,12 +31,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "mac_address",
-        "name",
-        "ip_address"
-      ]
+      "type": "object"
     }
   }
 }

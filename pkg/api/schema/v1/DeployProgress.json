@@ -44,18 +44,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "node_mac",
-        "phase",
-        "phase_index",
-        "phase_total",
-        "bytes_done",
-        "bytes_total",
-        "speed_bps",
-        "eta_seconds",
-        "updated_at"
-      ]
+      "type": "object"
     }
   }
 }
