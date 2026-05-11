@@ -1,0 +1,722 @@
+# clustr.db migration chain — Sprint 42 MIGRATE-CHAIN
+#
+# Each entry:
+#   id:          unique numeric identifier (matches file number prefix)
+#   filename:    SQL file name (must match a file in this directory)
+#   description: human-readable description shown in startup logs
+#   applied_to:  "clustr" (all entries in this file target clustr.db)
+#   requires:    list of migration IDs that must be applied first
+#
+# Rules enforced by the runner:
+#   - Every .sql file in this directory must have an entry here.
+#   - Every entry here must have a corresponding .sql file.
+#   - Drift in either direction = startup failure.
+#   - Migrations run in the order listed here, not alphabetical filename order.
+#   - The requires list is checked before applying each migration.
+#
+# NOTE: 102b is an anomaly — it falls between 102 and 103 lexicographically
+# and logically depends on 102. It is registered as id 1025 (after 102, before 103)
+# so the ordering is correct while keeping IDs numeric-friendly.
+migrations:
+  - id: 1
+    filename: 001_initial.sql
+    description: "initial schema: node_configs, base_images, reimage_requests"
+    applied_to: clustr
+    requires: []
+
+  - id: 2
+    filename: 002_deploy_events.sql
+    description: "deploy_events table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 3
+    filename: 003_node_logs.sql
+    description: "node_logs table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 4
+    filename: 004_node_hardware_profile.sql
+    description: "add hardware_profile column to node_configs for PXE auto-registration"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 5
+    filename: 005_bmc_ib_config.sql
+    description: "BMC and InfiniBand config columns"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 6
+    filename: 006_hostname_auto.sql
+    description: "hostname auto-assignment support"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 7
+    filename: 007_power_provider.sql
+    description: "power_provider column on node_configs"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 8
+    filename: 008_reimage_requests.sql
+    description: "reimage_requests extensions"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 9
+    filename: 009_reimage_pending.sql
+    description: "tracks whether a node is awaiting a reimage deployment"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 10
+    filename: 010_node_deploy_timestamps.sql
+    description: "lifecycle timestamps for tracking per-node deploy outcomes"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 11
+    filename: 011_node_groups.sql
+    description: "node_groups table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 12
+    filename: 012_extra_mounts.sql
+    description: "extra_mounts column on base_images"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 13
+    filename: 013_image_roles.sql
+    description: "add built_for_roles and build_method columns to base_images"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 14
+    filename: 014_fix_completed_at_type.sql
+    description: "coerce legacy string values in reimage_requests timestamp columns"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 15
+    filename: 015_api_keys.sql
+    description: "api_keys: SHA-256 hashed API keys with per-scope rotation support"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 16
+    filename: 016_image_firmware.sql
+    description: "add firmware column to base_images"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 17
+    filename: 017_node_scoped_keys.sql
+    description: "add node_id binding and TTL to api_keys"
+    applied_to: clustr
+    requires: [15]
+
+  - id: 18
+    filename: 018_image_build_resumable.sql
+    description: "extend base_images with resumable-build fields"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 19
+    filename: 019_initramfs_builds.sql
+    description: "track initramfs rebuild history"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 20
+    filename: 020_api_keys_rotation.sql
+    description: "add rotation, labelling, and soft-delete support to api_keys"
+    applied_to: clustr
+    requires: [15]
+
+  - id: 21
+    filename: 021_group_memberships.sql
+    description: "group_memberships table"
+    applied_to: clustr
+    requires: [11]
+
+  - id: 22
+    filename: 022_reimage_terminal_state.sql
+    description: "add terminal-state detail columns to reimage_requests"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 23
+    filename: 023_image_metadata.sql
+    description: "image metadata columns"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 24
+    filename: 024_post_reboot_verification.sql
+    description: "ADR-0008: post-reboot verification two-phase deploy success"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 25
+    filename: 025_users.sql
+    description: "ADR-0007: user accounts and first-run bootstrap"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 26
+    filename: 026_node_detected_firmware.sql
+    description: "store firmware type detected by deploy agent at reimage time"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 27
+    filename: 027_ldap_module.sql
+    description: "LDAP module state tables"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 28
+    filename: 028_ldap_admin_passwd.sql
+    description: "persist the LDAP admin (Directory Manager) password in the DB"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 29
+    filename: 029_system_accounts.sql
+    description: "system service account definitions for node injection"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 30
+    filename: 030_network_module.sql
+    description: "switch inventory, Ethernet bond/VLAN profiles"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 31
+    filename: 031_switch_discovery.sql
+    description: "adds DHCP auto-discovery fields to network_switches"
+    applied_to: clustr
+    requires: [30]
+
+  - id: 32
+    filename: 032_node_heartbeats.sql
+    description: "Sprint 1: clustr-clientd heartbeat persistence"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 33
+    filename: 033_slurm_module.sql
+    description: "Sprint 4: Slurm module core tables"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 34
+    filename: 034_slurm_extended.sql
+    description: "Sprint 4: extended Slurm module tables (builds, scripts, roles, secrets, upgrades)"
+    applied_to: clustr
+    requires: [33]
+
+  - id: 35
+    filename: 035_slurm_sprint8.sql
+    description: "Sprint 8: Slurm build pipeline additions"
+    applied_to: clustr
+    requires: [34]
+
+  - id: 36
+    filename: 036_sudoers.sql
+    description: "LDAP sudoers group feature"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 37
+    filename: 037_node_logs_summary.sql
+    description: "log purge event summary table"
+    applied_to: clustr
+    requires: [3]
+
+  - id: 38
+    filename: 038_ldap_credential_encryption.sql
+    description: "LDAP credential encryption at rest"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 39
+    filename: 039_bmc_credential_encryption.sql
+    description: "BMC/power credential encryption at rest"
+    applied_to: clustr
+    requires: [5]
+
+  - id: 40
+    filename: 040_image_status_check.sql
+    description: "image status CHECK constraint"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 41
+    filename: 041_node_tags_rename.sql
+    description: "rename node tags column"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 42
+    filename: 042_group_membership_primary.sql
+    description: "group_membership primary key fix"
+    applied_to: clustr
+    requires: [21]
+
+  - id: 43
+    filename: 043_user_group_memberships.sql
+    description: "user group memberships table"
+    applied_to: clustr
+    requires: [25, 11]
+
+  - id: 44
+    filename: 044_audit_log.sql
+    description: "audit_log table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 45
+    filename: 045_webhooks.sql
+    description: "webhook subscriptions and delivery log"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 46
+    filename: 046_reimage_inject_vars.sql
+    description: "per-deployment custom_vars overrides"
+    applied_to: clustr
+    requires: [8]
+
+  - id: 47
+    filename: 047_node_config_history.sql
+    description: "node config change history for audit trail"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 48
+    filename: 048_drop_group_id.sql
+    description: "drop legacy group_id column"
+    applied_to: clustr
+    requires: [42]
+
+  - id: 49
+    filename: 049_drop_last_deploy_succeeded_at.sql
+    description: "drop last_deploy_succeeded_at column"
+    applied_to: clustr
+    requires: [10]
+
+  - id: 50
+    filename: 050_slurm_repo_url.sql
+    description: "add slurm_repo_url to slurm_module_config for auto-install at deploy time"
+    applied_to: clustr
+    requires: [33]
+
+  - id: 51
+    filename: 051_slurm_slurmdbd_managed.sql
+    description: "backfill slurmdbd.conf into managed_files for existing Slurm module configs"
+    applied_to: clustr
+    requires: [34]
+
+  - id: 52
+    filename: 052_slurm_config_files_clustr_default.sql
+    description: "add is_clustr_default to slurm_config_files"
+    applied_to: clustr
+    requires: [34]
+
+  - id: 53
+    filename: 053_viewer_role.sql
+    description: "add viewer role support"
+    applied_to: clustr
+    requires: [25]
+
+  - id: 54
+    filename: 054_verify_timeout_override.sql
+    description: "per-node verify_timeout_override"
+    applied_to: clustr
+    requires: [24]
+
+  - id: 55
+    filename: 055_pi_role.sql
+    description: "add PI role to RBAC"
+    applied_to: clustr
+    requires: [25]
+
+  - id: 56
+    filename: 056_node_group_pi.sql
+    description: "NodeGroup PI ownership + PI member requests"
+    applied_to: clustr
+    requires: [11, 55]
+
+  - id: 57
+    filename: 057_pi_expansion_requests.sql
+    description: "PI expansion requests"
+    applied_to: clustr
+    requires: [56]
+
+  - id: 58
+    filename: 058_users_role_check.sql
+    description: "expand users.role CHECK constraint to include viewer and pi"
+    applied_to: clustr
+    requires: [53, 55]
+
+  - id: 59
+    filename: 059_director_role.sql
+    description: "add director role to RBAC"
+    applied_to: clustr
+    requires: [58]
+
+  - id: 60
+    filename: 060_grants.sql
+    description: "grant tracking"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 61
+    filename: 061_publications.sql
+    description: "publication tracking"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 62
+    filename: 062_review_cycles.sql
+    description: "annual review cycles"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 63
+    filename: 063_smtp_config.sql
+    description: "SMTP notification configuration"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 64
+    filename: 064_allocation_change_requests.sql
+    description: "full allocation change request workflow"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 65
+    filename: 065_fields_of_science.sql
+    description: "field of science taxonomy"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 66
+    filename: 066_attribute_visibility.sql
+    description: "per-attribute visibility policy"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 67
+    filename: 067_user_notification_prefs.sql
+    description: "per-user notification preferences"
+    applied_to: clustr
+    requires: [25]
+
+  - id: 68
+    filename: 068_node_group_expires_at.sql
+    description: "add optional allocation expiration timestamp to node_groups"
+    applied_to: clustr
+    requires: [11]
+
+  - id: 69
+    filename: 069_ldap_project_plugin.sql
+    description: "OpenLDAP project plugin"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 70
+    filename: 070_node_group_ldap_restrictions.sql
+    description: "per-NodeGroup LDAP group access restrictions"
+    applied_to: clustr
+    requires: [11, 27]
+
+  - id: 71
+    filename: 071_project_managers.sql
+    description: "PI manager delegation"
+    applied_to: clustr
+    requires: [56]
+
+  - id: 72
+    filename: 072_auto_compute_policy.sql
+    description: "auto-compute allocation policy engine"
+    applied_to: clustr
+    requires: [11]
+
+  - id: 73
+    filename: 073_auto_policy_config.sql
+    description: "admin-configurable auto-compute allocation policy table"
+    applied_to: clustr
+    requires: [72]
+
+  - id: 74
+    filename: 074_tech_trig_state.sql
+    description: "TECH-TRIG monitoring state table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 75
+    filename: 075_gpg_keys.sql
+    description: "user-managed GPG public keys"
+    applied_to: clustr
+    requires: [25]
+
+  - id: 76
+    filename: 076_node_provider.sql
+    description: "add provider column to node_configs"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 77
+    filename: 077_node_sudoers.sql
+    description: "per-node sudoers assignments"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 78
+    filename: 078_identity_groups.sql
+    description: "identity surface group data models"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 79
+    filename: 079_ldap_write_bind.sql
+    description: "LDAP write-back: write bind credentials and group direct-write mode"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 80
+    filename: 080_ldap_source_mode.sql
+    description: "LDAP source mode toggle"
+    applied_to: clustr
+    requires: [27]
+
+  - id: 81
+    filename: 081_posixid_config.sql
+    description: "POSIX ID allocator config"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 82
+    filename: 082_node_ldap_ready.sql
+    description: "LDAP readiness state per node"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 83
+    filename: 083_slurm_repo.sql
+    description: "clustr-internal-repo support"
+    applied_to: clustr
+    requires: [33]
+
+  - id: 84
+    filename: 084_posixid_roles.sql
+    description: "split POSIX ID allocator into per-role ranges"
+    applied_to: clustr
+    requires: [81]
+
+  - id: 85
+    filename: 085_node_stats.sql
+    description: "on-node stats collection: node_stats time-series table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 86
+    filename: 086_alerts.sql
+    description: "alert rule engine tables"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 87
+    filename: 087_disk_layouts.sql
+    description: "disk layout as a first-class object"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 88
+    filename: 088_install_instructions.sql
+    description: "add install_instructions column to base_images"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 89
+    filename: 089_racks.sql
+    description: "rack model: physical rack inventory and node placement"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 90
+    filename: 090_alert_silences.sql
+    description: "alert silences table"
+    applied_to: clustr
+    requires: [86]
+
+  - id: 91
+    filename: 091_pending_changes.sql
+    description: "two-stage commit: pending_changes table and module-stage-mode flags"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 92
+    filename: 092_boot_entries.sql
+    description: "per-image stateless/netboot menu entries"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 93
+    filename: 093_multicast_sessions.sql
+    description: "multicast_sessions and multicast_session_members tables"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 94
+    filename: 094_bios_profiles.sql
+    description: "BIOS profiles: named reusable BIOS setting sets and per-node bindings"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 95
+    filename: 095_reimage_bios_only.sql
+    description: "add bios_only flag to reimage_requests"
+    applied_to: clustr
+    requires: [8, 94]
+
+  - id: 96
+    filename: 096_fix_node_rack_position_fk.sql
+    description: "fix node_rack_position FK: referenced nodes(id) but table is node_configs"
+    applied_to: clustr
+    requires: [89]
+
+  - id: 97
+    filename: 097_image_reconcile_statuses.sql
+    description: "image reconcile status columns and periodic reconcile support"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 98
+    filename: 098_enclosures.sql
+    description: "Sprint 31 chassis enclosures (Path A): enclosures table + nullable FK"
+    applied_to: clustr
+    requires: [89]
+
+  - id: 99
+    filename: 099_hosts.sql
+    description: "SELF-MON hosts table and nodes.host_id FK"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 100
+    filename: 100_fix_node_rack_position_nullable.sql
+    description: "make node_rack_position columns nullable"
+    applied_to: clustr
+    requires: [96]
+
+  - id: 101
+    filename: 101_orphan_position_cleanup.sql
+    description: "clean orphan node_rack_position rows"
+    applied_to: clustr
+    requires: [100]
+
+  - id: 102
+    filename: 102_fix_ldap_node_state_fk.sql
+    description: "fix LDAP node state FK reference"
+    applied_to: clustr
+    requires: [82]
+
+  # 102b falls between 102 and 103 — depends on 102, must run before 103.
+  - id: 1025
+    filename: 102b_clean_pre_v019_fk_orphans.sql
+    description: "clean orphan child rows accumulated under pre-v0.1.7 FK schema"
+    applied_to: clustr
+    requires: [102]
+
+  - id: 103
+    filename: 103_repair_users_old_fk_dangling.sql
+    description: "repair dangling FK references to _users_old / _users_059_old"
+    applied_to: clustr
+    requires: [1025]
+
+  - id: 104
+    filename: 104_fix_sudoers_group_cn.sql
+    description: "fix sudoers group CN mismatch"
+    applied_to: clustr
+    requires: [36]
+
+  - id: 105
+    filename: 105_node_boot_policy_settings.sql
+    description: "Sprint 34 BOOT-POLICY + BOOT-SETTINGS-MODAL"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 106
+    filename: 106_node_stats_expires_at.sql
+    description: "add optional expires_at column to node_stats for TTL-bounded samples"
+    applied_to: clustr
+    requires: [85]
+
+  - id: 107
+    filename: 107_node_external_stats.sql
+    description: "node_external_stats table for agent-less collector samples"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 108
+    filename: 108_system_alerts.sql
+    description: "Sprint 38 SYSTEM-ALERT-FRAMEWORK: system alerts table"
+    applied_to: clustr
+    requires: [86]
+
+  - id: 109
+    filename: 109_node_config_variants.sql
+    description: "Sprint 44 VARIANTS-SYSTEM: node config variants"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 110
+    filename: 110_disk_layout_firmware_kind.sql
+    description: "firmware-aware disk layout selection"
+    applied_to: clustr
+    requires: [87]
+
+  - id: 111
+    filename: 111_node_operating_mode.sql
+    description: "Sprint 37 DISKLESS Bundle A: node operating_mode column"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 112
+    filename: 112_config_render_state.sql
+    description: "Sprint 36 Bundle A: reactive config render-state tracking"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 113
+    filename: 113_roles_and_assignments.sql
+    description: "Sprint 41 Day 1: roles and assignments tables"
+    applied_to: clustr
+    requires: [25]
+
+  - id: 114
+    filename: 114_pending_dangerous_pushes.sql
+    description: "Sprint 41 Day 1: pending dangerous pushes table"
+    applied_to: clustr
+    requires: [1]
+
+  - id: 115
+    filename: 115_dangerous_push_attempts.sql
+    description: "Sprint 41 Day 3: dangerous push attempts table"
+    applied_to: clustr
+    requires: [114]
+
+  - id: 116
+    filename: 116_plugin_backups.sql
+    description: "Sprint 41 Day 4: plugin backups table"
+    applied_to: clustr
+    requires: [1]
