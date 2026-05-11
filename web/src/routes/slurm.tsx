@@ -1819,10 +1819,10 @@ function DepMatrixSection() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   function setPage(p: number) {
-    navigate({ to: "/slurm", search: { ...search, deps_page: p === 1 ? undefined : p }, replace: true })
+    navigate({ to: "/slurm", search: { deps_page: p === 1 ? undefined : p, deps_per_page: search.deps_per_page ?? undefined }, replace: true })
   }
   function setPageSize(ps: number) {
-    navigate({ to: "/slurm", search: { ...search, deps_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, deps_page: undefined }, replace: true })
+    navigate({ to: "/slurm", search: { deps_page: undefined, deps_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps }, replace: true })
   }
 
   return (

@@ -43,7 +43,7 @@ import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
 import type { InterfaceRow } from "@/components/InterfaceList"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
-import { PaginatedTable, parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
+import { parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
 
 // ─── Sprint 38: PROBE-3 — Reachability dots ──────────────────────────────────
 //
@@ -795,7 +795,7 @@ export function NodesPage() {
       setCreateGroupOpen(true)
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", view: view === "nodes" ? undefined : view, tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, createGroup: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", view: view === "nodes" ? undefined : view, tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, createGroup: undefined, page: undefined, per_page: undefined },
         replace: true,
       })
     }
@@ -806,7 +806,7 @@ export function NodesPage() {
       setAddNodeOpen(true)
       navigate({
         to: "/nodes",
-        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined },
+        search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined },
         replace: true,
       })
     }
@@ -3349,7 +3349,7 @@ export function NodeDetailPage() {
       <div className="p-6 space-y-4">
         <Link
           to="/nodes"
-          search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined }}
+          search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -3367,7 +3367,7 @@ export function NodeDetailPage() {
       {/* Breadcrumb */}
       <Link
         to="/nodes"
-        search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined }}
+        search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
         className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         data-testid="back-to-nodes"
       >
@@ -3398,7 +3398,7 @@ export function NodeDetailPage() {
           // Invalidate the single-node query so the header badge refreshes.
           qc.invalidateQueries({ queryKey: ["node", nodeId] })
         }}
-        onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })}
+        onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })}
       />
     </div>
   )

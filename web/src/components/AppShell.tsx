@@ -578,12 +578,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         gKeyPending.current = false
         if (gTimer.current) clearTimeout(gTimer.current)
         switch (e.key) {
-          case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } }); break
+          case "n": navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } }); break
           case "i": navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } }); break
-          case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined } }); break
+          case "a": navigate({ to: "/activity", search: { q: undefined, kind: undefined, page: undefined, per_page: undefined } }); break
           case "s": navigate({ to: "/settings" }); break
-          case "d": navigate({ to: "/identity" }); break
-          case "l": navigate({ to: "/slurm" }); break
+          case "d": navigate({ to: "/identity", search: { users_page: undefined, users_per_page: undefined, groups_page: undefined, groups_per_page: undefined } }); break
+          case "l": navigate({ to: "/slurm", search: { deps_page: undefined, deps_per_page: undefined } }); break
           case "r": navigate({ to: "/alerts" }); break
           case "c": navigate({ to: "/datacenter" }); break
         }
