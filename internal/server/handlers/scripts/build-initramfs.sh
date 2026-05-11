@@ -937,7 +937,11 @@ if [[ -n "$MODULES_PATH" ]]; then
     fi
     KMOD_SRC="${MODULES_PATH}/${KVER}/kernel"
     if [[ ! -d "$KMOD_SRC" ]]; then
-        # Caller may have passed the versioned dir directly.
+        # Caller passed the versioned dir directly (e.g. MODULES_PATH=/lib/modules/5.14.0-...).
+        # In that case find returns "kernel" as the first subdirectory, corrupting KVER.
+        # Reset KVER to the actual kernel version (the basename of MODULES_PATH) and
+        # repoint KMOD_SRC to the kernel/ subtree within it.
+        KVER=$(basename "$MODULES_PATH")
         KMOD_SRC="${MODULES_PATH}/kernel"
         if [[ ! -d "$KMOD_SRC" ]]; then
             echo "ERROR: MODULES_PATH=${MODULES_PATH}: cannot find kernel/ subdirectory." >&2
