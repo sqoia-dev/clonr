@@ -20,11 +20,13 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // backupBaseDir is the only directory that backup-write may write tarballs to,
@@ -322,10 +324,17 @@ func createTarball(outPath string, paths []string) error {
 
 	for _, p := range paths {
 		if err := addPathToTar(tw, p); err != nil {
-			// If the path doesn't exist, skip it (the file may not be present on all nodes).
+			// Missing path: silently skip with a warning. Paths in BackupSpec may not
+			// exist on all nodes (e.g. /etc/sssd/conf.d/ before SSSD is configured).
 			if os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "backup-write: skipping missing path %s\n", p)
+				fmt.Fprintf(os.Stderr, "backup-write: warning: skipping missing path %s\n", p)
 				continue
+			}
+			// Unreadable path: return a clear diagnostic. Do not crash the whole
+			// backup for a permission error — wrap and surface it so the caller
+			// (verbBackupWrite) can print it and return exit code 2.
+			if isPermissionError(err) {
+				return fmt.Errorf("path not readable: %s: %w", p, err)
 			}
 			return fmt.Errorf("add %s to tar: %w", p, err)
 		}
@@ -349,6 +358,12 @@ func createTarball(outPath string, paths []string) error {
 
 // addPathToTar adds a path (file or directory tree) to a tar.Writer.
 // Paths are stored relative to "/" (strip the leading slash).
+//
+// Missing paths return an os.IsNotExist error; the caller (createTarball)
+// silently skips them with a warning.
+//
+// Unreadable paths (EPERM/EACCES) propagate up as-is; createTarball wraps
+// them with "path not readable: <path>: ..." for clear operator diagnostics.
 func addPathToTar(tw *tar.Writer, path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -358,10 +373,12 @@ func addPathToTar(tw *tar.Writer, path string) error {
 	if info.IsDir() {
 		return filepath.Walk(path, func(fp string, fi os.FileInfo, walkErr error) error {
 			if walkErr != nil {
-				// Missing file inside a directory: skip it.
+				// Missing entry inside a directory during walk: skip it.
 				if os.IsNotExist(walkErr) {
 					return nil
 				}
+				// Permission error on a subdirectory or file inside the tree:
+				// propagate so createTarball can surface a clear diagnostic.
 				return walkErr
 			}
 			if fi.IsDir() {
@@ -372,6 +389,20 @@ func addPathToTar(tw *tar.Writer, path string) error {
 	}
 
 	return addFileToTar(tw, path, info)
+}
+
+// isPermissionError returns true for EPERM and EACCES errors from the OS.
+// Used to produce "path not readable: ..." diagnostics instead of a generic
+// "add <path> to tar: open <path>: permission denied" message.
+func isPermissionError(err error) bool {
+	if os.IsPermission(err) {
+		return true
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err == syscall.EPERM || pathErr.Err == syscall.EACCES
+	}
+	return false
 }
 
 // addFileToTar adds a single regular file to a tar.Writer.
