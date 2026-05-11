@@ -927,27 +927,15 @@ SEARCH_DIRS=(
 #   Still supported; CI no longer depends on this path.
 if [[ -n "$MODULES_PATH" ]]; then
     # ── MODULES_PATH mode ─────────────────────────────────────────────────────
-    # Derive KVER from the directory name inside MODULES_PATH.
-    # The builder image copies /lib/modules/$KVER → /modules, so exactly one
-    # subdirectory should exist. We pick the first non-empty one.
-    KVER=$(find "$MODULES_PATH" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | head -1 || true)
-    if [[ -z "$KVER" ]]; then
-        # Fallback: MODULES_PATH is itself the kernel version directory.
-        KVER=$(basename "$MODULES_PATH")
-    fi
-    KMOD_SRC="${MODULES_PATH}/${KVER}/kernel"
+    # Workflow contract: MODULES_PATH=/lib/modules/<kver>  (the versioned dir).
+    # Derive KVER directly from the basename — do not try to find subdirs,
+    # which returns 'build'/'source'/'kernel' and breaks all downstream uses.
+    KVER=$(basename "$MODULES_PATH")
+    KMOD_SRC="${MODULES_PATH}/kernel"
     if [[ ! -d "$KMOD_SRC" ]]; then
-        # Caller passed the versioned dir directly (e.g. MODULES_PATH=/lib/modules/5.14.0-...).
-        # In that case find returns "kernel" as the first subdirectory, corrupting KVER.
-        # Reset KVER to the actual kernel version (the basename of MODULES_PATH) and
-        # repoint KMOD_SRC to the kernel/ subtree within it.
-        KVER=$(basename "$MODULES_PATH")
-        KMOD_SRC="${MODULES_PATH}/kernel"
-        if [[ ! -d "$KMOD_SRC" ]]; then
-            echo "ERROR: MODULES_PATH=${MODULES_PATH}: cannot find kernel/ subdirectory." >&2
-            echo "       Expected: ${MODULES_PATH}/<kver>/kernel or ${MODULES_PATH}/kernel" >&2
-            exit 1
-        fi
+        echo "ERROR: MODULES_PATH=${MODULES_PATH}: cannot find kernel/ subdirectory." >&2
+        echo "       Expected MODULES_PATH to be the versioned kernel dir (e.g. /lib/modules/5.14.0-362.el9.x86_64)" >&2
+        exit 1
     fi
     echo "  [+] Using local kernel modules from MODULES_PATH=${MODULES_PATH} (kver=${KVER})"
 
@@ -1241,6 +1229,11 @@ MODALIAS
         # Sort manifest lines deterministically for reproducible content.
         sort -o "$MANIFEST_FILE" "$MANIFEST_FILE"
         echo "      manifest: $MANIFEST_FILE ($MOD_COUNT modules, sorted)"
+        if [[ "$MOD_COUNT" -eq 0 ]]; then
+            echo "ERROR: zero kernel modules embedded — empty manifest is a release-blocker." >&2
+            echo "       Check that MODULES_PATH points to the versioned kernel dir (e.g. /lib/modules/5.14.0-362.el9.x86_64)" >&2
+            exit 1
+        fi
     fi
 fi
 
