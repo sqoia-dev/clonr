@@ -170,3 +170,61 @@ func (db *DB) PurgeDangerousPushes(ctx context.Context, olderThan time.Time) (in
 	n, _ := res.RowsAffected()
 	return n, nil
 }
+
+// JanitorSweepDangerousPushes is the periodic GC method called by the background
+// janitor goroutine every 10 minutes. It returns:
+//
+//   - expiredIDs: IDs of rows that were expired AND unconfirmed at sweep time
+//     (consumed=0, expires_at < now). The caller emits a dangerous_push.expired
+//     audit event per ID.
+//   - totalDeleted: count of all rows removed (consumed=1 OR expired), for the
+//     summary dangerous_push.janitor audit event.
+//
+// Both categories are removed in a single DELETE inside a serialised write
+// transaction; SQLite WAL mode makes this safe with concurrent readers.
+func (db *DB) JanitorSweepDangerousPushes(ctx context.Context, now time.Time) (expiredIDs []string, totalDeleted int64, err error) {
+	tx, txErr := db.sql.BeginTx(ctx, nil)
+	if txErr != nil {
+		return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: begin tx: %w", txErr)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Collect expired-and-unconfirmed IDs before deleting so the caller can emit
+	// per-row audit events.
+	rows, qErr := tx.QueryContext(ctx, `
+		SELECT id FROM pending_dangerous_pushes
+		WHERE consumed = 0 AND expires_at < ?
+	`, now.Unix())
+	if qErr != nil {
+		return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: query expired: %w", qErr)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: scan: %w", scanErr)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: rows: %w", rowsErr)
+	}
+
+	// Delete all stale rows: consumed=1 OR expires_at < now.
+	res, delErr := tx.ExecContext(ctx, `
+		DELETE FROM pending_dangerous_pushes
+		WHERE consumed = 1
+		   OR expires_at < ?
+	`, now.Unix())
+	if delErr != nil {
+		return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: delete: %w", delErr)
+	}
+	n, _ := res.RowsAffected()
+
+	if commitErr := tx.Commit(); commitErr != nil {
+		return nil, 0, fmt.Errorf("db: janitor sweep dangerous pushes: commit: %w", commitErr)
+	}
+	return ids, n, nil
+}

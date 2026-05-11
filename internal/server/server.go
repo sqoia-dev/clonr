@@ -376,6 +376,10 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// accumulate dead node-scope tokens (24h TTL each, minted on every PXE boot).
 	go s.runAPIKeySweeper(ctx)
 
+	// Sprint 41 hygiene: janitor for pending_dangerous_pushes — prevents
+	// unbounded table growth from unconsumed/expired staging rows.
+	go s.runDangerousPushJanitor(ctx)
+
 	// Sprint 38 Bundle B SYSTEM-ALERT-FRAMEWORK: sweeper for expired
 	// transient (push-style) system alerts.  30-second tick is enough for
 	// operator dashboards; the List query also filters by current time so
