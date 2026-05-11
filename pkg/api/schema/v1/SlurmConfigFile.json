@@ -28,16 +28,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "filename",
-        "path",
-        "content",
-        "checksum",
-        "file_mode",
-        "owner",
-        "version"
-      ]
+      "type": "object"
     }
   }
 }

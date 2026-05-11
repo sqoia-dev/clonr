@@ -19,12 +19,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "vendor",
-        "available",
-        "bin_path"
-      ]
+      "type": "object"
     }
   }
 }

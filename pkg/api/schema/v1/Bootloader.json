@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     }
   }
 }

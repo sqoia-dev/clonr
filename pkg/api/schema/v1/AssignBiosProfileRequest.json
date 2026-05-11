@@ -10,10 +10,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "profile_id"
-      ]
+      "type": "object"
     }
   }
 }

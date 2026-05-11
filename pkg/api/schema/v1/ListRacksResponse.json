@@ -39,16 +39,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "rack_id",
-        "rack_slot_u",
-        "height_u",
-        "type_id",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "EnclosureSlot": {
       "properties": {
@@ -60,10 +51,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "slot_index"
-      ]
+      "type": "object"
     },
     "ListRacksResponse": {
       "properties": {
@@ -78,11 +66,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "racks",
-        "total"
-      ]
+      "type": "object"
     },
     "NodeRackPosition": {
       "properties": {
@@ -106,10 +90,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "node_id"
-      ]
+      "type": "object"
     },
     "Rack": {
       "properties": {
@@ -144,14 +125,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "height_u",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     }
   }
 }

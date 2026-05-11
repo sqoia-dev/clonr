@@ -25,12 +25,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "kind",
-        "kernel_url"
-      ]
+      "type": "object"
     }
   }
 }

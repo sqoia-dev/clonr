@@ -17,10 +17,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "hardware_profile"
-      ]
+      "type": "object"
     }
   }
 }

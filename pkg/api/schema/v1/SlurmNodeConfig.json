@@ -28,16 +28,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "filename",
-        "path",
-        "content",
-        "checksum",
-        "file_mode",
-        "owner",
-        "version"
-      ]
+      "type": "object"
     },
     "SlurmNodeConfig": {
       "properties": {
@@ -73,11 +64,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "cluster_name",
-        "configs"
-      ]
+      "type": "object"
     },
     "SlurmScriptFile": {
       "properties": {
@@ -98,14 +85,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "script_type",
-        "dest_path",
-        "content",
-        "checksum",
-        "version"
-      ]
+      "type": "object"
     }
   }
 }

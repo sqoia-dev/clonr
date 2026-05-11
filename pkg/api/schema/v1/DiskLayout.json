@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     },
     "DiskLayout": {
       "properties": {
@@ -47,11 +43,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "partitions",
-        "bootloader"
-      ]
+      "type": "object"
     },
     "PartitionSpec": {
       "properties": {
@@ -81,15 +73,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     },
     "RAIDSpec": {
       "properties": {
@@ -122,12 +106,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     },
     "ZFSPool": {
       "properties": {
@@ -154,13 +133,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vdev_type",
-        "members",
-        "mountpoint"
-      ]
+      "type": "object"
     }
   }
 }

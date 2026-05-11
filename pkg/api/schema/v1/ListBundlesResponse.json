@@ -49,19 +49,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "slurm_version",
-        "bundle_version",
-        "sha256",
-        "kind",
-        "source",
-        "status",
-        "is_active",
-        "nodes_using"
-      ]
+      "type": "object"
     },
     "ListBundlesResponse": {
       "properties": {
@@ -76,11 +64,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "bundles",
-        "total"
-      ]
+      "type": "object"
     }
   }
 }

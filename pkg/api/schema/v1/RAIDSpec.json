@@ -34,12 +34,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     }
   }
 }

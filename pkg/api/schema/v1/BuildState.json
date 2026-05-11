@@ -45,16 +45,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "image_id",
-        "phase",
-        "started_at",
-        "updated_at",
-        "bytes_total",
-        "bytes_done",
-        "elapsed_ms"
-      ]
+      "type": "object"
     }
   }
 }

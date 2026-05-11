@@ -23,13 +23,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "fingerprint",
-        "owner",
-        "source",
-        "created_at"
-      ]
+      "type": "object"
     }
   }
 }

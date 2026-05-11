@@ -35,15 +35,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "node_mac",
-        "level",
-        "component",
-        "message",
-        "timestamp"
-      ]
+      "type": "object"
     }
   }
 }

@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "begin",
-        "end"
-      ]
+      "type": "object"
     },
     "BaseImage": {
       "properties": {
@@ -94,23 +90,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "version",
-        "os",
-        "arch",
-        "status",
-        "format",
-        "firmware",
-        "size_bytes",
-        "checksum",
-        "disk_layout",
-        "tags",
-        "notes",
-        "created_at"
-      ]
+      "type": "object"
     },
     "Bootloader": {
       "properties": {
@@ -122,11 +102,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     },
     "DiskLayout": {
       "properties": {
@@ -156,11 +132,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "partitions",
-        "bootloader"
-      ]
+      "type": "object"
     },
     "InstallInstruction": {
       "properties": {
@@ -178,12 +150,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "opcode",
-        "target",
-        "payload"
-      ]
+      "type": "object"
     },
     "ListImagesResponse": {
       "properties": {
@@ -207,11 +174,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "images",
-        "total"
-      ]
+      "type": "object"
     },
     "PartitionSpec": {
       "properties": {
@@ -241,15 +204,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     },
     "RAIDSpec": {
       "properties": {
@@ -282,12 +237,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     },
     "ZFSPool": {
       "properties": {
@@ -314,13 +264,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vdev_type",
-        "members",
-        "mountpoint"
-      ]
+      "type": "object"
     }
   }
 }

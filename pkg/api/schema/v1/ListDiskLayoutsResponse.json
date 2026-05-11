@@ -13,11 +13,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     },
     "DiskLayout": {
       "properties": {
@@ -47,11 +43,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "partitions",
-        "bootloader"
-      ]
+      "type": "object"
     },
     "ListDiskLayoutsResponse": {
       "properties": {
@@ -66,11 +58,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "layouts",
-        "total"
-      ]
+      "type": "object"
     },
     "PartitionSpec": {
       "properties": {
@@ -100,15 +88,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     },
     "RAIDSpec": {
       "properties": {
@@ -141,12 +121,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     },
     "StoredDiskLayout": {
       "properties": {
@@ -179,16 +154,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "captured_at",
-        "layout",
-        "firmware_kind",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "ZFSPool": {
       "properties": {
@@ -215,13 +181,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vdev_type",
-        "members",
-        "mountpoint"
-      ]
+      "type": "object"
     }
   }
 }

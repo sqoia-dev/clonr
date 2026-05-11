@@ -22,14 +22,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "ip_address",
-        "netmask",
-        "gateway",
-        "username",
-        "password"
-      ]
+      "type": "object"
     },
     "BondConfig": {
       "properties": {
@@ -82,20 +75,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "profile_id",
-        "bond_name",
-        "mode",
-        "mtu",
-        "vlan_id",
-        "ip_method",
-        "sort_order",
-        "members",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "BondMember": {
       "properties": {
@@ -116,12 +96,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "bond_id",
-        "sort_order"
-      ]
+      "type": "object"
     },
     "Bootloader": {
       "properties": {
@@ -133,11 +108,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "target"
-      ]
+      "type": "object"
     },
     "DiskLayout": {
       "properties": {
@@ -167,11 +138,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "partitions",
-        "bootloader"
-      ]
+      "type": "object"
     },
     "FstabEntry": {
       "properties": {
@@ -201,16 +168,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "source",
-        "mount_point",
-        "fs_type",
-        "options",
-        "dump",
-        "pass",
-        "auto_mkdir"
-      ]
+      "type": "object"
     },
     "HostEntry": {
       "properties": {
@@ -231,11 +189,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "ip",
-        "hostname"
-      ]
+      "type": "object"
     },
     "IBInterfaceConfig": {
       "properties": {
@@ -259,12 +213,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "device_name",
-        "pkeys",
-        "ipoib_mode"
-      ]
+      "type": "object"
     },
     "IBProfile": {
       "properties": {
@@ -302,17 +251,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "profile_id",
-        "ipoib_mode",
-        "ipoib_mtu",
-        "ip_method",
-        "pkeys",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "InterfaceConfig": {
       "properties": {
@@ -342,12 +281,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "mac_address",
-        "name",
-        "ip_address"
-      ]
+      "type": "object"
     },
     "LDAPNodeConfig": {
       "properties": {
@@ -368,14 +302,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "server_uri",
-        "base_dn",
-        "service_bind_dn",
-        "service_bind_passwd",
-        "ca_cert_pem"
-      ]
+      "type": "object"
     },
     "ListNodesResponse": {
       "properties": {
@@ -399,11 +326,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "nodes",
-        "total"
-      ]
+      "type": "object"
     },
     "NetworkNodeConfig": {
       "properties": {
@@ -582,23 +505,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "hostname",
-        "hostname_auto",
-        "fqdn",
-        "primary_mac",
-        "interfaces",
-        "ssh_keys",
-        "kernel_args",
-        "tags",
-        "groups",
-        "custom_vars",
-        "operating_mode",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "PartitionSpec": {
       "properties": {
@@ -628,15 +535,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     },
     "PowerProviderConfig": {
       "properties": {
@@ -651,11 +550,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "type",
-        "fields"
-      ]
+      "type": "object"
     },
     "RAIDSpec": {
       "properties": {
@@ -688,12 +583,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "level",
-        "members"
-      ]
+      "type": "object"
     },
     "SlurmConfigFile": {
       "properties": {
@@ -720,16 +610,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "filename",
-        "path",
-        "content",
-        "checksum",
-        "file_mode",
-        "owner",
-        "version"
-      ]
+      "type": "object"
     },
     "SlurmNodeConfig": {
       "properties": {
@@ -765,11 +646,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "cluster_name",
-        "configs"
-      ]
+      "type": "object"
     },
     "SlurmScriptFile": {
       "properties": {
@@ -790,14 +667,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "script_type",
-        "dest_path",
-        "content",
-        "checksum",
-        "version"
-      ]
+      "type": "object"
     },
     "SudoersNodeConfig": {
       "properties": {
@@ -809,11 +679,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "group_cn",
-        "no_passwd"
-      ]
+      "type": "object"
     },
     "SystemAccount": {
       "properties": {
@@ -854,20 +720,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "username",
-        "uid",
-        "primary_gid",
-        "shell",
-        "home_dir",
-        "create_home",
-        "system_account",
-        "comment",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "SystemAccountsNodeConfig": {
       "properties": {
@@ -885,11 +738,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "groups",
-        "accounts"
-      ]
+      "type": "object"
     },
     "SystemGroup": {
       "properties": {
@@ -915,15 +764,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "gid",
-        "description",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "ZFSPool": {
       "properties": {
@@ -950,13 +791,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "vdev_type",
-        "members",
-        "mountpoint"
-      ]
+      "type": "object"
     }
   }
 }

@@ -54,20 +54,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "profile_id",
-        "bond_name",
-        "mode",
-        "mtu",
-        "vlan_id",
-        "ip_method",
-        "sort_order",
-        "members",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "BondMember": {
       "properties": {
@@ -88,12 +75,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "bond_id",
-        "sort_order"
-      ]
+      "type": "object"
     },
     "IBProfile": {
       "properties": {
@@ -131,17 +113,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "profile_id",
-        "ipoib_mode",
-        "ipoib_mtu",
-        "ip_method",
-        "pkeys",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     },
     "NetworkProfile": {
       "properties": {
@@ -173,13 +145,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "id",
-        "name",
-        "created_at",
-        "updated_at"
-      ]
+      "type": "object"
     }
   }
 }

@@ -31,15 +31,7 @@
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "label",
-        "size_bytes",
-        "filesystem",
-        "mountpoint",
-        "flags",
-        "min_bytes"
-      ]
+      "type": "object"
     }
   }
 }

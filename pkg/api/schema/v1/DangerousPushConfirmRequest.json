@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sqoia-dev/clustr/pkg/api/dangerous-push-confirm-request",
+  "$ref": "#/$defs/DangerousPushConfirmRequest",
+  "$defs": {
+    "DangerousPushConfirmRequest": {
+      "properties": {
+        "confirm_string": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "confirm_string"
+      ]
+    }
+  }
+}
