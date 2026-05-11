@@ -116,6 +116,11 @@ const (
 	AuditActionLDAPInternalDestroyed = "ldap.internal.destroyed"
 	AuditActionLDAPModeSwitched      = "ldap.mode.switched"
 	AuditActionLDAPDITRepaired       = "ldap.internal.dit_repaired" // v0.1.15
+
+	// Sprint 41 Day 3 — dangerous config push gate events.
+	// See docs/design/sprint-41-auth-safety.md §7.
+	AuditActionConfigDangerousStaged    = "config.dangerous.confirm_required"
+	AuditActionConfigDangerousConfirmed = "config.dangerous.confirmed"
 )
 
 // AuditRecord is one row in audit_log.

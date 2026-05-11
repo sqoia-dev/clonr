@@ -57,21 +57,19 @@ func SSSDWatchKey() string { return sssdWatchKey }
 // slurm config that references LDAP-resolved users. Sits in the Middleware
 // band (51–100).
 //
-// Dangerous=false on Day 1. The Dangerous flag (and DangerReason) will be
-// flipped to true in Sprint 41 Day 3 once the dangerous-confirmation flow is
-// live and proven. Flipping it now without the flow would gate every SSSD push
-// on a confirmation the server cannot yet deliver.
+// Dangerous=true (Sprint 41 Day 3): a misrendered sssd.conf breaks login for all
+// LDAP-resolved users. On a lab where every operator is LDAP-backed this is
+// lockout-class. Operators must supply the typed cluster name via the
+// POST /api/v1/config/dangerous-push → confirm handshake before delivery.
+// The confirmation gate is feature-flagged behind CLUSTR_DANGEROUS_GATE_ENABLED=1;
+// when the flag is off the regular push path operates as before (no gate).
 //
-// Design rationale: a misrendered sssd.conf breaks login for all LDAP-resolved
-// users. On a lab where every operator is LDAP-backed, this is lockout-class.
-// The Day 3 flip adds: Dangerous: true, DangerReason: "misrendered sssd.conf
-// breaks login for all LDAP users; recovery requires console access".
-//
-// Backup=nil on Day 1; wired in Sprint 41 Day 4.
+// Backup=nil on Day 3; wired in Sprint 41 Day 4.
 func (SSSDPlugin) Metadata() config.PluginMetadata {
 	return config.PluginMetadata{
-		Priority:  80,
-		Dangerous: false,
+		Priority:     80,
+		Dangerous:    true,
+		DangerReason: "SSSD restart can sever active operator SSH sessions if PAM stack is broken; a misrendered sssd.conf breaks login for all LDAP users and requires console access to recover",
 	}
 }
 

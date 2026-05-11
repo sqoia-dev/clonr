@@ -12,6 +12,7 @@ package server
 // both into the observer goroutine once all plugins are converted.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -234,6 +235,37 @@ func (s *Server) sendPluginPush(nodeID, pluginName string, instr api.InstallInst
 		Str("rendered_hash", renderedHash).
 		Str("msg_id", msgID).
 		Msg("reactive push: config_push sent")
+}
+
+// renderPluginForDangerousPush renders the named plugin for the given node and
+// returns the first instruction and its rendered hash. This is the render path
+// used by DangerousPushHandler.HandleStage to produce the staged payload that
+// will be delivered on successful operator confirmation.
+//
+// Only single-instruction plugins are supported (the dangerous gate is designed
+// for plugins like sssd, hostname, and limits which each produce exactly one
+// InstallInstruction). A plugin that returns zero instructions produces an error;
+// one that returns more than one uses only the first.
+func (s *Server) renderPluginForDangerousPush(ctx context.Context, pluginName, nodeID string) (api.InstallInstruction, string, error) {
+	// Load the node config from the DB for the render state.
+	nodeCfg, err := s.db.GetNodeConfig(ctx, nodeID)
+	if err != nil {
+		return api.InstallInstruction{}, "", fmt.Errorf("renderPluginForDangerousPush: get node config %s: %w", nodeID, err)
+	}
+
+	state := config.ClusterState{
+		NodeID:     nodeID,
+		NodeConfig: nodeCfg,
+	}
+
+	instrs, renderedHash, err := config.RenderByName(ctx, pluginName, state)
+	if err != nil {
+		return api.InstallInstruction{}, "", err
+	}
+	if len(instrs) == 0 {
+		return api.InstallInstruction{}, "", fmt.Errorf("renderPluginForDangerousPush: plugin %q returned no instructions for node %s", pluginName, nodeID)
+	}
+	return instrs[0], renderedHash, nil
 }
 
 // configPushPayloadFromInstruction converts a single InstallInstruction from a

@@ -55,6 +55,12 @@ type ServerConfig struct {
 	// From CLUSTR_AUDIT_RETENTION (Go duration string, e.g. "90d").
 	// Default: 0 (server treats as 90 days).
 	AuditRetention time.Duration `json:"audit_retention"` // CLUSTR_AUDIT_RETENTION
+
+	// ClusterName is the human-readable name for this clustr installation.
+	// Used as the required typed-confirm string in the dangerous-push gate
+	// (CLUSTR_DANGEROUS_GATE_ENABLED). Defaults to "clustr" when unset.
+	// From CLUSTR_CLUSTER_NAME.
+	ClusterName string `json:"cluster_name"` // CLUSTR_CLUSTER_NAME
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -123,6 +129,7 @@ func LoadServerConfig() ServerConfig {
 		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
 		LogArchiveDir:  envOrDefault("CLUSTR_LOG_ARCHIVE_DIR", "/var/lib/clustr/log-archive"),
 		AuditRetention: parseAuditRetention(),
+		ClusterName:    envOrDefault("CLUSTR_CLUSTER_NAME", "clustr"),
 	}
 }
 

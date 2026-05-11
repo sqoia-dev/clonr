@@ -1707,6 +1707,13 @@ func (s *Server) buildRouter() chi.Router {
 			SudoersNodeConfig: func(ctx context.Context) (*api.SudoersNodeConfig, error) {
 				return s.ldapMgr.SudoersNodeConfig(ctx)
 			},
+			// Sprint 41 Day 3 — dangerous-push gate: reject direct config pushes
+			// to plugins flagged Dangerous=true when the gate is enabled.
+			DangerousGateEnabled: os.Getenv("CLUSTR_DANGEROUS_GATE_ENABLED") == "1",
+			IsPluginDangerous: func(target string) bool {
+				meta, ok := config.PluginMetadataByName(target)
+				return ok && meta.Dangerous
+			},
 		}
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/clientd/ws", clientdH.HandleClientdWS)
 
@@ -2266,6 +2273,35 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Post("/changes/clear", changesH.HandleClear)
 			r.With(requireRole("admin")).Put("/changes/mode/{surface}", changesH.HandleSetMode)
 		})
+
+		// ─── Sprint 41 Day 3 — dangerous-push gate ───────────────────────────────
+		// Feature-flagged: only registered when CLUSTR_DANGEROUS_GATE_ENABLED=1.
+		// When the flag is set:
+		//   - POST /config/dangerous-push stages a push for a Dangerous plugin.
+		//   - POST /config/dangerous-push/{pending_id}/confirm delivers it.
+		// Both routes require config.dangerous_push permission via requirePermission.
+		// The regular config-push handler (PUT /nodes/{id}/config-push) rejects
+		// dangerous plugins with 409 Conflict when the gate is enabled.
+		if os.Getenv("CLUSTR_DANGEROUS_GATE_ENABLED") == "1" {
+			dangerousPushH := &handlers.DangerousPushHandler{
+				DB:           s.db,
+				Hub:          s.clientdHub,
+				Audit:        s.audit,
+				GetActorInfo: getActorInfo,
+				ClusterName:  s.cfg.ClusterName,
+				PluginMetadata: func(pluginName string) (config.PluginMetadata, bool) {
+					return config.PluginMetadataByName(pluginName)
+				},
+				RenderPlugin: func(ctx context.Context, pluginName, nodeID string) (api.InstallInstruction, string, error) {
+					return s.renderPluginForDangerousPush(ctx, pluginName, nodeID)
+				},
+			}
+			r.With(requireScope(true)).With(requirePermission(s.db, "config.dangerous_push")).
+				Post("/config/dangerous-push", dangerousPushH.HandleStage)
+			r.With(requireScope(true)).With(requirePermission(s.db, "config.dangerous_push")).
+				Post("/config/dangerous-push/{pending_id}/confirm", dangerousPushH.HandleConfirm)
+			log.Info().Msg("dangerous-push gate enabled (CLUSTR_DANGEROUS_GATE_ENABLED=1)")
+		}
 	})
 
 	return r
