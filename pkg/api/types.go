@@ -906,20 +906,22 @@ type PullRequest struct {
 
 // CreateNodeConfigRequest is the body for POST /api/v1/nodes.
 type CreateNodeConfigRequest struct {
-	Hostname   string            `json:"hostname"`
-	FQDN       string            `json:"fqdn"`
-	PrimaryMAC string            `json:"primary_mac"`
-	Interfaces []InterfaceConfig `json:"interfaces"`
-	SSHKeys    []string          `json:"ssh_keys"`
-	KernelArgs string            `json:"kernel_args"`
+	Hostname    string `json:"hostname" jsonschema:"required,minLength=1"`
+	FQDN        string `json:"fqdn,omitempty"`
+	PrimaryMAC  string `json:"primary_mac" jsonschema:"required,minLength=1"`
+	// Optional slice fields use omitempty so that nil values are omitted from
+	// JSON rather than serialized as null, which JSON Schema "type":"array" rejects.
+	Interfaces  []InterfaceConfig `json:"interfaces,omitempty"`
+	SSHKeys     []string          `json:"ssh_keys,omitempty"`
+	KernelArgs  string            `json:"kernel_args,omitempty"`
 	// Tags holds unstructured node labels for filtering and Slurm role assignment.
-	Tags []string `json:"tags"`
+	Tags        []string          `json:"tags,omitempty"`
 	// Groups is a deprecated alias for Tags, accepted for backward compatibility through v1.0.
-	Groups      []string          `json:"groups"`
-	CustomVars  map[string]string `json:"custom_vars"`
-	BaseImageID string            `json:"base_image_id"`
+	Groups      []string          `json:"groups,omitempty"`
+	CustomVars  map[string]string `json:"custom_vars,omitempty"`
+	BaseImageID string            `json:"base_image_id,omitempty"`
 	// Provider identifies the node's hardware/power backend: "ipmi", "proxmox", or "".
-	Provider string `json:"provider,omitempty"`
+	Provider    string            `json:"provider,omitempty"`
 }
 
 // UpdateNodeConfigRequest is the body for PUT /api/v1/nodes/:id.
