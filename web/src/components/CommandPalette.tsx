@@ -105,11 +105,11 @@ export function CommandPalette({ open, onClose }: Props) {
 
   function goTo(path: string) {
     onClose()
-    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })
+    if (path === "/nodes") navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })
     else if (path === "/images") navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } })
-    else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined } })
-    else if (path === "/identity") navigate({ to: "/identity" })
-    else if (path === "/slurm") navigate({ to: "/slurm" })
+    else if (path === "/activity") navigate({ to: "/activity", search: { q: undefined, kind: undefined, page: undefined, per_page: undefined } })
+    else if (path === "/identity") navigate({ to: "/identity", search: { users_page: undefined, users_per_page: undefined, groups_page: undefined, groups_per_page: undefined } })
+    else if (path === "/slurm") navigate({ to: "/slurm", search: { deps_page: undefined, deps_per_page: undefined } })
     else if (path === "/alerts") navigate({ to: "/alerts" })
     else if (path === "/datacenter") navigate({ to: "/datacenter" })
     else navigate({ to: "/settings" })
@@ -133,6 +133,8 @@ export function CommandPalette({ open, onClose }: Props) {
         tag: undefined,
         view: undefined,
         createGroup: undefined,
+        page: undefined,
+        per_page: undefined,
       },
     })
   }
@@ -141,7 +143,7 @@ export function CommandPalette({ open, onClose }: Props) {
     onClose()
     navigate({
       to: "/nodes",
-      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: "1", deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined },
+      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: "1", deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined },
     })
   }
 
@@ -153,7 +155,7 @@ export function CommandPalette({ open, onClose }: Props) {
   function visitRecent(entity: RecentEntity) {
     onClose()
     if (entity.kind === "node") {
-      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined } })
+      navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: entity.id, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })
     } else {
       navigate({ to: "/images", search: { q: undefined, tab: undefined, sort: undefined, dir: undefined, addImage: undefined } })
     }
@@ -165,7 +167,7 @@ export function CommandPalette({ open, onClose }: Props) {
     recordRecentEntity({ kind: "node", id: nodeId, label: nodeLabel })
     navigate({
       to: "/nodes",
-      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: nodeId, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined },
+      search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: nodeId, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined },
     })
   }
 
@@ -187,6 +189,8 @@ export function CommandPalette({ open, onClose }: Props) {
         tag: undefined,
         view: undefined,
         createGroup: undefined,
+        page: undefined,
+        per_page: undefined,
       },
     })
   }

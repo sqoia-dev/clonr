@@ -10,7 +10,6 @@
  *   PAGE-6  footer hidden when total == 0
  */
 
-import * as React from "react"
 import { describe, it, expect } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
 import { PaginatedTable, parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "../components/PaginatedTable"

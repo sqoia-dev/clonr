@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
 import type { AuditRecord, AuditQueryResponse } from "@/lib/types"
-import { cn } from "@/lib/utils"
 import { toast } from "@/hooks/use-toast"
 
 interface ActivitySearch {

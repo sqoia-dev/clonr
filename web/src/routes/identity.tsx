@@ -49,16 +49,16 @@ export function IdentityPage() {
   const groupsPageSize = parsePageSize({ per_page: search.groups_per_page })
 
   function setUsersPage(p: number) {
-    navigate({ to: "/identity", search: { ...search, users_page: p === 1 ? undefined : p }, replace: true })
+    navigate({ to: "/identity", search: { users_page: p === 1 ? undefined : p, users_per_page: search.users_per_page ?? undefined, groups_page: search.groups_page ?? undefined, groups_per_page: search.groups_per_page ?? undefined }, replace: true })
   }
   function setUsersPageSize(ps: number) {
-    navigate({ to: "/identity", search: { ...search, users_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, users_page: undefined }, replace: true })
+    navigate({ to: "/identity", search: { users_page: undefined, users_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, groups_page: search.groups_page ?? undefined, groups_per_page: search.groups_per_page ?? undefined }, replace: true })
   }
   function setGroupsPage(p: number) {
-    navigate({ to: "/identity", search: { ...search, groups_page: p === 1 ? undefined : p }, replace: true })
+    navigate({ to: "/identity", search: { users_page: search.users_page ?? undefined, users_per_page: search.users_per_page ?? undefined, groups_page: p === 1 ? undefined : p, groups_per_page: search.groups_per_page ?? undefined }, replace: true })
   }
   function setGroupsPageSize(ps: number) {
-    navigate({ to: "/identity", search: { ...search, groups_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps, groups_page: undefined }, replace: true })
+    navigate({ to: "/identity", search: { users_page: search.users_page ?? undefined, users_per_page: search.users_per_page ?? undefined, groups_page: undefined, groups_per_page: ps === DEFAULT_PAGE_SIZE ? undefined : ps }, replace: true })
   }
 
   return (

@@ -1589,7 +1589,7 @@ function BundlesEmptyState() {
           install from it via clientd-orchestrated dnf.
         </p>
       </div>
-      <Button size="sm" onClick={() => navigate({ to: "/slurm" })}>
+      <Button size="sm" onClick={() => navigate({ to: "/slurm", search: { deps_page: undefined, deps_per_page: undefined } })}>
         Build slurm
       </Button>
     </div>
