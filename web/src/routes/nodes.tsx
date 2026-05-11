@@ -43,6 +43,7 @@ import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
 import type { InterfaceRow } from "@/components/InterfaceList"
 import type { ListNodeSudoersResponse, UserSearchResult } from "@/lib/types"
+import { PaginatedTable, parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
 
 // ─── Sprint 38: PROBE-3 — Reachability dots ──────────────────────────────────
 //
@@ -755,6 +756,9 @@ interface NodeSearch {
   view?: "nodes" | "groups"
   // GRP-5: open create group sheet from Cmd-K
   createGroup?: string
+  // Pagination
+  page?: number
+  per_page?: number
 }
 
 export function NodesPage() {
@@ -769,6 +773,9 @@ export function NodesPage() {
   const activeTags: string[] = search.tag ?? []
   // GRP-2: current view tab (nodes | groups)
   const view = search.view ?? "nodes"
+  // Pagination
+  const page = parsePage(search as Record<string, unknown>)
+  const pageSize = parsePageSize(search as Record<string, unknown>)
   const [advanced, setAdvanced] = React.useState(false)
   const [addNodeOpen, setAddNodeOpen] = React.useState(false)
   // BULK-MULTISELECT: row selection state
@@ -825,14 +832,17 @@ export function NodesPage() {
         addNode: undefined,
         deleteNode: undefined,
         createGroup: undefined,
+        // Reset to page 1 when filters/sort change
+        page: patch.page !== undefined ? (patch.page === 1 ? undefined : patch.page) : undefined,
+        per_page: patch.per_page !== undefined ? (patch.per_page === DEFAULT_PAGE_SIZE ? undefined : patch.per_page) : (pageSize === DEFAULT_PAGE_SIZE ? undefined : pageSize),
       },
       replace: true,
     })
   }
 
-  // TanStack Query for nodes
+  // TanStack Query for nodes — pass page+per_page to server when present
   const { data, isLoading, isError } = useQuery<ListNodesResponse>({
-    queryKey: ["nodes", q, sortCol, sortDir, activeTags],
+    queryKey: ["nodes", q, sortCol, sortDir, activeTags, page, pageSize],
     queryFn: () => {
       const params = new URLSearchParams()
       if (q) params.set("search", q)
@@ -842,6 +852,8 @@ export function NodesPage() {
       for (const t of activeTags) {
         params.append("tag", t)
       }
+      params.set("page", String(page))
+      params.set("per_page", String(pageSize))
       return apiFetch<ListNodesResponse>(`/api/v1/nodes?${params}`)
     },
     refetchInterval: 30000,
@@ -1459,6 +1471,59 @@ export function NodesPage() {
               ))}
             </TableBody>
           </Table>
+          {/* Pagination controls */}
+          {(data?.total ?? 0) > 0 && (
+            <div className="flex items-center justify-between gap-4 px-4 py-2 border-t border-border text-xs text-muted-foreground">
+              <div className="flex items-center gap-1.5">
+                <span>Rows per page:</span>
+                <div className="flex items-center gap-0.5">
+                  {[10, 25, 50, 100].map((opt) => (
+                    <button
+                      key={opt}
+                      onClick={() => {
+                        updateSearch({ page: 1, per_page: opt === DEFAULT_PAGE_SIZE ? undefined : opt })
+                      }}
+                      className={cn(
+                        "px-1.5 py-0.5 rounded text-xs transition-colors",
+                        pageSize === opt
+                          ? "bg-primary/10 text-primary font-medium"
+                          : "hover:bg-secondary/60",
+                      )}
+                      data-testid={`nodes-page-size-${opt}`}
+                      aria-pressed={pageSize === opt}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span data-testid="nodes-page-label">
+                  Page {page} of {Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))} ({data?.total ?? 0} total)
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => updateSearch({ page: page - 1 })}
+                  disabled={page <= 1}
+                  data-testid="nodes-prev-page"
+                >
+                  Prev
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => updateSearch({ page: page + 1 })}
+                  disabled={page >= Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
+                  data-testid="nodes-next-page"
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
           </>
         )}
       </div>

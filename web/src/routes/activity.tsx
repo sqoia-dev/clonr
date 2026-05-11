@@ -5,6 +5,8 @@ import { formatDistanceToNow } from "date-fns"
 import { Search, RefreshCw, Trash2, AlertTriangle } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { parsePage, parsePageSize, DEFAULT_PAGE_SIZE } from "@/components/PaginatedTable"
+import { cn } from "@/lib/utils"
 import {
   Sheet,
   SheetContent,
@@ -27,9 +29,9 @@ import { toast } from "@/hooks/use-toast"
 interface ActivitySearch {
   q?: string
   kind?: string
+  page?: number
+  per_page?: number
 }
-
-const LIMIT = 100
 
 function kindLabel(action: string, resourceType: string): string {
   if (resourceType === "node") return "provisioning"
@@ -53,6 +55,8 @@ export function ActivityPage() {
   const search = useSearch({ strict: false }) as ActivitySearch
   const q = search.q ?? ""
   const kind = search.kind ?? ""
+  const page = parsePage(search as Record<string, unknown>)
+  const pageSize = parsePageSize(search as Record<string, unknown>)
 
   const listRef = React.useRef<HTMLDivElement>(null)
   const [userScrolled, setUserScrolled] = React.useState(false)
@@ -72,15 +76,18 @@ export function ActivityPage() {
       search: {
         q: patch.q !== undefined ? patch.q : q || undefined,
         kind: patch.kind !== undefined ? patch.kind : kind || undefined,
+        page: patch.page !== undefined ? (patch.page === 1 ? undefined : patch.page) : (page === 1 ? undefined : page),
+        per_page: patch.per_page !== undefined ? (patch.per_page === DEFAULT_PAGE_SIZE ? undefined : patch.per_page) : (pageSize === DEFAULT_PAGE_SIZE ? undefined : pageSize),
       },
       replace: true,
     })
   }
 
   const { data, refetch, isFetching, isLoading: actLoading, isError: actError } = useQuery<AuditQueryResponse>({
-    queryKey: ["activity", q, kind],
+    queryKey: ["activity", q, kind, page, pageSize],
     queryFn: () => {
-      const params = new URLSearchParams({ limit: String(LIMIT) })
+      const offset = (page - 1) * pageSize
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) })
       if (q) params.set("action", q)
       if (kind === "provisioning") params.set("resource_type", "node")
       if (kind === "api") params.set("resource_type", "api_key")
@@ -367,6 +374,47 @@ export function ActivityPage() {
               })}
             </TableBody>
           </Table>
+          {/* Pagination controls */}
+          {(data?.total ?? 0) > 0 && (
+            <div className="flex items-center justify-between gap-4 px-4 py-2 border-t border-border text-xs text-muted-foreground">
+              <div className="flex items-center gap-1.5">
+                <span>Rows per page:</span>
+                <div className="flex items-center gap-0.5">
+                  {[10, 25, 50, 100].map((opt) => (
+                    <button
+                      key={opt}
+                      onClick={() => updateSearch({ page: 1, per_page: opt === DEFAULT_PAGE_SIZE ? undefined : opt })}
+                      className={cn(
+                        "px-1.5 py-0.5 rounded text-xs transition-colors",
+                        pageSize === opt ? "bg-primary/10 text-primary font-medium" : "hover:bg-secondary/60",
+                      )}
+                      data-testid={`activity-page-size-${opt}`}
+                      aria-pressed={pageSize === opt}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span data-testid="activity-page-label">
+                  Page {page} of {Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))} ({data?.total ?? 0} total)
+                </span>
+                <Button
+                  variant="ghost" size="sm" className="h-6 px-2 text-xs"
+                  onClick={() => updateSearch({ page: page - 1 })}
+                  disabled={page <= 1}
+                  data-testid="activity-prev-page"
+                >Prev</Button>
+                <Button
+                  variant="ghost" size="sm" className="h-6 px-2 text-xs"
+                  onClick={() => updateSearch({ page: page + 1 })}
+                  disabled={page >= Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))}
+                  data-testid="activity-next-page"
+                >Next</Button>
+              </div>
+            </div>
+          )}
         )}
 
         {/* Scroll lock indicator */}
