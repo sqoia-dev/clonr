@@ -144,6 +144,34 @@ type ConfigPushPayload struct {
 	// separate DB lookup.
 	// Empty for legacy (Plugin == "") pushes.
 	RenderedHash string `json:"rendered_hash,omitempty"`
+
+	// Priority is the plugin's declared priority (PluginMetadata.Priority),
+	// included for observability. The server sorts pushes by priority before
+	// sending (wired in Sprint 41 Day 2); clientd applies pushes in the order
+	// they arrive on the wire. Server-side sorting is authoritative.
+	//
+	// Zero when Plugin is empty (legacy push) or when the plugin declares the
+	// default priority. Old clients that do not know about this field ignore it.
+	Priority int `json:"priority,omitempty"`
+
+	// Backup, when non-nil, instructs clientd to snapshot the listed paths
+	// before applying this push. Empty Paths slice is treated as nil.
+	// Wired in Sprint 41 Day 4; nil on Day 1.
+	Backup *BackupDirective `json:"backup,omitempty"`
+}
+
+// BackupDirective is the wire form of BackupSpec, included in ConfigPushPayload
+// when the plugin declares a backup requirement. The server expands template
+// tokens (e.g. <plugin>, <timestamp>) before sending.
+type BackupDirective struct {
+	// Paths is the list of file paths to snapshot on the node.
+	Paths []string `json:"paths"`
+	// RetainN is the number of snapshots to keep (oldest-first GC).
+	RetainN int `json:"retain_n"`
+	// StoredAt is the expanded directory path prefix for the snapshot.
+	StoredAt string `json:"stored_at"`
+	// Manifest is the server-supplied manifest filename, e.g. "manifest.json".
+	Manifest string `json:"manifest"`
 }
 
 // LogPullStartPayload is the payload for the "log_pull_start" server→node message.

@@ -43,6 +43,10 @@ func (p *countingPlugin) Render(_ ClusterState) ([]api.InstallInstruction, error
 	return nil, nil
 }
 
+// Metadata returns the zero-value metadata (DefaultPriority via EffectivePriority,
+// Dangerous=false, Backup=nil). Test plugins have no ordering requirements.
+func (p *countingPlugin) Metadata() PluginMetadata { return PluginMetadata{} }
+
 // noopAlertWriter satisfies AlertWriter for tests that need one but don't
 // assert on alert content.
 type noopAlertWriter struct{}

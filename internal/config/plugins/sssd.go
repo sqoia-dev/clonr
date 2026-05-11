@@ -51,6 +51,30 @@ func (SSSDPlugin) WatchedKeys() []string {
 // tests) can reference it without importing the unexported constant.
 func SSSDWatchKey() string { return sssdWatchKey }
 
+// Metadata returns the execution and safety invariants for the SSSD plugin.
+//
+// Priority 80: must run after hostname/hosts (Foundation band) but before any
+// slurm config that references LDAP-resolved users. Sits in the Middleware
+// band (51–100).
+//
+// Dangerous=false on Day 1. The Dangerous flag (and DangerReason) will be
+// flipped to true in Sprint 41 Day 3 once the dangerous-confirmation flow is
+// live and proven. Flipping it now without the flow would gate every SSSD push
+// on a confirmation the server cannot yet deliver.
+//
+// Design rationale: a misrendered sssd.conf breaks login for all LDAP-resolved
+// users. On a lab where every operator is LDAP-backed, this is lockout-class.
+// The Day 3 flip adds: Dangerous: true, DangerReason: "misrendered sssd.conf
+// breaks login for all LDAP users; recovery requires console access".
+//
+// Backup=nil on Day 1; wired in Sprint 41 Day 4.
+func (SSSDPlugin) Metadata() config.PluginMetadata {
+	return config.PluginMetadata{
+		Priority:  80,
+		Dangerous: false,
+	}
+}
+
 // Render returns a single InstallInstruction that writes /etc/sssd/sssd.conf
 // for the node identified by state.NodeID.
 //
