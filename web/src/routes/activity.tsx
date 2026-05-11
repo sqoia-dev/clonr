@@ -304,6 +304,7 @@ export function ActivityPage() {
         ) : filtered.length === 0 ? (
           <EmptyState />
         ) : (
+          <>
           <Table>
             <caption className="sr-only">Cluster activity log</caption>
             <TableHeader>
@@ -415,6 +416,7 @@ export function ActivityPage() {
               </div>
             </div>
           )}
+          </>
         )}
 
         {/* Scroll lock indicator */}
