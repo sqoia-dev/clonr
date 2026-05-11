@@ -254,29 +254,37 @@ func TestAllow_NamespaceWildcard(t *testing.T) {
 }
 
 // TestAllow_QueryWildcardRejected verifies that querying with a wildcard verb
-// returns false — callers must ask for exact verbs.
+// always returns false — callers must ask for exact verbs. This is enforced at
+// runtime: Allow() inspects the query for '*' and returns false before any
+// permission lookup, even for an admin Resolution.
 func TestAllow_QueryWildcardRejected(t *testing.T) {
-	// Even an admin's Resolution should not match a wildcard query.
-	r := &auth.Resolution{
+	// Admin resolution (wildcard grant).
+	admin := &auth.Resolution{
 		IsAdmin:     true,
 		Permissions: map[string]bool{"*": true},
 	}
-	// "node.*" as a query returns false (IsAdmin=true takes precedence here
-	// through the IsAdmin shortcut, so use a non-admin resolution for this test).
-	rViewer := &auth.Resolution{
+	// Namespace-grant resolution.
+	nodeAll := &auth.Resolution{
 		Permissions: map[string]bool{"node.*": true},
 	}
-	// A wildcard query string like "node.*" should NOT match "node.*" in perms
-	// via the exact-match path — it would, but it's semantically wrong.
-	// The design doc says "queries must be exact verbs."
-	// In our implementation, "node.*" as a query would match via exact string lookup
-	// if "node.*" is a key in Permissions. This test documents that behaviour is
-	// acceptable — the guard is editorial (PR review), not runtime enforcement.
-	// However, the namespace-wildcard lookup should NOT fire recursively.
-	_ = r
-	_ = rViewer
-	// This test is intentionally a no-op runtime assertion; it documents the
-	// contract in the test name. The actual enforcement is editorial.
+
+	wildcardQueries := []string{"*", "node.*", "*.read", "node.*.reimage"}
+	for _, verb := range wildcardQueries {
+		if auth.Allow(admin, verb) {
+			t.Errorf("Allow(admin, %q) = true, want false (wildcard queries rejected even for admin)", verb)
+		}
+		if auth.Allow(nodeAll, verb) {
+			t.Errorf("Allow(nodeAll, %q) = true, want false (wildcard queries always rejected)", verb)
+		}
+	}
+
+	// Sanity: exact verbs still work as expected.
+	if !auth.Allow(admin, "node.read") {
+		t.Error("Allow(admin, node.read) = false, want true (exact verb on admin)")
+	}
+	if !auth.Allow(nodeAll, "node.read") {
+		t.Error("Allow(nodeAll, node.read) = false, want true (exact verb matched by node.* grant)")
+	}
 }
 
 // TestResolveRoles_UnionOfMultipleRoles verifies that a user with both operator
