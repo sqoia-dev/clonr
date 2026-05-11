@@ -92,7 +92,7 @@ func rbacDecisionMiddleware(database *db.DB, verb string) func(http.Handler) htt
 // Bearer API keys with KeyScopeAdmin always pass. Session users are resolved
 // via auth.ResolveRoles; posix group assignments are honoured.
 //
-//nolint:unused // wired on Day 3
+//lint:ignore U1000 wired to POST /api/v1/nodes/{id}/reimage on Day 3 (Sprint 41)
 func requirePermission(database *db.DB, verb string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +179,7 @@ func lastDot(s string) int {
 	return -1
 }
 
-// writeInternalError writes a 500 JSON response.
+//lint:ignore U1000 used by requirePermission which is wired on Day 3 (Sprint 41)
 func writeInternalError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
