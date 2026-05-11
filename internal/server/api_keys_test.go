@@ -35,7 +35,7 @@ func newAPIKeyTestServer(t *testing.T) (*httptest.Server, *http.Client, string, 
 		SessionSecret: "test-session-secret-32-bytes-xxx",
 		SessionSecure: false,
 	}
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 
 	rawKey, _, err := server.CreateAPIKey(context.Background(), database, api.KeyScopeAdmin, "test admin key")
 	if err != nil {

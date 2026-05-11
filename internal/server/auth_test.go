@@ -42,7 +42,7 @@ func newAuthTestServer(t *testing.T) (*server.Server, *httptest.Server, string) 
 		t.Fatalf("bootstrap default user: %v", err)
 	}
 
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 
 	// Also seed a legacy admin key for backward-compat tests.
 	rawKey, _, err := server.CreateAPIKey(context.Background(), database, api.KeyScopeAdmin, "test key")
@@ -539,7 +539,7 @@ func TestAuthStatus_NoAdmin_False(t *testing.T) {
 		SessionSecure: false,
 	}
 	// Do NOT call BootstrapDefaultUser — empty database.
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 

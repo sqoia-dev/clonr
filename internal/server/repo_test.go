@@ -37,7 +37,7 @@ func newRepoTestServer(t *testing.T, repoDir string) *httptest.Server {
 		RepoDir:     repoDir,
 	}
 
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -188,7 +188,7 @@ func TestRepoRoute_NoAuthRequired(t *testing.T) {
 		LogLevel:    "error",
 		RepoDir:     repoDir,
 	}
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
@@ -301,7 +301,7 @@ func TestRepoHealth_NoAuthRequired(t *testing.T) {
 		LogLevel:    "error",
 		RepoDir:     repoDir,
 	}
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 

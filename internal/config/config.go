@@ -16,6 +16,12 @@ type ServerConfig struct {
 	ListenAddr      string        `json:"listen_addr"`      // default ":8080"
 	ImageDir        string        `json:"image_dir"`        // default "/var/lib/clustr/images"
 	DBPath          string        `json:"db_path"`          // default "/var/lib/clustr/db/clustr.db"
+	// StatsDatabasePath is the path to the separate stats SQLite database.
+	// Keeping stats writes on a distinct file prevents high-churn stats I/O
+	// from contending with clustr.db's WAL journal (auth/RBAC writes).
+	// Default: /var/lib/clustr/db/stats.db.
+	// From CLUSTR_STATS_DB_PATH.
+	StatsDatabasePath string `json:"stats_database_path"` // CLUSTR_STATS_DB_PATH
 	AuthToken       string        `json:"auth_token"`       // legacy: from CLUSTR_AUTH_TOKEN; superseded by api_keys table
 	AuthDevMode     bool          `json:"auth_dev_mode"`    // from CLUSTR_AUTH_DEV_MODE=1; bypasses auth for local dev ONLY
 	SessionSecret   string        `json:"session_secret"`   // CLUSTR_SESSION_SECRET: HMAC key for browser session tokens (32+ bytes)
@@ -102,9 +108,10 @@ type Config struct {
 // sensible production defaults. Environment variables take precedence over defaults.
 func LoadServerConfig() ServerConfig {
 	return ServerConfig{
-		ListenAddr:    envOrDefault("CLUSTR_LISTEN_ADDR", ":8080"),
-		ImageDir:      envOrDefault("CLUSTR_IMAGE_DIR", "/var/lib/clustr/images"),
-		DBPath:        envOrDefault("CLUSTR_DB_PATH", "/var/lib/clustr/db/clustr.db"),
+		ListenAddr:        envOrDefault("CLUSTR_LISTEN_ADDR", ":8080"),
+		ImageDir:          envOrDefault("CLUSTR_IMAGE_DIR", "/var/lib/clustr/images"),
+		DBPath:            envOrDefault("CLUSTR_DB_PATH", "/var/lib/clustr/db/clustr.db"),
+		StatsDatabasePath: envOrDefault("CLUSTR_STATS_DB_PATH", "/var/lib/clustr/db/stats.db"),
 		AuthToken:     os.Getenv("CLUSTR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
 		AuthDevMode:   os.Getenv("CLUSTR_AUTH_DEV_MODE") == "1",
 		SessionSecret: os.Getenv("CLUSTR_SESSION_SECRET"),

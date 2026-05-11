@@ -18,6 +18,7 @@ import (
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/internal/image/isoinstaller"
 	"github.com/sqoia-dev/clustr/internal/pxe"
 	"github.com/sqoia-dev/clustr/internal/secrets"
@@ -265,6 +266,18 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	log.Info().Str("db", cfg.DBPath).Msg("database ready")
 
+	// STATS-DB-SPLIT: open the dedicated stats database.
+	// stats.db lives alongside clustr.db in the db/ directory (already created
+	// above in the requiredDirs loop). If stats.db does not exist on an existing
+	// install it is created fresh and the full stats migration chain is applied.
+	statsDatabase, err := statsdb.Open(cfg.StatsDatabasePath)
+	if err != nil {
+		return fmt.Errorf("failed to open stats database %s: %w", cfg.StatsDatabasePath, err)
+	}
+	defer statsDatabase.Close()
+
+	log.Info().Str("stats_db", cfg.StatsDatabasePath).Msg("stats database ready")
+
 	// #243: Bootstrap control-plane host row (idempotent, creates on first run).
 	{
 		ctx := context.Background()
@@ -361,7 +374,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wire up and start the HTTP server.
-	srv := server.New(cfg, database, server.BuildInfo{
+	srv := server.New(cfg, database, statsDatabase, server.BuildInfo{
 		Version:            version,
 		CommitSHA:          commitSHA,
 		BuildTime:          buildTime,

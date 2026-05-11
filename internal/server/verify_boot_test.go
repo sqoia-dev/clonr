@@ -46,7 +46,7 @@ func newVerifyBootServer(t *testing.T) (*httptest.Server, *db.DB, string, string
 		SessionSecure: false,
 		VerifyTimeout: 5 * time.Minute,
 	}
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 
 	// Seed one node.
 	nodeID := "verify-boot-test-node"
@@ -164,7 +164,7 @@ func TestVerifyBoot_WrongNodeToken_Returns403(t *testing.T) {
 		SessionSecret: "test-session-secret-32-bytes-xxx",
 		VerifyTimeout: 5 * time.Minute,
 	}
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 
 	node1 := api.NodeConfig{ID: "n1", Hostname: "node1", PrimaryMAC: "aa:00:00:00:00:01", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	node2 := api.NodeConfig{ID: "n2", Hostname: "node2", PrimaryMAC: "aa:00:00:00:00:02", CreatedAt: time.Now(), UpdatedAt: time.Now()}

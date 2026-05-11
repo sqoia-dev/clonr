@@ -27,6 +27,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/config/plugins"
 	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/internal/image"
 	ldapmodule "github.com/sqoia-dev/clustr/internal/ldap"
 	networkmodule "github.com/sqoia-dev/clustr/internal/network"
@@ -72,6 +73,11 @@ type BuildInfo struct {
 type Server struct {
 	cfg                 config.ServerConfig
 	db                  *db.DB
+	// statsDB is the separate SQLite handle for the stats domain (Sprint 42
+	// STATS-DB-SPLIT). All node_stats and node_external_stats reads/writes go
+	// through this handle so high-churn stats I/O cannot contend with
+	// clustr.db's WAL journal.
+	statsDB             *statsdb.StatsDB
 	audit               *db.AuditService
 	broker              *LogBroker
 	progress            *ProgressStore
@@ -180,8 +186,9 @@ func (a buildProgressAdapter) Start(imageID string) image.BuildHandle {
 	return buildHandleAdapter{h: h}
 }
 
-// New creates a Server wired with the given config and database.
-func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
+// New creates a Server wired with the given config, main database, and stats database.
+// statsDatabase must not be nil — the server will panic on first stats operation if it is.
+func New(cfg config.ServerConfig, database *db.DB, statsDatabase *statsdb.StatsDB, info BuildInfo) *Server {
 	// Build the power provider registry and register all supported backends.
 	registry := power.NewRegistry()
 	ipmipower.Register(registry)
@@ -240,6 +247,7 @@ func New(cfg config.ServerConfig, database *db.DB, info BuildInfo) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		db:                  database,
+		statsDB:             statsDatabase,
 		audit:               db.NewAuditService(database),
 		broker:              logBroker,
 		progress:            NewProgressStore(),
@@ -1383,7 +1391,7 @@ func (s *Server) buildRouter() chi.Router {
 				s.alertStore = alertStore
 				s.alertSilences = silenceStore
 				s.alertDispatcher = alertDispatcher
-				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.db), s.db, alertStore, silenceStore, alertDispatcher)
+				s.alertEngine = alerts.New("", NewStatsDBAdapter(s.statsDB), s.db, alertStore, silenceStore, alertDispatcher)
 			}
 		}
 
@@ -1704,7 +1712,7 @@ func (s *Server) buildRouter() chi.Router {
 		// clustr-clientd WebSocket endpoint — node-scoped key required; the key's
 		// bound node_id must match the {id} URL parameter (same as verify-boot).
 		clientdH := &handlers.ClientdHandler{
-			DB:     s.db,
+			DB:     newClientdDBAdapter(s.db, s.statsDB),
 			Hub:    s.clientdHub,
 			Broker: s.broker,
 			BiosDB: s.db,
@@ -1937,18 +1945,18 @@ func (s *Server) buildRouter() chi.Router {
 			r.Post("/nodes/{id}/exec", clientdH.ExecOnNode)
 
 			// Sprint 22 #131: per-node stats query.
-			statsH := &handlers.StatsHandler{DB: NewStatsDBAdapter(s.db)}
+			statsH := &handlers.StatsHandler{DB: NewStatsDBAdapter(s.statsDB)}
 			r.Get("/nodes/{id}/stats", statsH.GetNodeStats)
 
 			// Sprint 38 Bundle A: agent-less external stats — probes
 			// + BMC/SNMP/IPMI samples written by the goroutine pool.
 			extStatsH := &handlers.ExternalStatsHandler{
-				DB: NewExternalStatsDBAdapter(s.db),
+				DB: NewExternalStatsDBAdapter(s.statsDB),
 			}
 			r.Get("/nodes/{id}/external_stats", extStatsH.Get)
 
 			// #243: SELF-MON — control-plane host status endpoint.
-			cpHandler := &handlers.ControlPlaneHandler{DB: handlers.NewControlPlaneDBAdapter(s.db)}
+			cpHandler := &handlers.ControlPlaneHandler{DB: handlers.NewControlPlaneDBAdapter(s.db, s.statsDB)}
 			r.Get("/control-plane", cpHandler.ServeHTTP)
 
 			// Sprint 38 SYSTEM-ALERT-FRAMEWORK — operator-visible alerts with TTL.
