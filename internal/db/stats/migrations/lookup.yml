@@ -1,0 +1,27 @@
+# stats.db migration chain — Sprint 42 STATS-DB-SPLIT
+#
+# Each entry:
+#   id:          unique numeric identifier within the stats namespace
+#   filename:    SQL file name (must match a file in this directory)
+#   description: human-readable description shown in startup logs
+#   applied_to:  "stats" (all entries in this file are stats-only)
+#   requires:    list of migration IDs that must be applied first
+#
+# Rules enforced by the runner:
+#   - Every .sql file in this directory must have an entry here.
+#   - Every entry here must have a corresponding .sql file.
+#   - Drift in either direction = startup failure.
+#   - Migrations run in the order listed here, not alphabetical filename order.
+#   - The requires list is checked before applying each migration.
+migrations:
+  - id: 1
+    filename: 001_node_stats.sql
+    description: "node_stats time-series table with optional expires_at TTL"
+    applied_to: stats
+    requires: []
+
+  - id: 2
+    filename: 002_node_external_stats.sql
+    description: "node_external_stats table for agent-less collector samples"
+    applied_to: stats
+    requires: [1]
