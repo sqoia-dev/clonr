@@ -67,6 +67,7 @@ func (s *Server) pushHostnamePlugin(nodeID string, cfg api.NodeConfig) {
 		Checksum:     checksum,
 		Plugin:       "hostname",
 		RenderedHash: renderedHash,
+		Priority:     config.EffectivePriority(plugins.HostnamePlugin{}.Metadata()),
 	}
 
 	payloadBytes, err := json.Marshal(pushPayload)
@@ -92,10 +93,11 @@ func (s *Server) pushHostnamePlugin(nodeID string, cfg api.NodeConfig) {
 	log.Info().
 		Str("node_id", nodeID).
 		Str("plugin", "hostname").
+		Int("priority", config.EffectivePriority(plugins.HostnamePlugin{}.Metadata())).
 		Str("hostname", cfg.Hostname).
 		Str("rendered_hash", renderedHash).
 		Str("msg_id", msgID).
-		Msg("reactive push: hostname config_push sent")
+		Msg("reactive push: config_push sent")
 }
 
 //lint:ignore U1000 wired into the node-PUT handler once reactive config push is enabled (REACTIVE-PUSH-SSSD, Sprint 38)
@@ -127,7 +129,7 @@ func (s *Server) pushSSSDPlugin(nodeID string, cfg api.NodeConfig) {
 		return
 	}
 
-	s.sendPluginPush(nodeID, "sssd", instrs[0], renderedHash)
+	s.sendPluginPush(nodeID, "sssd", instrs[0], renderedHash, config.EffectivePriority(plugins.SSSDPlugin{}.Metadata()))
 }
 
 // pushHostsPlugin renders the hosts plugin for the given node (using allNodes
@@ -158,7 +160,7 @@ func (s *Server) pushHostsPlugin(nodeID string, cfg api.NodeConfig, allNodes []a
 		return
 	}
 
-	s.sendPluginPush(nodeID, "hosts", instrs[0], renderedHash)
+	s.sendPluginPush(nodeID, "hosts", instrs[0], renderedHash, config.EffectivePriority(plugins.HostsPlugin{}.Metadata()))
 }
 
 // pushLimitsPlugin renders the limits plugin for nodeID+cfg and sends a
@@ -187,14 +189,18 @@ func (s *Server) pushLimitsPlugin(nodeID string, cfg api.NodeConfig) {
 		return
 	}
 
-	s.sendPluginPush(nodeID, "limits", instrs[0], renderedHash)
+	s.sendPluginPush(nodeID, "limits", instrs[0], renderedHash, config.EffectivePriority(plugins.LimitsPlugin{}.Metadata()))
 }
 
 // sendPluginPush is the shared WS delivery path for single-instruction plugins.
 // It marshals the ConfigPushPayload, wraps it in a ServerMessage, and sends it
 // to nodeID via the clientdHub. Non-blocking on the WS send. Best-effort.
-func (s *Server) sendPluginPush(nodeID, pluginName string, instr api.InstallInstruction, renderedHash string) {
-	payload, err := configPushPayloadFromInstruction(instr, pluginName, renderedHash)
+//
+// priority is the plugin's EffectivePriority (Sprint 41 Day 2). It is
+// stamped into ConfigPushPayload.Priority for observability and included in
+// the info log so operators can audit push order against declared priority.
+func (s *Server) sendPluginPush(nodeID, pluginName string, instr api.InstallInstruction, renderedHash string, priority int) {
+	payload, err := configPushPayloadFromInstruction(instr, pluginName, renderedHash, priority)
 	if err != nil {
 		log.Error().Err(err).Str("node_id", nodeID).Str("plugin", pluginName).
 			Msg("reactive push: configPushPayloadFromInstruction failed")
@@ -224,6 +230,7 @@ func (s *Server) sendPluginPush(nodeID, pluginName string, instr api.InstallInst
 	log.Info().
 		Str("node_id", nodeID).
 		Str("plugin", pluginName).
+		Int("priority", priority).
 		Str("rendered_hash", renderedHash).
 		Str("msg_id", msgID).
 		Msg("reactive push: config_push sent")
@@ -232,7 +239,12 @@ func (s *Server) sendPluginPush(nodeID, pluginName string, instr api.InstallInst
 // configPushPayloadFromInstruction converts a single InstallInstruction from a
 // plugin's Render output into a ConfigPushPayload for the legacy WS wire format.
 // Only "overwrite" instructions are supported (hostname plugin always returns overwrite).
-func configPushPayloadFromInstruction(instr api.InstallInstruction, pluginName, renderedHash string) (clientd.ConfigPushPayload, error) {
+//
+// priority is the plugin's EffectivePriority (Sprint 41 Day 2). It is included
+// in the payload for observability and carried to clientd so operators and audit
+// tools can correlate push order with declared priority. The server's batch sort
+// is authoritative; clientd applies pushes in the order they arrive on the wire.
+func configPushPayloadFromInstruction(instr api.InstallInstruction, pluginName, renderedHash string, priority int) (clientd.ConfigPushPayload, error) {
 	if instr.Opcode != "overwrite" {
 		return clientd.ConfigPushPayload{}, fmt.Errorf("reactive push: only overwrite instructions are supported, got %q", instr.Opcode)
 	}
@@ -244,5 +256,6 @@ func configPushPayloadFromInstruction(instr api.InstallInstruction, pluginName, 
 		Checksum:     checksum,
 		Plugin:       pluginName,
 		RenderedHash: renderedHash,
+		Priority:     priority,
 	}, nil
 }

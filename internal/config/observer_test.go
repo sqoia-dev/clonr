@@ -17,9 +17,20 @@ import (
 // resetRegistry tears down and reinitialises the global observer state so
 // each test starts with a clean slate.
 func resetRegistry() {
+	// Drain the shared batch queue before reinitialising plugin state.
+	globalBatch.mu.Lock()
+	if globalBatch.timer != nil {
+		globalBatch.timer.Stop()
+		globalBatch.timer = nil
+	}
+	globalBatch.queues = nil
+	globalBatch.pending = nil
+	globalBatch.mu.Unlock()
+
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	plugins = map[string]*pluginQueue{}
+	pluginOrder = nil
 	watchIndex = map[string][]*pluginQueue{}
 	globalAlerts = nil
 }
