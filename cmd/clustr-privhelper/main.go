@@ -225,7 +225,7 @@ func isSafePackageName(pkg string) bool {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, rule-write, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply, ipmi-power, ipmi-sel, ipmi-sensors, ipmi-lan-set, ipmi-lan-get, ipmi-sol-activate, nfs-export\n")
+		fmt.Fprintf(os.Stderr, "usage: clustr-privhelper <verb> [args...]\nverbs: dnf-install, dnf-upgrade, rule-write, repo-push, repo-refresh, cap-bit-test, service-control, ca-trust-extract, bios-read, bios-apply, ipmi-power, ipmi-sel, ipmi-sensors, ipmi-lan-set, ipmi-lan-get, ipmi-sol-activate, nfs-export, backup-write, backup-restore\n")
 		os.Exit(1)
 	}
 
@@ -273,6 +273,10 @@ func main() {
 		exitCode = verbIPMISOLActivate(callerUID, verbArgs)
 	case "nfs-export":
 		exitCode = verbNFSExport(callerUID, verbArgs)
+	case "backup-write":
+		exitCode = verbBackupWrite(callerUID, verbArgs)
+	case "backup-restore":
+		exitCode = verbBackupRestore(callerUID, verbArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "clustr-privhelper: unknown verb %q\n", verb)
 		exitCode = 1
