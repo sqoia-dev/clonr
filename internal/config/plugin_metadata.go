@@ -8,7 +8,7 @@ package config
 //
 // Priority band convention (for authors choosing a priority value):
 //
-//	  0– 50  Foundation   — host identity that everything else depends on
+//	  1– 50  Foundation   — host identity that everything else depends on
 //	                        (hostname, /etc/hosts, kernel sysctls).
 //	 51–100  Middleware   — authentication and time-synchronisation daemons
 //	                        (sssd, pam, chrony). Run after foundation so LDAP
@@ -22,12 +22,13 @@ package config
 //
 // Pick deliberately. "I don't care" → use DefaultPriority (100) and document
 // why ordering is irrelevant for your plugin.
+// To run first, use Priority=1 (not 0 — zero is the unset sentinel).
 
 const (
-	// PriorityMin is the lowest valid priority. 0 is reserved for "must run
-	// absolutely first ever" (e.g. baseline filesystem layout). Used by
-	// tests to probe the boundary.
-	PriorityMin = 0
+	// PriorityMin is the lowest valid explicit priority (1-based).
+	// Zero is reserved as the unset sentinel and is treated as DefaultPriority
+	// (100) by EffectivePriority. To request "run first", use Priority=1.
+	PriorityMin = 1
 
 	// PriorityMax is the highest valid priority. Registration rejects values
 	// above this to catch typos (e.g. 10000 instead of 100) at startup.
@@ -38,13 +39,17 @@ const (
 // PluginMetadata to be registered. Returns a non-nil error with a human-readable
 // description of the first violation found.
 //
+// Priority=0 is the unset sentinel and is accepted (EffectivePriority promotes
+// it to DefaultPriority=100). Negative priorities and values above PriorityMax
+// are rejected.
+//
 // Callers: Register (panics on error), tests.
 func ValidatePluginMetadata(name string, m PluginMetadata) error {
-	if m.Priority < PriorityMin || m.Priority > PriorityMax {
+	if m.Priority < 0 || m.Priority > PriorityMax {
 		return &metadataError{
 			plugin: name,
 			field:  "Priority",
-			msg:    "must be in range [0, 1000]",
+			msg:    "must be in range [0, 1000] (0 is the unset sentinel; use 1 for run-first)",
 		}
 	}
 	if m.Dangerous && m.DangerReason == "" {
@@ -85,18 +90,36 @@ func (e *metadataError) Error() string {
 }
 
 // EffectivePriority returns m.Priority when it is non-zero, or DefaultPriority
-// when zero. This implements the "zero value means default 100" contract
-// described in §2.1 of the design doc without requiring every plugin author
-// to write Priority: DefaultPriority explicitly.
+// (100) when zero. This implements the "zero value means default 100" contract:
+// a plugin that returns PluginMetadata{} (zero value) behaves as if it declared
+// Priority=100, without the author needing to write it explicitly.
 //
-// Note: Priority=0 is valid for plugins that explicitly need to be first.
-// Those plugins must set Priority: PriorityMin (0) in their Metadata() method.
-// The distinction between "I forgot to set it" and "I mean 0" is enforced by
-// ValidatePluginMetadata — plugins with Priority=0 must document their intent
-// in their Metadata() godoc.
+// Zero is the unset sentinel. To run first, set Priority=PriorityMin (1).
 func EffectivePriority(m PluginMetadata) int {
 	if m.Priority == 0 {
 		return DefaultPriority
 	}
 	return m.Priority
+}
+
+// ValidatePriority checks whether a raw integer is a permissible Priority value
+// for external or user-supplied contexts (CLI flags, API payloads). It accepts 0
+// (the unset sentinel) and any positive integer; it rejects negative values which
+// are always a caller error.
+//
+// This function does NOT enforce PriorityMax — that is done by
+// ValidatePluginMetadata at plugin registration time. ValidatePriority is the
+// lightweight boundary check for inputs that arrive before plugin registration
+// (e.g. API requests that accept a priority override, CLI flag parsing).
+//
+// Future callers: API handlers that accept a priority query param; CLI flag.
+func ValidatePriority(p int) error {
+	if p < 0 {
+		return &metadataError{
+			plugin: "unknown",
+			field:  "Priority",
+			msg:    "must be >= 0 (0 is the unset sentinel; use 1 for run-first)",
+		}
+	}
+	return nil
 }

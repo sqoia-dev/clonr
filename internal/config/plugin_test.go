@@ -65,7 +65,8 @@ func TestValidatePluginMetadata_Valid(t *testing.T) {
 		name string
 		m    config.PluginMetadata
 	}{
-		{"zero value", config.PluginMetadata{}},
+		{"zero value (unset sentinel)", config.PluginMetadata{}},
+		{"explicit priority 1 (PriorityMin, run-first)", config.PluginMetadata{Priority: 1}},
 		{"explicit priority 20", config.PluginMetadata{Priority: 20}},
 		{"explicit priority 1000 (max)", config.PluginMetadata{Priority: 1000}},
 		{"dangerous with reason", config.PluginMetadata{
@@ -93,7 +94,8 @@ func TestValidatePluginMetadata_Invalid(t *testing.T) {
 		name string
 		m    config.PluginMetadata
 	}{
-		{"priority too low (negative)", config.PluginMetadata{Priority: -1}},
+		// Priority=0 is the unset sentinel (valid); negative values are rejected.
+		{"priority negative", config.PluginMetadata{Priority: -1}},
 		{"priority too high", config.PluginMetadata{Priority: 1001}},
 		{"dangerous without reason", config.PluginMetadata{
 			Priority:  80,
