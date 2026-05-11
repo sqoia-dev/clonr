@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users, GitCommit, Radio } from "lucide-react"
+import { Copy, Check, Plus, Trash2, Key, Server, ShieldCheck, LogOut, Eye, EyeOff, Pencil, RefreshCw, X, Users, GitCommit, Radio, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -14,6 +14,54 @@ import { formatDistanceToNow } from "date-fns"
 function relativeTime(iso?: string | null) {
   if (!iso) return "—"
   try { return formatDistanceToNow(new Date(iso), { addSuffix: true }) } catch { return "—" }
+}
+
+// ─── Sprint 42 Day 3: Schema-drift banner ─────────────────────────────────────
+//
+// Calls GET /api/v1/admin/schema-drift on mount (60s stale time — this is
+// infra-health, not a hot path).  Shows a red banner when status=drift.
+// Hidden when status=ok or when the request fails (non-admin user, network
+// error) — we don't want to show a misleading banner on benign failures.
+
+interface SchemaDriftResponse {
+  status: "ok" | "drift"
+  binary_hash: string
+  embedded_hash: string
+  mismatched_routes: string[]
+}
+
+function SchemaDriftBanner() {
+  const { data, isError } = useQuery<SchemaDriftResponse>({
+    queryKey: ["schema-drift"],
+    queryFn: () => apiFetch<SchemaDriftResponse>("/api/v1/admin/schema-drift"),
+    staleTime: 60_000,
+    retry: false, // don't retry — non-admin users get 403 and that's expected
+  })
+
+  // Hide on error (non-admin, network failure) or when schemas are in sync.
+  if (isError || !data || data.status !== "drift") return null
+
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+    >
+      <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+      <div className="space-y-1 min-w-0">
+        <p className="font-semibold">Schema drift detected</p>
+        <p className="text-xs text-destructive/80">
+          The embedded JSON Schema bundle does not match the binary&apos;s compiled structs.
+          Re-run the upgrade or{" "}
+          <code className="font-mono text-xs">make schemas</code> and redeploy.
+        </p>
+        {data.mismatched_routes.length > 0 && (
+          <p className="text-xs text-destructive/70">
+            Mismatched files: {data.mismatched_routes.join(", ")}
+          </p>
+        )}
+      </div>
+    </div>
+  )
 }
 
 // ─── Settings page ────────────────────────────────────────────────────────────
@@ -36,6 +84,8 @@ export function SettingsPage() {
         <h1 className="text-xl font-semibold">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">Server configuration, user management, and API key management</p>
       </div>
+
+      <SchemaDriftBanner />
 
       <APIKeysSection />
       <LocalUsersSection />
