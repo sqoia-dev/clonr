@@ -156,11 +156,18 @@ func (db *DB) SlurmGetActiveBuildID(ctx context.Context) (string, error) {
 	return activeBuildID.String, nil
 }
 
-// SlurmListDepMatrix returns all rows in the dependency compatibility matrix.
+// SlurmListDepMatrix returns one row per distinct (slurm_version_min,
+// slurm_version_max, dep_name, dep_version_min, dep_version_max, source)
+// tuple from the dependency compatibility matrix.
+// Migration 117 adds a UNIQUE constraint that prevents future duplicates;
+// this GROUP BY is a belt-and-suspenders guard for any DB that has not yet
+// run the migration (e.g. tests running against an older schema snapshot).
 func (db *DB) SlurmListDepMatrix(ctx context.Context) ([]SlurmDepMatrixRow, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, slurm_version_min, slurm_version_max, dep_name, dep_version_min, dep_version_max, source, created_at
-		FROM slurm_dep_matrix ORDER BY slurm_version_min, dep_name
+		SELECT MIN(id), slurm_version_min, slurm_version_max, dep_name, dep_version_min, dep_version_max, source, MIN(created_at)
+		FROM slurm_dep_matrix
+		GROUP BY slurm_version_min, slurm_version_max, dep_name, dep_version_min, dep_version_max, source
+		ORDER BY slurm_version_min, dep_name
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("db: SlurmListDepMatrix: %w", err)

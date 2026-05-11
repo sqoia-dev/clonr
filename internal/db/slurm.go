@@ -1193,13 +1193,23 @@ func (db *DB) SlurmListUpgradeOps(ctx context.Context) ([]SlurmUpgradeOpRow, err
 
 // ─── Dep matrix ───────────────────────────────────────────────────────────────
 
-// SlurmSeedDepMatrix inserts dep matrix rows using INSERT OR IGNORE.
+// SlurmSeedDepMatrix inserts dep matrix rows, ignoring duplicates.
+//
+// After migration 117 the table has a UNIQUE constraint on the content tuple
+// (slurm_version_min, slurm_version_max, dep_name, dep_version_min,
+// dep_version_max, source).  We use ON CONFLICT(…) DO NOTHING so that
+// repeated seeding on every startup is a no-op — only genuinely new rows
+// (different content) are inserted.  The id column carries a fresh UUID for
+// each INSERT attempt; the UNIQUE constraint on the content tuple prevents
+// duplicate rows regardless of the id value.
 func (db *DB) SlurmSeedDepMatrix(ctx context.Context, entries []SlurmDepMatrixRow) error {
 	for _, e := range entries {
 		_, err := db.sql.ExecContext(ctx, `
-			INSERT OR IGNORE INTO slurm_dep_matrix
+			INSERT INTO slurm_dep_matrix
 				(id, slurm_version_min, slurm_version_max, dep_name, dep_version_min, dep_version_max, source, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(slurm_version_min, slurm_version_max, dep_name, dep_version_min, dep_version_max, source)
+			DO NOTHING
 		`, e.ID, e.SlurmVersionMin, e.SlurmVersionMax, e.DepName, e.DepVersionMin, e.DepVersionMax, e.Source, e.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("db: SlurmSeedDepMatrix: %w", err)

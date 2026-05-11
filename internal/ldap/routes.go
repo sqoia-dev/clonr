@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -193,7 +194,18 @@ func (m *Manager) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"users": users, "total": len(users)}, http.StatusOK)
+	total := len(users)
+	page, perPage, paging := parseLDAPPageParams(r)
+	if paging {
+		start, end := ldapPageSlice(total, page, perPage)
+		users = users[start:end]
+		jsonResponse(w, map[string]interface{}{
+			"users": users, "total": total,
+			"page": page, "per_page": perPage,
+		}, http.StatusOK)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"users": users, "total": total}, http.StatusOK)
 }
 
 func (m *Manager) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +590,18 @@ func (m *Manager) handleListGroups(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	jsonResponse(w, map[string]interface{}{"groups": groups, "total": len(groups)}, http.StatusOK)
+	total := len(groups)
+	page, perPage, paging := parseLDAPPageParams(r)
+	if paging {
+		start, end := ldapPageSlice(total, page, perPage)
+		groups = groups[start:end]
+		jsonResponse(w, map[string]interface{}{
+			"groups": groups, "total": total,
+			"page": page, "per_page": perPage,
+		}, http.StatusOK)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{"groups": groups, "total": total}, http.StatusOK)
 }
 
 // handleCreateGroup handles POST /api/v1/ldap/groups.
@@ -1234,4 +1257,42 @@ func jsonErrorPosixID(w http.ResponseWriter, field string, err error) {
 		"code":  code,
 		"field": field,
 	})
+}
+
+// parseLDAPPageParams parses ?page= and ?per_page= from r.
+// Returns (page, perPage, paging) where paging is true only when at least one
+// pagination parameter is present.  Values are clamped to [1, 500].
+func parseLDAPPageParams(r *http.Request) (page, perPage int, paging bool) {
+	q := r.URL.Query()
+	pageStr := q.Get("page")
+	perPageStr := q.Get("per_page")
+	if pageStr == "" && perPageStr == "" {
+		return 0, 0, false
+	}
+	page = 1
+	perPage = 25
+	if v, err := strconv.Atoi(pageStr); err == nil && v > 0 {
+		page = v
+	}
+	if v, err := strconv.Atoi(perPageStr); err == nil && v > 0 {
+		if v > 500 {
+			v = 500
+		}
+		perPage = v
+	}
+	return page, perPage, true
+}
+
+// ldapPageSlice returns the [start, end) indices into a slice of length total
+// for the given 1-based page and perPage values.
+func ldapPageSlice(total, page, perPage int) (start, end int) {
+	start = (page - 1) * perPage
+	if start > total {
+		start = total
+	}
+	end = start + perPage
+	if end > total {
+		end = total
+	}
+	return start, end
 }
