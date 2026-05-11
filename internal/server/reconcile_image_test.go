@@ -9,6 +9,7 @@ import (
 
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/pkg/api"
 	"github.com/sqoia-dev/clustr/pkg/reconcile"
 )
@@ -168,6 +169,11 @@ func newReconcileTestServer(t *testing.T) (*Server, *db.DB, string) {
 	if err := os.MkdirAll(cfg.PXE.BootDir, 0o755); err != nil {
 		t.Fatalf("mkdir boot dir: %v", err)
 	}
-	srv := New(cfg, database, BuildInfo{})
+	sdb, err := statsdb.Open(filepath.Join(dir, "stats.db"))
+	if err != nil {
+		t.Fatalf("open stats.db: %v", err)
+	}
+	t.Cleanup(func() { sdb.Close() })
+	srv := New(cfg, database, sdb, BuildInfo{})
 	return srv, database, dir
 }

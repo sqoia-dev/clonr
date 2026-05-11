@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/internal/metrics"
 )
 
@@ -49,7 +50,7 @@ func (s *Server) runStatsRetentionSweeper(ctx context.Context) {
 
 	sweep := func() {
 		cutoff := time.Now().Add(-retention)
-		n, err := s.db.DeleteOldNodeStats(ctx, cutoff)
+		n, err := s.statsDB.DeleteOldNodeStats(ctx, cutoff)
 		if err != nil {
 			log.Warn().Err(err).Msg("stats sweeper: DeleteOldNodeStats failed")
 			return
@@ -84,7 +85,7 @@ func (s *Server) runStatsPrometheusRefresher(ctx context.Context) {
 		qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		rows, err := s.db.QueryLatestNodeStats(qCtx)
+		rows, err := s.statsDB.QueryLatestNodeStats(qCtx)
 		if err != nil {
 			log.Warn().Err(err).Msg("stats prometheus: QueryLatestNodeStats failed")
 			return
@@ -112,18 +113,67 @@ func (s *Server) runStatsPrometheusRefresher(ctx context.Context) {
 	}
 }
 
-// StatsDBAdapter wraps *db.DB for use by the stats handler.
+// StatsDBAdapter wraps *statsdb.StatsDB for use by the stats handler.
+// It bridges the db.* types used by handlers to the statsdb.* types used by StatsDB.
 // Declared here rather than in handlers/ to keep the DB import chain clean.
 type StatsDBAdapter struct {
-	db *db.DB
+	sdb *statsdb.StatsDB
 }
 
-// NewStatsDBAdapter creates a StatsDBAdapter.
-func NewStatsDBAdapter(database *db.DB) *StatsDBAdapter {
-	return &StatsDBAdapter{db: database}
+// NewStatsDBAdapter creates a StatsDBAdapter backed by the stats DB.
+func NewStatsDBAdapter(sdb *statsdb.StatsDB) *StatsDBAdapter {
+	return &StatsDBAdapter{sdb: sdb}
 }
 
-// QueryNodeStats delegates to the underlying DB.
+// QueryNodeStats bridges db.QueryNodeStatsParams → statsdb.QueryNodeStatsParams,
+// delegates to stats.db, then bridges the result back to []db.NodeStatRow.
 func (a *StatsDBAdapter) QueryNodeStats(ctx context.Context, p db.QueryNodeStatsParams) ([]db.NodeStatRow, bool, error) {
-	return a.db.QueryNodeStats(ctx, p)
+	sp := statsdb.QueryNodeStatsParams{
+		NodeID:         p.NodeID,
+		Plugin:         p.Plugin,
+		Sensor:         p.Sensor,
+		Since:          p.Since,
+		Until:          p.Until,
+		Limit:          p.Limit,
+		IncludeExpired: p.IncludeExpired,
+	}
+	srows, truncated, err := a.sdb.QueryNodeStats(ctx, sp)
+	if err != nil {
+		return nil, false, err
+	}
+	rows := make([]db.NodeStatRow, len(srows))
+	for i, r := range srows {
+		rows[i] = db.NodeStatRow{
+			NodeID:    r.NodeID,
+			Plugin:    r.Plugin,
+			Sensor:    r.Sensor,
+			Value:     r.Value,
+			Unit:      r.Unit,
+			Labels:    r.Labels,
+			TS:        r.TS,
+			ExpiresAt: r.ExpiresAt,
+		}
+	}
+	return rows, truncated, nil
+}
+
+// QueryLatestNodeStats delegates to the stats DB and bridges types back to
+// []db.LatestNodeStatRow.
+func (a *StatsDBAdapter) QueryLatestNodeStats(ctx context.Context) ([]db.LatestNodeStatRow, error) {
+	srows, err := a.sdb.QueryLatestNodeStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]db.LatestNodeStatRow, len(srows))
+	for i, r := range srows {
+		rows[i] = db.LatestNodeStatRow{
+			NodeID: r.NodeID,
+			Plugin: r.Plugin,
+			Sensor: r.Sensor,
+			Value:  r.Value,
+			Unit:   r.Unit,
+			Labels: r.Labels,
+		}
+	}
+	return rows, nil
 }

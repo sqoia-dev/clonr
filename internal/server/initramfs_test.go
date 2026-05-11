@@ -40,7 +40,7 @@ func newInitramfsTestServer(t *testing.T) (*server.Server, *httptest.Server, *db
 		t.Fatalf("mkdir boot dir: %v", err)
 	}
 
-	srv := server.New(cfg, database, server.BuildInfo{})
+	srv := server.New(cfg, database, openTestStatsDB(t), server.BuildInfo{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts, database

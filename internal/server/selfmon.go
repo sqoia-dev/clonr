@@ -6,7 +6,7 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/rs/zerolog/log"
-	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/internal/metrics/collector"
 )
 
@@ -107,10 +107,11 @@ func (s *Server) runSelfmon(ctx context.Context) {
 			return
 		}
 
-		// Convert to db.NodeStatRow using the control-plane host ID as node_id.
-		rows := make([]db.NodeStatRow, 0, len(samples))
+		// Convert to statsdb.NodeStatRow using the control-plane host ID as node_id.
+		// Stats writes go to the separate stats DB (Sprint 42 STATS-DB-SPLIT).
+		rows := make([]statsdb.NodeStatRow, 0, len(samples))
 		for _, s := range samples {
-			rows = append(rows, db.NodeStatRow{
+			rows = append(rows, statsdb.NodeStatRow{
 				NodeID: cpHost.ID,
 				Plugin: s.Plugin,
 				Sensor: s.Sensor,
@@ -121,7 +122,7 @@ func (s *Server) runSelfmon(ctx context.Context) {
 			})
 		}
 
-		if err := s.db.InsertStatsBatch(tickCtx, rows); err != nil {
+		if err := s.statsDB.InsertStatsBatch(tickCtx, rows); err != nil {
 			log.Error().Err(err).
 				Str("host_id", cpHost.ID).
 				Int("samples", len(rows)).

@@ -22,6 +22,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/sqoia-dev/clustr/internal/db"
+	statsdb "github.com/sqoia-dev/clustr/internal/db/stats"
 	"github.com/sqoia-dev/clustr/internal/server/stats/external"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
@@ -45,15 +46,15 @@ const (
 	externalSweepInterval = 24 * time.Hour
 )
 
-// externalStoreAdapter forwards UpsertExternalStat into the DB layer
+// externalStoreAdapter forwards UpsertExternalStat into the stats DB layer
 // via the typed UpsertExternalStat method. It exists so the pool can
-// be tested with a fake store that doesn't carry a *db.DB.
-type externalStoreAdapter struct{ db *db.DB }
+// be tested with a fake store that doesn't carry a *statsdb.StatsDB.
+type externalStoreAdapter struct{ sdb *statsdb.StatsDB }
 
 func (a externalStoreAdapter) UpsertExternalStat(ctx context.Context, nodeID, source string, payload []byte, lastSeen, expiresAt time.Time) error {
-	return a.db.UpsertExternalStat(ctx, db.NodeExternalStatRow{
+	return a.sdb.UpsertExternalStat(ctx, statsdb.NodeExternalStatRow{
 		NodeID:     nodeID,
-		Source:     db.ExternalStatsSource(source),
+		Source:     statsdb.ExternalStatsSource(source),
 		Payload:    json.RawMessage(payload),
 		LastSeenAt: lastSeen,
 		ExpiresAt:  expiresAt,
@@ -142,7 +143,7 @@ func (s *Server) StartExternalCollectorPool(ctx context.Context) *external.Pool 
 
 	pool := external.NewPool(
 		cfg,
-		externalStoreAdapter{db: s.db},
+		externalStoreAdapter{sdb: s.statsDB},
 		externalListerAdapter{db: s.db},
 		prober,
 		bmc,
@@ -167,11 +168,11 @@ func (s *Server) runExternalStatsSweeper(ctx context.Context) {
 
 	sweep := func() {
 		now := time.Now()
-		nExt, err := s.db.SweepExpiredExternalStats(ctx, now)
+		nExt, err := s.statsDB.SweepExpiredExternalStats(ctx, now)
 		if err != nil {
 			log.Warn().Err(err).Msg("external stats sweeper: SweepExpiredExternalStats failed")
 		}
-		nNS, err := s.db.SweepExpiredNodeStats(ctx, now)
+		nNS, err := s.statsDB.SweepExpiredNodeStats(ctx, now)
 		if err != nil {
 			log.Warn().Err(err).Msg("external stats sweeper: SweepExpiredNodeStats failed")
 		}
@@ -224,15 +225,30 @@ func envDuration(name string, def time.Duration, unit time.Duration) time.Durati
 }
 
 // ExternalStatsDBAdapter implements handlers.ExternalStatsDBIface.
-// Delegates straight to the DB.
-type ExternalStatsDBAdapter struct{ db *db.DB }
+// Delegates to the stats DB and bridges types back to db.NodeExternalStatRow
+// for the handler layer (which uses db.* types).
+type ExternalStatsDBAdapter struct{ sdb *statsdb.StatsDB }
 
-// NewExternalStatsDBAdapter constructs an adapter around the given DB.
-func NewExternalStatsDBAdapter(database *db.DB) *ExternalStatsDBAdapter {
-	return &ExternalStatsDBAdapter{db: database}
+// NewExternalStatsDBAdapter constructs an adapter around the stats DB.
+func NewExternalStatsDBAdapter(sdb *statsdb.StatsDB) *ExternalStatsDBAdapter {
+	return &ExternalStatsDBAdapter{sdb: sdb}
 }
 
-// ListExternalStatsForNode delegates to the DB.
+// ListExternalStatsForNode delegates to the stats DB and bridges types.
 func (a *ExternalStatsDBAdapter) ListExternalStatsForNode(ctx context.Context, nodeID string, now time.Time) ([]db.NodeExternalStatRow, error) {
-	return a.db.ListExternalStatsForNode(ctx, nodeID, now)
+	srows, err := a.sdb.ListExternalStatsForNode(ctx, nodeID, now)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]db.NodeExternalStatRow, len(srows))
+	for i, r := range srows {
+		rows[i] = db.NodeExternalStatRow{
+			NodeID:     r.NodeID,
+			Source:     db.ExternalStatsSource(r.Source),
+			Payload:    r.Payload,
+			LastSeenAt: r.LastSeenAt,
+			ExpiresAt:  r.ExpiresAt,
+		}
+	}
+	return rows, nil
 }
