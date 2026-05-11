@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -107,11 +108,16 @@ type Config struct {
 // LoadServerConfig populates ServerConfig from environment variables with
 // sensible production defaults. Environment variables take precedence over defaults.
 func LoadServerConfig() ServerConfig {
+	dbPath := envOrDefault("CLUSTR_DB_PATH", "/var/lib/clustr/db/clustr.db")
+	// Default stats.db is in the same directory as clustr.db so that setting
+	// CLUSTR_DB_PATH to a custom location automatically co-locates stats.db.
+	// CLUSTR_STATS_DB_PATH overrides this when an independent location is needed.
+	defaultStatsPath := filepath.Join(filepath.Dir(dbPath), "stats.db")
 	return ServerConfig{
 		ListenAddr:        envOrDefault("CLUSTR_LISTEN_ADDR", ":8080"),
 		ImageDir:          envOrDefault("CLUSTR_IMAGE_DIR", "/var/lib/clustr/images"),
-		DBPath:            envOrDefault("CLUSTR_DB_PATH", "/var/lib/clustr/db/clustr.db"),
-		StatsDatabasePath: envOrDefault("CLUSTR_STATS_DB_PATH", "/var/lib/clustr/db/stats.db"),
+		DBPath:            dbPath,
+		StatsDatabasePath: envOrDefault("CLUSTR_STATS_DB_PATH", defaultStatsPath),
 		AuthToken:     os.Getenv("CLUSTR_AUTH_TOKEN"), // legacy, no longer used for auth enforcement
 		AuthDevMode:   os.Getenv("CLUSTR_AUTH_DEV_MODE") == "1",
 		SessionSecret: os.Getenv("CLUSTR_SESSION_SECRET"),
