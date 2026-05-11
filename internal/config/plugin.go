@@ -2,6 +2,42 @@ package config
 
 import "github.com/sqoia-dev/clustr/pkg/api"
 
+// PayloadValidationError is a single semantic-validation violation returned
+// by PayloadValidator.ValidatePayload. It mirrors the shape of
+// ValidationViolation in the HTTP middleware layer so callers can translate
+// it to the same MULTI-ERROR-ROLLUP 400 response without an import cycle.
+type PayloadValidationError struct {
+	// Path is a human-readable field path within the payload (e.g. "ldap_uri").
+	Path string
+	// Message describes the constraint that was violated.
+	Message string
+	// Code is a short machine-readable keyword (e.g. "invalid_uri", "empty_field").
+	Code string
+}
+
+// PayloadValidator is an optional extension to Plugin.  Dangerous-gate plugins
+// that can detect semantic errors in their incoming payload (beyond structural
+// JSON-SCHEMA validation) should implement this interface.
+//
+// ValidatePayload is called by the dangerous-push stage handler AFTER the
+// JSON-SCHEMA middleware has already validated the structural shape of the
+// request.  The payload bytes are the raw JSON from the stage request body
+// (the same bytes that were validated by the schema).
+//
+// Return an empty slice to signal that the payload is semantically valid.
+// Return one or more PayloadValidationError entries to signal violations; the
+// stage endpoint will return a 400 with the errors in the MULTI-ERROR-ROLLUP
+// shape — the push is never staged.
+//
+// Implementations MUST:
+//   - Be pure and side-effect-free (no DB writes, no network calls).
+//   - Be safe for concurrent invocation from multiple goroutines.
+//   - Be conservative: only reject payloads that are clearly wrong.
+//     Ambiguous or opinionated checks should NOT be added here.
+type PayloadValidator interface {
+	ValidatePayload(payload []byte) []PayloadValidationError
+}
+
 // Plugin is the unit of reactive config rendering. Implementations are
 // stateless and registered once at server startup via Register.
 //

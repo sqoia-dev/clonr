@@ -8,12 +8,33 @@ package plugins
 // path produces via deploy.renderSSSDConf.
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/sqoia-dev/clustr/internal/config"
 	"github.com/sqoia-dev/clustr/pkg/api"
 )
+
+// sssdStagePayload is the portion of the dangerous-push stage request body
+// that the SSSD plugin's ValidatePayload reads.  Only the fields that SSSD
+// semantic-validation actually inspects are decoded; unknown fields are
+// ignored (the JSON-SCHEMA middleware already validated structure).
+type sssdStagePayload struct {
+	// The stage endpoint accepts plugin_name + node_id.  SSSD validates the
+	// ldap_uri field when it appears inside an optional "config" sub-object.
+	// If the caller did not send a config sub-object, ValidatePayload is a no-op.
+	Config *sssdPayloadConfig `json:"config,omitempty"`
+}
+
+type sssdPayloadConfig struct {
+	ServerURI string `json:"ldap_uri,omitempty"`
+	BaseDN    string `json:"base_dn,omitempty"`
+}
+
+// Compile-time assertion: SSSDPlugin implements config.PayloadValidator.
+var _ config.PayloadValidator = SSSDPlugin{}
 
 // sssdWatchKey is the config-tree path the SSSD plugin subscribes to.
 //
@@ -78,6 +99,81 @@ func (SSSDPlugin) Metadata() config.PluginMetadata {
 			RetainN: 10,
 		},
 	}
+}
+
+// ValidatePayload implements config.PayloadValidator for the SSSD plugin.
+//
+// It performs semantic validation of the dangerous-push stage payload beyond
+// the structural JSON-SCHEMA check.  Validation is conservative: only clearly
+// wrong values are rejected.
+//
+// Rules:
+//  1. If a "config.ldap_uri" field is present it must be a valid LDAP URI
+//     (scheme must be "ldap" or "ldaps"; host must be non-empty).
+//  2. If a "config.base_dn" field is present it must be non-empty and contain
+//     at least one "dc=" component (sanity check, not a full RFC 4514 parse).
+//
+// If the payload carries no "config" sub-object, or the body is not parseable
+// as JSON, this method returns an empty slice — the JSON-SCHEMA middleware has
+// already ensured structural validity by this point so an unparseable body is
+// treated as "no overrides to validate".
+func (SSSDPlugin) ValidatePayload(payload []byte) []config.PayloadValidationError {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	var p sssdStagePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		// Structural parse failure: JSON-SCHEMA already validated the shape;
+		// treat as no config sub-object to avoid double-reporting.
+		return nil
+	}
+	if p.Config == nil {
+		// No SSSD-specific config block in the payload — nothing to validate.
+		return nil
+	}
+
+	var violations []config.PayloadValidationError
+
+	if uri := p.Config.ServerURI; uri != "" {
+		if err := validateLDAPURI(uri); err != nil {
+			violations = append(violations, config.PayloadValidationError{
+				Path:    "config.ldap_uri",
+				Message: err.Error(),
+				Code:    "invalid_uri",
+			})
+		}
+	}
+
+	if dn := p.Config.BaseDN; dn != "" {
+		if !strings.Contains(strings.ToLower(dn), "dc=") {
+			violations = append(violations, config.PayloadValidationError{
+				Path:    "config.base_dn",
+				Message: "base_dn must contain at least one dc= component (e.g. dc=cluster,dc=local)",
+				Code:    "invalid_base_dn",
+			})
+		}
+	}
+
+	return violations
+}
+
+// validateLDAPURI checks that uri is a well-formed LDAP URI.
+// Only the scheme and host are inspected — path/query/fragment are not part of
+// the SSSD ldap_uri field and are rejected by conservative check.
+func validateLDAPURI(uri string) error {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return fmt.Errorf("not a valid URI: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "ldap" && scheme != "ldaps" {
+		return fmt.Errorf("scheme must be ldap or ldaps, got %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("host must not be empty")
+	}
+	return nil
 }
 
 // Render returns a single InstallInstruction that writes /etc/sssd/sssd.conf
