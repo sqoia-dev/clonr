@@ -720,3 +720,9 @@ migrations:
     description: "Sprint 41 Day 4: plugin backups table"
     applied_to: clustr
     requires: [1]
+
+  - id: 117
+    filename: 117_slurm_dep_matrix_dedup.sql
+    description: "deduplicate slurm_dep_matrix rows and add UNIQUE constraint on content tuple"
+    applied_to: clustr
+    requires: [34]
