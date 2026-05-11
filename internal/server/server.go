@@ -1020,6 +1020,26 @@ func (s *Server) buildRouter() chi.Router {
 		log.Info().Int("routes", len(schemaReg.compiled)).Msg("server: JSON-SCHEMA registry built")
 	}
 
+	// Sprint 42 Day 3 — startup schema-drift check.
+	// Log a WARNING when the embedded schema bundle does not match the in-process
+	// reflection output.  In a normal release this should never fire: the binary's
+	// embedded FS is baked at compile time from the same schemas that reflect would
+	// produce.  If it fires, an operator manually tampered with schema files or CI
+	// produced a divergent binary.  Non-fatal: we log and expose via the
+	// /api/v1/admin/schema-drift endpoint; the server continues to start normally.
+	go func() {
+		drift, driftErr := handlers.ComputeSchemaDriftForStartup()
+		if driftErr != nil {
+			log.Warn().Err(driftErr).Msg("server: schema-drift startup check failed (non-fatal)")
+			return
+		}
+		if drift {
+			log.Warn().Msg("server: SCHEMA DRIFT DETECTED — embedded schemas differ from binary reflection output; check GET /api/v1/admin/schema-drift and re-run make schemas")
+		} else {
+			log.Debug().Msg("server: schema-drift startup check: ok")
+		}
+	}()
+
 	// Handler instances.
 	apiKeysH := s.buildAPIKeysHandler()
 	usersH := s.buildUsersHandler()
@@ -1771,6 +1791,13 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Delete("/admin/webhooks/{id}", webhooksH.HandleDelete)
 			r.With(requireRole("admin")).Get("/admin/webhooks/{id}/deliveries", webhooksH.HandleListDeliveries)
 
+			// Sprint 42 Day 3 — schema-drift detection.
+			// GET /api/v1/admin/schema-drift compares the embedded schema bundle against
+			// what the running binary's reflection would produce.  Admin-only: this is an
+			// infra-health endpoint, not user-facing.
+			schemaDriftH := &handlers.SchemaDriftHandler{}
+			r.With(requireRole("admin")).Get("/admin/schema-drift", schemaDriftH.Handle)
+
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
 			// GET /admin/users includes group_ids for each user (S3-3).
 			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleListWithMemberships)
@@ -2318,6 +2345,10 @@ func (s *Server) buildRouter() chi.Router {
 				},
 				RenderPlugin: func(ctx context.Context, pluginName, nodeID string) (api.InstallInstruction, string, error) {
 					return s.renderPluginForDangerousPush(ctx, pluginName, nodeID)
+				},
+				// Sprint 42 Day 3: semantic validation via optional PayloadValidator.
+				LookupPlugin: func(pluginName string) (config.Plugin, bool) {
+					return config.PluginByName(pluginName)
 				},
 			}
 			r.With(requireScope(true), requirePermission(s.db, "config.dangerous_push"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/config/dangerous-push")).

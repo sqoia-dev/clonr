@@ -567,6 +567,206 @@ func TestSSSDPlugin_IsDangerous(t *testing.T) {
 	}
 }
 
+// ─── Sprint 42 Day 3: ValidatePayload + Phase 2 re-validation tests ───────────
+
+// fakePayloadValidator is a minimal Plugin + PayloadValidator that allows tests
+// to inject controlled violation lists without touching the real registry.
+type fakePayloadValidator struct {
+	name       string
+	violations []config.PayloadValidationError
+}
+
+func (f *fakePayloadValidator) Name() string                { return f.name }
+func (f *fakePayloadValidator) WatchedKeys() []string       { return nil }
+func (f *fakePayloadValidator) Render(_ config.ClusterState) ([]api.InstallInstruction, error) {
+	return nil, nil
+}
+func (f *fakePayloadValidator) Metadata() config.PluginMetadata {
+	return config.PluginMetadata{
+		Priority:     80,
+		Dangerous:    true,
+		DangerReason: "test danger",
+	}
+}
+func (f *fakePayloadValidator) ValidatePayload(_ []byte) []config.PayloadValidationError {
+	return f.violations
+}
+
+// buildHandlerWithValidator returns a DangerousPushHandler wired so that the
+// "sssd" plugin lookup returns the given validator (which may also be nil to
+// simulate a plugin-gone scenario).
+func buildHandlerWithValidator(fdb *fakeDangerousDB, hub *fakeHubDangerous, clusterName string, validator *fakePayloadValidator) *DangerousPushHandler {
+	h := buildDangerousHandler(fdb, hub, clusterName)
+	h.LookupPlugin = func(name string) (config.Plugin, bool) {
+		if validator != nil && name == validator.name {
+			return validator, true
+		}
+		// All other plugin names: not found (simulate plugin-gone).
+		return nil, false
+	}
+	return h
+}
+
+// TestDangerousPush_Stage_SemanticValidation_Pass verifies that when
+// ValidatePayload returns no violations the stage proceeds normally (202).
+func TestDangerousPush_Stage_SemanticValidation_Pass(t *testing.T) {
+	fdb := newFakeDangerousDB()
+	hub := &fakeHubDangerous{}
+	validator := &fakePayloadValidator{name: "sssd", violations: nil}
+	h := buildHandlerWithValidator(fdb, hub, "mycluster", validator)
+
+	// Send a stage request with a payload field so LookupPlugin + ValidatePayload are exercised.
+	body := map[string]interface{}{
+		"node_id":     "node-1",
+		"plugin_name": "sssd",
+		"payload":     json.RawMessage(`{"config":{"ldap_uri":"ldaps://clustr.local:636"}}`),
+	}
+	r := dangerousJSONRequest(t, http.MethodPost, "/config/dangerous-push", body)
+	w := httptest.NewRecorder()
+	h.HandleStage(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("semantic validation pass: want 202, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestDangerousPush_Stage_SemanticValidation_Fail verifies that when
+// ValidatePayload returns violations the stage returns 400 with the
+// MULTI-ERROR-ROLLUP shape and does not persist a pending row.
+func TestDangerousPush_Stage_SemanticValidation_Fail(t *testing.T) {
+	fdb := newFakeDangerousDB()
+	hub := &fakeHubDangerous{}
+	validator := &fakePayloadValidator{
+		name: "sssd",
+		violations: []config.PayloadValidationError{
+			{Path: "config.ldap_uri", Message: "scheme must be ldap or ldaps", Code: "invalid_uri"},
+		},
+	}
+	h := buildHandlerWithValidator(fdb, hub, "mycluster", validator)
+
+	body := map[string]interface{}{
+		"node_id":     "node-1",
+		"plugin_name": "sssd",
+		"payload":     json.RawMessage(`{"config":{"ldap_uri":"http://bad"}}`),
+	}
+	r := dangerousJSONRequest(t, http.MethodPost, "/config/dangerous-push", body)
+	w := httptest.NewRecorder()
+	h.HandleStage(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("semantic validation fail: want 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Response must be the MULTI-ERROR-ROLLUP shape.
+	var resp struct {
+		Error      string                `json:"error"`
+		Violations []ValidationViolation `json:"violations"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != "validation_failed" {
+		t.Errorf("error field: want validation_failed, got %q", resp.Error)
+	}
+	if len(resp.Violations) == 0 {
+		t.Error("expected at least one violation in response")
+	}
+	if resp.Violations[0].Code != "invalid_uri" {
+		t.Errorf("violation code: want invalid_uri, got %q", resp.Violations[0].Code)
+	}
+
+	// No pending row must have been inserted.
+	if len(fdb.rows) != 0 {
+		t.Errorf("expected no pending rows after validation failure, got %d", len(fdb.rows))
+	}
+}
+
+// TestDangerousPush_Confirm_PluginGone verifies that when the plugin has been
+// unregistered between stage and confirm the confirm endpoint returns 409 and
+// marks the pending row as consumed.
+func TestDangerousPush_Confirm_PluginGone(t *testing.T) {
+	fdb := newFakeDangerousDB()
+	hub := &fakeHubDangerous{connected: true}
+	clusterName := "mycluster"
+
+	// Stage using the standard helper (no LookupPlugin wired yet).
+	stageH := buildDangerousHandler(fdb, hub, clusterName)
+	pendingID := stageSSSD(t, stageH)
+
+	// Now build a confirm handler where the plugin is gone (LookupPlugin returns false).
+	confirmH := buildDangerousHandler(fdb, hub, clusterName)
+	confirmH.LookupPlugin = func(_ string) (config.Plugin, bool) {
+		return nil, false // plugin no longer present
+	}
+
+	w := confirm(t, confirmH, pendingID, clusterName)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("plugin-gone confirm: want 409, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var resp api.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "pending_invalidated" {
+		t.Errorf("code: want pending_invalidated, got %q", resp.Code)
+	}
+
+	// Row must be consumed so it can't be retried.
+	row, ok := fdb.rows[pendingID]
+	if !ok {
+		t.Fatal("pending row disappeared from DB (expected consumed=true, not deleted)")
+	}
+	if !row.Consumed {
+		t.Error("expected pending row to be consumed after plugin-gone")
+	}
+}
+
+// TestDangerousPush_Confirm_RevalidationFails verifies that when the plugin is
+// still present but ValidatePayload now returns errors the confirm endpoint
+// returns 409 and marks the pending row as consumed.
+func TestDangerousPush_Confirm_RevalidationFails(t *testing.T) {
+	fdb := newFakeDangerousDB()
+	hub := &fakeHubDangerous{connected: true}
+	clusterName := "mycluster"
+
+	// Stage with a passing validator.
+	stageValidator := &fakePayloadValidator{name: "sssd", violations: nil}
+	stageH := buildHandlerWithValidator(fdb, hub, clusterName, stageValidator)
+	pendingID := stageSSSD(t, stageH)
+
+	// Confirm with a validator that now returns a violation.
+	confirmValidator := &fakePayloadValidator{
+		name: "sssd",
+		violations: []config.PayloadValidationError{
+			{Path: "config.ldap_uri", Message: "server decommissioned", Code: "invalid_uri"},
+		},
+	}
+	confirmH := buildHandlerWithValidator(fdb, hub, clusterName, confirmValidator)
+	w := confirm(t, confirmH, pendingID, clusterName)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("re-validation fail: want 409, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var resp api.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "pending_invalidated" {
+		t.Errorf("code: want pending_invalidated, got %q", resp.Code)
+	}
+
+	// Row must be consumed.
+	row, ok := fdb.rows[pendingID]
+	if !ok {
+		t.Fatal("pending row disappeared from DB")
+	}
+	if !row.Consumed {
+		t.Error("expected pending row to be consumed after re-validation failure")
+	}
+}
+
 // TestVerbConfigDangerousPush verifies the permission verb constant.
 func TestVerbConfigDangerousPush(t *testing.T) {
 	if auth.VerbConfigDangerousPush == "" {
