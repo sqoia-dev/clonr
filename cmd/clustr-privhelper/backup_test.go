@@ -282,6 +282,117 @@ func TestExtractTarball(t *testing.T) {
 	}
 }
 
+// ─── SSSD BackupSpec smoke test ───────────────────────────────────────────────
+
+// TestCreateTarball_SSSDDefaultPaths verifies createTarball behaviour when some
+// of the SSSD default BackupSpec paths don't exist (mirrors production: a fresh
+// node may have /etc/sssd/sssd.conf but not /etc/sssd/conf.d/ or
+// /var/lib/sss/db/).
+//
+// Assertions:
+//   - A non-empty tarball is produced even when some paths are missing.
+//   - The tarball contains the one file that does exist.
+//   - Missing paths are silently skipped (no error returned).
+func TestCreateTarball_SSSDDefaultPaths(t *testing.T) {
+	// Build a temp tree that mimics a minimal SSSD installation:
+	//   present:  <root>/etc/sssd/sssd.conf
+	//   missing:  <root>/etc/sssd/conf.d/       (doesn't exist)
+	//   missing:  <root>/var/lib/sss/db/         (doesn't exist)
+	root := t.TempDir()
+	confDir := filepath.Join(root, "etc", "sssd")
+	if err := os.MkdirAll(confDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	confFile := filepath.Join(confDir, "sssd.conf")
+	sssdConfContent := []byte("[sssd]\ndomains = test\nconfig_file_version = 2\n")
+	if err := os.WriteFile(confFile, sssdConfContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	missingDir1 := filepath.Join(confDir, "conf.d")   // does not exist
+	missingDir2 := filepath.Join(root, "var", "lib", "sss", "db") // does not exist
+
+	paths := []string{confFile, missingDir1, missingDir2}
+
+	tarball := filepath.Join(t.TempDir(), "sssd-snapshot.tar.gz")
+	if err := createTarball(tarball, paths); err != nil {
+		t.Fatalf("createTarball with missing paths: %v", err)
+	}
+
+	// Tarball must be non-empty.
+	info, err := os.Stat(tarball)
+	if err != nil {
+		t.Fatalf("stat tarball: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("tarball is empty — expected at least sssd.conf to be included")
+	}
+
+	// Tarball must contain sssd.conf (the one file that exists).
+	f, err := os.Open(tarball)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	found := false
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+		// Path stored without leading slash; strip the temp root prefix too.
+		wantSuffix := "etc/sssd/sssd.conf"
+		if len(hdr.Name) >= len(wantSuffix) && hdr.Name[len(hdr.Name)-len(wantSuffix):] == wantSuffix {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("sssd.conf was not found in the tarball even though the file exists")
+	}
+}
+
+// TestCreateTarball_UnreadablePath verifies that createTarball returns a clear
+// "path not readable: <path>: ..." error when a file exists but cannot be read.
+func TestCreateTarball_UnreadablePath(t *testing.T) {
+	// Create a file then chmod it unreadable.
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "unreadable.conf")
+	if err := os.WriteFile(secretFile, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(secretFile, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(secretFile, 0600) //nolint:errcheck // cleanup
+
+	tarball := filepath.Join(t.TempDir(), "snap.tar.gz")
+	err := createTarball(tarball, []string{secretFile})
+
+	// If the test runs as root, the permission check won't fire; skip in that case.
+	if os.Getuid() == 0 {
+		t.Skip("skipping unreadable-path test: running as root (permissions not enforced)")
+	}
+
+	if err == nil {
+		t.Fatal("expected error from createTarball with unreadable file, got nil")
+	}
+	const wantPrefix = "path not readable:"
+	if len(err.Error()) < len(wantPrefix) || err.Error()[:len(wantPrefix)] != wantPrefix {
+		t.Errorf("error message = %q; want prefix %q", err.Error(), wantPrefix)
+	}
+}
+
 // createTestTarball creates a gzipped tarball from a map of name → content
 // without the allowlist restriction (used in tests where we supply arbitrary paths).
 func createTestTarball(t *testing.T, outPath string, files map[string][]byte) error {
