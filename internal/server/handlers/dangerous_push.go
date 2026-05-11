@@ -200,19 +200,21 @@ func (h *DangerousPushHandler) HandleStage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Audit the stage event.
+	// Audit the stage event using the soak-metric action name so the histogram
+	// is consistent with the mismatch/locked_out/expired/confirmed events.
 	actorID, actorLabel := h.GetActorInfo(r)
 	if h.Audit != nil {
 		h.Audit.Record(r.Context(), actorID, actorLabel,
-			db.AuditActionConfigDangerousStaged,
-			"config_push", pendingID,
+			db.AuditActionDangerousPushStaged,
+			"pending_dangerous_push", pendingID,
 			r.RemoteAddr,
 			nil,
-			map[string]string{
-				"plugin":    req.PluginName,
-				"reason":    meta.DangerReason,
-				"challenge": clusterName,
-				"node_id":   req.NodeID,
+			map[string]interface{}{
+				"plugin":     req.PluginName,
+				"reason":     meta.DangerReason,
+				"challenge":  clusterName,
+				"node_id":    req.NodeID,
+				"expires_at": row.ExpiresAt.Format(time.RFC3339),
 			},
 		)
 	}
@@ -320,7 +322,23 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 		}
 
 		attemptsLeft := maxConfirmAttempts - newCount
+		actorID, actorLabel := h.GetActorInfo(r)
+
 		if attemptsLeft <= 0 {
+			// Soak metric: emit locked_out event so we can histogram gate failures.
+			if h.Audit != nil {
+				h.Audit.Record(r.Context(), actorID, actorLabel,
+					db.AuditActionDangerousPushLockedOut,
+					"pending_dangerous_push", pendingID,
+					r.RemoteAddr,
+					nil,
+					map[string]interface{}{
+						"plugin":        staged.PluginName,
+						"node_id":       staged.NodeID,
+						"attempt_count": newCount,
+					},
+				)
+			}
 			log.Warn().Str("pending_id", pendingID).Str("plugin", staged.PluginName).
 				Msg("dangerous push: 3-strike lockout reached, pending push consumed")
 			writeJSON(w, http.StatusGone, api.ErrorResponse{
@@ -328,6 +346,23 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 				Code:  "locked_out",
 			})
 			return
+		}
+
+		// Soak metric: emit mismatch event with attempt count so we can see
+		// how often operators mistype and how close they get to lockout.
+		if h.Audit != nil {
+			h.Audit.Record(r.Context(), actorID, actorLabel,
+				db.AuditActionDangerousPushMismatch,
+				"pending_dangerous_push", pendingID,
+				r.RemoteAddr,
+				nil,
+				map[string]interface{}{
+					"plugin":          staged.PluginName,
+					"node_id":         staged.NodeID,
+					"attempt_count":   newCount,
+					"attempts_left":   attemptsLeft,
+				},
+			)
 		}
 
 		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{
@@ -429,23 +464,23 @@ func (h *DangerousPushHandler) HandleConfirm(w http.ResponseWriter, r *http.Requ
 			Msg("dangerous push confirm: consume row failed (push already delivered)")
 	}
 
-	// Audit the confirmed event.
+	// Audit the confirmed event using the soak-metric action name.
 	actorID, actorLabel := h.GetActorInfo(r)
 	if h.Audit != nil {
 		newVal := map[string]interface{}{
-			"plugin":    staged.PluginName,
-			"node_id":   staged.NodeID,
-			"applied":   true,
-			"msg_id":    msgID,
+			"plugin":  staged.PluginName,
+			"node_id": staged.NodeID,
+			"applied": true,
+			"msg_id":  msgID,
 		}
 		if backupID != "" {
 			newVal["backup_id"] = backupID
 		}
 		h.Audit.Record(r.Context(), actorID, actorLabel,
-			db.AuditActionConfigDangerousConfirmed,
-			"config_push", pendingID,
+			db.AuditActionDangerousPushConfirmed,
+			"pending_dangerous_push", pendingID,
 			r.RemoteAddr,
-			map[string]string{
+			map[string]interface{}{
 				"plugin":        staged.PluginName,
 				"staged_reason": staged.Reason,
 			},
