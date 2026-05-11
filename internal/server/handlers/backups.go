@@ -270,8 +270,14 @@ func (h *BackupsHandler) HandleRestoreStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Copy the job snapshot under the mutex so we never read struct fields
+	// concurrently with setJobStatus writes.
 	h.restoreMu.Lock()
-	job, ok := h.jobs[jobID]
+	ptr, ok := h.jobs[jobID]
+	var snap RestoreJobState
+	if ok {
+		snap = *ptr // copy while holding the lock
+	}
 	h.restoreMu.Unlock()
 
 	if !ok {
@@ -283,18 +289,20 @@ func (h *BackupsHandler) HandleRestoreStatus(w http.ResponseWriter, r *http.Requ
 	}
 
 	resp := restoreStatusResponse{
-		JobID:     job.ID,
-		BackupID:  job.BackupID,
-		NodeID:    job.NodeID,
-		Plugin:    job.Plugin,
-		Status:    job.Status,
-		StartedAt: job.StartedAt.Format(time.RFC3339),
+		JobID:     snap.ID,
+		BackupID:  snap.BackupID,
+		NodeID:    snap.NodeID,
+		Plugin:    snap.Plugin,
+		Status:    snap.Status,
+		StartedAt: snap.StartedAt.Format(time.RFC3339),
 	}
-	if job.Error != "" {
-		resp.Error = &job.Error
+	if snap.Error != "" {
+		errCopy := snap.Error
+		resp.Error = &errCopy
 	}
-	if job.DoneAt != nil {
-		s := job.DoneAt.Format(time.RFC3339)
+	if snap.DoneAt != nil {
+		doneCopy := *snap.DoneAt
+		s := doneCopy.Format(time.RFC3339)
 		resp.DoneAt = &s
 	}
 
