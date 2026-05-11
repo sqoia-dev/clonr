@@ -119,3 +119,118 @@ func TestSchemaContainsExpectedNodeConfigFields(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateUserRequestSchemaHasRequiredAndEnum asserts that the Sprint 42 Day 2
+// CreateUserRequest schema contains required fields and the role enum constraint.
+// This is the golden-file round-trip test: struct → JSON Schema → verify constraints.
+func TestCreateUserRequestSchemaHasRequiredAndEnum(t *testing.T) {
+	r := jsonschema.Reflector{
+		AllowAdditionalProperties:  false,
+		RequiredFromJSONSchemaTags: true,
+		Namer: func(t reflect.Type) string {
+			return t.Name()
+		},
+	}
+
+	schema := r.ReflectFromType(reflect.TypeOf(api.CreateUserRequest{}))
+	out, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal CreateUserRequest schema: %v", err)
+	}
+	outStr := string(out)
+
+	// Verify required fields are present.
+	for _, field := range []string{"username", "password", "role"} {
+		if !strings.Contains(outStr, `"`+field+`"`) {
+			t.Errorf("CreateUserRequest schema missing field %q", field)
+		}
+	}
+	// Verify "required" array and at least one enum value are emitted.
+	if !strings.Contains(outStr, `"required"`) {
+		t.Error("CreateUserRequest schema missing \"required\" array")
+	}
+	if !strings.Contains(outStr, `"enum"`) {
+		t.Error("CreateUserRequest schema missing \"enum\" constraint for role")
+	}
+	for _, role := range []string{"admin", "operator", "readonly"} {
+		if !strings.Contains(outStr, `"`+role+`"`) {
+			t.Errorf("CreateUserRequest schema enum missing role %q", role)
+		}
+	}
+}
+
+// TestDangerousPushStageRequestSchema verifies the DangerousPushStageRequest
+// schema requires node_id and plugin_name.
+func TestDangerousPushStageRequestSchema(t *testing.T) {
+	r := jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		Namer: func(t reflect.Type) string {
+			return t.Name()
+		},
+	}
+
+	schema := r.ReflectFromType(reflect.TypeOf(api.DangerousPushStageRequest{}))
+	out, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal DangerousPushStageRequest schema: %v", err)
+	}
+	outStr := string(out)
+
+	for _, field := range []string{"node_id", "plugin_name"} {
+		if !strings.Contains(outStr, `"`+field+`"`) {
+			t.Errorf("DangerousPushStageRequest schema missing field %q", field)
+		}
+	}
+	if !strings.Contains(outStr, `"required"`) {
+		t.Error("DangerousPushStageRequest schema missing \"required\" array")
+	}
+}
+
+// TestDangerousPushConfirmRequestSchema verifies the DangerousPushConfirmRequest
+// schema requires confirm_string.
+func TestDangerousPushConfirmRequestSchema(t *testing.T) {
+	r := jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		Namer: func(t reflect.Type) string {
+			return t.Name()
+		},
+	}
+
+	schema := r.ReflectFromType(reflect.TypeOf(api.DangerousPushConfirmRequest{}))
+	out, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal DangerousPushConfirmRequest schema: %v", err)
+	}
+	outStr := string(out)
+
+	if !strings.Contains(outStr, `"confirm_string"`) {
+		t.Error("DangerousPushConfirmRequest schema missing confirm_string field")
+	}
+	if !strings.Contains(outStr, `"required"`) {
+		t.Error("DangerousPushConfirmRequest schema missing \"required\" array")
+	}
+}
+
+// TestCreateNodeConfigRequestSchema verifies the CreateNodeConfigRequest schema
+// includes hostname and primary_mac as required fields.
+func TestCreateNodeConfigRequestSchema(t *testing.T) {
+	r := jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		Namer: func(t reflect.Type) string {
+			return t.Name()
+		},
+	}
+
+	schema := r.ReflectFromType(reflect.TypeOf(api.CreateNodeConfigRequest{}))
+	out, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal CreateNodeConfigRequest schema: %v", err)
+	}
+	outStr := string(out)
+
+	for _, field := range []string{"hostname", "primary_mac"} {
+		if !strings.Contains(outStr, `"`+field+`"`) {
+			t.Errorf("CreateNodeConfigRequest schema missing field %q", field)
+		}
+	}
+}

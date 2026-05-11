@@ -994,6 +994,32 @@ type CreateNodeGroupRequest struct {
 	ExtraMounts        []FstabEntry `json:"extra_mounts,omitempty"`
 }
 
+// ─── Sprint 42 Day 2 — JSON-SCHEMA validation request types ──────────────────
+
+// CreateUserRequest is the wire type for POST /api/v1/admin/users and
+// POST /api/v1/users. Exported so cmd/generate-schemas can reflect on it
+// and emit a JSON Schema used for API-boundary validation.
+type CreateUserRequest struct {
+	Username string `json:"username" jsonschema:"required,minLength=1"`
+	Password string `json:"password" jsonschema:"required,minLength=8"`
+	Role     string `json:"role" jsonschema:"required,enum=admin,enum=operator,enum=readonly,enum=viewer,enum=pi,enum=director"`
+}
+
+// DangerousPushStageRequest is the wire type for POST /api/v1/config/dangerous-push.
+// Exported so cmd/generate-schemas can emit a JSON Schema for this endpoint.
+type DangerousPushStageRequest struct {
+	NodeID     string          `json:"node_id" jsonschema:"required,minLength=1"`
+	PluginName string          `json:"plugin_name" jsonschema:"required,minLength=1"`
+	Payload    json.RawMessage `json:"payload,omitempty" jsonschema:"description=Reserved for future use"`
+}
+
+// DangerousPushConfirmRequest is the wire type for
+// POST /api/v1/config/dangerous-push/{id}/confirm.
+// Exported so cmd/generate-schemas can emit a JSON Schema for this endpoint.
+type DangerousPushConfirmRequest struct {
+	ConfirmString string `json:"confirm_string" jsonschema:"required,minLength=1"`
+}
+
 // UpdateNodeGroupRequest is the body for PUT /api/v1/node-groups/:id.
 type UpdateNodeGroupRequest struct {
 	Name                string      `json:"name"`
