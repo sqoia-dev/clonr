@@ -310,6 +310,23 @@ func PluginMetadataByName(name string) (PluginMetadata, bool) {
 	return q.plugin.Metadata(), true
 }
 
+// PluginByName returns the Plugin instance registered under the given name.
+// Returns (nil, false) if no plugin with that name is registered.
+// Safe for concurrent use.
+//
+// Use this when you need the plugin instance itself — e.g. to perform an
+// interface assertion for the optional PayloadValidator extension point.
+// For metadata-only lookups, prefer PluginMetadataByName.
+func PluginByName(name string) (Plugin, bool) {
+	registryMu.RLock()
+	q, ok := plugins[name]
+	registryMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return q.plugin, true
+}
+
 // SortPluginsByPriorityForTest sorts a slice of Plugin values by ascending
 // EffectivePriority, using slice index as the tiebreaker (stable). This
 // exposes the same ordering logic used by the batch dispatcher so integration

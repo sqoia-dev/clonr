@@ -211,6 +211,113 @@ func TestSSSDPlugin_WatchedKeys(t *testing.T) {
 	}
 }
 
+// ─── ValidatePayload tests (Sprint 42 Day 3) ─────────────────────────────────
+
+// TestSSSDPlugin_ValidatePayload_HappyPath verifies that a well-formed payload
+// with valid ldap_uri and base_dn produces no violations.
+func TestSSSDPlugin_ValidatePayload_HappyPath(t *testing.T) {
+	p := SSSDPlugin{}
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "valid ldap URI and base_dn",
+			payload: `{"config":{"ldap_uri":"ldap://clustr.local:389","base_dn":"dc=cluster,dc=local"}}`,
+		},
+		{
+			name:    "valid ldaps URI",
+			payload: `{"config":{"ldap_uri":"ldaps://clustr.local:636","base_dn":"dc=hpc,dc=example,dc=com"}}`,
+		},
+		{
+			name:    "no config sub-object (stage request with only node_id+plugin_name)",
+			payload: `{"node_id":"node-1","plugin_name":"sssd"}`,
+		},
+		{
+			name:    "empty payload",
+			payload: ``,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			violations := p.ValidatePayload([]byte(tc.payload))
+			if len(violations) != 0 {
+				t.Errorf("expected no violations, got %+v", violations)
+			}
+		})
+	}
+}
+
+// TestSSSDPlugin_ValidatePayload_BadURI verifies that an invalid LDAP URI is rejected.
+func TestSSSDPlugin_ValidatePayload_BadURI(t *testing.T) {
+	p := SSSDPlugin{}
+	cases := []struct {
+		name    string
+		payload string
+		wantCode string
+	}{
+		{
+			name:     "http scheme instead of ldap",
+			payload:  `{"config":{"ldap_uri":"http://clustr.local:80","base_dn":"dc=cluster,dc=local"}}`,
+			wantCode: "invalid_uri",
+		},
+		{
+			name:     "empty host",
+			payload:  `{"config":{"ldap_uri":"ldap://","base_dn":"dc=cluster,dc=local"}}`,
+			wantCode: "invalid_uri",
+		},
+		{
+			name:     "no scheme",
+			payload:  `{"config":{"ldap_uri":"clustr.local:389","base_dn":"dc=cluster,dc=local"}}`,
+			wantCode: "invalid_uri",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			violations := p.ValidatePayload([]byte(tc.payload))
+			if len(violations) == 0 {
+				t.Fatalf("expected violations for %q, got none", tc.payload)
+			}
+			found := false
+			for _, v := range violations {
+				if v.Code == tc.wantCode && v.Path == "config.ldap_uri" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected violation with code=%q path=config.ldap_uri, got %+v", tc.wantCode, violations)
+			}
+		})
+	}
+}
+
+// TestSSSDPlugin_ValidatePayload_BadBaseDN verifies that a base_dn without dc= is rejected.
+func TestSSSDPlugin_ValidatePayload_BadBaseDN(t *testing.T) {
+	p := SSSDPlugin{}
+	payload := `{"config":{"ldap_uri":"ldap://clustr.local:389","base_dn":"ou=people,o=example"}}`
+	violations := p.ValidatePayload([]byte(payload))
+	if len(violations) == 0 {
+		t.Fatal("expected violations for base_dn without dc=, got none")
+	}
+	found := false
+	for _, v := range violations {
+		if v.Code == "invalid_base_dn" && v.Path == "config.base_dn" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected violation with code=invalid_base_dn path=config.base_dn, got %+v", violations)
+	}
+}
+
+// TestSSSDPlugin_ImplementsPayloadValidator is a compile-time + runtime
+// assertion that SSSDPlugin satisfies the config.PayloadValidator interface.
+func TestSSSDPlugin_ImplementsPayloadValidator(t *testing.T) {
+	var _ config.PayloadValidator = SSSDPlugin{}
+}
+
 // TestSSSDPlugin_ContentMatchesImperativePath verifies that the rendered
 // sssd.conf content is structurally identical to what the imperative deploy
 // path (deploy.renderSSSDConf) would produce. We compare the key structural
