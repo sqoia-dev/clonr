@@ -1,17 +1,18 @@
 package server
 
-// middleware_rbac_test.go — Sprint 41 Day 1
+// middleware_rbac_test.go — Sprint 41 Day 1 (P2 fix: shim integrated into requireRoleRBAC)
 //
-// Parity mode tests for the RBAC shim middleware (rbacDecisionMiddleware).
+// Parity mode tests for the RBAC dual-decision logging path.
 //
-// Contract being tested:
-//   1. A request the legacy requireRole path would Allow reaches the handler
-//      (200 OK) AND the rbac_decision=allow log line appears.
-//   2. A request the legacy path would Deny returns a legacy 403 AND the
-//      rbac_decision=deny log line appears (legacy is authoritative).
+// Contract being tested (post P2 fix):
+//   1. requireRoleRBAC logs rbac_decision=allow for requests the legacy gate allows.
+//   2. requireRoleRBAC logs rbac_decision=deny for requests the legacy gate denies.
+//      This is the bug Codex caught: the old rbacDecisionMiddleware placed AFTER
+//      requireRole never saw denied requests, so deny decisions were never logged.
+//   3. Bearer-token requests (no userID in context) skip the RBAC log silently.
 //
-// Day 1 parity rule: rbacDecisionMiddleware NEVER changes the HTTP response.
-// Only the log output changes.
+// Day 1 parity rule: requireRoleRBAC NEVER changes the HTTP response.
+// Only the log output changes relative to requireRole.
 //
 // The test verifies decisions by inspecting the zerolog output captured via
 // a bytes.Buffer writer injected into the logger for the duration of the test.
@@ -49,12 +50,13 @@ func injectSessionContext(r *http.Request, scope api.KeyScope, userID, role stri
 	return r.WithContext(ctx)
 }
 
-// TestMiddlewareRBAC_AllowDecisionLogged verifies that when the legacy
-// requireRole allows a request, the shim logs rbac_decision=allow.
+// TestRequireRole_LogsNewRBACAllowMatchingLegacyAllow verifies that when
+// requireRoleRBAC allows a request via the legacy gate, it also emits an
+// rbac_decision=allow log from the new RBAC path.
 //
-// The test uses an admin user who has a direct role_assignment for role-admin
-// in the DB. Both legacy and RBAC paths should allow the request.
-func TestMiddlewareRBAC_AllowDecisionLogged(t *testing.T) {
+// Happy path: admin user, admin role_assignment, admin-minimum route.
+// Both legacy and RBAC paths should allow the request.
+func TestRequireRole_LogsNewRBACAllowMatchingLegacyAllow(t *testing.T) {
 	database := newTestDB(t)
 	buf := captureLog(t)
 
@@ -77,11 +79,12 @@ func TestMiddlewareRBAC_AllowDecisionLogged(t *testing.T) {
 		t.Fatalf("seed role_assignment: %v", err)
 	}
 
-	// Build middleware chain: requireRole("admin") → rbacDecisionMiddleware → ok handler.
+	// Build middleware chain: requireRoleRBAC("admin", "node.reimage", db) → ok handler.
+	// The RBAC log fires before the legacy gate. Both should produce allow.
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chain := requireRole("admin")(rbacDecisionMiddleware(database, "node.reimage")(okHandler))
+	chain := requireRoleRBAC("admin", "node.reimage", database)(okHandler)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/x/reimage", nil)
 	req = injectSessionContext(req, api.KeyScopeAdmin, userID, "admin")
@@ -106,16 +109,19 @@ func TestMiddlewareRBAC_AllowDecisionLogged(t *testing.T) {
 	}
 }
 
-// TestMiddlewareRBAC_DenyDecisionLogged verifies that when the legacy
-// requireRole denies a request, the response is still 403 (legacy authoritative)
-// and the shim logs rbac_decision=deny.
+// TestRequireRole_LogsNewRBACDenyEvenWhenLegacyDenies is the regression test for
+// the Codex P2 bug: a request that the legacy gate denies must STILL produce an
+// rbac_decision=deny log line from the new RBAC path.
 //
-// The test uses a viewer user attempting an admin-only route.
-func TestMiddlewareRBAC_DenyDecisionLogged(t *testing.T) {
+// The old rbacDecisionMiddleware was stacked AFTER requireRole. Any request that
+// legacy denied never reached rbacDecisionMiddleware, so deny decisions were
+// invisible in the parity logs. requireRoleRBAC fixes this by evaluating the new
+// RBAC path BEFORE the legacy gate, so both outcomes are always captured.
+func TestRequireRole_LogsNewRBACDenyEvenWhenLegacyDenies(t *testing.T) {
 	database := newTestDB(t)
 	buf := captureLog(t)
 
-	// Seed a viewer user.
+	// Seed a viewer user — insufficient for an admin-minimum route.
 	userID := "u-rbac-deny-test"
 	_, err := database.SQL().Exec(
 		`INSERT INTO users (id, username, password_hash, role, must_change_password, created_at)
@@ -135,36 +141,29 @@ func TestMiddlewareRBAC_DenyDecisionLogged(t *testing.T) {
 		t.Fatalf("seed role_assignment: %v", err)
 	}
 
-	// Build middleware chain: requireRole("admin") → rbacDecisionMiddleware → ok handler.
-	// The legacy requireRole("admin") will reject the viewer and return 403 before
-	// the handler is reached. But rbacDecisionMiddleware is placed AFTER requireRole
-	// in the chain, so it only fires when the legacy layer passes.
-	//
-	// For this test we deliberately place rbacDecisionMiddleware BEFORE requireRole
-	// to capture the RBAC log even when the legacy layer would deny, so we can assert
-	// the log content. This simulates the production chain where both log entries
-	// are expected.
+	// Build middleware chain: requireRoleRBAC("admin", "node.reimage", db) → ok handler.
+	// The RBAC log fires BEFORE the legacy gate, so the deny decision is captured
+	// even though the legacy gate is about to reject the request.
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// shim first (logs), then legacy role check (denies).
-	chain := rbacDecisionMiddleware(database, "node.reimage")(requireRole("admin")(okHandler))
+	chain := requireRoleRBAC("admin", "node.reimage", database)(okHandler)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/x/reimage", nil)
-	// Viewer scope: the legacy requireRole("admin") checks userRoleFromContext and denies.
 	req = injectSessionContext(req, api.KeyScope("viewer"), userID, "viewer")
 	rr := httptest.NewRecorder()
 	chain.ServeHTTP(rr, req)
 
-	// Legacy path: 403 Forbidden (requireRole("admin") denies viewer).
+	// Legacy path: 403 Forbidden (viewer cannot reach admin-minimum route).
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d; body=%s", rr.Code, rr.Body.String())
 	}
 
-	// RBAC shim: log must contain rbac_decision=deny.
+	// RBAC shim: log must contain rbac_decision=deny — this is the regression check.
+	// Before the P2 fix, this assertion would fail because the shim never saw the request.
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "rbac_decision") {
-		t.Errorf("no rbac_decision in log output; got: %s", logOutput)
+		t.Errorf("no rbac_decision in log output; got: %s — deny decisions must be captured before the legacy gate rejects", logOutput)
 	}
 	if !strings.Contains(logOutput, "deny") {
 		t.Errorf("expected deny in log; got: %s", logOutput)
@@ -172,7 +171,8 @@ func TestMiddlewareRBAC_DenyDecisionLogged(t *testing.T) {
 }
 
 // TestMiddlewareRBAC_BearerTokenSkipsLog verifies that Bearer-token requests
-// (no userID in context) skip the RBAC log silently and pass through.
+// (no userID in context) skip the RBAC log silently and the legacy gate handles
+// them normally (admin Bearer keys pass, no RBAC log emitted).
 func TestMiddlewareRBAC_BearerTokenSkipsLog(t *testing.T) {
 	database := newTestDB(t)
 	buf := captureLog(t)
@@ -180,20 +180,21 @@ func TestMiddlewareRBAC_BearerTokenSkipsLog(t *testing.T) {
 	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	chain := rbacDecisionMiddleware(database, "node.reimage")(okHandler)
+	chain := requireRoleRBAC("admin", "node.reimage", database)(okHandler)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/x/reimage", nil)
-	// Bearer token: scope set, but NO userID in context.
+	// Bearer token: scope set to admin, but NO userID in context.
+	// The legacy gate passes admin Bearer keys. No RBAC log should be emitted.
 	ctx := context.WithValue(req.Context(), ctxKeyScope{}, api.KeyScopeAdmin)
 	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 	chain.ServeHTTP(rr, req)
 
-	// Handler should be reached (200 OK).
+	// Legacy gate passes admin Bearer key: 200 OK.
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
-	// No RBAC log should have been emitted.
+	// No RBAC log should have been emitted (no userID → skip RBAC path).
 	if strings.Contains(buf.String(), "rbac_decision") {
 		t.Errorf("unexpected rbac_decision log for bearer token request: %s", buf.String())
 	}

@@ -19,9 +19,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
+	"github.com/sqoia-dev/clustr/internal/auth"
+	"github.com/sqoia-dev/clustr/internal/db"
 	"github.com/sqoia-dev/clustr/internal/metrics"
 	"github.com/sqoia-dev/clustr/pkg/api"
-	"github.com/sqoia-dev/clustr/internal/db"
 )
 
 // imageAccessCacheEntry is a single cached result from requireImageAccess.
@@ -335,6 +336,83 @@ func requireRole(minimum string) func(http.Handler) http.Handler {
 				return
 			}
 
+			writeForbidden(w, "insufficient permissions")
+		})
+	}
+}
+
+// requireRoleRBAC is requireRole with integrated dual-decision logging.
+// It resolves the new RBAC path (auth.ResolveRoles + auth.Allow) alongside the
+// legacy role-rank check and logs both decisions before delegating to the legacy
+// gate. The legacy gate is authoritative — this function makes NO behavior change
+// relative to requireRole. The RBAC log is the parity dataset used before Day 3
+// cutover.
+//
+// Use this on routes where RBAC parity logging is desired. On Day 3, when the
+// legacy gate is removed, this function can be simplified or replaced by
+// requirePermission.
+//
+// Unlike rbacDecisionMiddleware (deleted in Sprint 41 P2 fix), this integrates
+// directly into the legacy gate so deny decisions are always captured, regardless
+// of middleware ordering.
+func requireRoleRBAC(minimum, verb string, database *db.DB) func(http.Handler) http.Handler {
+	roleRank := map[string]int{
+		"viewer":   0,
+		"readonly": 1,
+		"pi":       2,
+		"operator": 3,
+		"admin":    4,
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := scopeFromContext(r.Context())
+			if scope == "" {
+				writeUnauthorized(w, "authentication required")
+				return
+			}
+
+			// ── New RBAC path (parity mode, non-authoritative) ──────────────
+			// Resolve roles and log the RBAC decision for every request,
+			// regardless of whether the legacy gate will allow or deny it.
+			// This captures both allow and deny decisions in the parity dataset,
+			// fixing the ordering bug where rbacDecisionMiddleware placed AFTER
+			// requireRole would never see legacy-denied requests.
+			if userID := userIDFromContext(r.Context()); userID != "" {
+				resolution, err := auth.ResolveRoles(r.Context(), database, userID)
+				if err != nil {
+					// Resolution failure in parity mode is non-fatal: log and continue.
+					// On Day 3 this becomes a hard fail.
+					log.Warn().
+						Err(err).
+						Str("user_id", userID).
+						Str("verb", verb).
+						Msg("rbac shim: ResolveRoles failed (parity mode — legacy auth still authoritative)")
+				} else {
+					decision, reason := rbacDecision(resolution, verb)
+					log.Warn().
+						Str("rbac_decision", decision).
+						Str("rbac_reason", reason).
+						Str("user_id", userID).
+						Str("verb", verb).
+						Str("route", r.Method+" "+r.URL.Path).
+						Bool("parity_mode", true).
+						Msg("rbac shim: dual-decision log (Day 1 — legacy auth still authoritative)")
+				}
+			}
+
+			// ── Legacy path (authoritative) ─────────────────────────────────
+			if role := userRoleFromContext(r.Context()); role != "" {
+				if roleRank[role] < roleRank[minimum] {
+					writeForbidden(w, "insufficient role: requires "+minimum+" or higher")
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			if scope == api.KeyScopeAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
 			writeForbidden(w, "insufficient permissions")
 		})
 	}
