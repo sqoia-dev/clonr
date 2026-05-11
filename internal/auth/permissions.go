@@ -33,4 +33,16 @@ const (
 	//
 	// See docs/design/sprint-41-auth-safety.md §3.6 and §4.2.
 	VerbConfigDangerousPush = "config.dangerous_push"
+
+	// VerbBackupList is required to list plugin backup snapshots
+	// (GET /api/v1/backups). Operators and admins hold this by default via the
+	// built-in admin wildcard; restrict to admins-only by removing from operator
+	// role assignments.
+	VerbBackupList = "backup.list"
+
+	// VerbBackupRestore is required to initiate a backup restore
+	// (POST /api/v1/backups/{id}/restore). Treated as a dangerous operation
+	// because it can re-introduce a previously broken config. By default only
+	// the built-in admin role holds this verb ("*" wildcard).
+	VerbBackupRestore = "backup.restore"
 )
