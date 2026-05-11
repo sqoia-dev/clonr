@@ -121,6 +121,12 @@ const (
 	// See docs/design/sprint-41-auth-safety.md §7.
 	AuditActionConfigDangerousStaged    = "config.dangerous.confirm_required"
 	AuditActionConfigDangerousConfirmed = "config.dangerous.confirmed"
+
+	// Sprint 41 Day 4 — plugin backup and restore events.
+	// config.backup.created is intentionally not written by default — every
+	// plugin push would emit one and audit log volume would balloon.
+	// config.restore is always written (operator-initiated, low-frequency).
+	AuditActionConfigRestore = "config.restore"
 )
 
 // AuditRecord is one row in audit_log.
