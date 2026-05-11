@@ -64,12 +64,19 @@ func SSSDWatchKey() string { return sssdWatchKey }
 // The confirmation gate is feature-flagged behind CLUSTR_DANGEROUS_GATE_ENABLED=1;
 // when the flag is off the regular push path operates as before (no gate).
 //
-// Backup=nil on Day 3; wired in Sprint 41 Day 4.
+// Backup is wired in Sprint 41 Day 4. Paths cover the full files SSSD reads on
+// startup: sssd.conf (main config), conf.d/ (drop-in overrides), and the SSSD
+// ldb caches under /var/lib/sss/db/ (corrupted caches can cause sssd to fail to
+// start even with a correct sssd.conf). MaxBackups=10 keeps the last 10 renders.
 func (SSSDPlugin) Metadata() config.PluginMetadata {
 	return config.PluginMetadata{
 		Priority:     80,
 		Dangerous:    true,
 		DangerReason: "SSSD restart can sever active operator SSH sessions if PAM stack is broken; a misrendered sssd.conf breaks login for all LDAP users and requires console access to recover",
+		Backup: &config.BackupSpec{
+			Paths:   []string{"/etc/sssd/sssd.conf", "/etc/sssd/conf.d/", "/var/lib/sss/db/"},
+			RetainN: 10,
+		},
 	}
 }
 
