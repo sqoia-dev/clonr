@@ -44,20 +44,22 @@ type dirtyEvent struct {
 	state   ClusterState
 }
 
-// pluginQueue is the per-plugin coalesce queue.
+// pluginQueue holds the per-plugin state used by the shared batch coordinator.
 //
-// THREAD-SAFETY: mu guards all fields. The single render goroutine (run by
-// start) is the only writer to the accumulated state; Notify is the only
-// writer to pending. Both hold mu during mutation.
+// Dispatch is now managed by globalBatch (notifyBatch → fireBatch) rather than
+// per-plugin timers, so pluginQueue is a lightweight struct that carries only
+// what the batch runner needs: the plugin itself, the alert writer for Render
+// error surfacing, and the registration sequence number for stable-sort tiebreaking.
+//
+// THREAD-SAFETY: render is called sequentially within each batch; no mutex is
+// needed on pluginQueue itself. The globalBatch.mu guards the set of queues
+// that will be dispatched in the next batch.
 type pluginQueue struct {
-	mu      sync.Mutex
-	plugin  Plugin
-	pending []dirtyEvent
-	timer   *time.Timer
+	plugin Plugin
 	// alerts is the system-alert store used to surface Render failures.
 	// May be nil in tests that don't exercise the alert path.
 	alerts AlertWriter
-	// regOrder is the registration sequence number, used for stable sort
+	// regOrder is the registration sequence number used for stable sort
 	// tiebreaking when two plugins share the same effective priority.
 	regOrder int
 }
@@ -177,11 +179,10 @@ func Notify(changed []string, state ClusterState) {
 	notifyBatch(affected, ev)
 }
 
-// Stop drains all in-flight coalesce timers and cancels pending renders. It
-// is a best-effort shutdown — it does not wait for in-progress Render calls
-// to complete. Pass the server context so renders can be cancelled.
+// Stop drains the in-flight batch coalesce timer and cancels pending renders.
+// It is a best-effort shutdown — it does not wait for in-progress Render calls
+// to complete.
 func Stop() {
-	// Drain the shared batch queue first.
 	globalBatch.mu.Lock()
 	if globalBatch.timer != nil {
 		globalBatch.timer.Stop()
@@ -190,68 +191,9 @@ func Stop() {
 	globalBatch.queues = nil
 	globalBatch.pending = nil
 	globalBatch.mu.Unlock()
-
-	// Drain any per-plugin timers (legacy path, now only reachable via enqueue
-	// if callers bypass Notify; kept for safety).
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-
-	for _, q := range plugins {
-		q.mu.Lock()
-		if q.timer != nil {
-			q.timer.Stop()
-			q.timer = nil
-		}
-		q.pending = nil
-		q.mu.Unlock()
-	}
 }
 
-// ─── per-plugin coalesce logic ────────────────────────────────────────────────
-
-// enqueue appends ev to the queue and (re)starts the debounce timer.
-func (q *pluginQueue) enqueue(ev dirtyEvent) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	q.pending = append(q.pending, ev)
-
-	if q.timer != nil {
-		q.timer.Reset(coalesceWindow)
-	} else {
-		q.timer = time.AfterFunc(coalesceWindow, func() {
-			q.fire()
-		})
-	}
-}
-
-// fire is called by the AfterFunc goroutine after the debounce window expires.
-// It drains the pending queue, coalesces all events, and calls Render once.
-func (q *pluginQueue) fire() {
-	q.mu.Lock()
-	pending := q.pending
-	q.pending = nil
-	q.timer = nil
-	q.mu.Unlock()
-
-	if len(pending) == 0 {
-		return
-	}
-
-	// Coalesce: union of all changed keys, latest state snapshot.
-	changedSet := map[string]struct{}{}
-	var latestState ClusterState
-	for i, ev := range pending {
-		for _, k := range ev.changed {
-			changedSet[k] = struct{}{}
-		}
-		if i == len(pending)-1 {
-			latestState = ev.state
-		}
-	}
-
-	q.render(context.Background(), latestState)
-}
+// ─── per-plugin render ────────────────────────────────────────────────────────
 
 // render calls the plugin's Render with a hard timeout, logs failures, and
 // writes a system_alert on error — without blocking other plugins.
@@ -362,7 +304,6 @@ type batchState struct {
 	queues  map[*pluginQueue]struct{} // deduplicated set of affected plugin queues
 	pending []dirtyEvent
 	timer   *time.Timer
-	alerts  AlertWriter
 }
 
 // globalBatch is the single shared batch coalescer. All Notify calls funnel
