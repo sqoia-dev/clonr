@@ -92,6 +92,8 @@ func (h *UsersHandler) HandleGetUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleList handles GET /api/v1/admin/users.
+// Accepts optional ?page=N&per_page=M for pagination (backward-compat: absent
+// params return all records with total, page=1, per_page=total).
 func (h *UsersHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	users, err := h.DB.ListUsers(r.Context())
 	if err != nil {
@@ -101,11 +103,26 @@ func (h *UsersHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	total := len(users)
+	rawPage, rawPerPage, paging := parsePaginationQuery(r)
+	if paging {
+		start, end, p := paginate(total, rawPage, rawPerPage)
+		users = users[start:end]
+		out := make([]userResponse, len(users))
+		for i, u := range users {
+			out[i] = toUserResponse(u)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"users": out, "total": total,
+			"page": p.page, "per_page": p.perPage,
+		})
+		return
+	}
 	out := make([]userResponse, len(users))
 	for i, u := range users {
 		out[i] = toUserResponse(u)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+	writeJSON(w, http.StatusOK, map[string]any{"users": out, "total": total})
 }
 
 // createUserRequest is the body for POST /api/v1/admin/users.
@@ -507,6 +524,7 @@ func (h *UsersHandler) HandleSetGroupMemberships(w http.ResponseWriter, r *http.
 
 // HandleListWithMemberships handles GET /api/v1/admin/users with group memberships included.
 // This replaces HandleList for the settings UI to avoid a second round-trip.
+// Accepts optional ?page=N&per_page=M for pagination.
 func (h *UsersHandler) HandleListWithMemberships(w http.ResponseWriter, r *http.Request) {
 	users, err := h.DB.ListUsers(r.Context())
 	if err != nil {
@@ -534,6 +552,26 @@ func (h *UsersHandler) HandleListWithMemberships(w http.ResponseWriter, r *http.
 		GroupIDs []string `json:"group_ids"`
 	}
 
+	total := len(users)
+	rawPage, rawPerPage, paging := parsePaginationQuery(r)
+	if paging {
+		start, end, p := paginate(total, rawPage, rawPerPage)
+		users = users[start:end]
+		out := make([]userWithMemberships, len(users))
+		for i, u := range users {
+			gids := membershipMap[u.ID]
+			if gids == nil {
+				gids = []string{}
+			}
+			out[i] = userWithMemberships{userResponse: toUserResponse(u), GroupIDs: gids}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"users": out, "total": total,
+			"page": p.page, "per_page": p.perPage,
+		})
+		return
+	}
+
 	out := make([]userWithMemberships, len(users))
 	for i, u := range users {
 		gids := membershipMap[u.ID]
@@ -545,7 +583,7 @@ func (h *UsersHandler) HandleListWithMemberships(w http.ResponseWriter, r *http.
 			GroupIDs:     gids,
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+	writeJSON(w, http.StatusOK, map[string]any{"users": out, "total": total})
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
