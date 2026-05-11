@@ -1008,6 +1008,18 @@ func (s *Server) buildRouter() chi.Router {
 		serverURL = "http://localhost:" + port
 	}
 
+	// JSON-SCHEMA registry — compiled once at startup, used by per-route middleware.
+	// Graceful fallback: if the embedded schemas can't be compiled (e.g. corrupt
+	// embed), log the error and continue with an empty (no-op) registry rather than
+	// refusing to start.
+	schemaReg, schemaRegErr := newSchemaRegistry()
+	if schemaRegErr != nil {
+		log.Error().Err(schemaRegErr).Msg("server: failed to build JSON-SCHEMA registry (validation disabled)")
+		schemaReg = newEmptySchemaRegistry()
+	} else {
+		log.Info().Int("routes", len(schemaReg.compiled)).Msg("server: JSON-SCHEMA registry built")
+	}
+
 	// Handler instances.
 	apiKeysH := s.buildAPIKeysHandler()
 	usersH := s.buildUsersHandler()
@@ -1762,7 +1774,7 @@ func (s *Server) buildRouter() chi.Router {
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
 			// GET /admin/users includes group_ids for each user (S3-3).
 			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleListWithMemberships)
-			r.With(requireRole("admin")).Post("/admin/users", usersH.HandleCreate)
+			r.With(requireRole("admin"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/admin/users")).Post("/admin/users", usersH.HandleCreate)
 			r.With(requireRole("admin")).Put("/admin/users/{id}", usersH.HandleUpdate)
 			r.With(requireRole("admin")).Post("/admin/users/{id}/reset-password", usersH.HandleResetPassword)
 			r.With(requireRole("admin")).Post("/admin/users/{id}/enable", usersH.HandleEnable)
@@ -1770,7 +1782,7 @@ func (s *Server) buildRouter() chi.Router {
 			// GAP-21: /api/v1/users CRUD aliases — Sprint 3 docs and the walkthrough
 			// expect these paths; /admin/users is the canonical path but /users also works.
 			r.With(requireRole("admin")).Get("/users", usersH.HandleListWithMemberships)
-			r.With(requireRole("admin")).Post("/users", usersH.HandleCreate)
+			r.With(requireRole("admin"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/users")).Post("/users", usersH.HandleCreate)
 			r.With(requireRole("admin")).Get("/users/{id}", usersH.HandleGetUser)
 			r.With(requireRole("admin")).Put("/users/{id}", usersH.HandleUpdate)
 			r.With(requireRole("admin")).Delete("/users/{id}", usersH.HandleDelete)
@@ -1891,7 +1903,7 @@ func (s *Server) buildRouter() chi.Router {
 			r.Get("/nodes/connected", clientdH.GetConnectedNodes)
 			r.Get("/nodes/unassigned", nodes.ListUnassignedNodes)
 			r.Get("/nodes", nodes.ListNodes)
-			r.Post("/nodes", nodes.CreateNode)
+			r.With(jsonSchemaMiddleware(schemaReg, "POST /api/v1/nodes")).Post("/nodes", nodes.CreateNode)
 			// Sprint 4 BULK-1: batch create endpoint (must be before /{id}).
 			r.Post("/nodes/batch", nodes.BatchCreateNodes)
 			r.Get("/nodes/{id}", nodes.GetNode)
@@ -2308,9 +2320,9 @@ func (s *Server) buildRouter() chi.Router {
 					return s.renderPluginForDangerousPush(ctx, pluginName, nodeID)
 				},
 			}
-			r.With(requireScope(true)).With(requirePermission(s.db, "config.dangerous_push")).
+			r.With(requireScope(true), requirePermission(s.db, "config.dangerous_push"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/config/dangerous-push")).
 				Post("/config/dangerous-push", dangerousPushH.HandleStage)
-			r.With(requireScope(true)).With(requirePermission(s.db, "config.dangerous_push")).
+			r.With(requireScope(true), requirePermission(s.db, "config.dangerous_push"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/config/dangerous-push/{pending_id}/confirm")).
 				Post("/config/dangerous-push/{pending_id}/confirm", dangerousPushH.HandleConfirm)
 			log.Info().Msg("dangerous-push gate enabled (CLUSTR_DANGEROUS_GATE_ENABLED=1)")
 		}
