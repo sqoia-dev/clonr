@@ -6,13 +6,15 @@
     "CreateNodeConfigRequest": {
       "properties": {
         "hostname": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "fqdn": {
           "type": "string"
         },
         "primary_mac": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "interfaces": {
           "items": {
@@ -55,7 +57,11 @@
         }
       },
       "additionalProperties": false,
-      "type": "object"
+      "type": "object",
+      "required": [
+        "hostname",
+        "primary_mac"
+      ]
     },
     "InterfaceConfig": {
       "properties": {
