@@ -137,10 +137,19 @@ func ResolveRoles(ctx context.Context, database *db.DB, userID string) (*Resolut
 //     "node.read", the match succeeds.
 //
 // The query verb must be an exact dot-delimited resource.action string.
-// Querying with a wildcard (e.g. "node.*") returns false — handlers must
-// ask for exact verbs to prevent accidental over-grants.
+// Querying with a wildcard (e.g. "node.*") always returns false — callers
+// must ask for concrete verbs to prevent accidental over-grants. Wildcards
+// are only valid on the stored-permission side, never in the query.
 func Allow(r *Resolution, verb string) bool {
 	if r == nil {
+		return false
+	}
+	// Guard: reject wildcard query verbs before any permission lookup.
+	// A stored permission may contain "*" (e.g. "node.*"), but a caller asking
+	// Allow(r, "node.*") is always a bug — it would silently over-grant if that
+	// key happened to exist in Permissions. Return false unconditionally so the
+	// caller is forced to use a concrete verb.
+	if strings.Contains(verb, "*") {
 		return false
 	}
 	if r.IsAdmin {
