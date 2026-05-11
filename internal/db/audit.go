@@ -122,6 +122,24 @@ const (
 	AuditActionConfigDangerousStaged    = "config.dangerous.confirm_required"
 	AuditActionConfigDangerousConfirmed = "config.dangerous.confirmed"
 
+	// Sprint 41 hygiene — dangerous-push lifecycle soak metrics.
+	// These five actions give a clean histogram from the audit log to measure
+	// gate usage before flipping CLUSTR_DANGEROUS_GATE_ENABLED on by default.
+	//
+	//   dangerous_push.staged     — row created; operator must confirm
+	//   dangerous_push.confirmed  — operator confirmed; push delivered
+	//   dangerous_push.mismatch   — operator typed the wrong confirm string
+	//                               (new_value includes attempt_count)
+	//   dangerous_push.locked_out — attempt_count reached 3; row force-consumed
+	//   dangerous_push.expired    — janitor deleted an expired-but-unconfirmed row
+	//   dangerous_push.janitor    — periodic GC sweep summary (count > 0 only)
+	AuditActionDangerousPushStaged    = "dangerous_push.staged"
+	AuditActionDangerousPushConfirmed = "dangerous_push.confirmed"
+	AuditActionDangerousPushMismatch  = "dangerous_push.mismatch"
+	AuditActionDangerousPushLockedOut = "dangerous_push.locked_out"
+	AuditActionDangerousPushExpired   = "dangerous_push.expired"
+	AuditActionDangerousPushJanitor   = "dangerous_push.janitor"
+
 	// Sprint 41 Day 4 — plugin backup and restore events.
 	// config.backup.created is intentionally not written by default — every
 	// plugin push would emit one and audit log volume would balloon.
