@@ -8,8 +8,6 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +19,7 @@ import (
 )
 
 //go:embed migrations/*.sql
+//go:embed migrations/lookup.yml
 var migrationsFS embed.FS
 
 // ErrExpired is returned by LookupAPIKey when a key exists but its TTL has elapsed.
@@ -262,43 +261,76 @@ func (db *DB) migrate() error {
 		db.sql.Exec(`UPDATE schema_migrations SET name = ? WHERE name = ?`, newName, oldName)
 	}
 
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	// MIGRATE-CHAIN: load and validate lookup.yml before applying any migrations.
+	// This ensures the on-disk SQL files match the declared manifest, and that
+	// the requires graph has no cycles or unsatisfied references.
+	lookupEntries, err := loadDBLookup()
 	if err != nil {
-		return fmt.Errorf("read migrations dir: %w", err)
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := validateDBLookup(lookupEntries); err != nil {
+		return fmt.Errorf("migrate: %w", err)
 	}
 
-	// Sort by filename to guarantee ordering.
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
+	// Build a set of already-applied migration names for fast lookup.
+	appliedRows, err := db.sql.Query(`SELECT name FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("migrate: query applied migrations: %w", err)
+	}
+	applied := make(map[string]bool)
+	for appliedRows.Next() {
+		var name string
+		if err := appliedRows.Scan(&name); err != nil {
+			appliedRows.Close()
+			return fmt.Errorf("migrate: scan applied migration: %w", err)
+		}
+		applied[name] = true
+	}
+	appliedRows.Close()
+	if err := appliedRows.Err(); err != nil {
+		return fmt.Errorf("migrate: iterate applied migrations: %w", err)
+	}
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
+	// Track which IDs have been applied (for requires checking).
+	appliedIDs := make(map[int]bool)
+	for _, entry := range lookupEntries {
+		if applied[entry.Filename] {
+			appliedIDs[entry.ID] = true
+		}
+	}
+
+	// Apply migrations in lookup.yml declaration order.
+	// The lookup validator has already confirmed:
+	//   - every file on disk is in the manifest
+	//   - every manifest entry has a file on disk
+	//   - no duplicate IDs
+	//   - no cycles
+	// So here we only need to check requires are satisfied before applying.
+	for _, entry := range lookupEntries {
+		if applied[entry.Filename] {
+			continue // already applied on a previous run
 		}
 
-		var count int
-		if err := db.sql.QueryRow(
-			`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, entry.Name(),
-		).Scan(&count); err != nil {
-			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
-		}
-		if count > 0 {
-			continue // already applied
+		// Check requires are satisfied before applying this migration.
+		for _, reqID := range entry.Requires {
+			if !appliedIDs[reqID] {
+				return fmt.Errorf("migrate: migration %d (%s) requires id %d which has not been applied yet",
+					entry.ID, entry.Filename, reqID)
+			}
 		}
 
-		sql, err := migrationsFS.ReadFile("migrations/" + entry.Name())
+		sqlBytes, err := migrationsFS.ReadFile("migrations/" + entry.Filename)
 		if err != nil {
-			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("read migration %s: %w", entry.Filename, err)
 		}
 
 		tx, err := db.sql.Begin()
 		if err != nil {
-			return fmt.Errorf("begin transaction for migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("begin transaction for migration %s: %w", entry.Filename, err)
 		}
-		if _, err := tx.Exec(string(sql)); err != nil {
+		if _, err := tx.Exec(string(sqlBytes)); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("apply migration %s: %w", entry.Filename, err)
 		}
 		// Q6b — runtime FK-violation guard.
 		//
@@ -316,20 +348,23 @@ func (db *DB) migrate() error {
 		// PRAGMA foreign_key_check returns one row per violating ROWID:
 		//   (table, rowid, parent, fkid)
 		// We collect them into a flat list for the error message.
-		if violErr := assertNoFKViolations(tx, entry.Name()); violErr != nil {
+		if violErr := assertNoFKViolations(tx, entry.Filename); violErr != nil {
 			tx.Rollback()
 			return violErr
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
-			entry.Name(), time.Now().Unix(),
+			entry.Filename, time.Now().Unix(),
 		); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("record migration %s: %w", entry.Filename, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("commit migration %s: %w", entry.Filename, err)
 		}
+
+		appliedIDs[entry.ID] = true
+		fmt.Printf("db: applied migration %d %s — %s\n", entry.ID, entry.Filename, entry.Description)
 	}
 	return nil
 }
