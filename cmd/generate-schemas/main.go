@@ -90,6 +90,11 @@ var schemaTypes = []reflect.Type{
 	// Sprint 36: reactive config ANCHORS types.
 	reflect.TypeOf(api.InstallInstruction{}),
 	reflect.TypeOf(api.AnchorPair{}),
+	// Sprint 42 Day 2: JSON-SCHEMA validation request types.
+	reflect.TypeOf(api.CreateNodeConfigRequest{}),
+	reflect.TypeOf(api.CreateUserRequest{}),
+	reflect.TypeOf(api.DangerousPushStageRequest{}),
+	reflect.TypeOf(api.DangerousPushConfirmRequest{}),
 }
 
 func main() {
@@ -104,6 +109,11 @@ func main() {
 	r := jsonschema.Reflector{
 		AllowAdditionalProperties: false,
 		DoNotReference:            false,
+		// RequiredFromJSONSchemaTags: only fields tagged `jsonschema:"required"`
+		// are placed in the "required" array. Without this flag invopop marks all
+		// non-omitempty fields as required, which is too strict for request structs
+		// where many fields are optional but not tagged with omitempty.
+		RequiredFromJSONSchemaTags: true,
 		// Use the Go type name as the schema $id so references are stable.
 		Namer: func(t reflect.Type) string {
 			return t.Name()
