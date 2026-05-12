@@ -30,7 +30,7 @@ describe("apiFetch -- 401 handling", () => {
     const dispatched: Event[] = []
     window.addEventListener(SESSION_EXPIRED_EVENT, (e) => dispatched.push(e))
 
-    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("401")
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("HTTP 401")
     expect(dispatched).toHaveLength(1)
     expect(dispatched[0].type).toBe(SESSION_EXPIRED_EVENT)
   })
@@ -47,7 +47,7 @@ describe("apiFetch -- 401 handling", () => {
     const dispatched: Event[] = []
     window.addEventListener(SESSION_EXPIRED_EVENT, (e) => dispatched.push(e))
 
-    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("500")
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("HTTP 500")
     expect(dispatched).toHaveLength(0)
   })
 
@@ -140,16 +140,66 @@ describe("apiFetch -- 401 handling", () => {
     )
   })
 
-  it("should throw with status text on 500", async () => {
+  it("should throw with HTTP status prefix and body on non-ok response", async () => {
     vi.stubGlobal("fetch", vi.fn(() =>
       Promise.resolve({
         ok: false,
-        status: 500,
-        text: () => Promise.resolve("internal server error"),
+        status: 503,
+        text: () => Promise.resolve("service unavailable"),
       })
     ))
 
-    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("500: internal server error")
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("HTTP 503: service unavailable")
+  })
+})
+
+// ---- UX-13: HTTP status in error message ------------------------------------
+
+describe("apiFetch -- HTTP status in error message (UX-13)", () => {
+  beforeEach(() => { vi.resetAllMocks() })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it("includes HTTP status code prefix on non-JSON error body", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        text: () => Promise.resolve("Service Unavailable"),
+      })
+    ))
+
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("HTTP 503: Service Unavailable")
+  })
+
+  it("includes HTTP status code prefix even when body is empty", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 502,
+        text: () => Promise.resolve(""),
+      })
+    ))
+
+    await expect(apiFetch("/api/v1/nodes")).rejects.toThrow("HTTP 502:")
+  })
+
+  it("error message starts with 'HTTP ' prefix so callers can detect it", async () => {
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve("not found"),
+      })
+    ))
+
+    let thrown: Error | undefined
+    try {
+      await apiFetch("/api/v1/nodes")
+    } catch (e) {
+      thrown = e as Error
+    }
+    expect(thrown).toBeDefined()
+    expect(thrown!.message).toMatch(/^HTTP \d+:/)
   })
 })
 
