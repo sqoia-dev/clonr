@@ -475,30 +475,6 @@ func (n *Notifier) NotifyMemberRemoved(ctx context.Context, to, username, groupN
 		NodeGroupMembershipData{Username: username, GroupName: groupName, PIName: piName, Action: "removed"})
 }
 
-// PIRequestData is the template data for PI request approved/denied events.
-type PIRequestData struct {
-	Username    string
-	GroupName   string
-	Action      string // "approved" or "denied"
-	AdminName   string
-}
-
-// NotifyPIRequestApproved sends the pi_request_approved notification to the PI.
-func (n *Notifier) NotifyPIRequestApproved(ctx context.Context, to, username, groupName, adminName string) {
-	n.send(ctx, "pi_request_approved", []string{to},
-		"Member request approved: "+username+" → "+groupName,
-		"pi_request_approved",
-		PIRequestData{Username: username, GroupName: groupName, Action: "approved", AdminName: adminName})
-}
-
-// NotifyPIRequestDenied sends the pi_request_denied notification to the PI.
-func (n *Notifier) NotifyPIRequestDenied(ctx context.Context, to, username, groupName, adminName string) {
-	n.send(ctx, "pi_request_denied", []string{to},
-		"Member request denied: "+username+" → "+groupName,
-		"pi_request_denied",
-		PIRequestData{Username: username, GroupName: groupName, Action: "denied", AdminName: adminName})
-}
-
 // AnnualReviewData is the template data for the annual review notification.
 type AnnualReviewData struct {
 	PIName      string

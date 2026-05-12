@@ -183,12 +183,21 @@ func (e *Engine) Run(ctx context.Context, req Request, actorID, actorLabel strin
 		return nil, fmt.Errorf("auto-policy[step=%s]: %w (rolled back NodeGroup %s)", step, stepErr, group.ID)
 	}
 
-	// ─── Step 2: Assign the PI as owner ──────────────────────────────────────
-	if err := e.DB.SetNodeGroupPI(ctx, group.ID, req.PIUserID); err != nil {
-		return rollback("assign_pi", err)
+	// ─── Step 2: Assign the PI as owner via project_managers ────────────────
+	// node_groups.pi_user_id was dropped in migration 103; ownership is now
+	// expressed via the project_managers table. Non-fatal: the group is
+	// functional without a manager row; the PI can add one via the portal.
+	if req.PIUserID != "" {
+		if _, pmErr := e.DB.AddProjectManager(ctx, group.ID, req.PIUserID, req.PIUserID); pmErr != nil {
+			log.Warn().Err(pmErr).
+				Str("group_id", group.ID).
+				Str("pi_user_id", req.PIUserID).
+				Msg("auto-policy: AddProjectManager failed (non-fatal)")
+		} else {
+			log.Info().Str("group_id", group.ID).Str("pi_user_id", req.PIUserID).
+				Msg("auto-policy: PI added as project manager")
+		}
 	}
-	log.Info().Str("group_id", group.ID).Str("pi_user_id", req.PIUserID).
-		Msg("auto-policy: PI assigned")
 
 	// ─── Step 3: Queue LDAP sync (G1) ────────────────────────────────────────
 	ldapGroupDN := ""

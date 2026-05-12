@@ -565,36 +565,31 @@ func TestMigration103_RepairUsersOldDangling(t *testing.T) {
 		t.Fatalf("node_groups table not found or empty schema")
 	}
 
-	// 4. Rebuilt tables are still present and have a valid REFERENCES users(id).
-	//
-	// Per the founder's revised scope (escape clause invoked: dropping these
-	// tables would have required wiping a large body of still-live Go code that
-	// is identity-model redesign by another name), 103 REBUILDS these tables
-	// rather than dropping them.  The rebuild produces fresh sqlite_master FK
-	// entries pointing at the live `users` table, which is what unblocks the
-	// boot handler on legacy DBs that suffered the _users_old rewrite.
-	rebuilt := []string{"pi_member_requests", "pi_expansion_requests", "user_group_memberships"}
-	for _, name := range rebuilt {
+	// 4. Migration 119 (PI-CODE-WIPE, Sprint 43-prime Day 2) dropped
+	// pi_member_requests and pi_expansion_requests. user_group_memberships is
+	// still present (it was rebuilt by 103 and NOT dropped by 119).
+	// Assert the expected final state after the full migration chain.
+	droppedByM119 := []string{"pi_member_requests", "pi_expansion_requests"}
+	for _, name := range droppedByM119 {
 		var n int
 		if err := raw.QueryRow(
 			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
 		).Scan(&n); err != nil {
 			t.Fatalf("query sqlite_master for %s: %v", name, err)
 		}
-		if n != 1 {
-			t.Errorf("table %s should be present after migration 103 rebuild, count=%d", name, n)
+		if n != 0 {
+			t.Errorf("table %s should be ABSENT after migration 119 drop, count=%d", name, n)
 		}
-		// Confirm the schema text mentions a fresh REFERENCES users(id).
-		var schema string
-		if err := raw.QueryRow(
-			`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, name,
-		).Scan(&schema); err != nil {
-			t.Fatalf("read schema for %s: %v", name, err)
-		}
-		if !strings.Contains(schema, "REFERENCES users(id)") &&
-			!strings.Contains(schema, "REFERENCES \"users\"") {
-			t.Errorf("table %s schema missing fresh REFERENCES users(id): %s", name, schema)
-		}
+	}
+	// user_group_memberships was rebuilt by 103 and is not touched by 119.
+	var ugmCount int
+	if err := raw.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='user_group_memberships'`,
+	).Scan(&ugmCount); err != nil {
+		t.Fatalf("query sqlite_master for user_group_memberships: %v", err)
+	}
+	if ugmCount != 1 {
+		t.Errorf("user_group_memberships should be present after migrations 103+119, count=%d", ugmCount)
 	}
 }
 
@@ -645,6 +640,54 @@ func TestMigration103_AllAPIKeyRowsHaveUserID(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("found %d api_keys rows with NULL user_id; expected 0", n)
+	}
+}
+
+// TestMigration119_DropPITables asserts that after applying all migrations up to
+// and including 119, the PI workflow tables are absent and portal_config no longer
+// has a pi_auto_approve column.
+func TestMigration119_DropPITables(t *testing.T) {
+	d := openTestDB(t)
+	raw := d.SQL()
+
+	// 1. pi_member_requests must be gone.
+	for _, name := range []string{"pi_member_requests", "pi_expansion_requests"} {
+		var n int
+		if err := raw.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
+		).Scan(&n); err != nil {
+			t.Fatalf("sqlite_master query for %s: %v", name, err)
+		}
+		if n != 0 {
+			t.Errorf("table %s should be absent after migration 119, found count=%d", name, n)
+		}
+	}
+
+	// 2. portal_config must not have a pi_auto_approve column.
+	pragmaRows, err := raw.Query("PRAGMA table_info(portal_config)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(portal_config): %v", err)
+	}
+	var cols []string
+	for pragmaRows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt interface{}
+		var pk int
+		if scanErr := pragmaRows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); scanErr != nil {
+			continue
+		}
+		cols = append(cols, name)
+	}
+	pragmaRows.Close()
+	for _, c := range cols {
+		if c == "pi_auto_approve" {
+			t.Errorf("portal_config still has pi_auto_approve column after migration 119: cols=%v", cols)
+		}
+	}
+	if len(cols) == 0 {
+		t.Fatalf("portal_config table not found or empty schema")
 	}
 }
 

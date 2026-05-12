@@ -8,11 +8,11 @@ import (
 
 // ReviewCycle is one center-wide annual review cycle.
 type ReviewCycle struct {
-	ID          string
-	Name        string
-	Deadline    time.Time
-	CreatedBy   string
-	CreatedAt   time.Time
+	ID        string
+	Name      string
+	Deadline  time.Time
+	CreatedBy string
+	CreatedAt time.Time
 }
 
 // ReviewResponse is one PI's response to a review cycle.
@@ -77,14 +77,22 @@ func (db *DB) ListReviewCycles(ctx context.Context) ([]ReviewCycle, error) {
 	return out, rows.Err()
 }
 
-// CreateReviewResponses creates pending response rows for all PI-owned NodeGroups.
-// Called immediately after creating a review cycle.
+// CreateReviewResponses creates pending response rows for all NodeGroups that have
+// at least one project_manager row. Called immediately after creating a review cycle.
+// The pi_user_id column was dropped in migration 103; the first (oldest) manager is
+// used as the review respondent.
 func (db *DB) CreateReviewResponses(ctx context.Context, cycleID string) (int, error) {
-	// Find all NodeGroups with a PI assigned.
-	rows, err := db.sql.QueryContext(ctx,
-		`SELECT id, pi_user_id FROM node_groups WHERE pi_user_id IS NOT NULL AND pi_user_id != ''`)
+	// Find all NodeGroups that have at least one project_manager, take the oldest manager.
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT pm.node_group_id, pm.user_id
+		FROM project_managers pm
+		WHERE pm.granted_at = (
+			SELECT MIN(pm2.granted_at) FROM project_managers pm2
+			WHERE pm2.node_group_id = pm.node_group_id
+		)
+		GROUP BY pm.node_group_id`)
 	if err != nil {
-		return 0, fmt.Errorf("db: list pi groups for review: %w", err)
+		return 0, fmt.Errorf("db: list managed groups for review: %w", err)
 	}
 	defer rows.Close()
 	type groupPI struct{ groupID, piID string }
@@ -175,7 +183,7 @@ func (db *DB) SubmitReviewResponse(ctx context.Context, cycleID, nodeGroupID, st
 	return nil
 }
 
-// ListReviewResponsesByPI returns all review responses for groups owned by a PI.
+// ListReviewResponsesByPI returns all review responses for groups managed by a user.
 func (db *DB) ListReviewResponsesByPI(ctx context.Context, piUserID string) ([]ReviewResponse, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT rr.id, rr.cycle_id, rr.node_group_id, COALESCE(ng.name,''),

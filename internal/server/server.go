@@ -1508,6 +1508,12 @@ func (s *Server) buildRouter() chi.Router {
 		piH := s.buildPIHandler()
 		piH.Notifier = notifierEarly
 		piMW := portalhandler.PIMiddleware(s.db, userIDFromContext, userRoleFromContext)
+		r.Group(func(r chi.Router) {
+			r.Use(requirePI())
+			r.Use(piMW)
+			// List managed NodeGroups (via project_managers).
+			r.Get("/portal/pi/groups", piH.HandleListGroups)
+		})
 
 		// ─── Sprint D — Grant + Publication routes (PI + admin) ──────────────────
 		// Grants CRUD on PI-owned NodeGroups.

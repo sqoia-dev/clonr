@@ -83,30 +83,13 @@ func (db *DB) SetSMTPConfig(ctx context.Context, cfg SMTPConfig) error {
 	return nil
 }
 
-// ListApprovedMemberEmails returns the LDAP usernames (used as email addresses)
-// of all approved members of a NodeGroup. These come from pi_member_requests
-// with status='approved'. If users have email-format usernames (e.g. jdoe@example.com)
-// they work directly as SMTP To: addresses. Otherwise the operator should configure
-// an LDAP attribute for email lookup (future enhancement).
-func (db *DB) ListApprovedMemberEmails(ctx context.Context, groupID string) ([]string, error) {
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT DISTINCT ldap_username
-		FROM pi_member_requests
-		WHERE group_id = ? AND status = 'approved' AND ldap_username != ''
-	`, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("db: list approved member emails: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
+// ListApprovedMemberEmails previously queried pi_member_requests.
+// That table was dropped in migration 119 (PI-CODE-WIPE, Sprint 43-prime Day 2).
+// Returns nil so callers that dispatch notification broadcasts receive an empty list
+// rather than a hard error. SMTP broadcast is driven by LDAP group membership; this
+// function is a retained stub for call-site compat.
+func (db *DB) ListApprovedMemberEmails(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
 }
 
 // ─── Broadcast rate-limiting ──────────────────────────────────────────────────
