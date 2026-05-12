@@ -4,7 +4,6 @@
 // Edit button, and an info icon that triggers the NodeIdentityPopover.
 // Sticks to the top of the main content area (position: sticky, top-0) with backdrop blur.
 
-import * as React from "react"
 import { Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
