@@ -40,6 +40,15 @@ func NewSchemaHandler() *SchemaHandler {
 }
 
 
+// schemasCacheControl is the Cache-Control header value applied to all
+// /api/v1/schemas/* and /api/v1/openapi.json responses.
+//
+// Rationale: schema files are embedded at compile time and keyed to the release
+// binary — they cannot change without a server restart. A 5-minute shared cache
+// prevents redundant fetches on every page load. "immutable" tells CDN / proxy
+// caches the content will not change for the lifetime of the max-age window.
+const schemasCacheControl = "public, max-age=300, immutable"
+
 // GetTypeSchema handles GET /api/v1/schemas/{type}.
 // Returns the JSON Schema for the named type (e.g. "NodeConfig").
 // Returns 404 if the type has no generated schema file.
@@ -63,6 +72,7 @@ func (h *SchemaHandler) GetTypeSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", schemasCacheControl)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -78,6 +88,7 @@ func (h *SchemaHandler) GetOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", schemasCacheControl)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
