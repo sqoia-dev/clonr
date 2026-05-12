@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/creack/pty"
@@ -54,6 +56,36 @@ var systemdRunAvailable = func() bool {
 	return err == nil
 }()
 
+// procStatusPath is the path to /proc/self/status. It is a variable so tests
+// can point it at a temp file to simulate different kernel environments without
+// requiring root or real /proc manipulation.
+var procStatusPath = "/proc/self/status"
+
+// isNoNewPrivilegesActive reads /proc/self/status (or procStatusPath in tests)
+// and returns true when the kernel has set NoNewPrivs:	1 on the current process.
+// This means the process — and any children — cannot gain new privileges via
+// setuid, capabilities, or similar mechanisms, and systemd-run --scope cannot
+// escape the parent cgroup's restrictions.
+func isNoNewPrivilegesActive() bool {
+	f, err := os.Open(procStatusPath)
+	if err != nil {
+		// Cannot determine state; conservatively report false so the caller can
+		// decide whether to proceed or fail.
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "NoNewPrivs:") {
+			// Format: "NoNewPrivs:\t1" or "NoNewPrivs:\t0"
+			fields := strings.Fields(line)
+			return len(fields) >= 2 && fields[1] == "1"
+		}
+	}
+	return false
+}
+
 // wrapNspawnInScope wraps a systemd-nspawn invocation in a systemd-run
 // --scope --slice=clustr-shells.slice so the nspawn process runs outside the
 // clustr-serverd cgroup and is not subject to its NoNewPrivileges=true or
@@ -63,9 +95,28 @@ var systemdRunAvailable = func() bool {
 //
 // Falls back to a direct systemd-nspawn invocation when systemd-run is not
 // available (e.g. inside a Docker container or minimal install).
-func wrapNspawnInScope(sessionID string, nspawnArgs []string) *exec.Cmd {
+//
+// Fallback guard: when NoNewPrivileges=true is already active on the parent
+// process, the direct-nspawn fallback will silently fail — the kernel will not
+// allow pivot_root(2) or mount-namespace creation regardless of binary
+// capabilities. Rather than produce a misleading runtime error, refuse early
+// and return a nil Cmd with an explicit error the caller can surface to the
+// operator. The operator must either install systemd-run (so the scope wrapper
+// can escape the cgroup) or remove NoNewPrivileges=true from the service unit.
+func wrapNspawnInScope(sessionID string, nspawnArgs []string) (*exec.Cmd, error) {
 	if !systemdRunAvailable {
-		return exec.Command("systemd-nspawn", nspawnArgs...)
+		// Fallback path: direct nspawn without scope wrapper.
+		// Guard: refuse if the kernel has already set NoNewPrivileges on this process.
+		if isNoNewPrivilegesActive() {
+			return nil, fmt.Errorf(
+				"shell: cannot start nspawn — NoNewPrivileges=true is set on the " +
+					"clustr-serverd process and systemd-run is not available. " +
+					"Install systemd-run (`dnf install systemd`) so nspawn can be " +
+					"wrapped in a scope that escapes the NoNewPrivileges restriction, " +
+					"or remove NoNewPrivileges=true from the clustr-serverd service unit.",
+			)
+		}
+		return exec.Command("systemd-nspawn", nspawnArgs...), nil
 	}
 	scopeName := "clustr-shell-" + sessionID + ".scope"
 	args := []string{
@@ -77,7 +128,7 @@ func wrapNspawnInScope(sessionID string, nspawnArgs []string) *exec.Cmd {
 		"systemd-nspawn",
 	}
 	args = append(args, nspawnArgs...)
-	return exec.Command("systemd-run", args...)
+	return exec.Command("systemd-run", args...), nil
 }
 
 // invalidateImageSidecar deletes the tar-sha256 sidecar file for imageID so
@@ -278,7 +329,12 @@ func (h *FactoryHandler) ShellWS(w http.ResponseWriter, r *http.Request) {
 		"--",
 		shell, "--login",
 	}
-	cmd := wrapNspawnInScope(sessionID, nspawnArgs)
+	cmd, err := wrapNspawnInScope(sessionID, nspawnArgs)
+	if err != nil {
+		writeWSError(conn, err.Error())
+		log.Error().Err(err).Str("session_id", sessionID).Msg("shell ws: nspawn scope setup failed")
+		return
+	}
 	cmd.Env = []string{
 		"TERM=xterm-256color",
 		"HOME=/root",
