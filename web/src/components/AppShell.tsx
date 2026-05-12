@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router"
-import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot, AlertTriangle, Info, XCircle, Loader2, HardDrive } from "lucide-react"
+import { Server, Image, Activity, Settings, ShieldCheck, Cpu, Building2, Bell, ChevronsLeft, ChevronsRight, Command as CmdIcon, Sun, Moon, LogOut, User, WifiOff, GitCommit, ChevronDown, ChevronRight, Trash2, Check, X, MonitorDot, AlertTriangle, Info, XCircle, Loader2, HardDrive, Megaphone } from "lucide-react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -296,6 +296,100 @@ function PendingChangesDrawer({
 }
 
 // ─── AppShell ─────────────────────────────────────────────────────────────────
+
+// ─── Sprint 42 Day 4: Global operator notice banner (NOTICE-PATCH) ───────────
+//
+// NoticeBanner polls GET /api/v1/notices/active every 30 s.
+// When a notice is present, it renders a sticky strip at the very top of the
+// app shell in the appropriate severity colour:
+//   info     → blue
+//   warning  → amber/yellow
+//   critical → red
+// Admin users see a dismiss button that calls DELETE /api/v1/admin/notices/{id}.
+
+interface ActiveNotice {
+  id: number
+  body: string
+  severity: "info" | "warning" | "critical"
+  created_by?: string
+  created_at: string
+  expires_at?: string
+  dismissed_at?: string
+}
+
+interface ActiveNoticeResponse {
+  notice: ActiveNotice | null
+}
+
+const NOTICE_SEVERITY_STYLES: Record<
+  string,
+  { bg: string; border: string; text: string; icon: React.ElementType }
+> = {
+  info:     { bg: "bg-blue-500/10",     border: "border-blue-500/30",     text: "text-blue-400",     icon: Info },
+  warning:  { bg: "bg-amber-500/10",    border: "border-amber-500/30",    text: "text-amber-400",    icon: AlertTriangle },
+  critical: { bg: "bg-destructive/15",  border: "border-destructive/40",  text: "text-destructive",  icon: Megaphone },
+}
+
+function NoticeBanner() {
+  const qc = useQueryClient()
+  const { session } = useSession()
+  const isAdmin = session.status === "authed" && session.user.role === "admin"
+
+  const { data } = useQuery<ActiveNoticeResponse>({
+    queryKey: ["notices-active"],
+    queryFn: () => apiFetch<ActiveNoticeResponse>("/api/v1/notices/active"),
+    refetchInterval: 30_000,
+    staleTime: 25_000,
+    retry: false,
+  })
+
+  const dismissMutation = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch(`/api/v1/admin/notices/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notices-active"] })
+      toast({ title: "Notice dismissed" })
+    },
+    onError: (e: Error) =>
+      toast({ title: "Dismiss failed", description: e.message, variant: "destructive" }),
+  })
+
+  const notice = data?.notice
+  if (!notice) return null
+
+  const styles = NOTICE_SEVERITY_STYLES[notice.severity] ?? NOTICE_SEVERITY_STYLES.info
+  const Icon = styles.icon
+
+  return (
+    <div
+      role="alert"
+      data-testid="notice-banner"
+      className={cn(
+        "flex items-center justify-between gap-3 px-4 py-2 text-xs shrink-0",
+        styles.bg,
+        "border-b",
+        styles.border,
+        styles.text,
+      )}
+    >
+      <span className="flex items-center gap-2 min-w-0">
+        <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="truncate" data-testid="notice-banner-body">{notice.body}</span>
+      </span>
+      {isAdmin && (
+        <button
+          className="underline underline-offset-2 hover:no-underline shrink-0 text-xs"
+          onClick={() => dismissMutation.mutate(notice.id)}
+          disabled={dismissMutation.isPending}
+          data-testid="notice-banner-dismiss"
+          aria-label="Dismiss notice"
+        >
+          Dismiss
+        </button>
+      )}
+    </div>
+  )
+}
 
 // ─── Control-plane status strip ──────────────────────────────────────────────
 
@@ -627,6 +721,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Sprint 42 Day 4: Operator notice banner (highest priority — above control-plane strip) */}
+      <NoticeBanner />
       {/* Control-plane status strip (non-dismissible, above everything) */}
       <ControlPlaneStrip />
 
