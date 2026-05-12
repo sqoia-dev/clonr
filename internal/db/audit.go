@@ -117,6 +117,15 @@ const (
 	AuditActionLDAPModeSwitched      = "ldap.mode.switched"
 	AuditActionLDAPDITRepaired       = "ldap.internal.dit_repaired" // v0.1.15
 
+	// Sprint 43-prime Day 3.5 — post-enable config fanout audit events (GAP-104a-1/2).
+	// "Applied" (not "pushed") because the ack from the node confirms applyConfig()
+	// ran synchronously before the ack was sent — so OK=true means the file was
+	// written AND the post-write action (update-ca-trust extract, sssd restart) ran.
+	// This closes the Sprint 17 audit-on-push miss: a successful ack is a successful apply.
+	AuditActionLDAPCAApplied          = "ldap.ca_applied"           // CA cert applied on enrolled node (update-ca-trust + sssd restart ran)
+	AuditActionLDAPBindPasswordApplied = "ldap.bind_password_applied" // sssd.conf (new bind pw) applied on enrolled node
+	AuditActionLDAPSSHDKeysApplied    = "ldap.sshd_keys_applied"    // sshd AuthorizedKeysCommand drop-in applied on enrolled node
+
 	// Sprint 41 Day 3 — dangerous config push gate events.
 	// See docs/design/sprint-41-auth-safety.md §7.
 	AuditActionConfigDangerousStaged    = "config.dangerous.confirm_required"
