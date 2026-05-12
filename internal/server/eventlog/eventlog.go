@@ -87,6 +87,9 @@ type FileLogger struct {
 	// rotateSize is the threshold for rotation (default rotateBytes).
 	rotateSize int64
 
+	// archiveCount is the number of compressed archives to keep (default maxArchives).
+	archiveCount int
+
 	// closed is set to 1 when Close is called so the background flusher exits.
 	closed atomic.Int32
 	wg     sync.WaitGroup
@@ -97,6 +100,8 @@ type FileLogger struct {
 type Options struct {
 	// RotateBytes overrides the rotation threshold. Default: 100 MB.
 	RotateBytes int64
+	// MaxArchives overrides the number of compressed archives to retain. Default: 10.
+	MaxArchives int
 	// FsyncEvery overrides the per-write fsync cadence. Default: 100.
 	FsyncEvery int
 	// FsyncInterval overrides the timed fsync cadence. Default: 1s.
@@ -123,6 +128,10 @@ func NewWithOptions(path string, opts Options) (*FileLogger, error) {
 	if opts.RotateBytes > 0 {
 		rotSz = opts.RotateBytes
 	}
+	archCount := maxArchives
+	if opts.MaxArchives > 0 {
+		archCount = opts.MaxArchives
+	}
 	fsyncEvery := defaultFsyncEvery
 	if opts.FsyncEvery > 0 {
 		fsyncEvery = opts.FsyncEvery
@@ -139,6 +148,7 @@ func NewWithOptions(path string, opts Options) (*FileLogger, error) {
 		lastFsync:     time.Now(),
 		fsyncInterval: fsyncInterval,
 		rotateSize:    rotSz,
+		archiveCount:  archCount,
 	}
 	l.wg.Add(1)
 	go l.bgFlusher()
@@ -228,14 +238,14 @@ func (l *FileLogger) rotate() {
 	_ = l.file.Close()
 	l.file = nil
 
-	// Shift existing archives: events.jsonl.9.gz → delete, .8.gz → .9.gz, etc.
-	for i := maxArchives - 1; i >= 1; i-- {
+	// Shift existing archives: events.jsonl.(N-1).gz → .N.gz, etc.
+	for i := l.archiveCount - 1; i >= 1; i-- {
 		old := l.path + "." + strconv.Itoa(i) + ".gz"
 		new := l.path + "." + strconv.Itoa(i+1) + ".gz"
 		_ = os.Rename(old, new)
 	}
 	// Delete overflow archive.
-	_ = os.Remove(l.path + "." + strconv.Itoa(maxArchives+1) + ".gz")
+	_ = os.Remove(l.path + "." + strconv.Itoa(l.archiveCount+1) + ".gz")
 
 	// Compress the current active file to .1.gz
 	archivePath := l.path + ".1.gz"

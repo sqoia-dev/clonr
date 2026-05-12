@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sqoia-dev/clustr/internal/server/eventlog"
 )
@@ -77,6 +78,54 @@ func TestConcurrentWritesNoInterleave(t *testing.T) {
 	expected := goroutines * perGoroutine
 	if lineCount != expected {
 		t.Errorf("want %d lines, got %d", expected, lineCount)
+	}
+}
+
+// TestNewWithOptions_RespectParams verifies that NewWithOptions uses the caller-
+// supplied RotateBytes, MaxArchives, FsyncEvery, and FsyncInterval values rather
+// than the package-level defaults.
+func TestNewWithOptions_RespectParams(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	const wantRotateBytes int64 = 512 * 1024 // 512 KB
+	const wantMaxArchives = 3
+	const wantFsyncEvery = 5
+	const wantFsyncInterval = 200 * time.Millisecond
+
+	l, err := eventlog.NewWithOptions(path, eventlog.Options{
+		RotateBytes:   wantRotateBytes,
+		MaxArchives:   wantMaxArchives,
+		FsyncEvery:    wantFsyncEvery,
+		FsyncInterval: wantFsyncInterval,
+	})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	// Write enough data to trigger at least one rotation (>512 KB).
+	ctx := context.Background()
+	payload := make([]byte, 1024) // 1 KB per write
+	for i := range payload {
+		payload[i] = 'x'
+	}
+	for i := 0; i < 600; i++ {
+		l.Log(ctx, "test.rotate", "thing", fmt.Sprintf("id-%d", i), "actor", map[string]string{"data": string(payload)})
+	}
+	_ = l.Close()
+
+	// At least one archive must exist (.1.gz).
+	archivePath := path + ".1.gz"
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("expected archive %s after rotation: %v", archivePath, err)
+	}
+
+	// With MaxArchives=3, the fourth archive (.4.gz) must NOT exist.
+	overflow := path + ".4.gz"
+	if _, err := os.Stat(overflow); err == nil {
+		t.Errorf("archive %s should not exist with MaxArchives=%d", overflow, wantMaxArchives)
 	}
 }
 
