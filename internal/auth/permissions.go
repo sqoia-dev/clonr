@@ -45,4 +45,15 @@ const (
 	// because it can re-introduce a previously broken config. By default only
 	// the built-in admin role holds this verb ("*" wildcard).
 	VerbBackupRestore = "backup.restore"
+
+	// VerbAdminNotices is required to create or dismiss global operator notices
+	// (POST /api/v1/admin/notices and DELETE /api/v1/admin/notices/{id}).
+	// GET /api/v1/notices/active requires no auth — the banner is public.
+	// By default only the built-in admin role holds this verb ("*" wildcard).
+	VerbAdminNotices = "admin.notices"
+
+	// VerbAdminEventsTail is required to stream the JSONL event log via
+	// GET /api/v1/admin/events (SSE). Admin-only; the local file path is
+	// for operator direct access.
+	VerbAdminEventsTail = "admin.events.tail"
 )
