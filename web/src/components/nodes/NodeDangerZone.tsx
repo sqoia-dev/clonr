@@ -59,12 +59,9 @@ export function NodeDangerZone({ node, onDeleted, autoExpand }: NodeDangerZonePr
     enabled: zoneExpanded,
   })
 
-  // Sync selectedImageId when images load and node has an assigned image.
-  React.useEffect(() => {
-    if (imagesData && selectedImageId === "" && node.base_image_id) {
-      setSelectedImageId(node.base_image_id)
-    }
-  }, [imagesData, node.base_image_id, selectedImageId])
+  // Default to the node's current image once the list loads (only if operator
+  // hasn't changed the picker yet). Computed derivation avoids a setState-in-effect.
+  const effectiveImageId = selectedImageId || (imagesData ? (node.base_image_id || "") : "")
 
   const readyImages = imagesData?.images?.filter((img) => img.status === "ready") ?? []
   const allImages   = imagesData?.images ?? []
@@ -107,7 +104,7 @@ export function NodeDangerZone({ node, onDeleted, autoExpand }: NodeDangerZonePr
     mutationFn: () =>
       apiFetch<ReimageRequest>(`/api/v1/nodes/${node.id}/reimage`, {
         method: "POST",
-        body: JSON.stringify({ image_id: selectedImageId }),
+        body: JSON.stringify({ image_id: effectiveImageId }),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["nodes"] })
@@ -317,7 +314,7 @@ export function NodeDangerZone({ node, onDeleted, autoExpand }: NodeDangerZonePr
             ) : (
               <select
                 className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
-                value={selectedImageId}
+                value={effectiveImageId}
                 onChange={(e) => setSelectedImageId(e.target.value)}
                 disabled={reimageMutation.isPending}
               >

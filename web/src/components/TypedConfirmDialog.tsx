@@ -73,11 +73,6 @@ export function TypedConfirmDialog({
 }: TypedConfirmDialogProps) {
   const [typed, setTyped] = React.useState("")
 
-  // Reset input whenever the dialog opens/closes.
-  React.useEffect(() => {
-    if (!open) setTyped("")
-  }, [open])
-
   const matches = caseSensitive
     ? typed === confirmToken
     : typed.toLowerCase() === confirmToken.toLowerCase()
@@ -94,7 +89,7 @@ export function TypedConfirmDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v && !isPending) onClose() }}>
+    <Dialog open={open} onOpenChange={(v) => { if (!v && !isPending) { setTyped(""); onClose() } }}>
       <DialogContent className="sm:max-w-md" data-testid="typed-confirm-dialog">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
@@ -151,7 +146,7 @@ export function TypedConfirmDialog({
             <Button
               variant="ghost"
               size="sm"
-              onClick={onClose}
+              onClick={() => { setTyped(""); onClose() }}
               disabled={isPending}
               data-testid="typed-confirm-cancel"
             >

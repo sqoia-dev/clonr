@@ -9,7 +9,7 @@ import { Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { NodeConfig } from "@/lib/types"
-import { nodeState, operatingModeLabel, NODE_OPERATING_MODES } from "@/lib/types"
+import { nodeState, NODE_OPERATING_MODES } from "@/lib/types"
 import { NodeIdentityPopover } from "@/components/nodes/NodeIdentityPopover"
 
 // ─── Connectivity threshold ───────────────────────────────────────────────────
