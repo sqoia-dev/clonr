@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
   Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Zap, Radio,
   Square, CheckSquare, WifiOff, ImagePlay, Play, GitBranch, ArrowLeft,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
@@ -38,6 +38,8 @@ import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
 import { BootSettingsModal } from "@/components/BootSettingsModal"
+import { NodeStatusStrip } from "@/components/nodes/NodeStatusStrip"
+import { NodeDangerZone } from "@/components/nodes/NodeDangerZone"
 import { DiskLayoutPicker, FirmwareBadge } from "@/components/DiskLayoutPicker"
 import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
@@ -1621,7 +1623,6 @@ function EditField({ label, children }: { label: string; children: React.ReactNo
 // Disabled options (filesystem_install, stateless_ram) show a tooltip explaining
 // they are not yet implemented.
 
-const NOT_YET_IMPLEMENTED_TOOLTIP = "Not yet implemented — planned for future release"
 
 interface OperatingModePickerProps {
   node: NodeConfig
@@ -1673,45 +1674,31 @@ function OperatingModePicker({ node, qc, onSaved }: OperatingModePickerProps) {
         <p className="text-xs text-muted-foreground">
           Controls how this node boots and runs. Changes take effect on next PXE boot.
         </p>
-        <TooltipProvider>
-          <div className="space-y-1" data-testid="operating-mode-picker">
-            {NODE_OPERATING_MODES.map((mode) => (
-              <Tooltip key={mode.value}>
-                <TooltipTrigger asChild>
-                  <label
-                    className={cn(
-                      "flex items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer transition-colors",
-                      mode.disabled
-                        ? "opacity-50 cursor-not-allowed"
-                        : "hover:bg-secondary/50",
-                      displayMode === mode.value && !mode.disabled && "bg-secondary/60 font-medium",
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name={`operating-mode-${node.id}`}
-                      value={mode.value}
-                      checked={displayMode === mode.value}
-                      disabled={mode.disabled}
-                      onChange={() => !mode.disabled && setPendingMode(mode.value)}
-                      className="accent-primary"
-                      data-testid={`operating-mode-option-${mode.value}`}
-                    />
-                    {mode.label}
-                    {mode.disabled && (
-                      <span className="ml-auto text-xs text-muted-foreground italic">Not yet implemented</span>
-                    )}
-                  </label>
-                </TooltipTrigger>
-                {mode.disabled && (
-                  <TooltipContent side="right" className="text-xs">
-                    {NOT_YET_IMPLEMENTED_TOOLTIP}
-                  </TooltipContent>
-                )}
-              </Tooltip>
-            ))}
-          </div>
-        </TooltipProvider>
+        <div className="space-y-1" data-testid="operating-mode-picker">
+          {NODE_OPERATING_MODES.filter((mode) => !mode.disabled).map((mode) => (
+            <label
+              key={mode.value}
+              className={cn(
+                "flex items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer transition-colors hover:bg-secondary/50",
+                displayMode === mode.value && "bg-secondary/60 font-medium",
+              )}
+            >
+              <input
+                type="radio"
+                name={`operating-mode-${node.id}`}
+                value={mode.value}
+                checked={displayMode === mode.value}
+                onChange={() => setPendingMode(mode.value)}
+                className="accent-primary"
+                data-testid={`operating-mode-option-${mode.value}`}
+              />
+              {mode.label}
+            </label>
+          ))}
+          <p className="text-xs text-muted-foreground pt-1 pl-1">
+            More operating modes coming in a future release.
+          </p>
+        </div>
         {isDirty && (
           <div className="flex gap-1.5 pt-1">
             <Button
@@ -3320,6 +3307,9 @@ export function NodeDetailPage() {
   const autoReimage = search.reimage === "1"
   const autoDelete = search.deleteNode === "1"
 
+  // Ref to trigger edit mode inside NodeDetailContent from NodeStatusStrip.
+  const editTriggerRef = React.useRef<(() => void) | null>(null)
+
   function relativeTime(iso?: string) {
     if (!iso) return "—"
     try {
@@ -3363,43 +3353,42 @@ export function NodeDetailPage() {
   const node = nodeData
 
   return (
-    <div className="p-6 space-y-4 max-w-4xl">
-      {/* Breadcrumb */}
-      <Link
-        to="/nodes"
-        search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        data-testid="back-to-nodes"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to Nodes
-      </Link>
-
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold font-mono">{node.hostname || node.id}</h1>
-        <StatusDot state={nodeState(node)} />
-        {operatingModeLabel(node.operating_mode) && (
-          <span className="inline-flex items-center rounded border border-blue-300 bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-800 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">
-            {operatingModeLabel(node.operating_mode)}
-          </span>
-        )}
+    <div className="flex flex-col min-h-0">
+      {/* Breadcrumb — above the sticky strip */}
+      <div className="px-6 pt-4 pb-2">
+        <Link
+          to="/nodes"
+          search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          data-testid="back-to-nodes"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Nodes
+        </Link>
       </div>
 
-      {/* Full-width node detail — same content as NodeSheet, without the drawer chrome */}
-      <NodeDetailContent
+      {/* Sticky status strip */}
+      <NodeStatusStrip
         node={node}
-        qc={qc}
-        advanced={false}
-        relativeTime={relativeTime}
-        autoReimage={autoReimage}
-        autoDelete={autoDelete}
-        onOperatingModeSaved={() => {
-          // Invalidate the single-node query so the header badge refreshes.
-          qc.invalidateQueries({ queryKey: ["node", nodeId] })
-        }}
-        onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })}
+        onEdit={() => editTriggerRef.current?.()}
       />
+
+      {/* Page body */}
+      <div className="p-6 space-y-4 max-w-4xl">
+        <NodeDetailContent
+          node={node}
+          qc={qc}
+          advanced={false}
+          relativeTime={relativeTime}
+          autoReimage={autoReimage}
+          autoDelete={autoDelete}
+          onOperatingModeSaved={() => {
+            qc.invalidateQueries({ queryKey: ["node", nodeId] })
+          }}
+          onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })}
+          onEditRequested={(trigger) => { editTriggerRef.current = trigger }}
+        />
+      </div>
     </div>
   )
 }
@@ -3417,6 +3406,9 @@ interface NodeDetailContentProps {
   autoDelete?: boolean
   onOperatingModeSaved?: (mode: string) => void
   onDeleted: () => void
+  /** When provided, hides the inline Edit button in the tab strip and uses this
+   *  callback to enter edit mode (called by NodeStatusStrip in full-page view). */
+  onEditRequested?: (trigger: () => void) => void
 }
 
 function NodeDetailContent({
@@ -3428,6 +3420,7 @@ function NodeDetailContent({
   autoDelete,
   onOperatingModeSaved,
   onDeleted,
+  onEditRequested,
 }: NodeDetailContentProps) {
   const [editing, setEditing] = React.useState(false)
   const [editHostname, setEditHostname] = React.useState(node.hostname)
@@ -3438,7 +3431,16 @@ function NodeDetailContent({
   const [editError, setEditError] = React.useState("")
   const [tagInput, setTagInput] = React.useState("")
   const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
-  const [bootSettingsOpen, setBootSettingsOpen] = React.useState(false)
+
+  // Expose the setEditing trigger to the parent (NodeStatusStrip in full-page view).
+  // Use a ref to avoid re-firing the effect when the inline callback identity changes.
+  const onEditRequestedRef = React.useRef(onEditRequested)
+  onEditRequestedRef.current = onEditRequested
+  React.useEffect(() => {
+    onEditRequestedRef.current?.(() => { setEditing(true); setEditError("") })
+  // onEditRequestedRef is stable; the effect runs once on mount to register the trigger.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const isController = node.tags?.includes("controller")
   const editRemovesController = isController && !editTags.includes("controller")
@@ -3593,10 +3595,13 @@ function NodeDetailContent({
                   IPMI
                 </TabsTrigger>
               </TabsList>
-              <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2 shrink-0">
-                <Pencil className="h-3.5 w-3.5 mr-1" />
-                Edit
-              </Button>
+              {/* Edit button hidden in full-page view — NodeStatusStrip handles it */}
+              {!onEditRequested && (
+                <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2 shrink-0">
+                  <Pencil className="h-3.5 w-3.5 mr-1" />
+                  Edit
+                </Button>
+              )}
             </div>
 
             <TabsContent value="overview" className="mt-0 space-y-4">
@@ -3675,22 +3680,11 @@ function NodeDetailContent({
               <DiskLayoutSection node={node} />
               <SudoersSection node={node} />
               <SlurmNodeSection node={node} />
-              <ReimageFlow node={node} autoExpand={autoReimage} />
-              <CaptureNodeFlow node={node} />
-
-              <div className="pt-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full gap-1.5 text-xs"
-                  onClick={() => setBootSettingsOpen(true)}
-                >
-                  <Settings2 className="h-3.5 w-3.5" />
-                  Change Boot Settings…
-                </Button>
-              </div>
-
-              <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onDeleted} />
+              <NodeDangerZone
+                node={node}
+                onDeleted={onDeleted}
+                autoExpand={autoReimage || autoDelete}
+              />
             </TabsContent>
 
             <TabsContent value="sensors" className="mt-2">
@@ -3715,11 +3709,6 @@ function NodeDetailContent({
         )}
       </div>
 
-      <BootSettingsModal
-        open={bootSettingsOpen}
-        onClose={() => setBootSettingsOpen(false)}
-        node={node}
-      />
     </>
   )
 }
