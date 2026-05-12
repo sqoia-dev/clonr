@@ -132,44 +132,16 @@ Examples:
 	return cmd
 }
 
-// resolveStatsNode uses the health endpoint to resolve a SelectorSet to a
-// single node ID.  Returns an error if the selector resolves to zero or more
-// than one node.
+// resolveStatsNode resolves a SelectorSet to a single node ID using the shared
+// fetchHealthSel helper (same path used by `clustr exec` and `clustr cp`).
+// Returns an error if the selector resolves to zero or more than one node.
+//
+// Previously this function duplicated the health query-string building logic
+// from health.go; using fetchHealthSel eliminates the duplication and ensures
+// selector semantics stay in sync across all batch commands (UX-17).
 func resolveStatsNode(sel selector.SelectorSet) (string, error) {
-	ctx := context.Background()
-	c := clientFromFlags()
-
-	// Build query string from selector fields — mirrors fetchHealthSel in health.go.
-	q := url.Values{}
-	if sel.Nodes != "" {
-		q.Set("nodes", sel.Nodes)
-	}
-	if sel.Group != "" {
-		q.Set("group", sel.Group)
-	}
-	if sel.All {
-		q.Set("all", "true")
-	}
-	if sel.Active {
-		q.Set("active", "true")
-	}
-	if sel.Racks != "" {
-		q.Set("racks", sel.Racks)
-	}
-	if sel.Chassis != "" {
-		q.Set("chassis", sel.Chassis)
-	}
-	if sel.IgnoreStatus {
-		q.Set("ignore_status", "true")
-	}
-
-	path := "/api/v1/cluster/health"
-	if len(q) > 0 {
-		path = path + "?" + q.Encode()
-	}
-
-	var resp cliNodeHealthResponse
-	if err := c.GetJSON(ctx, path, &resp); err != nil {
+	resp, err := fetchHealthSel(sel)
+	if err != nil {
 		return "", fmt.Errorf("stats: resolve node: %w", err)
 	}
 
