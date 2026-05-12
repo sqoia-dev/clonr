@@ -1795,6 +1795,9 @@ func (s *Server) buildRouter() chi.Router {
 				meta, ok := config.PluginMetadataByName(target)
 				return ok && meta.Dangerous
 			},
+			// GAP-104a reconnect push: push current LDAP config to enrolled nodes
+			// that reconnect after a CA rotation while they were offline.
+			LDAPOnConnect: s.ldapMgr.PushLDAPOnNodeConnect,
 		}
 		r.With(requireNodeOwnership("id")).Get("/nodes/{id}/clientd/ws", clientdH.HandleClientdWS)
 

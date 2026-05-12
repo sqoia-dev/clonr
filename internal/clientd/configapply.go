@@ -51,6 +51,16 @@ var configTargets = map[string]configTarget{
 		mode:        0644,
 		applyAction: caTrustExtractThenRestartSSSD(),
 	},
+	// sshd-ldap-keys: the sshd_config.d drop-in that wires AuthorizedKeysCommand to
+	// sss_ssh_authorizedkeys (GAP-104a-4). Written during initial deploy by
+	// writeLDAPConfig; pushed via fanout to already-deployed nodes after a CA rotation
+	// so LDAP SSH pubkey auth works without a full reimage. sshd is reloaded (not
+	// restarted) so active SSH sessions are not dropped.
+	"sshd-ldap-keys": {
+		relPath:     "etc/ssh/sshd_config.d/50-clustr-ldap-keys.conf",
+		mode:        0644,
+		applyAction: reloadService("sshd"),
+	},
 }
 
 const maxConfigSizeBytes = 1 << 20 // 1 MB
@@ -185,6 +195,22 @@ func restartService(name string) func() error {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("systemctl restart %s: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+}
+
+// reloadService returns an apply action that runs `systemctl reload <name>`.
+// Prefer reload over restart when a graceful in-place config reload is sufficient
+// (e.g. sshd: picks up sshd_config.d changes without dropping active sessions).
+func reloadService(name string) func() error {
+	return func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "systemctl", "reload", name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("systemctl reload %s: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
