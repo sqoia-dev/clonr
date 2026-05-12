@@ -1684,3 +1684,76 @@ Proxmox thin pool overcommit (pve/data): 356 GiB allocated vs 16 GiB free. Safe 
 - **UX-11** (LOW): `ImageShell.tsx` dynamically imports `@xterm/xterm` + `@xterm/addon-fit` to code-split, but `node-detail-tabs.tsx` already imports both statically, nullifying the split. Either remove the dynamic import in `ImageShell` (accepts the bundle weight) or move ConsoleTab to a lazy component so xterm only lands when needed.
 - **UX-12** (LOW): `/slurm` has no live-update wiring — builds and upgrades poll at 15-30s. If a `slurm` SSE topic is added server-side, wire `useEventInvalidation("bundles", ["slurm-builds"])` to reduce perceived latency in the Builds section.
 - **UX-13** (LOW): `/nodes` list has `refetchInterval: 30000` in addition to `useEventInvalidation("nodes", ...)`. The interval polling is now redundant since SSE handles invalidation; remove it to cut unnecessary network traffic.
+
+---
+
+## Sprint 43-prime Day 3 — Lab matrix close (2026-05-12)
+
+### LAB-BLK-2 — Template 299 offline bake (DONE)
+
+Baked two fixes directly into VMID 299 (`rocky9-minimal-template`) by temporarily detemplate-ing the disk, mounting rw via NBD, applying fixes, then re-templating:
+
+1. **NM keyfile:** Removed empty `ens18.nmconnection` (wrong interface name left by Anaconda). Wrote `/etc/NetworkManager/system-connections/eth0.nmconnection` with `[ipv4] method=auto`, `chmod 0600`. Matches `net.ifnames=0 biosdevname=0` kernel args that force NIC to `eth0`.
+2. **sshd_config:** Uncommented `PermitRootLogin yes`, `PubkeyAuthentication yes`, `PasswordAuthentication yes`. `NetworkManager.service` and `sshd.service` were already enabled in the template's systemd multi-user.target.wants — no `systemctl enable` needed.
+
+Template baked **2026-05-12**. Future clones from VMID 299 no longer need per-clone fixup for network or SSH.
+
+### LAB-BLK-1 — VMID 303 clone + enrollment + matrix Rows 2/3/6 (DONE)
+
+**VMID used:** 303 (`clustr-test-node303`), full clone of VMID 299 (post-bake).
+
+**Clone config:**
+- `net0`: vmbr0 (management LAN, 192.168.1.x, DHCP)
+- `net1`: vmbr10 (provisioning network, 10.99.0.x), PXE
+- Boot order: `net1;scsi0` (per pxe_boot_first rule)
+- Resources: 2 vCPU / 2 GB RAM
+
+**Enrollment:** SUCCESS
+- VMID 303 PXE-booted, hit cloner DHCP on `eth1` (vmbr10), got IP `10.99.0.102` (MAC `bc:24:11:e2:be:32`)
+- iPXE boot script served, vmlinuz + initramfs.img downloaded from `http://10.99.0.1:8080/api/v1/boot/`
+- Auto-registered as `node-e2be32`, node_id `e7f62a8d-17e2-4d34-b850-d78b99b95c41`
+- Node in DB with `primary_mac=bc:24:11:e2:be:32`, `operating_mode=block_install`, `created_at=2026-05-12T03:44:46Z`
+- No WS clientd handshake (expected: `block_install` mode does not proceed to install/report)
+
+Matrix rows 2/3/6 were run against the two pre-existing deployed nodes (`slurm-controller` 10.99.0.100, `slurm-compute` 10.99.0.101) which were already running with sssd active (verified 2026-05-08, LDAP auth confirmed working at test start).
+
+### Matrix rows 2/3/6 results
+
+| Row | Expected behavior | Actual behavior | Result |
+|-----|-------------------|-----------------|--------|
+| 2 | CA rotation: Disable+wipe → Enable → CA regenerates → nodes' `ldap_tls_cacert` auto-updates AND sssd reconnects | CA regenerated on re-enable (new fingerprint confirmed). Nodes NOT updated — still held old CA. `openssl s_client` with stale CA returned `verify error:num=19`. `getent passwd` returned empty. No push mechanism fired. | **FAIL — GAP-104a-1 confirmed** |
+| 3 | Service-bind password rotation: same flow with `service_bind_password` regen → nodes' sssd.conf auto-updates or surfaces drift | Bind password regenerated on re-enable. Node `ldap_default_authtok` (cleartext in sssd.conf) still held pre-rotation value. `ldapwhoami` with old password returned `Invalid credentials (49)`. No push mechanism. | **FAIL — GAP-104a-2 confirmed** |
+| 6 | SSH login via pubkey: set `sshPublicKey` on LDAP user → SSH with private key → login works | `AuthorizedKeysCommand` commented out in sshd_config on deployed nodes. No `ldap_user_ssh_public_key` in sssd.conf. `sss_ssh_authorizedkeys` binary present at `/usr/bin/sss_ssh_authorizedkeys` but not wired. No sshPublicKey schema attribute configured. End-to-end path completely un-wired. | **FAIL — GAP-104a-4 confirmed** |
+
+### Row 2 side effects (lab cascade)
+
+The Disable → Enable cycle regenerated slapd with a fresh CA, fresh admin password, and fresh DIT seed. All user accounts (rromero) were wiped. The `cn=admin` DN changed to `cn=Directory Manager`. The node-reader bind password was regenerated and had `pwdReset: TRUE` set by ppolicy — sssd cannot change passwords on bind, so it fell offline. Root cause: the re-enable path re-provisions slapd from scratch, wiping the entire DIT.
+
+**Lab restore steps taken (after matrix recording was complete):**
+1. Pushed new CA cert (`0D:FF:1A:2D:...`) to both nodes via SSH
+2. Reset node-reader password via `ldappasswd` (Directory Manager DN), cleared `pwdReset` flag via `ldapmodify`
+3. Updated `ldap_default_authtok` in sssd.conf on both nodes
+4. Restarted sssd on both nodes — LDAP auth restored (`getent passwd rromero` → `rromero:*:10001:10001:...`)
+
+**Lab final state:** LDAP running (uptime ~321s), both nodes sssd active + LDAP auth working, CA `0D:FF:1A:2D:63:B0:A8:66:60:61:8F:20:1E:4D:A6:E1:2C:88:BC:C3:E5:AF:83:9E:4F:D6:D1:69:1E:24:87:EF` on all three (server + both nodes). VMID 303 stopped after enrollment.
+
+### Gaps confirmed for v0.2.0 release notes
+
+All three rows produce FAIL results confirming pre-existing GAPs. These are documented gaps, not regressions from v0.1.x code. Queued for post-v0.2.0:
+
+| Gap | Severity | Description |
+|-----|----------|-------------|
+| GAP-104a-1 | HIGH | No automatic CA cert push to enrolled nodes on LDAP Disable→Enable/CA-rotate. Nodes hold stale `ldap_tls_cacert`; sssd silently fails on LDAP reconnect. |
+| GAP-104a-2 | MEDIUM | No automatic service-bind password push to enrolled nodes on rotation. Nodes hold stale `ldap_default_authtok`; LDAP auth breaks on first bind after slapd password change. |
+| GAP-104a-4 | LOW | `AuthorizedKeysCommand` and `ldap_user_ssh_public_key` not injected into deployed node sshd_config/sssd.conf during finalize step. SSH pubkey path via SSSD exists in theory (`sss_ssh_authorizedkeys` present) but is not wired. |
+
+### Template 299 documentation update
+
+| Field | Value |
+|-------|-------|
+| VMID | 299 |
+| Name | rocky9-minimal-template |
+| NM keyfile | `/etc/NetworkManager/system-connections/eth0.nmconnection` (baked 2026-05-12, replaces empty `ens18.nmconnection`) |
+| sshd_config | `PermitRootLogin yes`, `PubkeyAuthentication yes`, `PasswordAuthentication yes` (baked 2026-05-12) |
+| Services enabled | NetworkManager, sshd (pre-existing) |
+| Boot order | scsi0 (disk-first for OS boot; set net1;scsi0 on clones that need PXE) |
