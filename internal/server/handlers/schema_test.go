@@ -114,6 +114,49 @@ func TestGetTypeSchema_JSONInjection(t *testing.T) {
 	}
 }
 
+// TestGetTypeSchema_CacheControl asserts that successful schema responses include
+// the expected Cache-Control header so clients and proxies can cache them.
+// Schemas are embedded at compile time and cannot change within a binary, so a
+// 5-minute public cache is safe.
+func TestGetTypeSchema_CacheControl(t *testing.T) {
+	h := NewSchemaHandler()
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/schemas/{type}", h.GetTypeSchema)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/schemas/NodeConfig", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /schemas/NodeConfig: got %d, want 200", w.Code)
+	}
+
+	cc := w.Result().Header.Get("Cache-Control")
+	if cc != schemasCacheControl {
+		t.Errorf("Cache-Control = %q, want %q", cc, schemasCacheControl)
+	}
+}
+
+// TestGetOpenAPI_CacheControl asserts that /api/v1/openapi.json includes the
+// Cache-Control header on success.
+func TestGetOpenAPI_CacheControl(t *testing.T) {
+	h := NewSchemaHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.GetOpenAPI(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json: got %d, want 200", w.Code)
+	}
+
+	cc := w.Result().Header.Get("Cache-Control")
+	if cc != schemasCacheControl {
+		t.Errorf("Cache-Control = %q, want %q", cc, schemasCacheControl)
+	}
+}
+
 // TestGetOpenAPI asserts that /api/v1/openapi.json returns valid JSON.
 func TestGetOpenAPI(t *testing.T) {
 	h := NewSchemaHandler()
