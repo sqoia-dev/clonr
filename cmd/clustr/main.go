@@ -138,6 +138,9 @@ func init() {
 	eventsCmd.AddCommand(newAdminEventsTailCmd())
 	adminCmd.AddCommand(eventsCmd)
 
+	// Sprint 43-prime Day 4 — BACKUP-CLI: archive full data dir before reprovision.
+	adminCmd.AddCommand(newAdminBackupCmd())
+
 	rootCmd.AddCommand(adminCmd)
 
 	// ipmi subcommand group.
