@@ -109,6 +109,14 @@ type ClientdHandler struct {
 	// the push target is a dangerous plugin. Wired to config.PluginMetadataByName
 	// in server.go. When nil, no plugin-danger check is performed.
 	IsPluginDangerous func(target string) bool
+
+	// LDAPOnConnect, when non-nil, is called in the hello handler whenever a node
+	// (re)connects. Wired to ldapMgr.PushLDAPOnNodeConnect in server.go.
+	// Nil in dev/test setups where no LDAP manager is wired.
+	// Closes the reconnect gap: FanoutLDAPConfig fires on Enable() but enrolled
+	// nodes that were offline at that moment never receive the updated config.
+	// This callback delivers the deferred push on the node's next hello.
+	LDAPOnConnect func(ctx context.Context, nodeID string)
 }
 
 // biosLookup is a package-level var wrapping bios.Lookup to allow test stubbing.
@@ -318,6 +326,19 @@ func (h *ClientdHandler) handleHello(ctx context.Context, nodeID string, msg cli
 
 	if err := h.DB.UpdateLastSeen(ctx, nodeID); err != nil {
 		log.Error().Err(err).Str("node_id", nodeID).Msg("clientd ws: UpdateLastSeen failed on hello")
+	}
+
+	// GAP-104a reconnect push: if the node is enrolled for LDAP and the server's
+	// LDAP CA/config was rotated while the node was offline, push the current config
+	// now. The callback is a no-op for nodes that are not LDAP-enrolled or when
+	// LDAP is not enabled. Uses the server-lifetime context so a brief node
+	// disconnect mid-push does not abort the in-flight write.
+	if h.LDAPOnConnect != nil {
+		writeCtx := ctx
+		if h.ServerCtx != nil {
+			writeCtx = h.ServerCtx
+		}
+		h.LDAPOnConnect(writeCtx, nodeID)
 	}
 }
 

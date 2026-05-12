@@ -3,8 +3,8 @@ import { useNavigate, useSearch, useParams, Link } from "@tanstack/react-router"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { formatDistanceToNow } from "date-fns"
 import {
-  Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, AlertTriangle, Plus, Pencil, X, Tag, Trash2,
-  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Camera, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Settings2, Zap, Radio,
+  Search, ChevronUp, ChevronDown, ChevronRight, ChevronsUpDown, Copy, Check, Plus, Pencil, X, Tag,
+  Power, PowerOff, RefreshCw, RotateCcw, Network, HardDrive, Cpu, Users, Loader2, Activity, BookOpen, Terminal, ScrollText, Zap, Radio,
   Square, CheckSquare, WifiOff, ImagePlay, Play, GitBranch, ArrowLeft,
 } from "lucide-react"
 import { SensorsTab, EventLogTab, ConsoleTab, DeployLogTab, IpmiTab, ExternalStatsTab } from "@/routes/node-detail-tabs"
@@ -32,12 +32,13 @@ import { StatusDot } from "@/components/StatusDot"
 import { useEventInvalidation } from "@/contexts/connection"
 import { apiFetch } from "@/lib/api"
 import { toast } from "@/hooks/use-toast"
-import type { NodeConfig, ListNodesResponse, ListImagesResponse, ReimageRequest, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult, EffectiveLayoutResponse } from "@/lib/types"
+import type { NodeConfig, ListNodesResponse, ListImagesResponse, PowerStatusResponse, SensorsResponse, SlurmNodeRole, SlurmNodeSyncStatus, SlurmNodeOverride, ProbeResult, EffectiveLayoutResponse } from "@/lib/types"
 import { nodeState, NODE_PROVIDERS, NODE_OPERATING_MODES, operatingModeLabel } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { GroupsPanel } from "@/routes/groups"
 import { UserPicker } from "@/components/UserPicker"
-import { BootSettingsModal } from "@/components/BootSettingsModal"
+import { NodeStatusStrip } from "@/components/nodes/NodeStatusStrip"
+import { NodeDangerZone } from "@/components/nodes/NodeDangerZone"
 import { DiskLayoutPicker, FirmwareBadge } from "@/components/DiskLayoutPicker"
 import { HostlistInput } from "@/components/HostlistInput"
 import { InterfaceList, validateInterfaces } from "@/components/InterfaceList"
@@ -761,6 +762,15 @@ interface NodeSearch {
   per_page?: number
 }
 
+function SortIcon({ col, sortCol, sortDir }: { col: string; sortCol: string; sortDir: string }) {
+  if (sortCol !== col) return <ChevronsUpDown className="h-3 w-3 opacity-40" />
+  return sortDir === "asc" ? (
+    <ChevronUp className="h-3 w-3" />
+  ) : (
+    <ChevronDown className="h-3 w-3" />
+  )
+}
+
 export function NodesPage() {
   const navigate = useNavigate()
   const search = useSearch({ strict: false }) as NodeSearch
@@ -777,7 +787,7 @@ export function NodesPage() {
   const page = parsePage(search as Record<string, unknown>)
   const pageSize = parsePageSize(search as Record<string, unknown>)
   const [advanced, setAdvanced] = React.useState(false)
-  const [addNodeOpen, setAddNodeOpen] = React.useState(false)
+  const [addNodeOpen, setAddNodeOpen] = React.useState(() => search.addNode === "1")
   // BULK-MULTISELECT: row selection state
   const [selectedNodeIds, setSelectedNodeIds] = React.useState<Set<string>>(new Set())
   // BULK-POWER / BULK-ACTIONS: confirm dialog
@@ -789,10 +799,10 @@ export function NodesPage() {
   const [runCommandText, setRunCommandText] = React.useState("")
   const qc = useQueryClient()
   // GRP-5: open create group sheet from URL param (Cmd-K)
-  const [createGroupOpen, setCreateGroupOpen] = React.useState(false)
+  // Derive initial open state directly; navigate to strip the param after mount.
+  const [createGroupOpen, setCreateGroupOpen] = React.useState(() => search.createGroup === "1")
   React.useEffect(() => {
     if (search.createGroup === "1") {
-      setCreateGroupOpen(true)
       navigate({
         to: "/nodes",
         search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", view: view === "nodes" ? undefined : view, tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, createGroup: undefined, page: undefined, per_page: undefined },
@@ -803,7 +813,6 @@ export function NodesPage() {
   // NODE-CREATE-5: auto-open AddNode sheet from URL param (used by Cmd-K "Add node…").
   React.useEffect(() => {
     if (search.addNode === "1") {
-      setAddNodeOpen(true)
       navigate({
         to: "/nodes",
         search: { q: q || undefined, status: search.status, sort: sortCol || undefined, dir: sortDir === "asc" ? undefined : "desc", tag: activeTags.length ? activeTags : undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined },
@@ -977,15 +986,6 @@ export function NodesPage() {
     } else {
       updateSearch({ sort: col, dir: "asc" })
     }
-  }
-
-  function SortIcon({ col }: { col: string }) {
-    if (sortCol !== col) return <ChevronsUpDown className="h-3 w-3 opacity-40" />
-    return sortDir === "asc" ? (
-      <ChevronUp className="h-3 w-3" />
-    ) : (
-      <ChevronDown className="h-3 w-3" />
-    )
   }
 
   function relativeTime(iso?: string) {
@@ -1351,7 +1351,7 @@ export function NodesPage() {
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("hostname")}
                   >
-                    Hostname <SortIcon col="hostname" />
+                    Hostname <SortIcon col="hostname" sortCol={sortCol} sortDir={sortDir} />
                   </button>
                 </TableHead>
                 <TableHead scope="col">
@@ -1359,7 +1359,7 @@ export function NodesPage() {
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("status")}
                   >
-                    Status <SortIcon col="status" />
+                    Status <SortIcon col="status" sortCol={sortCol} sortDir={sortDir} />
                   </button>
                 </TableHead>
                 <TableHead scope="col">Role / Tags</TableHead>
@@ -1368,7 +1368,7 @@ export function NodesPage() {
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={() => handleSort("last_deploy")}
                   >
-                    Last heartbeat <SortIcon col="last_deploy" />
+                    Last heartbeat <SortIcon col="last_deploy" sortCol={sortCol} sortDir={sortDir} />
                   </button>
                 </TableHead>
                 <TableHead scope="col">Image</TableHead>
@@ -1621,7 +1621,6 @@ function EditField({ label, children }: { label: string; children: React.ReactNo
 // Disabled options (filesystem_install, stateless_ram) show a tooltip explaining
 // they are not yet implemented.
 
-const NOT_YET_IMPLEMENTED_TOOLTIP = "Not yet implemented — planned for future release"
 
 interface OperatingModePickerProps {
   node: NodeConfig
@@ -1673,45 +1672,31 @@ function OperatingModePicker({ node, qc, onSaved }: OperatingModePickerProps) {
         <p className="text-xs text-muted-foreground">
           Controls how this node boots and runs. Changes take effect on next PXE boot.
         </p>
-        <TooltipProvider>
-          <div className="space-y-1" data-testid="operating-mode-picker">
-            {NODE_OPERATING_MODES.map((mode) => (
-              <Tooltip key={mode.value}>
-                <TooltipTrigger asChild>
-                  <label
-                    className={cn(
-                      "flex items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer transition-colors",
-                      mode.disabled
-                        ? "opacity-50 cursor-not-allowed"
-                        : "hover:bg-secondary/50",
-                      displayMode === mode.value && !mode.disabled && "bg-secondary/60 font-medium",
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name={`operating-mode-${node.id}`}
-                      value={mode.value}
-                      checked={displayMode === mode.value}
-                      disabled={mode.disabled}
-                      onChange={() => !mode.disabled && setPendingMode(mode.value)}
-                      className="accent-primary"
-                      data-testid={`operating-mode-option-${mode.value}`}
-                    />
-                    {mode.label}
-                    {mode.disabled && (
-                      <span className="ml-auto text-xs text-muted-foreground italic">Not yet implemented</span>
-                    )}
-                  </label>
-                </TooltipTrigger>
-                {mode.disabled && (
-                  <TooltipContent side="right" className="text-xs">
-                    {NOT_YET_IMPLEMENTED_TOOLTIP}
-                  </TooltipContent>
-                )}
-              </Tooltip>
-            ))}
-          </div>
-        </TooltipProvider>
+        <div className="space-y-1" data-testid="operating-mode-picker">
+          {NODE_OPERATING_MODES.filter((mode) => !mode.disabled).map((mode) => (
+            <label
+              key={mode.value}
+              className={cn(
+                "flex items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer transition-colors hover:bg-secondary/50",
+                displayMode === mode.value && "bg-secondary/60 font-medium",
+              )}
+            >
+              <input
+                type="radio"
+                name={`operating-mode-${node.id}`}
+                value={mode.value}
+                checked={displayMode === mode.value}
+                onChange={() => setPendingMode(mode.value)}
+                className="accent-primary"
+                data-testid={`operating-mode-option-${mode.value}`}
+              />
+              {mode.label}
+            </label>
+          ))}
+          <p className="text-xs text-muted-foreground pt-1 pl-1">
+            More operating modes coming in a future release.
+          </p>
+        </div>
         {isDirty && (
           <div className="flex gap-1.5 pt-1">
             <Button
@@ -1848,205 +1833,6 @@ function ImageAssignRow({ node, qc }: ImageAssignRowProps) {
   )
 }
 
-// ─── Reimage inline flow (REIMG-1..6) ────────────────────────────────────────
-
-function ReimageFlow({ node, autoExpand }: { node: NodeConfig; autoExpand?: boolean }) {
-  const qc = useQueryClient()
-  const [expanded, setExpanded] = React.useState(autoExpand ?? false)
-  const [selectedImageId, setSelectedImageId] = React.useState(node.base_image_id || "")
-  const [confirmId, setConfirmId] = React.useState("")
-
-  // Fetch available base images for selector and button label resolution.
-  // Always enabled (not just when expanded) so the button can show the image name.
-  // ?kind=base excludes initramfs build artifacts from the reimage picker.
-  const { data: imagesData, isLoading: imagesLoading } = useQuery<ListImagesResponse>({
-    queryKey: ["images", "base"],
-    queryFn: () => apiFetch<ListImagesResponse>("/api/v1/images?kind=base"),
-    staleTime: 60000,
-  })
-
-  // When images load, default selection to the currently assigned image if
-  // the operator hasn't changed it yet.
-  React.useEffect(() => {
-    if (imagesData && selectedImageId === "" && node.base_image_id) {
-      setSelectedImageId(node.base_image_id)
-    }
-  }, [imagesData, node.base_image_id, selectedImageId])
-
-  // Poll active reimage for this node.
-  const { data: activeReimage } = useQuery<ReimageRequest | null>({
-    queryKey: ["reimage-active", node.id],
-    queryFn: async () => {
-      try {
-        return await apiFetch<ReimageRequest>(`/api/v1/nodes/${node.id}/reimage/active`)
-      } catch {
-        return null
-      }
-    },
-    refetchInterval: 3000,
-    staleTime: 2000,
-  })
-
-  const reimageMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<ReimageRequest>(`/api/v1/nodes/${node.id}/reimage`, {
-        method: "POST",
-        body: JSON.stringify({ image_id: selectedImageId }),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["nodes"] })
-      qc.invalidateQueries({ queryKey: ["reimage-active", node.id] })
-      setExpanded(false)
-      setConfirmId("")
-      setSelectedImageId("")
-      toast({
-        title: "Reimage triggered",
-        description: `Node ${node.hostname || node.id} is now provisioning.`,
-      })
-    },
-    onError: (err) => {
-      toast({
-        variant: "destructive",
-        title: "Reimage failed",
-        description: String(err),
-      })
-    },
-  })
-
-  const readyImages = imagesData?.images?.filter((img) => img.status === "ready") ?? []
-  const allImages = imagesData?.images ?? []
-  const canConfirm = confirmId === node.id && selectedImageId !== ""
-
-  // Defensive UI gate: even if a reimage_request row is stuck non-terminal in the
-  // DB, suppress the "Reimage in progress" badge once the node has finished its
-  // current provisioning cycle. The server clears reimage_pending the moment
-  // deploy-complete fires, so reimage_pending is the canonical "is a reimage
-  // happening RIGHT NOW" signal — a non-terminal reimage row without a pending
-  // node flag is an orphan from a prior cycle and must not render as in-flight.
-  // (fix/v0.1.14-ui-stale-reimage)
-  const isProvisioning =
-    node.reimage_pending &&
-    activeReimage &&
-    ["pending", "triggered", "in_progress"].includes(activeReimage.status)
-
-  // Resolve human-readable names for the current → target diff display.
-  const currentImageName = allImages.find((img) => img.id === node.base_image_id)
-    ? `${allImages.find((img) => img.id === node.base_image_id)!.name} ${allImages.find((img) => img.id === node.base_image_id)!.version}`
-    : node.base_image_id
-      ? node.base_image_id.slice(0, 12)
-      : "no image"
-  const targetImageName = allImages.find((img) => img.id === selectedImageId)
-    ? `${allImages.find((img) => img.id === selectedImageId)!.name} ${allImages.find((img) => img.id === selectedImageId)!.version}`
-    : selectedImageId
-      ? selectedImageId.slice(0, 12)
-      : "(select target)"
-
-  // Label for the collapsed button: show image name when one is assigned.
-  const reimageButtonLabel = node.base_image_id && allImages.length > 0
-    ? `Reimage with ${currentImageName}`
-    : "Reimage node"
-
-  return (
-    <div className="pt-4 border-t border-border space-y-3">
-      {/* Active reimage progress (REIMG-5) */}
-      {isProvisioning && activeReimage && (
-        <div className="rounded-md border border-border bg-card p-3 space-y-1.5">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="h-2 w-2 rounded-full bg-status-warning animate-pulse shrink-0" />
-            <span className="font-medium">Reimage in progress</span>
-            <span className="text-xs text-muted-foreground ml-auto">{activeReimage.status}</span>
-          </div>
-          <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-            <div
-              className="h-full bg-status-warning transition-all duration-500 animate-pulse"
-              style={{ width: activeReimage.status === "in_progress" ? "60%" : activeReimage.status === "triggered" ? "20%" : "10%" }}
-            />
-          </div>
-          {activeReimage.error_message && (
-            <p className="text-xs text-destructive">{activeReimage.error_message}</p>
-          )}
-        </div>
-      )}
-
-      {/* Expand / collapse reimage form (REIMG-2) */}
-      {!expanded ? (
-        <Button
-          variant="outline"
-          className="w-full text-status-warning border-status-warning/40 hover:bg-status-warning/10"
-          onClick={() => setExpanded(true)}
-          disabled={!!isProvisioning}
-        >
-          {reimageButtonLabel}
-        </Button>
-      ) : (
-        <div className="rounded-md border border-status-warning/30 bg-status-warning/5 p-4 space-y-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-status-warning">
-            <AlertTriangle className="h-4 w-4 shrink-0" />
-            Reimage node — this will reinstall the OS
-          </div>
-
-          {/* Current → target diff */}
-          <div className="text-xs text-muted-foreground flex items-center gap-2">
-            <span className="font-mono truncate">{currentImageName}</span>
-            <span className="shrink-0">→</span>
-            <span className="font-mono truncate">{targetImageName}</span>
-          </div>
-
-          {/* Target image selector (REIMG-3) */}
-          {imagesLoading ? (
-            <Skeleton className="h-8 w-full" />
-          ) : (
-            <select
-              className="w-full text-sm border border-border bg-background rounded-md px-3 py-1.5"
-              value={selectedImageId}
-              onChange={(e) => setSelectedImageId(e.target.value)}
-            >
-              <option value="">Select target image…</option>
-              {readyImages.map((img) => (
-                <option key={img.id} value={img.id}>
-                  {img.name} {img.version} ({img.id.slice(0, 8)})
-                </option>
-              ))}
-            </select>
-          )}
-
-          {/* Typed node ID confirmation */}
-          <div className="space-y-1">
-            <p className="text-xs text-muted-foreground">
-              Type <code className="font-mono">{node.id}</code> to confirm:
-            </p>
-            <Input
-              className="font-mono text-xs"
-              placeholder={node.id}
-              value={confirmId}
-              onChange={(e) => setConfirmId(e.target.value)}
-            />
-          </div>
-
-          <div className="flex gap-2">
-            <Button
-              variant="destructive"
-              size="sm"
-              className="flex-1"
-              disabled={!canConfirm || reimageMutation.isPending}
-              onClick={() => reimageMutation.mutate()}
-            >
-              {reimageMutation.isPending ? "Triggering…" : "Confirm reimage"}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => { setExpanded(false); setConfirmId(""); setSelectedImageId(node.base_image_id || "") }}
-            >
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ─── SlurmNodeSection (NODE-SLURM-1..3) ──────────────────────────────────────
 // Per-node Slurm subsection in the node detail Sheet.
 // Shows: current Slurm role(s), sync status, override count.
@@ -2100,7 +1886,7 @@ function SlurmNodeSection({ node }: { node: NodeConfig }) {
 
   const saveOverridesMut = useMutation({
     mutationFn: () => {
-      let params: Record<string, string> = {}
+      let params: Record<string, string>
       try {
         params = JSON.parse(overrideText)
       } catch {
@@ -2234,120 +2020,6 @@ function SlurmNodeSection({ node }: { node: NodeConfig }) {
                 </Button>
               </div>
             )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── DeleteNodeFlow (NODE-DEL-1..5) ──────────────────────────────────────────
-// Inline destructive confirmation per UI/UX principle 4.
-
-function DeleteNodeFlow({ node, autoExpand, onDeleted }: { node: NodeConfig; autoExpand?: boolean; onDeleted: () => void }) {
-  const qc = useQueryClient()
-  const state = nodeState(node)
-  const isDeploying = state === "deploying" || state === "reimage_pending"
-  const [expanded, setExpanded] = React.useState(autoExpand ?? false)
-  const [confirmHostname, setConfirmHostname] = React.useState("")
-  const [deleteError, setDeleteError] = React.useState("")
-
-  const canDelete = confirmHostname === node.hostname
-
-  const deleteMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<void>(`/api/v1/nodes/${node.id}`, { method: "DELETE" }),
-    onMutate: async () => {
-      // Optimistic remove from list cache.
-      await qc.cancelQueries({ queryKey: ["nodes"] })
-      const prev = qc.getQueryData<{ nodes: NodeConfig[]; total: number }>(["nodes"])
-      if (prev) {
-        qc.setQueryData<{ nodes: NodeConfig[]; total: number }>(["nodes"], {
-          ...prev,
-          nodes: prev.nodes.filter((n) => n.id !== node.id),
-          total: Math.max(0, prev.total - 1),
-        })
-      }
-      return { prev }
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["nodes"] })
-      toast({ title: `Node deleted: ${node.hostname}` })
-      onDeleted()
-    },
-    onError: (err, _vars, context) => {
-      // Rollback optimistic remove.
-      if (context?.prev) {
-        qc.setQueryData(["nodes"], context.prev)
-      }
-      const msg = String(err)
-      if (msg.includes("409") || msg.toLowerCase().includes("deploy")) {
-        setDeleteError("Cannot delete: node is currently deploying. Cancel deployment first.")
-      } else {
-        setDeleteError(msg)
-      }
-    },
-  })
-
-  return (
-    <div className="pt-4 border-t border-border space-y-3">
-      {!expanded ? (
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-block w-full">
-                <Button
-                  variant="ghost"
-                  className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
-                  onClick={() => { setExpanded(true); setDeleteError("") }}
-                  disabled={isDeploying}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete node
-                </Button>
-              </span>
-            </TooltipTrigger>
-            {isDeploying && (
-              <TooltipContent>Cancel active deployment to delete.</TooltipContent>
-            )}
-          </Tooltip>
-        </TooltipProvider>
-      ) : (
-        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4 space-y-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-            <Trash2 className="h-4 w-4 shrink-0" />
-            Delete node — this is permanent
-          </div>
-
-          <p className="text-xs text-muted-foreground">
-            Type <code className="font-mono font-semibold text-foreground">{node.hostname}</code> to confirm:
-          </p>
-          <Input
-            className="font-mono text-xs"
-            placeholder={node.hostname}
-            value={confirmHostname}
-            onChange={(e) => { setConfirmHostname(e.target.value); setDeleteError("") }}
-          />
-
-          {deleteError && <p className="text-xs text-destructive">{deleteError}</p>}
-
-          <div className="flex gap-2">
-            <Button
-              variant="destructive"
-              size="sm"
-              className="flex-1"
-              disabled={!canDelete || deleteMutation.isPending}
-              onClick={() => deleteMutation.mutate()}
-            >
-              {deleteMutation.isPending ? "Deleting…" : "Delete permanently"}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => { setExpanded(false); setConfirmHostname(""); setDeleteError("") }}
-            >
-              Cancel
-            </Button>
           </div>
         </div>
       )}
@@ -2709,124 +2381,6 @@ function HardwareSection({ node }: { node: NodeConfig }) {
           )}
         </div>
       </Section>
-    </div>
-  )
-}
-
-// ─── CaptureNodeFlow — CAP-4..7 ──────────────────────────────────────────────
-// "Capture as base image" flow in node detail Sheet.
-
-function CaptureNodeFlow({ node }: { node: NodeConfig }) {
-  const qc = useQueryClient()
-  const [expanded, setExpanded] = React.useState(false)
-  const [imageName, setImageName] = React.useState("")
-  const [version, setVersion] = React.useState("1.0.0")
-  const [sshUser, setSshUser] = React.useState("root")
-  const [excludePaths, setExcludePaths] = React.useState("/proc\n/sys\n/dev\n/tmp\n/run")
-  const [confirmHostname, setConfirmHostname] = React.useState("")
-  const [captureError, setCaptureError] = React.useState("")
-  const [inProgress, setInProgress] = React.useState(false)
-  const [progressImageId, setProgressImageId] = React.useState<string | null>(null)
-
-  const captureMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<{ id: string }>("/api/v1/factory/capture", {
-        method: "POST",
-        body: JSON.stringify({
-          source_host: node.hostname || node.fqdn || node.id,
-          ssh_user: sshUser,
-          name: imageName || `${node.hostname}-capture`,
-          version,
-          exclude_paths: excludePaths.split("\n").map((p) => p.trim()).filter(Boolean),
-        }),
-      }),
-    onSuccess: (res) => {
-      setInProgress(true)
-      setProgressImageId(res.id)
-      qc.invalidateQueries({ queryKey: ["images"] })
-      toast({ title: "Capture started", description: `Capturing ${node.hostname} in background.` })
-    },
-    onError: (err) => setCaptureError(String(err)),
-  })
-
-  return (
-    <div className="pt-4 border-t border-border space-y-3">
-      {!expanded ? (
-        <Button
-          variant="outline"
-          className="w-full text-xs"
-          size="sm"
-          onClick={() => setExpanded(true)}
-        >
-          <Camera className="h-3.5 w-3.5 mr-1.5" />
-          Capture as base image
-        </Button>
-      ) : (
-        <div className="rounded-md border border-border bg-secondary/10 p-4 space-y-3">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Capture node as base image</p>
-
-          {inProgress ? (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="h-2 w-2 rounded-full bg-status-warning animate-pulse shrink-0" />
-                <span>Capturing {node.hostname}…</span>
-              </div>
-              <p className="text-xs text-muted-foreground font-mono">Image ID: {progressImageId?.slice(0, 12)}</p>
-              <p className="text-xs text-muted-foreground">Check /images for progress. Capture runs async via rsync.</p>
-              <Button size="sm" variant="ghost" className="w-full text-xs" onClick={() => { setExpanded(false); setInProgress(false); setProgressImageId(null) }}>
-                Close
-              </Button>
-            </div>
-          ) : (
-            <>
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Image name</label>
-                <Input className="text-xs" placeholder={`${node.hostname}-capture`} value={imageName} onChange={(e) => setImageName(e.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Version</label>
-                <Input className="text-xs" value={version} onChange={(e) => setVersion(e.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">SSH user</label>
-                <Input className="text-xs" value={sshUser} onChange={(e) => setSshUser(e.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Exclude paths (one per line)</label>
-                <textarea
-                  className="w-full font-mono text-xs border border-border bg-background rounded-md px-2 py-1.5 resize-none"
-                  rows={4}
-                  value={excludePaths}
-                  onChange={(e) => setExcludePaths(e.target.value)}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Type <code className="font-mono">{node.hostname}</code> to confirm:
-              </p>
-              <Input
-                className="font-mono text-xs"
-                placeholder={node.hostname}
-                value={confirmHostname}
-                onChange={(e) => { setConfirmHostname(e.target.value); setCaptureError("") }}
-              />
-              {captureError && <p className="text-xs text-destructive">{captureError}</p>}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  className="flex-1 text-xs"
-                  disabled={confirmHostname !== node.hostname || captureMutation.isPending}
-                  onClick={() => captureMutation.mutate()}
-                >
-                  {captureMutation.isPending ? "Starting…" : "Start capture"}
-                </Button>
-                <Button size="sm" variant="ghost" className="text-xs" onClick={() => { setExpanded(false); setCaptureError(""); setConfirmHostname("") }}>
-                  Cancel
-                </Button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
     </div>
   )
 }
@@ -3320,6 +2874,9 @@ export function NodeDetailPage() {
   const autoReimage = search.reimage === "1"
   const autoDelete = search.deleteNode === "1"
 
+  // Ref to trigger edit mode inside NodeDetailContent from NodeStatusStrip.
+  const editTriggerRef = React.useRef<(() => void) | null>(null)
+
   function relativeTime(iso?: string) {
     if (!iso) return "—"
     try {
@@ -3363,43 +2920,42 @@ export function NodeDetailPage() {
   const node = nodeData
 
   return (
-    <div className="p-6 space-y-4 max-w-4xl">
-      {/* Breadcrumb */}
-      <Link
-        to="/nodes"
-        search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        data-testid="back-to-nodes"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to Nodes
-      </Link>
-
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold font-mono">{node.hostname || node.id}</h1>
-        <StatusDot state={nodeState(node)} />
-        {operatingModeLabel(node.operating_mode) && (
-          <span className="inline-flex items-center rounded border border-blue-300 bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-800 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300">
-            {operatingModeLabel(node.operating_mode)}
-          </span>
-        )}
+    <div className="flex flex-col min-h-0">
+      {/* Breadcrumb — above the sticky strip */}
+      <div className="px-6 pt-4 pb-2">
+        <Link
+          to="/nodes"
+          search={{ q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined }}
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          data-testid="back-to-nodes"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Nodes
+        </Link>
       </div>
 
-      {/* Full-width node detail — same content as NodeSheet, without the drawer chrome */}
-      <NodeDetailContent
+      {/* Sticky status strip */}
+      <NodeStatusStrip
         node={node}
-        qc={qc}
-        advanced={false}
-        relativeTime={relativeTime}
-        autoReimage={autoReimage}
-        autoDelete={autoDelete}
-        onOperatingModeSaved={() => {
-          // Invalidate the single-node query so the header badge refreshes.
-          qc.invalidateQueries({ queryKey: ["node", nodeId] })
-        }}
-        onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })}
+        onEdit={() => editTriggerRef.current?.()}
       />
+
+      {/* Page body */}
+      <div className="p-6 space-y-4 max-w-4xl">
+        <NodeDetailContent
+          node={node}
+          qc={qc}
+          advanced={false}
+          relativeTime={relativeTime}
+          autoReimage={autoReimage}
+          autoDelete={autoDelete}
+          onOperatingModeSaved={() => {
+            qc.invalidateQueries({ queryKey: ["node", nodeId] })
+          }}
+          onDeleted={() => navigate({ to: "/nodes", search: { q: undefined, status: undefined, sort: undefined, dir: undefined, openNode: undefined, reimage: undefined, addNode: undefined, deleteNode: undefined, tag: undefined, view: undefined, createGroup: undefined, page: undefined, per_page: undefined } })}
+          onEditRequested={(trigger) => { editTriggerRef.current = trigger }}
+        />
+      </div>
     </div>
   )
 }
@@ -3417,6 +2973,9 @@ interface NodeDetailContentProps {
   autoDelete?: boolean
   onOperatingModeSaved?: (mode: string) => void
   onDeleted: () => void
+  /** When provided, hides the inline Edit button in the tab strip and uses this
+   *  callback to enter edit mode (called by NodeStatusStrip in full-page view). */
+  onEditRequested?: (trigger: () => void) => void
 }
 
 function NodeDetailContent({
@@ -3428,6 +2987,7 @@ function NodeDetailContent({
   autoDelete,
   onOperatingModeSaved,
   onDeleted,
+  onEditRequested,
 }: NodeDetailContentProps) {
   const [editing, setEditing] = React.useState(false)
   const [editHostname, setEditHostname] = React.useState(node.hostname)
@@ -3438,7 +2998,16 @@ function NodeDetailContent({
   const [editError, setEditError] = React.useState("")
   const [tagInput, setTagInput] = React.useState("")
   const [detailTab, setDetailTab] = React.useState<NodeDetailTab>("overview")
-  const [bootSettingsOpen, setBootSettingsOpen] = React.useState(false)
+
+  // Expose the setEditing trigger to the parent (NodeStatusStrip in full-page view).
+  // startEdit is stable (useCallback with empty deps) so the effect only fires once.
+  const startEdit = React.useCallback(() => {
+    setEditing(true)
+    setEditError("")
+  }, [])
+  React.useEffect(() => {
+    if (onEditRequested) onEditRequested(startEdit)
+  }, [onEditRequested, startEdit])
 
   const isController = node.tags?.includes("controller")
   const editRemovesController = isController && !editTags.includes("controller")
@@ -3593,10 +3162,13 @@ function NodeDetailContent({
                   IPMI
                 </TabsTrigger>
               </TabsList>
-              <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2 shrink-0">
-                <Pencil className="h-3.5 w-3.5 mr-1" />
-                Edit
-              </Button>
+              {/* Edit button hidden in full-page view — NodeStatusStrip handles it */}
+              {!onEditRequested && (
+                <Button variant="ghost" size="sm" onClick={() => { setEditing(true); setEditError("") }} className="h-7 px-2 shrink-0">
+                  <Pencil className="h-3.5 w-3.5 mr-1" />
+                  Edit
+                </Button>
+              )}
             </div>
 
             <TabsContent value="overview" className="mt-0 space-y-4">
@@ -3675,22 +3247,11 @@ function NodeDetailContent({
               <DiskLayoutSection node={node} />
               <SudoersSection node={node} />
               <SlurmNodeSection node={node} />
-              <ReimageFlow node={node} autoExpand={autoReimage} />
-              <CaptureNodeFlow node={node} />
-
-              <div className="pt-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full gap-1.5 text-xs"
-                  onClick={() => setBootSettingsOpen(true)}
-                >
-                  <Settings2 className="h-3.5 w-3.5" />
-                  Change Boot Settings…
-                </Button>
-              </div>
-
-              <DeleteNodeFlow node={node} autoExpand={autoDelete} onDeleted={onDeleted} />
+              <NodeDangerZone
+                node={node}
+                onDeleted={onDeleted}
+                autoExpand={autoReimage || autoDelete}
+              />
             </TabsContent>
 
             <TabsContent value="sensors" className="mt-2">
@@ -3715,11 +3276,6 @@ function NodeDetailContent({
         )}
       </div>
 
-      <BootSettingsModal
-        open={bootSettingsOpen}
-        onClose={() => setBootSettingsOpen(false)}
-        node={node}
-      />
     </>
   )
 }
