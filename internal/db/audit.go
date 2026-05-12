@@ -140,6 +140,12 @@ const (
 	AuditActionDangerousPushExpired   = "dangerous_push.expired"
 	AuditActionDangerousPushJanitor   = "dangerous_push.janitor"
 
+	// Sprint 42 Day 4 — global operator notice events.
+	// notice.created  — operator POSTed a new notice banner.
+	// notice.dismissed — operator DELETEd (dismissed) a notice banner.
+	AuditActionNoticeCreated   = "notice.created"
+	AuditActionNoticeDismissed = "notice.dismissed"
+
 	// Sprint 41 Day 4 — plugin backup and restore events.
 	// config.backup.created is intentionally not written by default — every
 	// plugin push would emit one and audit log volume would balloon.
@@ -161,10 +167,22 @@ type AuditRecord struct {
 	CreatedAt    time.Time
 }
 
-// AuditService records audit events to the database.
+// EventLogger is the interface satisfied by eventlog.FileLogger and eventlog.Nop.
+// It is defined here (rather than importing eventlog) to avoid a circular import:
+// the db package must not import server-layer packages.
+type EventLogger interface {
+	Log(ctx context.Context, action, resourceType, resourceID, actorID string, payload interface{})
+}
+
+// AuditService records audit events to the database and optionally to a JSONL
+// sidecar event log (Sprint 42 EVENT-LOG-JSONL).
 // It is safe to call Record from multiple goroutines.
 type AuditService struct {
 	db *DB
+	// EventLog is the optional JSONL sidecar logger. When non-nil every
+	// RecordEntry call dual-writes to this logger. Failures are silently
+	// ignored because the SQL audit_log is the source of truth.
+	EventLog EventLogger
 }
 
 // NewAuditService constructs an AuditService backed by db.
@@ -202,6 +220,25 @@ func (a *AuditService) RecordEntry(ctx context.Context, rec AuditRecord) error {
 	if err != nil {
 		return fmt.Errorf("db: audit record: %w", err)
 	}
+
+	// EVENT-LOG-JSONL: dual-write to the JSONL sidecar when wired.
+	// Best-effort; SQL is the source of truth.
+	if a.EventLog != nil {
+		payload := map[string]interface{}{
+			"id":         rec.ID,
+			"actor_id":   rec.ActorID,
+			"actor_label": rec.ActorLabel,
+			"ip_addr":    rec.IPAddr,
+		}
+		if rec.NewValue != nil {
+			payload["new_value"] = rec.NewValue
+		}
+		if rec.OldValue != nil {
+			payload["old_value"] = rec.OldValue
+		}
+		a.EventLog.Log(ctx, rec.Action, rec.ResourceType, rec.ResourceID, rec.ActorID, payload)
+	}
+
 	return nil
 }
 

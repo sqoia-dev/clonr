@@ -44,6 +44,7 @@ import (
 	"github.com/sqoia-dev/clustr/internal/selector"
 	"github.com/sqoia-dev/clustr/internal/multicast"
 	"github.com/sqoia-dev/clustr/internal/server/eventbus"
+	"github.com/sqoia-dev/clustr/internal/server/eventlog"
 	systemalerts "github.com/sqoia-dev/clustr/internal/server/alerts"
 	"github.com/sqoia-dev/clustr/internal/server/handlers"
 	portalhandler "github.com/sqoia-dev/clustr/internal/server/handlers/portal"
@@ -142,6 +143,12 @@ type Server struct {
 	// from all internal producers (image lifecycle, node heartbeats, group
 	// reimage, etc.) to all active GET /api/v1/events SSE subscribers.
 	eventBus *eventbus.Bus
+
+	// eventLogger is the Sprint 42 EVENT-LOG-JSONL JSONL sidecar.
+	// Dual-writes every audit_log row to /var/lib/clustr/log/events.jsonl.
+	// Nil when the log directory cannot be created (non-fatal: SQL remains
+	// the source of truth).
+	eventLogger *eventlog.FileLogger
 
 	// reconcileCache and reconcileMu support the image blob reconciler (#247).
 	// reconcileCache maps imageID → cached reconcile result (mtime-keyed).
@@ -244,30 +251,51 @@ func New(cfg config.ServerConfig, database *db.DB, statsDatabase *statsdb.StatsD
 	logBroker := NewLogBroker()
 	logBroker.SetBus(bus)
 
+	// EVENT-LOG-JSONL: open the JSONL sidecar event log.
+	// The log directory is co-located with the DB directory for now;
+	// operators can symlink it elsewhere. Non-fatal: if the directory or file
+	// can't be created, the server still starts and the SQL audit_log is the
+	// sole record.
+	eventLogDir := filepath.Join(filepath.Dir(cfg.DBPath), "..", "log")
+	eventLogPath := filepath.Join(eventLogDir, "events.jsonl")
+	var evtLogger *eventlog.FileLogger
+	if el, err := eventlog.New(eventLogPath); err != nil {
+		log.Warn().Err(err).Str("path", eventLogPath).Msg("eventlog: failed to open JSONL event log — audit dual-write disabled")
+	} else {
+		evtLogger = el
+		log.Info().Str("path", eventLogPath).Msg("eventlog: JSONL sidecar open")
+	}
+
+	auditSvc := db.NewAuditService(database)
+	if evtLogger != nil {
+		auditSvc.EventLog = evtLogger
+	}
+
 	s := &Server{
-		cfg:                 cfg,
-		db:                  database,
-		statsDB:             statsDatabase,
-		audit:               db.NewAuditService(database),
-		broker:              logBroker,
-		progress:            NewProgressStore(),
-		imageEvents:         imageEventsStore,
-		groupReimageEvents:  groupReimageEvents,
-		buildProgress:       buildProg,
-		shells:              shells,
-		powerCache:          NewPowerCache(15 * time.Second),
-		powerRegistry:       registry,
+		cfg:                cfg,
+		db:                 database,
+		statsDB:            statsDatabase,
+		audit:              auditSvc,
+		eventLogger:        evtLogger,
+		broker:             logBroker,
+		progress:           NewProgressStore(),
+		imageEvents:        imageEventsStore,
+		groupReimageEvents: groupReimageEvents,
+		buildProgress:      buildProg,
+		shells:             shells,
+		powerCache:         NewPowerCache(15 * time.Second),
+		powerRegistry:      registry,
 		reimageOrchestrator: reimageOrch,
-		ldapMgr:             ldapMgr,
-		sysAccountsMgr:      sysAccountsMgr,
-		networkMgr:          networkMgr,
-		slurmMgr:            slurmMgr,
-		clientdHub:          hub,
-		webhookDispatcher:   webhook.New(database, log.Logger),
-		sessionSecret:       secret,
-		buildInfo:           info,
-		eventBus:            bus,
-		reconcileCache:      make(map[string]*reconCacheEntry), // #247: image blob reconciler cache
+		ldapMgr:            ldapMgr,
+		sysAccountsMgr:     sysAccountsMgr,
+		networkMgr:         networkMgr,
+		slurmMgr:           slurmMgr,
+		clientdHub:         hub,
+		webhookDispatcher:  webhook.New(database, log.Logger),
+		sessionSecret:      secret,
+		buildInfo:          info,
+		eventBus:           bus,
+		reconcileCache:     make(map[string]*reconCacheEntry), // #247: image blob reconciler cache
 	}
 	s.router = s.buildRouter()
 	s.http = &http.Server{
@@ -285,6 +313,13 @@ func New(cfg config.ServerConfig, database *db.DB, statsDatabase *statsdb.StatsD
 // Used by main to wire external callbacks (e.g. DHCP switch auto-discovery).
 func (s *Server) NetworkManager() *networkmodule.Manager {
 	return s.networkMgr
+}
+
+// eventLogPath returns the canonical path to the JSONL event log file.
+// It is computed from the DB path at server construction time; a nil
+// eventLogger means the file was never opened (non-fatal).
+func (s *Server) eventLogPath() string {
+	return filepath.Join(filepath.Dir(s.cfg.DBPath), "..", "log", "events.jsonl")
 }
 
 // SysAccountsManager returns the server's system accounts manager.
@@ -1798,6 +1833,24 @@ func (s *Server) buildRouter() chi.Router {
 			schemaDriftH := &handlers.SchemaDriftHandler{}
 			r.With(requireRole("admin")).Get("/admin/schema-drift", schemaDriftH.Handle)
 
+			// Sprint 42 Day 4 — NOTICE-PATCH: global operator notice banner.
+			noticesH := &handlers.NoticesHandler{
+				DB:           s.db,
+				Audit:        s.audit,
+				GetActorInfo: getActorInfo,
+			}
+			// Admin-only: create and dismiss notices.
+			r.With(requirePermission(s.db, "admin.notices")).Post("/admin/notices", noticesH.HandleCreate)
+			r.With(requirePermission(s.db, "admin.notices")).Delete("/admin/notices/{id}", noticesH.HandleDismiss)
+			// Public (no auth): fetch the active notice for the banner.
+			r.Get("/notices/active", noticesH.HandleGetActive)
+
+			// Sprint 42 Day 4 — EVENT-LOG-JSONL: stream the JSONL event log.
+			eventsLogH := &handlers.EventsLogHandler{
+				EventLogPath: s.eventLogPath(),
+			}
+			r.With(requirePermission(s.db, "admin.events.tail")).Get("/admin/events", eventsLogH.HandleTail)
+
 			// User management (ADR-0007) — admin role only (operator cannot manage users).
 			// GET /admin/users includes group_ids for each user (S3-3).
 			r.With(requireRole("admin")).Get("/admin/users", usersH.HandleListWithMemberships)
@@ -2962,6 +3015,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		if err := s.shells.CloseAll(); err != nil {
 			log.Error().Err(err).Msg("shell session cleanup error")
+		}
+		// EVENT-LOG-JSONL: flush and close the JSONL sidecar on clean shutdown.
+		if s.eventLogger != nil {
+			if err := s.eventLogger.Close(); err != nil {
+				log.Error().Err(err).Msg("eventlog: close error")
+			}
 		}
 	}()
 
