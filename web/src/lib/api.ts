@@ -8,15 +8,28 @@ export const SESSION_EXPIRED_EVENT = "clustr:session-expired"
  * apiFetch wraps fetch with:
  *  - Always `credentials: "include"` (cookie-based sessions, no API keys from web UI)
  *  - On 401: dispatch SESSION_EXPIRED_EVENT then throw
- *  - On non-ok: throw with status + body text
+ *  - On non-ok: throw with `HTTP <status>: <body>` so callers always see the status code
  */
 export async function apiFetch<T>(
   path: string,
-  init?: RequestInit
+  init?: { headers?: HeadersInit } & Omit<RequestInit, "headers">
 ): Promise<T> {
+  // Normalise HeadersInit → Record<string, string> so we can use ??= safely.
+  // HeadersInit can be Headers, string[][], or Record<string, string>; we only
+  // need string key-value pairs for the Accept / Content-Type defaults.
+  const callerHeaders: Record<string, string> = {}
+  if (init?.headers) {
+    if (init.headers instanceof Headers) {
+      init.headers.forEach((v, k) => { callerHeaders[k] = v })
+    } else if (Array.isArray(init.headers)) {
+      for (const [k, v] of init.headers) callerHeaders[k] = v
+    } else {
+      Object.assign(callerHeaders, init.headers)
+    }
+  }
   const headers: Record<string, string> = {
     Accept: "application/json",
-    ...(init?.headers as Record<string, string>),
+    ...callerHeaders,
   }
   if (init?.body) {
     headers["Content-Type"] ??= "application/json"
@@ -29,11 +42,11 @@ export async function apiFetch<T>(
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
     const text = await res.text().catch(() => "")
-    throw new Error(`401: ${text}`)
+    throw new Error(`HTTP 401: ${text}`)
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "")
-    throw new Error(`${res.status}: ${text}`)
+    throw new Error(`HTTP ${res.status}: ${text}`)
   }
   // 204 No Content — by spec the body is absent; never call .json()/.text().
   if (res.status === 204) return undefined as T
