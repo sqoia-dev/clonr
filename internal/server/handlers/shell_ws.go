@@ -110,10 +110,10 @@ func wrapNspawnInScope(sessionID string, nspawnArgs []string) (*exec.Cmd, error)
 		if isNoNewPrivilegesActive() {
 			return nil, fmt.Errorf(
 				"shell: cannot start nspawn — NoNewPrivileges=true is set on the " +
-					"clustr-serverd process and systemd-run is not available. " +
-					"Install systemd-run (`dnf install systemd`) so nspawn can be " +
+					"clustr-serverd process and systemd-run is not available; " +
+					"install systemd-run (dnf install systemd) so nspawn can be " +
 					"wrapped in a scope that escapes the NoNewPrivileges restriction, " +
-					"or remove NoNewPrivileges=true from the clustr-serverd service unit.",
+					"or remove NoNewPrivileges=true from the clustr-serverd service unit",
 			)
 		}
 		return exec.Command("systemd-nspawn", nspawnArgs...), nil
