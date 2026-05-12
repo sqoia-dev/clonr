@@ -102,6 +102,57 @@ func (db *DB) DismissNotice(ctx context.Context, id int64) error {
 	return nil
 }
 
+// DismissNoticeAt sets dismissed_at to the given time for the given notice ID.
+// Used in tests to seed notices with a known dismissal timestamp; production
+// code should call DismissNotice (which uses time.Now()).
+// Returns sql.ErrNoRows when the notice does not exist.
+func (db *DB) DismissNoticeAt(ctx context.Context, id int64, at time.Time) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE notices SET dismissed_at = ? WHERE id = ?
+	`, at.Unix(), id)
+	if err != nil {
+		return fmt.Errorf("db: dismiss notice at: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: dismiss notice at rows: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// NoticeExists reports whether a notice row with the given id exists.
+// Used in tests to verify row presence after a sweep.
+func (db *DB) NoticeExists(ctx context.Context, id int64) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE id = ?`, id).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("db: notice exists: %w", err)
+	}
+	return count > 0, nil
+}
+
+// SweepDismissedNotices hard-deletes notices that were dismissed more than
+// retentionDays days ago. Un-dismissed notices (dismissed_at IS NULL) are never
+// touched. Returns the number of rows deleted.
+func (db *DB) SweepDismissedNotices(ctx context.Context, olderThan time.Time) (int64, error) {
+	res, err := db.sql.ExecContext(ctx, `
+		DELETE FROM notices
+		WHERE dismissed_at IS NOT NULL
+		  AND dismissed_at < ?
+	`, olderThan.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("db: sweep dismissed notices: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("db: sweep dismissed notices rows: %w", err)
+	}
+	return n, nil
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 type noticeRowScanner interface {

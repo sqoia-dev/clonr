@@ -122,9 +122,9 @@ const (
 	AuditActionConfigDangerousStaged    = "config.dangerous.confirm_required"
 	AuditActionConfigDangerousConfirmed = "config.dangerous.confirmed"
 
-	// Sprint 41 hygiene — dangerous-push lifecycle soak metrics.
-	// These five actions give a clean histogram from the audit log to measure
-	// gate usage before flipping CLUSTR_DANGEROUS_GATE_ENABLED on by default.
+	// Sprint 41 hygiene / Sprint 43-prime Day 1 — dangerous-push lifecycle metrics.
+	// Gate is now default-on (CLUSTR_DANGEROUS_GATE_DISABLED=1 to override).
+	// These actions give a clean histogram from the audit log to measure gate usage.
 	//
 	//   dangerous_push.staged     — row created; operator must confirm
 	//   dangerous_push.confirmed  — operator confirmed; push delivered
@@ -145,6 +145,10 @@ const (
 	// notice.dismissed — operator DELETEd (dismissed) a notice banner.
 	AuditActionNoticeCreated   = "notice.created"
 	AuditActionNoticeDismissed = "notice.dismissed"
+
+	// Sprint 43-prime Day 1 — notice retention sweeper.
+	// notice.retention_sweep — periodic GC removed dismissed notices older than 30 days.
+	AuditActionNoticeRetentionSweep = "notice.retention_sweep"
 
 	// Sprint 41 Day 4 — plugin backup and restore events.
 	// config.backup.created is intentionally not written by default — every
