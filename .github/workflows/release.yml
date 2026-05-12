@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   lab-validate:
     name: Lab Validation Gate (vm201 BIOS + vm202 UEFI)
