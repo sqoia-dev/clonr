@@ -4,7 +4,7 @@ package handlers
 //
 // Implements the typed-confirm-string dangerous-push gate.
 //
-// Two endpoints (both gated behind CLUSTR_DANGEROUS_GATE_ENABLED=1):
+// Two endpoints (active by default; set CLUSTR_DANGEROUS_GATE_DISABLED=1 to bypass):
 //
 //   POST /api/v1/config/dangerous-push
 //     Stage a push for a plugin that declares Dangerous=true. Returns a

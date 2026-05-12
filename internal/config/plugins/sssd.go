@@ -82,8 +82,8 @@ func SSSDWatchKey() string { return sssdWatchKey }
 // LDAP-resolved users. On a lab where every operator is LDAP-backed this is
 // lockout-class. Operators must supply the typed cluster name via the
 // POST /api/v1/config/dangerous-push → confirm handshake before delivery.
-// The confirmation gate is feature-flagged behind CLUSTR_DANGEROUS_GATE_ENABLED=1;
-// when the flag is off the regular push path operates as before (no gate).
+// The confirmation gate is default-on (Sprint 43-prime Day 1).
+// Set CLUSTR_DANGEROUS_GATE_DISABLED=1 to bypass for debugging/rollback only.
 //
 // Backup is wired in Sprint 41 Day 4. Paths cover the full files SSSD reads on
 // startup: sssd.conf (main config), conf.d/ (drop-in overrides), and the SSSD

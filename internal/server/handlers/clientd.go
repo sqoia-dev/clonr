@@ -103,7 +103,7 @@ type ClientdHandler struct {
 	// DangerousGateEnabled, when true, causes ConfigPush to reject requests
 	// whose Target matches a plugin with Metadata().Dangerous == true with
 	// 409 Conflict. Operators must use POST /config/dangerous-push instead.
-	// Set by the server when CLUSTR_DANGEROUS_GATE_ENABLED=1.
+	// Default-on (Sprint 43-prime Day 1); disable via CLUSTR_DANGEROUS_GATE_DISABLED=1.
 	DangerousGateEnabled bool
 	// IsPluginDangerous, when non-nil, is called by ConfigPush to check whether
 	// the push target is a dangerous plugin. Wired to config.PluginMetadataByName
