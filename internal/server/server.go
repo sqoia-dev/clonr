@@ -258,8 +258,23 @@ func New(cfg config.ServerConfig, database *db.DB, statsDatabase *statsdb.StatsD
 	// sole record.
 	eventLogDir := filepath.Join(filepath.Dir(cfg.DBPath), "..", "log")
 	eventLogPath := filepath.Join(eventLogDir, "events.jsonl")
+	// Build eventlog Options from cfg (Sprint 43-prime Day 1).
+	// Zero values in cfg fall through to eventlog package defaults (100 MB / 10 / 1s / 100).
+	var evtLogOpts eventlog.Options
+	if cfg.EventLogRotateSizeMB > 0 {
+		evtLogOpts.RotateBytes = cfg.EventLogRotateSizeMB * 1024 * 1024
+	}
+	if cfg.EventLogArchiveCount > 0 {
+		evtLogOpts.MaxArchives = cfg.EventLogArchiveCount
+	}
+	if cfg.EventLogFsyncIntervalMs > 0 {
+		evtLogOpts.FsyncInterval = time.Duration(cfg.EventLogFsyncIntervalMs) * time.Millisecond
+	}
+	if cfg.EventLogFsyncEveryNWrites > 0 {
+		evtLogOpts.FsyncEvery = cfg.EventLogFsyncEveryNWrites
+	}
 	var evtLogger *eventlog.FileLogger
-	if el, err := eventlog.New(eventLogPath); err != nil {
+	if el, err := eventlog.NewWithOptions(eventLogPath, evtLogOpts); err != nil {
 		log.Warn().Err(err).Str("path", eventLogPath).Msg("eventlog: failed to open JSONL event log — audit dual-write disabled")
 	} else {
 		evtLogger = el
@@ -422,6 +437,10 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	// Sprint 41 hygiene: janitor for pending_dangerous_pushes — prevents
 	// unbounded table growth from unconsumed/expired staging rows.
 	go s.runDangerousPushJanitor(ctx)
+
+	// Sprint 43-prime Day 1: notice retention sweeper — hard-deletes dismissed
+	// notices older than 30 days; un-dismissed notices never expire.
+	go s.runNoticeJanitor(ctx)
 
 	// Sprint 38 Bundle B SYSTEM-ALERT-FRAMEWORK: sweeper for expired
 	// transient (push-style) system alerts.  30-second tick is enough for
@@ -1482,36 +1501,13 @@ func (s *Server) buildRouter() chi.Router {
 			config.Register(plugins.LimitsPlugin{})
 		})
 
-		// ─── PI portal API (C.5 — pi role and admin) ──────────────────────────────
-		// PI-scoped routes: PI can only access their own NodeGroups.
-		// Admin can access all PI data. operator, readonly, viewer are blocked.
+		// ─── PI portal — shared setup ─────────────────────────────────────────────
+		// Member/expansion request routes removed in Sprint 43-prime Day 2
+		// (PI-CODE-WIPE, migration 119). piH is still the receiver for grants,
+		// publications, and review cycle handlers below.
 		piH := s.buildPIHandler()
 		piH.Notifier = notifierEarly
 		piMW := portalhandler.PIMiddleware(s.db, userIDFromContext, userRoleFromContext)
-		r.Group(func(r chi.Router) {
-			r.Use(requirePI())
-			r.Use(piMW)
-			// List owned NodeGroups.
-			r.Get("/portal/pi/groups", piH.HandleListGroups)
-			// Per-group utilization view (CF-02 partial).
-			r.Get("/portal/pi/groups/{id}/utilization", piH.HandleGetGroupUtilization)
-			// Member management (CF-08).
-			r.Get("/portal/pi/groups/{id}/members", piH.HandleListMembers)
-			r.Post("/portal/pi/groups/{id}/members", piH.HandleAddMember)
-			r.Delete("/portal/pi/groups/{id}/members/{username}", piH.HandleRemoveMember)
-			// Expansion requests (C5-3-3).
-			r.Post("/portal/pi/groups/{id}/expansion-requests", piH.HandleRequestExpansion)
-		})
-
-		// Admin-only: PI request management ("Pending PI Requests" panel).
-		r.With(requireScope(true)).With(requireRole("admin")).
-			Get("/admin/pi/member-requests", piH.HandleListPendingMemberRequests)
-		r.With(requireScope(true)).With(requireRole("admin")).
-			Post("/admin/pi/member-requests/{id}/resolve", piH.HandleResolveMemberRequest)
-		r.With(requireScope(true)).With(requireRole("admin")).
-			Get("/admin/pi/expansion-requests", piH.HandleListPendingExpansionRequests)
-		r.With(requireScope(true)).With(requireRole("admin")).
-			Post("/admin/pi/expansion-requests/{id}/resolve", piH.HandleResolveExpansionRequest)
 
 		// ─── Sprint D — Grant + Publication routes (PI + admin) ──────────────────
 		// Grants CRUD on PI-owned NodeGroups.
@@ -1786,9 +1782,9 @@ func (s *Server) buildRouter() chi.Router {
 			SudoersNodeConfig: func(ctx context.Context) (*api.SudoersNodeConfig, error) {
 				return s.ldapMgr.SudoersNodeConfig(ctx)
 			},
-			// Sprint 41 Day 3 — dangerous-push gate: reject direct config pushes
-			// to plugins flagged Dangerous=true when the gate is enabled.
-			DangerousGateEnabled: os.Getenv("CLUSTR_DANGEROUS_GATE_ENABLED") == "1",
+			// Sprint 43-prime Day 1 — gate is ON by default.
+			// Set CLUSTR_DANGEROUS_GATE_DISABLED=1 to disable (debugging / rollback only).
+			DangerousGateEnabled: os.Getenv("CLUSTR_DANGEROUS_GATE_DISABLED") != "1",
 			IsPluginDangerous: func(target string) bool {
 				meta, ok := config.PluginMetadataByName(target)
 				return ok && meta.Dangerous
@@ -2206,8 +2202,6 @@ func (s *Server) buildRouter() chi.Router {
 			// Group membership management.
 			r.Post("/node-groups/{id}/members", nodeGroups.AddGroupMembers)
 			r.Delete("/node-groups/{id}/members/{node_id}", nodeGroups.RemoveGroupMember)
-			// C5-1-2: PI ownership assignment (admin-only).
-			r.With(requireRole("admin")).Put("/node-groups/{id}/pi", nodeGroups.SetNodeGroupPI)
 			// F3: Allocation expiration — pi rank or higher can set/clear.
 			// requireRole("pi") passes pi, operator, and admin through.
 			r.With(requireRole("pi")).Put("/node-groups/{id}/expiration", nodeGroups.HandleSetExpiration)
@@ -2378,15 +2372,16 @@ func (s *Server) buildRouter() chi.Router {
 			r.With(requireRole("admin")).Put("/changes/mode/{surface}", changesH.HandleSetMode)
 		})
 
-		// ─── Sprint 41 Day 3 — dangerous-push gate ───────────────────────────────
-		// Feature-flagged: only registered when CLUSTR_DANGEROUS_GATE_ENABLED=1.
-		// When the flag is set:
+		// ─── Sprint 43-prime Day 1 — dangerous-push gate (now default-on) ───────
+		// The gate is ENABLED by default. Set CLUSTR_DANGEROUS_GATE_DISABLED=1 to
+		// disable it (debugging / rollback only — not for normal operation).
+		// When the gate is active:
 		//   - POST /config/dangerous-push stages a push for a Dangerous plugin.
 		//   - POST /config/dangerous-push/{pending_id}/confirm delivers it.
 		// Both routes require config.dangerous_push permission via requirePermission.
 		// The regular config-push handler (PUT /nodes/{id}/config-push) rejects
 		// dangerous plugins with 409 Conflict when the gate is enabled.
-		if os.Getenv("CLUSTR_DANGEROUS_GATE_ENABLED") == "1" {
+		if os.Getenv("CLUSTR_DANGEROUS_GATE_DISABLED") != "1" {
 			dangerousPushH := &handlers.DangerousPushHandler{
 				DB:           s.db,
 				Hub:          s.clientdHub,
@@ -2408,7 +2403,7 @@ func (s *Server) buildRouter() chi.Router {
 				Post("/config/dangerous-push", dangerousPushH.HandleStage)
 			r.With(requireScope(true), requirePermission(s.db, "config.dangerous_push"), jsonSchemaMiddleware(schemaReg, "POST /api/v1/config/dangerous-push/{pending_id}/confirm")).
 				Post("/config/dangerous-push/{pending_id}/confirm", dangerousPushH.HandleConfirm)
-			log.Info().Msg("dangerous-push gate enabled (CLUSTR_DANGEROUS_GATE_ENABLED=1)")
+			log.Info().Msg("dangerous-push gate enabled (default-on; set CLUSTR_DANGEROUS_GATE_DISABLED=1 to disable)")
 		}
 
 		// ─── Sprint 41 Day 4 — plugin backup list + restore ──────────────────────
@@ -2566,21 +2561,20 @@ func (s *Server) buildChangesHandler(getActorInfo func(r *http.Request) (string,
 	return h
 }
 
-// buildPIHandler constructs the PI portal handler with LDAP closures.
+// buildPIHandler constructs the PIHandler shared by grants, publications,
+// and review cycle handlers. LDAP fields are wired for use by any remaining
+// notification flows.
 func (s *Server) buildPIHandler() *portalhandler.PIHandler {
 	h := &portalhandler.PIHandler{
 		DB:    s.db,
 		Audit: s.audit,
 	}
-
-	// Wire LDAP group membership helpers — best-effort, nil-safe.
 	h.AddLDAPMember = func(ctx context.Context, groupName, username string) error {
 		return s.ldapMgr.AddUserToGroup(ctx, username, groupName)
 	}
 	h.RemoveLDAPMember = func(ctx context.Context, groupName, username string) error {
 		return s.ldapMgr.RemoveUserFromGroup(ctx, username, groupName)
 	}
-
 	return h
 }
 
