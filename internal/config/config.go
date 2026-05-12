@@ -65,9 +65,32 @@ type ServerConfig struct {
 
 	// ClusterName is the human-readable name for this clustr installation.
 	// Used as the required typed-confirm string in the dangerous-push gate
-	// (CLUSTR_DANGEROUS_GATE_ENABLED). Defaults to "clustr" when unset.
+	// (default-on; disable via CLUSTR_DANGEROUS_GATE_DISABLED=1). Defaults to "clustr" when unset.
 	// From CLUSTR_CLUSTER_NAME.
 	ClusterName string `json:"cluster_name"` // CLUSTR_CLUSTER_NAME
+
+	// Event-log rotation and fsync configuration (Sprint 43-prime Day 1).
+	// These tune the JSONL sidecar written by the audit service.
+	// Zero values cause the eventlog package to use its built-in defaults
+	// (100 MB / 10 archives / 1 000 ms / 100 writes), so a plain upgrade
+	// is a no-op — operators who want non-default values must set these.
+
+	// EventLogRotateSizeMB is the file-size threshold (MB) that triggers log
+	// rotation. Default: 100. From CLUSTR_EVENT_LOG_ROTATE_SIZE_MB.
+	EventLogRotateSizeMB int64 `json:"event_log_rotate_size_mb"` // CLUSTR_EVENT_LOG_ROTATE_SIZE_MB
+
+	// EventLogArchiveCount is the number of compressed archives to retain
+	// after rotation. Default: 10. From CLUSTR_EVENT_LOG_ARCHIVE_COUNT.
+	EventLogArchiveCount int `json:"event_log_archive_count"` // CLUSTR_EVENT_LOG_ARCHIVE_COUNT
+
+	// EventLogFsyncIntervalMs is the maximum elapsed time (ms) between forced
+	// fsyncs in the background flusher goroutine. Default: 1000 (1 s).
+	// From CLUSTR_EVENT_LOG_FSYNC_INTERVAL_MS.
+	EventLogFsyncIntervalMs int64 `json:"event_log_fsync_interval_ms"` // CLUSTR_EVENT_LOG_FSYNC_INTERVAL_MS
+
+	// EventLogFsyncEveryNWrites is the maximum number of writes between forced
+	// fsyncs. Default: 100. From CLUSTR_EVENT_LOG_FSYNC_EVERY_N_WRITES.
+	EventLogFsyncEveryNWrites int `json:"event_log_fsync_every_n_writes"` // CLUSTR_EVENT_LOG_FSYNC_EVERY_N_WRITES
 }
 
 // PXEConfig holds configuration for the built-in PXE (DHCP + TFTP) server.
@@ -141,8 +164,12 @@ func LoadServerConfig() ServerConfig {
 		LDAPConfigDir: envOrDefault("CLUSTR_LDAP_CONFIG_DIR", "/etc/clustr/ldap"),
 		LDAPPKIDir:    envOrDefault("CLUSTR_LDAP_PKI_DIR", "/etc/clustr/pki"),
 		LogArchiveDir:  envOrDefault("CLUSTR_LOG_ARCHIVE_DIR", "/var/lib/clustr/log-archive"),
-		AuditRetention: parseAuditRetention(),
-		ClusterName:    envOrDefault("CLUSTR_CLUSTER_NAME", "clustr"),
+		AuditRetention:            parseAuditRetention(),
+		ClusterName:               envOrDefault("CLUSTR_CLUSTER_NAME", "clustr"),
+		EventLogRotateSizeMB:      parseEventLogRotateSizeMB(),
+		EventLogArchiveCount:      parseEventLogArchiveCount(),
+		EventLogFsyncIntervalMs:   parseEventLogFsyncIntervalMs(),
+		EventLogFsyncEveryNWrites: parseEventLogFsyncEveryNWrites(),
 	}
 }
 
@@ -276,4 +303,60 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseEventLogRotateSizeMB parses CLUSTR_EVENT_LOG_ROTATE_SIZE_MB.
+// Returns 0 (use eventlog package default of 100 MB) when unset or invalid.
+func parseEventLogRotateSizeMB() int64 {
+	v := os.Getenv("CLUSTR_EVENT_LOG_ROTATE_SIZE_MB")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// parseEventLogArchiveCount parses CLUSTR_EVENT_LOG_ARCHIVE_COUNT.
+// Returns 0 (use eventlog package default of 10) when unset or invalid.
+func parseEventLogArchiveCount() int {
+	v := os.Getenv("CLUSTR_EVENT_LOG_ARCHIVE_COUNT")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// parseEventLogFsyncIntervalMs parses CLUSTR_EVENT_LOG_FSYNC_INTERVAL_MS.
+// Returns 0 (use eventlog package default of 1000 ms) when unset or invalid.
+func parseEventLogFsyncIntervalMs() int64 {
+	v := os.Getenv("CLUSTR_EVENT_LOG_FSYNC_INTERVAL_MS")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// parseEventLogFsyncEveryNWrites parses CLUSTR_EVENT_LOG_FSYNC_EVERY_N_WRITES.
+// Returns 0 (use eventlog package default of 100) when unset or invalid.
+func parseEventLogFsyncEveryNWrites() int {
+	v := os.Getenv("CLUSTR_EVENT_LOG_FSYNC_EVERY_N_WRITES")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
