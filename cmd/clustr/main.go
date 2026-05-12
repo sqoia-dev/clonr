@@ -129,6 +129,15 @@ func init() {
 		newAdminKeysRevokeCmd(),
 	)
 	adminCmd.AddCommand(keysCmd)
+
+	// Sprint 42 Day 4 — EVENT-LOG-JSONL: admin events subcommand.
+	eventsCmd := &cobra.Command{
+		Use:   "events",
+		Short: "Inspect the structured event log",
+	}
+	eventsCmd.AddCommand(newAdminEventsTailCmd())
+	adminCmd.AddCommand(eventsCmd)
+
 	rootCmd.AddCommand(adminCmd)
 
 	// ipmi subcommand group.
