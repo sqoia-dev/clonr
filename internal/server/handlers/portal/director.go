@@ -137,15 +137,14 @@ func (h *DirectorHandler) HandleExportCSV(w http.ResponseWriter, r *http.Request
 
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{
-		"group_id", "group_name", "pi_username",
-		"node_count", "deployed_count", "member_count",
+		"group_id", "group_name",
+		"node_count", "deployed_count",
 		"grant_count", "publication_count",
 	})
 	for _, g := range groups {
 		_ = cw.Write([]string{
-			g.ID, g.Name, g.PIUsername,
+			g.ID, g.Name,
 			strconv.Itoa(g.NodeCount), strconv.Itoa(g.DeployedCount),
-			strconv.Itoa(g.MemberCount),
 			strconv.Itoa(g.GrantCount), strconv.Itoa(g.PubCount),
 		})
 	}

@@ -7,16 +7,14 @@ import (
 )
 
 // DirectorGroupView is a NodeGroup summary for the IT Director dashboard.
-// Reuses the same data as NodeGroupSummary but adds grant/pub counts.
+// PIUserID, PIUsername, and MemberCount were removed in Sprint 43-prime Day 2
+// (PI-CODE-WIPE) when pi_member_requests and node_groups.pi_user_id were dropped.
 type DirectorGroupView struct {
 	ID            string
 	Name          string
 	Description   string
-	PIUserID      string
-	PIUsername    string
 	NodeCount     int
 	DeployedCount int
-	MemberCount   int
 	GrantCount    int
 	PubCount      int
 	LastDeployAt  *int64
@@ -69,17 +67,15 @@ func (db *DB) GetDirectorSummary(ctx context.Context) (DirectorSummary, error) {
 }
 
 // ListDirectorGroups returns all NodeGroups with summary columns for the director.
+// No longer joins pi_user_id or queries pi_member_requests (both dropped in migrations 103/119).
 func (db *DB) ListDirectorGroups(ctx context.Context) ([]DirectorGroupView, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT
-			ng.id, ng.name, COALESCE(ng.description,''), ng.role,
-			COALESCE(ng.pi_user_id,''), COALESCE(u.username,''),
+			ng.id, ng.name, COALESCE(ng.description,''),
 			(SELECT COUNT(*) FROM node_group_memberships m WHERE m.group_id = ng.id) AS node_count,
 			(SELECT COUNT(*) FROM node_configs nc
 			  LEFT JOIN node_group_memberships m2 ON m2.node_id = nc.id AND m2.is_primary = 1
 			  WHERE m2.group_id = ng.id AND nc.deploy_completed_preboot_at IS NOT NULL) AS deployed_count,
-			(SELECT COUNT(*) FROM pi_member_requests pr
-			  WHERE pr.group_id = ng.id AND pr.status = 'approved') AS member_count,
 			(SELECT COUNT(*) FROM grants g WHERE g.node_group_id = ng.id) AS grant_count,
 			(SELECT COUNT(*) FROM publications p WHERE p.node_group_id = ng.id) AS pub_count,
 			(SELECT MAX(nc2.deploy_completed_preboot_at)
@@ -87,7 +83,6 @@ func (db *DB) ListDirectorGroups(ctx context.Context) ([]DirectorGroupView, erro
 			  LEFT JOIN node_group_memberships m3 ON m3.node_id = nc2.id AND m3.is_primary = 1
 			  WHERE m3.group_id = ng.id) AS last_deploy_at
 		FROM node_groups ng
-		LEFT JOIN users u ON u.id = ng.pi_user_id
 		ORDER BY ng.name ASC
 	`)
 	if err != nil {
@@ -98,12 +93,10 @@ func (db *DB) ListDirectorGroups(ctx context.Context) ([]DirectorGroupView, erro
 	var out []DirectorGroupView
 	for rows.Next() {
 		var g DirectorGroupView
-		var role string // scan but discard
 		var lastDeploy *int64
 		if err := rows.Scan(
-			&g.ID, &g.Name, &g.Description, &role,
-			&g.PIUserID, &g.PIUsername,
-			&g.NodeCount, &g.DeployedCount, &g.MemberCount,
+			&g.ID, &g.Name, &g.Description,
+			&g.NodeCount, &g.DeployedCount,
 			&g.GrantCount, &g.PubCount, &lastDeploy,
 		); err != nil {
 			return nil, fmt.Errorf("db: scan director group: %w", err)

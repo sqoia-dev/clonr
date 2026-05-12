@@ -732,3 +732,9 @@ migrations:
     description: "Sprint 42 Day 4 NOTICE-PATCH: operator global notices table"
     applied_to: clustr
     requires: [1]
+
+  - id: 119
+    filename: 119_drop_pi_tables.sql
+    description: "Sprint 43-prime Day 2 PI-CODE-WIPE: drop pi_member_requests, pi_expansion_requests, portal_config.pi_auto_approve"
+    applied_to: clustr
+    requires: [103]

@@ -98,6 +98,7 @@ func (db *DB) ListProjectManagersForGroup(ctx context.Context, nodeGroupID strin
 
 // ListManagedGroupsForUser returns all NodeGroups where userID has been delegated
 // as manager. Used by the PI portal middleware to augment the user's group list.
+// Does not join on the dropped pi_user_id column.
 func (db *DB) ListManagedGroupsForUser(ctx context.Context, userID string) ([]NodeGroupSummary, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT ng.id, ng.name, ng.description, ng.role,
@@ -105,36 +106,28 @@ func (db *DB) ListManagedGroupsForUser(ctx context.Context, userID string) ([]No
 		       (SELECT COUNT(*) FROM node_configs nc
 		         LEFT JOIN node_group_memberships m2 ON m2.node_id = nc.id AND m2.is_primary = 1
 		         WHERE m2.group_id = ng.id AND nc.deploy_completed_preboot_at IS NOT NULL) AS deployed_count,
-		       ng.pi_user_id,
-		       u.username AS pi_username,
 		       ng.created_at, ng.updated_at
 		FROM node_groups ng
 		JOIN project_managers pm ON pm.node_group_id = ng.id
-		LEFT JOIN users u ON u.id = ng.pi_user_id
 		WHERE pm.user_id = ?
 		ORDER BY ng.name ASC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("db: list managed groups for user: %w", err)
 	}
 	defer rows.Close()
-	// Reuse the scanner from pi.go (same package).
 	var out []NodeGroupSummary
 	for rows.Next() {
 		var s NodeGroupSummary
-		var piUserID, piUsername sql.NullString
 		var role sql.NullString
 		var createdAt, updatedAt int64
 		if err := rows.Scan(
 			&s.ID, &s.Name, &s.Description, &role,
 			&s.NodeCount, &s.DeployedCount,
-			&piUserID, &piUsername,
 			&createdAt, &updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("db: scan managed groups for user: %w", err)
 		}
 		s.Role = role.String
-		s.PIUserID = piUserID.String
-		s.PIUsername = piUsername.String
 		s.CreatedAt = time.Unix(createdAt, 0)
 		s.UpdatedAt = time.Unix(updatedAt, 0)
 		out = append(out, s)
@@ -155,21 +148,11 @@ func (db *DB) IsProjectManager(ctx context.Context, nodeGroupID, userID string) 
 	return count > 0, nil
 }
 
-// IsProjectManagerOrPI returns true if the user is either the PI owner or a
-// delegated manager for the given group. Used by middleware to gate access.
+// IsProjectManagerOrPI returns true if the user is a delegated manager for the group.
+// The pi_user_id column was dropped in migration 103; ownership is now expressed
+// solely via project_managers. This function is retained for call-site compat.
 func (db *DB) IsProjectManagerOrPI(ctx context.Context, nodeGroupID, userID string) (bool, error) {
-	var count int
-	err := db.sql.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM (
-			SELECT id FROM node_groups WHERE id = ? AND pi_user_id = ?
-			UNION ALL
-			SELECT id FROM project_managers WHERE node_group_id = ? AND user_id = ?
-		)`, nodeGroupID, userID, nodeGroupID, userID,
-	).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("db: is project manager or pi check: %w", err)
-	}
-	return count > 0, nil
+	return db.IsProjectManager(ctx, nodeGroupID, userID)
 }
 
 // ─── Scan helpers ──────────────────────────────────────────────────────────────
