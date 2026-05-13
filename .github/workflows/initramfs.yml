@@ -127,6 +127,22 @@ jobs:
               -o bin/clustr \
               ./cmd/clustr
 
+      - name: Build static clustr-clientd (node agent for initramfs)
+        # fix/v0.2.0-blockers-deadlock-clientd: this step was missing, causing
+        # every initramfs build since May 8 to ship without clustr-clientd.
+        # findClientdBin silently skipped the copy, so the service unit landed
+        # on every node but the binary never arrived — crashloop on boot.
+        # Build alongside the CLI so both binaries are present when make initramfs runs.
+        env:
+          TAG: ${{ github.ref_name }}
+          GOTOOLCHAIN: auto
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o bin/clustr-clientd \
+              ./cmd/clustr-clientd
+
       # The stock Rocky 9 container has exactly one kernel-modules version
       # installed; resolve it dynamically so the workflow works across kernel
       # updates without any pin to maintain.
@@ -148,6 +164,23 @@ jobs:
       # initramfs-verify cleans up its temp images; produce the release artifact.
       - name: Build release initramfs
         run: make initramfs MODULES_PATH=${{ steps.modules.outputs.modules_path }}
+
+      # ── Assert clustr-clientd binary is present in the initramfs ────────────
+      # fix/v0.2.0-blockers-deadlock-clientd: findClientdBin silently skipped
+      # the binary copy when the binary was absent; this gate ensures the
+      # regression can never re-land silently.
+      - name: Assert clustr-clientd present in initramfs
+        run: |
+          set -euo pipefail
+          if ! (xzcat initramfs-clustr.img 2>/dev/null || gzip -dc initramfs-clustr.img 2>/dev/null || cat initramfs-clustr.img) \
+               | cpio -t 2>/dev/null \
+               | grep -q 'usr/local/bin/clustr-clientd'; then
+            echo "ERROR: /usr/local/bin/clustr-clientd is missing from initramfs-clustr.img"
+            echo "Build step 'Build static clustr-clientd' must produce bin/clustr-clientd"
+            echo "before make initramfs runs."
+            exit 1
+          fi
+          echo "OK: /usr/local/bin/clustr-clientd is present in initramfs-clustr.img"
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
