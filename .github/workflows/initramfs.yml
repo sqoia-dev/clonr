@@ -174,13 +174,13 @@ jobs:
           set -euo pipefail
           if ! (xzcat initramfs-clustr.img 2>/dev/null || gzip -dc initramfs-clustr.img 2>/dev/null || cat initramfs-clustr.img) \
                | cpio -t 2>/dev/null \
-               | grep -q 'usr/local/bin/clustr-clientd'; then
-            echo "ERROR: /usr/local/bin/clustr-clientd is missing from initramfs-clustr.img"
+               | grep -q 'usr/bin/clustr-clientd'; then
+            echo "ERROR: /usr/bin/clustr-clientd is missing from initramfs-clustr.img"
             echo "Build step 'Build static clustr-clientd' must produce bin/clustr-clientd"
             echo "before make initramfs runs."
             exit 1
           fi
-          echo "OK: /usr/local/bin/clustr-clientd is present in initramfs-clustr.img"
+          echo "OK: /usr/bin/clustr-clientd is present in initramfs-clustr.img"
 
       - name: Attach initramfs to release
         uses: softprops/action-gh-release@v2
