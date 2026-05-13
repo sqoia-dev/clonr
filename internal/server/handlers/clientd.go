@@ -333,12 +333,21 @@ func (h *ClientdHandler) handleHello(ctx context.Context, nodeID string, msg cli
 	// now. The callback is a no-op for nodes that are not LDAP-enrolled or when
 	// LDAP is not enabled. Uses the server-lifetime context so a brief node
 	// disconnect mid-push does not abort the in-flight write.
+	//
+	// DEADLOCK FIX: must run in a goroutine. LDAPOnConnect → pushLDAPToNode →
+	// sendConfigPush blocks for up to 30 s waiting for a WS ack. That ack arrives
+	// as a WS message, but handleHello is called synchronously from the WS read
+	// loop (dispatchClientMessage). If we block here, the read loop never advances
+	// and the ack is never delivered — guaranteed 30 s timeout on every reconnect.
+	// Detaching into a goroutine returns control to the read loop immediately.
+	// writeCtx is server-lifetime (derived from ServerCtx, not the per-message
+	// scope) so it outlives this goroutine.
 	if h.LDAPOnConnect != nil {
 		writeCtx := ctx
 		if h.ServerCtx != nil {
 			writeCtx = h.ServerCtx
 		}
-		h.LDAPOnConnect(writeCtx, nodeID)
+		go h.LDAPOnConnect(writeCtx, nodeID)
 	}
 }
 
