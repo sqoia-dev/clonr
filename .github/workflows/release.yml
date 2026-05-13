@@ -467,6 +467,115 @@ jobs:
           path: build/udpcast/dist/udpcast-source.tar.gz
 
   # ---------------------------------------------------------------------------
+  # Build clustr-clientd node agent binary for each arch, package as RPM.
+  #
+  # fix/v0.2.0-blockers-deadlock-clientd: clustr-clientd was initramfs-only.
+  # This job adds it as a first-class release artifact so nodes can upgrade
+  # the agent via `dnf upgrade clustr-clientd` without requiring a full reimage.
+  # ---------------------------------------------------------------------------
+  build-clientd:
+    name: Build clientd (linux/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            nfpm_arch: amd64
+          - goarch: arm64
+            nfpm_arch: arm64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build clustr-clientd binary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -trimpath \
+              -ldflags="-s -w -X main.version=${TAG}" \
+              -o clustr-clientd-linux-${{ matrix.goarch }} \
+              ./cmd/clustr-clientd
+
+      - name: SHA256 checksum (binary)
+        run: sha256sum clustr-clientd-linux-${{ matrix.goarch }} > clustr-clientd-linux-${{ matrix.goarch }}.sha256
+
+      - name: Install nfpm + rpm tools
+        run: |
+          NFPM_VERSION=2.46.3
+          curl -fsSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz nfpm
+          chmod +x nfpm && mv nfpm /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends rpm
+          nfpm --version
+
+      - name: Import GPG signing key
+        env:
+          CLUSTR_GPG_PRIVATE_KEY: ${{ secrets.CLUSTR_GPG_PRIVATE_KEY }}
+        run: |
+          echo "${CLUSTR_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Build and sign clientd RPMs (el8 / el9 / el10)
+        env:
+          VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.nfpm_arch }}
+          CLUSTR_GPG_PASSPHRASE: ${{ secrets.CLUSTR_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION="${VERSION#v}"
+          KEY_FP=$(gpg --list-keys --with-colons release@sqoia.dev \
+            | awk -F: '/^fpr:/{print $10; exit}')
+          mkdir -p dist
+
+          # Pre-expand only ${ARCH} in src: paths.
+          NFPM_CLIENTD_RESOLVED=$(mktemp /tmp/nfpm-clientd-XXXXXX.yaml)
+          envsubst '${ARCH}' < nfpm-clientd.yaml > "${NFPM_CLIENTD_RESOLVED}"
+
+          for EL in el8 el9 el10; do
+            VERSION="${PKG_VERSION}" ARCH="${ARCH}" EL_RELEASE="${EL}" \
+              nfpm pkg --config "${NFPM_CLIENTD_RESOLVED}" --packager rpm --target dist/
+          done
+          rm -f "${NFPM_CLIENTD_RESOLVED}"
+
+          GPG_PASS_FILE=$(mktemp /tmp/gpg-pass-XXXXXX)
+          chmod 600 "${GPG_PASS_FILE}"
+          printf '%s' "${CLUSTR_GPG_PASSPHRASE}" > "${GPG_PASS_FILE}"
+
+          for rpm_file in dist/*.rpm; do
+            echo "Signing: ${rpm_file}"
+            rpmsign --addsign \
+              --define "_gpg_name ${KEY_FP}" \
+              --define "_gpg_path ${HOME}/.gnupg" \
+              --define "_gpg_digest_algo sha256" \
+              --define "__gpg /usr/bin/gpg" \
+              --define "__gpg_check_password_cmd /bin/true" \
+              --define "__gpg_sign_cmd %{__gpg} --batch --yes --no-tty --passphrase-file ${GPG_PASS_FILE} --pinentry-mode loopback -u \"%{_gpg_name}\" --detach-sign --output %{__signature_filename} %{__plaintext_filename}" \
+              "${rpm_file}" 2>&1 || \
+            echo "WARNING: rpmsign failed for ${rpm_file}"
+          done
+          rm -f "${GPG_PASS_FILE}"
+
+      - name: SHA256 checksums (packages)
+        run: cd dist && sha256sum *.rpm > ../checksums-clientd-${{ matrix.goarch }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clientd-linux-${{ matrix.goarch }}
+          path: |
+            clustr-clientd-linux-${{ matrix.goarch }}
+            clustr-clientd-linux-${{ matrix.goarch }}.sha256
+            dist/
+            checksums-clientd-${{ matrix.goarch }}.txt
+
+  # ---------------------------------------------------------------------------
   # Publish signed RPM repo to pkg.sqoia.dev.
   #
   # Repo layout on disk:
@@ -484,7 +593,7 @@ jobs:
   publish-repo:
     name: Publish to pkg.sqoia.dev
     runs-on: ubuntu-latest
-    needs: [build-client, build-server]
+    needs: [build-client, build-server, build-clientd]
     steps:
       - uses: actions/checkout@v5
 
@@ -595,7 +704,7 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-client, build-server, publish-repo]
+    needs: [build-client, build-server, build-clientd, publish-repo]
     permissions:
       contents: write
     steps:
@@ -642,5 +751,9 @@ jobs:
             clustr-serverd-linux-amd64.sha256
             clustr-serverd-linux-arm64
             clustr-serverd-linux-arm64.sha256
+            clustr-clientd-linux-amd64
+            clustr-clientd-linux-amd64.sha256
+            clustr-clientd-linux-arm64
+            clustr-clientd-linux-arm64.sha256
             dist/*.rpm
             udpcast-source.tar.gz

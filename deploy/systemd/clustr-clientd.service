@@ -1,0 +1,19 @@
+[Unit]
+Description=clustr node agent (clientd)
+Documentation=https://github.com/sqoia-dev/clustr
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/clustr/node-token
+ConditionPathExists=/etc/clustr/clustrd-url
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/clustr-clientd
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clustr-clientd
+
+[Install]
+WantedBy=multi-user.target

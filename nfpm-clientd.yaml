@@ -1,0 +1,66 @@
+# nfpm-clientd.yaml — package configuration for the clustr-clientd node agent RPM.
+#
+# Usage:
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el9 nfpm pkg --config nfpm-clientd.yaml --packager rpm --target dist/
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el8 nfpm pkg --config nfpm-clientd.yaml --packager rpm --target dist/
+#   VERSION=0.1.0 ARCH=amd64 EL_RELEASE=el10 nfpm pkg --config nfpm-clientd.yaml --packager rpm --target dist/
+#
+# Environment variables consumed:
+#   VERSION     — semver without leading 'v' (e.g. 0.10.0).
+#   ARCH        — amd64 or arm64.
+#   EL_RELEASE  — el8, el9, or el10.
+#
+# Requires binary: clustr-clientd-linux-${ARCH}
+#
+# clustr-clientd is the node agent daemon. It runs on deployed cluster nodes
+# (not on the clustr server host) and maintains a persistent WebSocket connection
+# back to clustr-serverd for heartbeat telemetry, log streaming, and config push.
+#
+# Normally delivered via initramfs (written into the deployed rootfs by
+# injectClientd during finalize). This RPM provides an upgrade path for nodes
+# already in service: `dnf upgrade clustr-clientd` updates the binary in place
+# without requiring a full reimage.
+#
+# See nfpm.yaml for clustr-serverd and nfpm-cli.yaml for the clustr CLI.
+
+name: clustr-clientd
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+version_schema: semver
+release: "1.${EL_RELEASE}"
+section: admin
+priority: optional
+maintainer: Sqoia Labs <hello@sqoia.dev>
+description: |
+  clustr node agent — daemon that runs on cluster compute nodes.
+  Maintains a persistent WebSocket connection to clustr-serverd for
+  heartbeat telemetry, log streaming, remote exec, and config push.
+vendor: Sqoia Labs
+homepage: https://github.com/sqoia-dev/clustr
+license: MIT
+
+rpm:
+  group: System Environment/Daemons
+  summary: clustr node agent daemon
+
+contents:
+  # Node agent binary
+  - src: clustr-clientd-linux-${ARCH}
+    dst: /usr/local/bin/clustr-clientd
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Systemd unit — installed to /usr/lib/ (vendor preset path, not /etc/systemd/).
+  # The post-install scriptlet enables + starts it so operators don't have to.
+  - src: deploy/systemd/clustr-clientd.service
+    dst: /usr/lib/systemd/system/clustr-clientd.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+scripts:
+  postinstall: scripts/pkg-clientd-postinstall.sh

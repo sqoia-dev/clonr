@@ -156,9 +156,19 @@ func injectClientd(mountRoot, clientdURL, clientdBinHint string) error {
 				Msg("finalize: clustr-clientd binary installed")
 		}
 	} else {
-		log.Warn().
+		// fix/v0.2.0-blockers-deadlock-clientd: elevated to Error so CI/operator
+		// logs are impossible to miss. The silent-skip path allowed the May 8
+		// initramfs regression to ship undetected: initramfs.yml built only the
+		// clustr CLI (cmd/clustr), not clustr-clientd (cmd/clustr-clientd), so
+		// findClientdBin returned "" here and silently skipped the copy. Every
+		// node deployed from that image had clustr-clientd.service in crashloop.
+		//
+		// Still non-fatal at runtime: the node boots, phone-home fires, and the
+		// binary can be delivered later via a config push. However the error is
+		// now unmissable in build output and cluster logs.
+		log.Error().
 			Str("hint", clientdBinHint).
-			Msg("finalize: clustr-clientd binary not found — service unit will be written but binary is missing; node-agent will not start until binary is delivered")
+			Msg("MISSING clustr-clientd binary: service unit will be written but binary absent — node agent will crashloop until binary is delivered; ensure cmd/clustr-clientd is built before make initramfs")
 	}
 
 	// ── 3. Write clustrd-url ──────────────────────────────────────────────────

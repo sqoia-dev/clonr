@@ -288,7 +288,17 @@ if [ -f "$CLUSTR_CLIENTD_SRC" ]; then
     chmod 755 "$WORKDIR/usr/bin/clustr-clientd"
     echo "  [+] Installed clustr-clientd as /usr/bin/clustr-clientd ($(du -h "$CLUSTR_CLIENTD_SRC" | cut -f1))"
 else
-    echo "  [!] clustr-clientd not found at $CLUSTR_CLIENTD_SRC — node agent will not be available in initramfs"
+    # fix/v0.2.0-blockers-deadlock-clientd: loud error so this is never missed
+    # in CI output. Previously a quiet [!] notice let the May 8 regression ship
+    # undetected — initramfs.yml built only cmd/clustr, not cmd/clustr-clientd.
+    echo ""
+    echo "  ######################################################################"
+    echo "  ERROR: clustr-clientd binary NOT FOUND at: $CLUSTR_CLIENTD_SRC"
+    echo "  The node agent (clustr-clientd) will be MISSING from the initramfs."
+    echo "  Every deployed node will have clustr-clientd.service in crashloop."
+    echo "  Build cmd/clustr-clientd BEFORE running make initramfs."
+    echo "  ######################################################################"
+    echo ""
 fi
 
 # Install busybox for shell and basic utilities.
